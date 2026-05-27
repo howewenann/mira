@@ -1,9 +1,17 @@
 import asyncio
+import warnings
 from pathlib import Path
 
 
 def run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
+    _suppress_known_warnings()
     asyncio.run(_run(prompt=prompt, resume=resume, workspace=workspace, session=session))
+
+
+def _suppress_known_warnings() -> None:
+    from langchain_core._api import LangChainBetaWarning
+
+    warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
 
 async def _run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
@@ -44,7 +52,7 @@ def _bootstrap(workspace: Path, session: str | None, resume: bool) -> dict:
     store = SessionStore(Path(config["session_dir"]))
     record = store.load(session, resume=resume, workspace=workspace)
     checkpointer = make_checkpointer()
-    renderer = Renderer()
+    renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
 
     return {

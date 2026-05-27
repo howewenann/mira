@@ -3,22 +3,31 @@ import re
 import sys
 from itertools import cycle
 
+from faker import Faker
 from prompt_toolkit import PromptSession
 from prompt_toolkit.shortcuts import choice
 from pyfiglet import Figlet
 from rich.console import Console
 from rich.panel import Panel
 
-OUTPUT_TRUNCATE_CHARS = 4000
+DEFAULT_TOOL_OUTPUT_CHARS = 240
 SUBAGENT_COLOURS = ["35", "33", "32", "36", "34"]
 
 
 class Renderer:
-    def __init__(self) -> None:
+    def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+        self.tool_output_chars = tool_output_chars
         self.console = Console()
+        self.fake = Faker()
         self.reasoning = []
         self.subagent_colours = {}
+        self.subagent_labels = {}
+        self.subagent_suffixes = set()
         self.colours = cycle(SUBAGENT_COLOURS)
+        self.section = None
 
     def splash(self, model_name: str, session_id: str) -> None:
         wordmark = Figlet(font="blocky").renderText("mira").rstrip()
@@ -37,6 +46,7 @@ class Renderer:
 
     def text(self, value: str) -> None:
         self.flush_reasoning()
+        self.enter_main()
         sys.stdout.write(value)
         sys.stdout.flush()
 
@@ -59,17 +69,23 @@ class Renderer:
 
     def tool_call(self, name: str, args) -> None:
         self.flush_reasoning()
-        self.write_dim(f"\n  tool call: {name}  {args}\n")
+        self.enter_main()
+        self.write_dim(f"\n  mira tool call: {name}  {self.truncate(args)}\n")
 
     def tool_result(self, name: str, result: str) -> None:
+        self.enter_main()
         self.write_dim(f"  └ {self.truncate(result)}\n")
 
     def subagent_tool_result(self, subagent: str, tool: str, result: str) -> None:
-        colour = self.subagent_colour(subagent)
-        sys.stdout.write(f"\n\033[1;{colour}m↳ {subagent}\033[0m")
-        sys.stdout.write(f"\n  \033[2mtool call: {tool}\033[0m")
+        self.enter_subagent(subagent)
+        sys.stdout.write(f"  \033[2mtool call: {tool}\033[0m")
         sys.stdout.write(f"\n  \033[2m└ {self.truncate(result)}\033[0m\n")
         sys.stdout.flush()
+
+    def finish_main(self) -> None:
+        self.flush_reasoning()
+        self.enter_main()
+        self.write_dim("  mira done\n")
 
     async def ask_approvals(self, interrupts: list) -> list[dict]:
         decisions = []
@@ -149,10 +165,51 @@ class Renderer:
         sys.stdout.flush()
 
     def truncate(self, value: str) -> str:
-        if OUTPUT_TRUNCATE_CHARS == 0 or len(value) <= OUTPUT_TRUNCATE_CHARS:
-            return value
+        text = self.single_line(value)
 
-        return value[:OUTPUT_TRUNCATE_CHARS] + "\n... truncated ..."
+        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
+            return text
+
+        return text[: self.tool_output_chars] + " ... truncated ..."
+
+    def single_line(self, value) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def enter_main(self) -> None:
+        if self.section == "main":
+            return
+
+        self.section = "main"
+        sys.stdout.write("\n\033[1;36mmira [main]\033[0m\n")
+        sys.stdout.flush()
+
+    def enter_subagent(self, label: str) -> None:
+        if self.section == label:
+            return
+
+        self.section = label
+        colour = self.subagent_colour(label)
+        sys.stdout.write(f"\n\033[1;{colour}msubagent - {label}\033[0m\n")
+        sys.stdout.flush()
+
+    def subagent_label(self, subagent) -> str:
+        key = id(subagent)
+        if key not in self.subagent_labels:
+            name = getattr(subagent, "name", "subagent")
+            self.subagent_labels[key] = f"{name} [{self.subagent_suffix()}]"
+
+        return self.subagent_labels[key]
+
+    def subagent_suffix(self) -> str:
+        for _ in range(20):
+            suffix = self.single_line(self.fake.word()).lower()
+            if suffix and suffix not in self.subagent_suffixes:
+                self.subagent_suffixes.add(suffix)
+                return suffix
+
+        suffix = self.single_line(self.fake.uuid4())[:8]
+        self.subagent_suffixes.add(suffix)
+        return suffix
 
     def subagent_colour(self, name: str) -> str:
         if name not in self.subagent_colours:

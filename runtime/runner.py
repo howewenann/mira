@@ -16,14 +16,14 @@ async def run_turn(agent, text: str, renderer, thread_id: str) -> None:
             _consume_messages(stream.messages, renderer),
             _consume_tool_calls(stream.tool_calls, renderer),
             _consume_subagents(stream.subagents, renderer),
-            _capture_output(stream.output, output),
+            _capture_output(stream.output(), output),
         )
 
         renderer.flush_reasoning()
         interrupts = _find_interrupts(output.get("value"))
 
         if not interrupts:
-            renderer.newline()
+            renderer.finish_main()
             return
 
         decisions = await renderer.ask_approvals(interrupts)
@@ -53,19 +53,20 @@ async def _consume_messages(messages, renderer) -> None:
         if text:
             renderer.text(text)
 
-        for call in _message_tool_calls(message):
+        for call in await _message_tool_calls(message):
             renderer.tool_call(call.get("name", "tool"), call.get("args", {}))
 
 
 async def _consume_tool_calls(tool_calls, renderer) -> None:
     async for call in tool_calls:
-        output = getattr(call, "output", None)
+        name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
+        output = await _tool_call_output(call)
 
         if isinstance(output, Command):
             continue
 
-        name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
-        renderer.tool_result(name, _tool_output_text(output))
+        if output:
+            renderer.tool_result(name, _tool_output_text(output))
 
 
 async def _consume_subagents(subagents, renderer) -> None:
@@ -79,16 +80,37 @@ async def _consume_subagents(subagents, renderer) -> None:
 
 
 async def _consume_subagent(subagent, renderer) -> None:
-    name = getattr(subagent, "name", "subagent")
+    name = renderer.subagent_label(subagent)
 
     async for call in subagent.tool_calls:
-        output = getattr(call, "output", None)
+        tool_name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
+        output = await _tool_call_output(call)
 
         if isinstance(output, Command):
             continue
 
-        tool_name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
-        renderer.subagent_tool_result(name, tool_name, _tool_output_text(output))
+        if output:
+            renderer.subagent_tool_result(name, tool_name, _tool_output_text(output))
+
+
+async def _tool_call_output(call):
+    deltas = []
+
+    if hasattr(call, "__aiter__"):
+        async for delta in call:
+            text = _tool_output_text(delta)
+            if text:
+                deltas.append(text)
+
+    output = getattr(call, "output", None)
+    if output is not None:
+        return output
+
+    error = getattr(call, "error", None)
+    if error is not None:
+        return error
+
+    return "".join(deltas)
 
 
 async def _message_text(message) -> str:
@@ -118,11 +140,17 @@ async def _message_reasoning(message) -> str:
     return str(reasoning or "")
 
 
-def _message_tool_calls(message) -> Iterable[dict]:
+async def _message_tool_calls(message) -> Iterable[dict]:
     calls = getattr(message, "tool_calls", None)
 
     if callable(calls):
         calls = calls()
+
+    if hasattr(calls, "__await__"):
+        calls = await calls
+
+    if hasattr(calls, "__aiter__"):
+        return [call async for call in calls]
 
     return calls or []
 
