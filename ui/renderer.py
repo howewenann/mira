@@ -1,6 +1,6 @@
 import json
 import re
-import sys
+import sys  # still needed for stdout.reconfigure in __init__
 from itertools import cycle
 
 from faker import Faker
@@ -23,7 +23,7 @@ class Renderer:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
         self.tool_output_chars = tool_output_chars
-        self.console = Console()
+        self.console = Console(stderr=True)
         self.fake = Faker()
         self.reasoning = []
         self.subagent_colours = {}
@@ -54,12 +54,10 @@ class Renderer:
     def text(self, value: str) -> None:
         self.flush_reasoning()
         self.enter_main()
-        sys.stdout.write(value)
-        sys.stdout.flush()
+        self.console.print(value, end="", highlight=False, markup=False)
 
     def newline(self) -> None:
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        self.console.print()
 
     def add_reasoning(self, value: str) -> None:
         cleaned = re.sub(r"</?[^>]+>", "", value).strip()

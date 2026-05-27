@@ -1,8 +1,17 @@
 from langchain_openai import ChatOpenAI
+from langchain_qwq import ChatQwen
 
 
 def get_llm(config: dict):
-    return ChatOpenAI(
+
+    # LM Studio example:
+    # return ChatOpenAI(
+    #     model=config["lmstudio_model"],
+    #     base_url=config["lmstudio_base_url"],
+    #     api_key=config["lmstudio_api_key"],
+    # )
+
+    return ChatQwen(
         model=config["lmstudio_model"],
         base_url=config["lmstudio_base_url"],
         api_key=config["lmstudio_api_key"],

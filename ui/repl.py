@@ -3,7 +3,6 @@ from pathlib import Path
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
 
 from runtime.runner import run_turn
 
@@ -15,26 +14,25 @@ async def start_repl(agent, renderer, store, session: dict, model_name: str) -> 
     history_path.parent.mkdir(parents=True, exist_ok=True)
     prompt = PromptSession(history=FileHistory(str(history_path)))
 
-    with patch_stdout():
-        while True:
-            try:
-                text = await prompt.prompt_async(HTML("<b><ansicyan>you&gt;</ansicyan></b> "))
-            except (EOFError, KeyboardInterrupt):
-                renderer.newline()
+    while True:
+        try:
+            text = await prompt.prompt_async(HTML("<b><ansicyan>you&gt;</ansicyan></b> "))
+        except (EOFError, KeyboardInterrupt):
+            renderer.newline()
+            break
+
+        text = text.strip()
+        if not text:
+            continue
+
+        if await handle_command(text, renderer, store, session, model_name):
+            if text in {"/exit", "/quit"}:
                 break
+            continue
 
-            text = text.strip()
-            if not text:
-                continue
-
-            if await handle_command(text, renderer, store, session, model_name):
-                if text in {"/exit", "/quit"}:
-                    break
-                continue
-
-            await run_turn(agent=agent, text=text, renderer=renderer, thread_id=session["id"])
-            session["turns"] += 1
-            store.save(session)
+        await run_turn(agent=agent, text=text, renderer=renderer, thread_id=session["id"])
+        session["turns"] += 1
+        store.save(session)
 
 
 async def handle_command(text: str, renderer, store, session: dict, model_name: str) -> bool:
