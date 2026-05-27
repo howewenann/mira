@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.mira/
+.env
+.venv/
+dist/
+build/
+*.egg-info/
+
+# vs-code stuff
+.vscode/
+.codex/
