@@ -39,8 +39,9 @@ MIRA_TOOL_OUTPUT_CHARS=240
 
 These values are loaded in `config/loader.py` and passed to `ChatOpenAI` in
 `agent/llm.py`. `MIRA_TOOL_OUTPUT_CHARS` controls how many characters of each
-tool call/result are shown in the terminal. Tool output is shown on one line;
-set the value to `0` to disable truncation.
+tool result are shown in the terminal, including the final tool output shown
+for subagents. Tool output is shown on one line; set the value to `0` to show
+full output.
 
 If you do not set them, MIRA uses:
 
@@ -54,8 +55,11 @@ MIRA_TOOL_OUTPUT_CHARS=240
 ## Tool Calls And Subagents
 
 When MIRA delegates work, the main agent calls the `task` tool. In the terminal
-this appears under the `mira [main]` header as `mira tool call: task`. Each
-delegated worker appears under its own header with a readable suffix, for
-example `subagent - general-purpose [ember]`, with its tool calls underneath it.
-The suffix word is generated with Faker. When the main agent finishes a turn,
-the terminal prints `mira done`.
+MIRA keeps this compact: each delegated worker appears once under its own
+colored block with a readable suffix, for example
+`subagent - general-purpose [ember]`. MIRA first shows a short delegation line
+under `mira [main]`, then each subagent block shows the request and an animated
+`RUNNING` status. When it finishes, the block switches to `DONE` and shows only
+that subagent's final tool call, args, and output. The final output follows
+`MIRA_TOOL_OUTPUT_CHARS`; set it to `0` when you want the full result. When the
+main agent finishes a turn, the terminal prints `mira done`.

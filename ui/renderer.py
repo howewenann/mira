@@ -7,11 +7,14 @@ from faker import Faker
 from prompt_toolkit import PromptSession
 from prompt_toolkit.shortcuts import choice
 from pyfiglet import Figlet
-from rich.console import Console
+from rich.console import Console, Group
+from rich.live import Live
 from rich.panel import Panel
+from rich.text import Text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
-SUBAGENT_COLOURS = ["35", "33", "32", "36", "34"]
+SUBAGENT_COLOURS = ["magenta", "yellow", "green", "cyan", "blue"]
+SPINNER_FRAMES = ["-", "\\", "|", "/"]
 
 
 class Renderer:
@@ -26,13 +29,17 @@ class Renderer:
         self.subagent_colours = {}
         self.subagent_labels = {}
         self.subagent_suffixes = set()
+        self.subagent_sections = set()
+        self.subagent_blocks = {}
+        self.live = None
+        self.spinner_index = 0
         self.colours = cycle(SUBAGENT_COLOURS)
         self.section = None
 
     def splash(self, model_name: str, session_id: str) -> None:
         wordmark = Figlet(font="blocky").renderText("mira").rstrip()
-        border = "[cyan]═══[/cyan]"
-        divider = "[cyan]───[/cyan]"
+        border = "[cyan]===[/cyan]"
+        divider = "[cyan]---[/cyan]"
 
         self.console.print(border)
         self.console.print(f"[cyan]{wordmark}[/cyan]")
@@ -70,22 +77,73 @@ class Renderer:
     def tool_call(self, name: str, args) -> None:
         self.flush_reasoning()
         self.enter_main()
-        self.write_dim(f"\n  mira tool call: {name}  {self.truncate(args)}\n")
+        self.console.print()
+        self.console.print(f"  mira tool call: {name}", style="cyan")
+        self.console.print(f"  args: {self.truncate(args)}", style="bright_black")
 
     def tool_result(self, name: str, result: str) -> None:
         self.enter_main()
-        self.write_dim(f"  └ {self.truncate(result)}\n")
+        self.console.print(f"  output: {self.truncate(result)}", style="white")
+
+    def delegation_started(self, calls: list[dict]) -> None:
+        if not calls:
+            return
+
+        self.flush_reasoning()
+        self.enter_main()
+        count = len(calls)
+        label = "subagent" if count == 1 else "subagents"
+        self.console.print(f"  delegating to {count} {label}...", style="bold yellow")
+
+        for call in calls:
+            args = call.get("args", {}) if isinstance(call, dict) else {}
+            description = args.get("description")
+            if description:
+                self.console.print(f"  request: {self.truncate(description)}", style="cyan")
+
+    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+        self.subagent_blocks[subagent] = {
+            "request": task_input,
+            "status": "RUNNING",
+            "tool": None,
+            "args": None,
+            "output": "",
+            "colour": self.subagent_colour(subagent),
+        }
+        self.refresh_subagents()
+
+    def subagent_finished(
+        self,
+        subagent: str,
+        tool: str | None = None,
+        args=None,
+        result: str = "",
+    ) -> None:
+        block = self.subagent_blocks.setdefault(
+            subagent,
+            {
+                "request": "",
+                "status": "RUNNING",
+                "tool": None,
+                "args": None,
+                "output": "",
+                "colour": self.subagent_colour(subagent),
+            },
+        )
+        block["status"] = "DONE"
+        block["tool"] = tool
+        block["args"] = args
+        block["output"] = result
+        self.refresh_subagents()
 
     def subagent_tool_result(self, subagent: str, tool: str, result: str) -> None:
-        self.enter_subagent(subagent)
-        sys.stdout.write(f"  \033[2mtool call: {tool}\033[0m")
-        sys.stdout.write(f"\n  \033[2m└ {self.truncate(result)}\033[0m\n")
-        sys.stdout.flush()
+        self.subagent_finished(subagent, tool, {}, result)
 
     def finish_main(self) -> None:
         self.flush_reasoning()
+        self.stop_subagent_live()
         self.enter_main()
-        self.write_dim("  mira done\n")
+        self.console.print("  mira done", style="green")
 
     async def ask_approvals(self, interrupts: list) -> list[dict]:
         decisions = []
@@ -161,8 +219,103 @@ class Renderer:
         )
 
     def write_dim(self, value: str) -> None:
-        sys.stdout.write(f"\033[2m{value}\033[0m")
-        sys.stdout.flush()
+        self.console.print(value, style="dim", end="")
+
+    def start_subagent_live(self) -> None:
+        if self.live is not None:
+            return
+
+        self.subagent_blocks = {}
+        self.spinner_index = 0
+        self.live = Live(
+            self.render_subagents(),
+            console=self.console,
+            refresh_per_second=8,
+            transient=False,
+        )
+        self.live.start()
+
+    def stop_subagent_live(self) -> None:
+        if self.live is None:
+            return
+
+        self.live.update(self.render_subagents())
+        self.live.stop()
+        self.live = None
+
+    def tick_subagents(self) -> None:
+        if not self.has_running_subagents():
+            return
+
+        self.spinner_index = (self.spinner_index + 1) % len(SPINNER_FRAMES)
+        self.refresh_subagents()
+
+    def has_running_subagents(self) -> bool:
+        return any(block["status"] == "RUNNING" for block in self.subagent_blocks.values())
+
+    def refresh_subagents(self) -> None:
+        if self.live is not None:
+            self.live.update(self.render_subagents())
+            return
+
+        self.console.print(self.render_subagents())
+
+    def render_subagents(self):
+        if not self.subagent_blocks:
+            return ""
+
+        return Group(*(self.render_subagent(label, block) for label, block in self.subagent_blocks.items()))
+
+    def render_subagent(self, label: str, block: dict) -> Panel:
+        colour = block["colour"]
+        status = block["status"]
+        text = Text()
+
+        if block.get("request"):
+            text.append("request: ", style="cyan")
+            text.append(self.truncate(block["request"]), style="white")
+            text.append("\n")
+
+        text.append("status: ", style="cyan")
+        if status == "RUNNING":
+            frame = SPINNER_FRAMES[self.spinner_index]
+            text.append(f"{frame} RUNNING", style="bold yellow")
+        else:
+            text.append("DONE", style="bold green")
+
+        if block.get("tool"):
+            text.append("\nfinal tool: ", style="cyan")
+            text.append(str(block["tool"]), style="bold white")
+            text.append("\nargs: ", style="cyan")
+            text.append(self.format_args(block.get("args")), style="white")
+            text.append("\noutput: ", style="cyan")
+            text.append(self.truncate_output(block.get("output", "")))
+
+        return Panel(
+            text,
+            title=Text(f"subagent - {label}", style=f"bold {colour}"),
+            title_align="left",
+            border_style=colour,
+        )
+
+    def format_args(self, value) -> str:
+        if value is None:
+            return "{}"
+
+        try:
+            return self.truncate(json.dumps(value, ensure_ascii=False, sort_keys=True))
+        except TypeError:
+            return self.truncate(value)
+
+    def truncate_output(self, value) -> Text:
+        text = self.single_line(value)
+
+        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
+            return Text(text, style="white")
+
+        rendered = Text(text[: self.tool_output_chars], style="white")
+        rendered.append(" ... truncated ...", style="yellow")
+        return rendered
 
     def truncate(self, value: str) -> str:
         text = self.single_line(value)
@@ -180,17 +333,21 @@ class Renderer:
             return
 
         self.section = "main"
-        sys.stdout.write("\n\033[1;36mmira [main]\033[0m\n")
-        sys.stdout.flush()
+        self.console.print()
+        self.console.print("mira [main]", style="bold cyan")
 
     def enter_subagent(self, label: str) -> None:
         if self.section == label:
             return
 
         self.section = label
+        if label in self.subagent_sections:
+            return
+
+        self.subagent_sections.add(label)
         colour = self.subagent_colour(label)
-        sys.stdout.write(f"\n\033[1;{colour}msubagent - {label}\033[0m\n")
-        sys.stdout.flush()
+        self.console.print()
+        self.console.print(f"subagent - {label}", style=f"bold {colour}")
 
     def subagent_label(self, subagent) -> str:
         key = id(subagent)

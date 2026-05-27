@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Iterable
+from contextlib import suppress
 
 from langgraph.types import Command
 
@@ -53,8 +54,14 @@ async def _consume_messages(messages, renderer) -> None:
         if text:
             renderer.text(text)
 
-        for call in await _message_tool_calls(message):
-            renderer.tool_call(call.get("name", "tool"), call.get("args", {}))
+        calls = await _message_tool_calls(message)
+        task_calls = [call for call in calls if call.get("name") == "task"]
+        if task_calls:
+            renderer.delegation_started(task_calls)
+
+        for call in calls:
+            if call.get("name") != "task":
+                renderer.tool_call(call.get("name", "tool"), call.get("args", {}))
 
 
 async def _consume_tool_calls(tool_calls, renderer) -> None:
@@ -71,26 +78,53 @@ async def _consume_tool_calls(tool_calls, renderer) -> None:
 
 async def _consume_subagents(subagents, renderer) -> None:
     tasks = []
+    if hasattr(renderer, "start_subagent_live"):
+        renderer.start_subagent_live()
+    animation = asyncio.create_task(_animate_subagents(renderer))
 
-    async for subagent in subagents:
-        tasks.append(asyncio.create_task(_consume_subagent(subagent, renderer)))
+    try:
+        async for subagent in subagents:
+            tasks.append(asyncio.create_task(_consume_subagent(subagent, renderer)))
 
-    if tasks:
-        await asyncio.gather(*tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+    finally:
+        animation.cancel()
+        with suppress(asyncio.CancelledError):
+            await animation
+        if hasattr(renderer, "stop_subagent_live"):
+            renderer.stop_subagent_live()
+
+
+async def _animate_subagents(renderer) -> None:
+    while True:
+        if hasattr(renderer, "tick_subagents"):
+            renderer.tick_subagents()
+        await asyncio.sleep(0.12)
 
 
 async def _consume_subagent(subagent, renderer) -> None:
     name = renderer.subagent_label(subagent)
+    renderer.subagent_started(name, getattr(subagent, "task_input", ""))
+    final_call = None
 
     async for call in subagent.tool_calls:
-        tool_name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
+        tool_name = _tool_call_name(call)
+        args = _tool_call_args(call)
         output = await _tool_call_output(call)
 
         if isinstance(output, Command):
             continue
 
         if output:
-            renderer.subagent_tool_result(name, tool_name, _tool_output_text(output))
+            final_call = (tool_name, args, _tool_output_text(output))
+
+    if final_call is None:
+        renderer.subagent_finished(name)
+        return
+
+    tool_name, args, output = final_call
+    renderer.subagent_finished(name, tool_name, args, output)
 
 
 async def _tool_call_output(call):
@@ -102,6 +136,13 @@ async def _tool_call_output(call):
             if text:
                 deltas.append(text)
 
+    if isinstance(call, dict):
+        if call.get("output") is not None:
+            return call["output"]
+        if call.get("error") is not None:
+            return call["error"]
+        return "".join(deltas)
+
     output = getattr(call, "output", None)
     if output is not None:
         return output
@@ -111,6 +152,20 @@ async def _tool_call_output(call):
         return error
 
     return "".join(deltas)
+
+
+def _tool_call_name(call) -> str:
+    if isinstance(call, dict):
+        return call.get("name") or call.get("tool_name") or "tool"
+
+    return getattr(call, "name", None) or getattr(call, "tool_name", "tool")
+
+
+def _tool_call_args(call):
+    if isinstance(call, dict):
+        return call.get("args", {})
+
+    return getattr(call, "args", {})
 
 
 async def _message_text(message) -> str:
