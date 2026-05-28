@@ -34,7 +34,7 @@ def build_plan_agent(config: dict, workspace: Path, checkpointer):
         checkpointer=checkpointer,
         permissions=_plan_permissions(),
         system_prompt=PLAN_SYSTEM_PROMPT,
-        extra_middleware=[ToolNameFilterMiddleware(PLAN_PROJECT_WRITE_TOOLS)],
+        extra_middleware=[PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)],
         interrupt_on=None,
     )
 
@@ -98,7 +98,7 @@ def _write_interrupts() -> dict:
     }
 
 
-class ToolNameFilterMiddleware(AgentMiddleware[Any, Any, Any]):
+class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):
     def __init__(self, excluded_tools: tuple[str, ...]) -> None:
         self.excluded_tools = set(excluded_tools)
 

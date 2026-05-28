@@ -1,5 +1,4 @@
 import asyncio
-from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 
@@ -55,7 +54,6 @@ async def _capture_output(output_stream, output: dict) -> None:
 
 async def _consume_messages(messages, renderer, result: TurnResult | None = None) -> None:
     async for message in messages:
-        # Stream reasoning deltas
         reasoning = getattr(message, "reasoning", None)
         if reasoning is not None:
             if hasattr(reasoning, "__aiter__"):
@@ -67,7 +65,6 @@ async def _consume_messages(messages, renderer, result: TurnResult | None = None
                 if text:
                     renderer.reasoning_delta(str(text))
 
-        # Stream text deltas
         msg_text = getattr(message, "text", None)
         if msg_text is not None:
             if hasattr(msg_text, "__aiter__"):
@@ -79,11 +76,8 @@ async def _consume_messages(messages, renderer, result: TurnResult | None = None
                 if text:
                     renderer.text_delta(str(text))
 
-        # Check for task tool calls (delegation) - use .get() to get finalized calls only,
-        # not the incremental argument chunks that arrive during streaming
         calls = getattr(message, "tool_calls", None)
         if calls is not None:
-            # Drain chunks (required to advance the stream) but use .get() for finalized objects
             if hasattr(calls, "__aiter__"):
                 async for _ in calls:
                     pass
@@ -157,10 +151,9 @@ async def _consume_subagent(subagent, renderer) -> None:
 
     try:
         output = subagent.output
-        # May be a bound method — call it first
         if callable(output) and not hasattr(output, "__aiter__") and not hasattr(output, "__await__"):
             output = output()
-        # Now await or iterate
+
         if hasattr(output, "__await__"):
             output = await output
         elif hasattr(output, "__aiter__"):
@@ -168,7 +161,7 @@ async def _consume_subagent(subagent, renderer) -> None:
             async for chunk in output:
                 chunks.append(_tool_output_text(chunk))
             output = "\n".join(filter(None, chunks))
-        # output is the full agent state dict — extract the last message content
+
         if isinstance(output, dict) and "messages" in output:
             messages = output["messages"]
             if messages:
@@ -209,40 +202,6 @@ async def _tool_call_output(call):
         return error
 
     return "".join(deltas)
-
-
-def _tool_call_name(call) -> str:
-    if isinstance(call, dict):
-        return call.get("name") or call.get("tool_name") or "tool"
-
-    return getattr(call, "name", None) or getattr(call, "tool_name", "tool")
-
-
-def _tool_call_args(call):
-    import json
-
-    if isinstance(call, dict):
-        args = call.get("args") or call.get("input")
-        if args:
-            return args
-        arguments = call.get("arguments") or (call.get("function") or {}).get("arguments")
-        if arguments:
-            try:
-                return json.loads(arguments)
-            except (TypeError, json.JSONDecodeError):
-                return {}
-        return {}
-
-    args = getattr(call, "args", None) or getattr(call, "input", None)
-    if args:
-        return args
-    arguments = getattr(call, "arguments", None)
-    if arguments:
-        try:
-            return json.loads(arguments)
-        except (TypeError, json.JSONDecodeError):
-            return {}
-    return {}
 
 
 def _tool_output_text(output) -> str:

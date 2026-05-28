@@ -89,7 +89,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("planning mode", kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].operations, ["write"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")
-        self.assertTrue(any(isinstance(item, factory.ToolNameFilterMiddleware) for item in kwargs["middleware"]))
+        self.assertTrue(any(isinstance(item, factory.PlanningToolFilter) for item in kwargs["middleware"]))
 
     def test_action_agent_keeps_write_interrupts(self):
         with (
@@ -108,7 +108,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["permissions"][0].mode, "allow")
 
     def test_plan_tool_filter_hides_write_tools_from_model(self):
-        middleware = factory.ToolNameFilterMiddleware(PLAN_PROJECT_WRITE_TOOLS)
+        middleware = factory.PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
@@ -314,7 +314,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
     def test_invalid_plan_result_when_write_tool_was_used(self):
         result = runner.TurnResult(final_text="Nope", tool_calls=["write_file"])
 
-        self.assertFalse(repl.is_valid_plan_result(result))
+        self.assertFalse(repl.has_clean_plan(result))
 
     def test_invalid_plan_result_when_project_write_was_blocked(self):
         result = runner.TurnResult(
@@ -323,12 +323,12 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             tool_results=["Error: permission denied for write on /test.txt"],
         )
 
-        self.assertFalse(repl.is_valid_plan_result(result))
+        self.assertFalse(repl.has_clean_plan(result))
 
     def test_invalid_plan_result_when_final_text_mentions_permission_denied(self):
         result = runner.TurnResult(final_text="I hit permission denied for write on /test.txt.")
 
-        self.assertFalse(repl.is_valid_plan_result(result))
+        self.assertFalse(repl.has_clean_plan(result))
 
     def test_plan_request_text_wraps_user_request(self):
         text = repl.plan_request_text("write a file")
@@ -341,7 +341,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         mode = {"plans": [], "last_plan": "", "plan_pending": False}
 
-        repl.save_plan_result(mode, runner.TurnResult(final_text="1. Create test.txt."), renderer)
+        repl.save_clean_plan(mode, runner.TurnResult(final_text="1. Create test.txt."), renderer)
 
         self.assertEqual(mode["last_plan"], "1. Create test.txt.")
         self.assertEqual(mode["plans"], [{"id": 1, "text": "1. Create test.txt."}])

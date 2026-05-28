@@ -56,7 +56,7 @@ async def start_repl(agent, plan_agent, renderer, store, session: dict, model_na
                 renderer=renderer,
                 thread_id=mode["plan_thread_id"],
             )
-            save_plan_result(mode, result, renderer)
+            save_clean_plan(mode, result, renderer)
         else:
             action_text = action_request_text(mode, text)
             await run_turn(agent=agent, text=action_text, renderer=renderer, thread_id=session["id"])
@@ -128,11 +128,11 @@ def plan_thread_id(session: dict, run_id: int | None = None) -> str:
     return f"{session['id']}:plan:{run_id}"
 
 
-def save_plan_result(mode: dict, result, renderer) -> None:
-    if not is_valid_plan_result(result):
+def save_clean_plan(mode: dict, result, renderer) -> None:
+    if not has_clean_plan(result):
         mode["last_plan"] = ""
         mode["plan_pending"] = False
-        if plan_write_was_blocked(result) or plan_write_tool_was_used(result):
+        if write_was_blocked(result) or write_tool_was_used(result):
             renderer.console.print("[yellow]planning mode[/yellow]: write/edit was blocked; no plan was saved")
         return
 
@@ -143,7 +143,7 @@ def save_plan_result(mode: dict, result, renderer) -> None:
     mode["plan_pending"] = False
 
 
-def is_valid_plan_result(result) -> bool:
+def has_clean_plan(result) -> bool:
     final_text = getattr(result, "final_text", "").strip()
     if not final_text:
         return False
@@ -151,20 +151,20 @@ def is_valid_plan_result(result) -> bool:
     if any(marker in final_text.lower() for marker in PLAN_BLOCKED_RESULT_MARKERS):
         return False
 
-    if plan_write_tool_was_used(result):
+    if write_tool_was_used(result):
         return False
 
-    if plan_write_was_blocked(result):
+    if write_was_blocked(result):
         return False
 
     return True
 
 
-def plan_write_tool_was_used(result) -> bool:
+def write_tool_was_used(result) -> bool:
     return bool(set(PLAN_PROJECT_WRITE_TOOLS).intersection(getattr(result, "tool_calls", [])))
 
 
-def plan_write_was_blocked(result) -> bool:
+def write_was_blocked(result) -> bool:
     tool_results = getattr(result, "tool_results", [])
     return any(
         marker in value.lower()
