@@ -12,13 +12,18 @@ async def run_turn(agent, text: str, renderer, thread_id: str) -> None:
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
         output = {}
+        buffered_text = []
 
         await asyncio.gather(
-            _consume_messages(stream.messages, renderer),
+            _consume_messages(stream.messages, renderer, buffered_text),
             _consume_tool_calls(stream.tool_calls, renderer),
             _consume_subagents(stream.subagents, renderer),
             _capture_output(stream.output(), output),
         )
+
+        # Flush buffered main-agent text AFTER subagents have stopped
+        for chunk in buffered_text:
+            renderer.text(chunk)
 
         renderer.flush_reasoning()
         interrupts = _find_interrupts(output.get("value"))
@@ -44,7 +49,7 @@ async def _capture_output(output_stream, output: dict) -> None:
     output["value"] = output_stream
 
 
-async def _consume_messages(messages, renderer) -> None:
+async def _consume_messages(messages, renderer, buffered_text: list) -> None:
     async for message in messages:
         reasoning = await _message_reasoning(message)
         if reasoning:
@@ -52,7 +57,8 @@ async def _consume_messages(messages, renderer) -> None:
 
         text = await _message_text(message)
         if text:
-            renderer.text(text)
+            # Buffer text so it renders after subagent panels are done
+            buffered_text.append(text)
 
         calls = await _message_tool_calls(message)
         task_calls = [call for call in calls if call.get("name") == "task"]
@@ -110,6 +116,7 @@ async def _consume_subagent(subagent, renderer) -> None:
 
     async for call in subagent.tool_calls:
         tool_name = _tool_call_name(call)
+        # Capture args BEFORE awaiting output (output consumption may clear the object)
         args = _tool_call_args(call)
         output = await _tool_call_output(call)
 
@@ -162,10 +169,30 @@ def _tool_call_name(call) -> str:
 
 
 def _tool_call_args(call):
-    if isinstance(call, dict):
-        return call.get("args", {})
+    import json
 
-    return getattr(call, "args", {})
+    if isinstance(call, dict):
+        args = call.get("args") or call.get("input")
+        if args:
+            return args
+        arguments = call.get("arguments") or (call.get("function") or {}).get("arguments")
+        if arguments:
+            try:
+                return json.loads(arguments)
+            except (TypeError, json.JSONDecodeError):
+                return {}
+        return {}
+
+    args = getattr(call, "args", None) or getattr(call, "input", None)
+    if args:
+        return args
+    arguments = getattr(call, "arguments", None)
+    if arguments:
+        try:
+            return json.loads(arguments)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+    return {}
 
 
 async def _message_text(message) -> str:
