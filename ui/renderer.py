@@ -210,39 +210,27 @@ class Renderer:
         self.subagent_blocks[subagent] = {
             "request": task_input,
             "status": "RUNNING",
-            "tool": None,
-            "args": None,
             "output": "",
             "colour": self.subagent_colour(subagent),
         }
         self.refresh_subagents()
 
-    def subagent_finished(
-        self,
-        subagent: str,
-        tool: str | None = None,
-        args=None,
-        result: str = "",
-    ) -> None:
+    def subagent_finished(self, subagent: str, result: str = "") -> None:
         block = self.subagent_blocks.setdefault(
             subagent,
             {
                 "request": "",
                 "status": "RUNNING",
-                "tool": None,
-                "args": None,
                 "output": "",
                 "colour": self.subagent_colour(subagent),
             },
         )
         block["status"] = "DONE"
-        block["tool"] = tool
-        block["args"] = args
         block["output"] = result
         self.refresh_subagents()
 
     def subagent_tool_result(self, subagent: str, tool: str, result: str) -> None:
-        self.subagent_finished(subagent, tool, {}, result)
+        self.subagent_finished(subagent, result=result)
 
     def finish_main(self) -> None:
         self._stop_thinking_live()
@@ -387,11 +375,7 @@ class Renderer:
         else:
             text.append("DONE", style="bold green")
 
-        if block.get("tool"):
-            text.append("\nfinal tool: ", style=MIRA_CYAN)
-            text.append(str(block["tool"]), style="bold white")
-            text.append("\nargs: ", style=MIRA_CYAN)
-            text.append(self.format_args(block.get("args")), style="white")
+        if block.get("output"):
             text.append("\noutput: ", style=MIRA_CYAN)
             text.append(self.truncate_output(block.get("output", "")))
 

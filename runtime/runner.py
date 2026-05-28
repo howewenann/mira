@@ -69,15 +69,18 @@ async def _consume_messages(messages, renderer) -> None:
                 if text:
                     renderer.text_delta(str(text))
 
-        # Check for task tool calls (delegation)
+        # Check for task tool calls (delegation) - use .get() to get finalized calls only,
+        # not the incremental argument chunks that arrive during streaming
         calls = getattr(message, "tool_calls", None)
         if calls is not None:
+            # Drain chunks (required to advance the stream) but use .get() for finalized objects
             if hasattr(calls, "__aiter__"):
-                call_list = [c async for c in calls]
-            elif hasattr(calls, "__await__"):
-                call_list = await calls
-            else:
-                call_list = calls or []
+                async for _ in calls:
+                    pass
+            finalized = calls.get() if hasattr(calls, "get") else (calls or [])
+            if hasattr(finalized, "__await__"):
+                finalized = await finalized
+            call_list = finalized or []
 
             task_calls = [c for c in call_list if (c.get("name") if isinstance(c, dict) else getattr(c, "name", "")) == "task"]
             if task_calls:
@@ -134,25 +137,34 @@ async def _animate_subagents(renderer) -> None:
 async def _consume_subagent(subagent, renderer) -> None:
     name = renderer.subagent_label(subagent)
     renderer.subagent_started(name, getattr(subagent, "task_input", ""))
-    final_call = None
 
-    async for call in subagent.tool_calls:
-        tool_name = _tool_call_name(call)
-        args = _tool_call_args(call)
-        output = await _tool_call_output(call)
+    try:
+        output = subagent.output
+        # May be a bound method — call it first
+        if callable(output) and not hasattr(output, "__aiter__") and not hasattr(output, "__await__"):
+            output = output()
+        # Now await or iterate
+        if hasattr(output, "__await__"):
+            output = await output
+        elif hasattr(output, "__aiter__"):
+            chunks = []
+            async for chunk in output:
+                chunks.append(_tool_output_text(chunk))
+            output = "\n".join(filter(None, chunks))
+        # output is the full agent state dict — extract the last message content
+        if isinstance(output, dict) and "messages" in output:
+            messages = output["messages"]
+            if messages:
+                last = messages[-1]
+                result = last.text if hasattr(last, "text") else str(last)
+            else:
+                result = ""
+        else:
+            result = _tool_output_text(output)
+    except Exception as e:
+        result = f"error: {e}"
 
-        if isinstance(output, Command):
-            continue
-
-        if output:
-            final_call = (tool_name, args, _tool_output_text(output))
-
-    if final_call is None:
-        renderer.subagent_finished(name)
-        return
-
-    tool_name, args, output = final_call
-    renderer.subagent_finished(name, tool_name, args, output)
+    renderer.subagent_finished(name, result=result)
 
 
 async def _tool_call_output(call):
