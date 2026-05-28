@@ -12,24 +12,18 @@ async def run_turn(agent, text: str, renderer, thread_id: str) -> None:
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
         output = {}
-        buffered_text = []
 
         await asyncio.gather(
-            _consume_messages(stream.messages, renderer, buffered_text),
+            _consume_messages(stream.messages, renderer),
             _consume_tool_calls(stream.tool_calls, renderer),
             _consume_subagents(stream.subagents, renderer),
             _capture_output(stream.output(), output),
         )
 
-        # Flush buffered main-agent text AFTER subagents have stopped
-        for chunk in buffered_text:
-            renderer.text(chunk)
-
-        renderer.flush_reasoning()
+        renderer.finish_main()
         interrupts = _find_interrupts(output.get("value"))
 
         if not interrupts:
-            renderer.finish_main()
             return
 
         decisions = await renderer.ask_approvals(interrupts)
@@ -49,30 +43,56 @@ async def _capture_output(output_stream, output: dict) -> None:
     output["value"] = output_stream
 
 
-async def _consume_messages(messages, renderer, buffered_text: list) -> None:
+async def _consume_messages(messages, renderer) -> None:
     async for message in messages:
-        reasoning = await _message_reasoning(message)
-        if reasoning:
-            renderer.add_reasoning(reasoning)
+        # Stream reasoning deltas
+        reasoning = getattr(message, "reasoning", None)
+        if reasoning is not None:
+            if hasattr(reasoning, "__aiter__"):
+                async for delta in reasoning:
+                    if delta:
+                        renderer.reasoning_delta(str(delta))
+            else:
+                text = await reasoning if hasattr(reasoning, "__await__") else reasoning
+                if text:
+                    renderer.reasoning_delta(str(text))
 
-        text = await _message_text(message)
-        if text:
-            # Buffer text so it renders after subagent panels are done
-            buffered_text.append(text)
+        # Stream text deltas
+        msg_text = getattr(message, "text", None)
+        if msg_text is not None:
+            if hasattr(msg_text, "__aiter__"):
+                async for delta in msg_text:
+                    if delta:
+                        renderer.text_delta(str(delta))
+            else:
+                text = await msg_text if hasattr(msg_text, "__await__") else msg_text
+                if text:
+                    renderer.text_delta(str(text))
 
-        calls = await _message_tool_calls(message)
-        task_calls = [call for call in calls if call.get("name") == "task"]
-        if task_calls:
-            renderer.delegation_started(task_calls)
+        # Check for task tool calls (delegation)
+        calls = getattr(message, "tool_calls", None)
+        if calls is not None:
+            if hasattr(calls, "__aiter__"):
+                call_list = [c async for c in calls]
+            elif hasattr(calls, "__await__"):
+                call_list = await calls
+            else:
+                call_list = calls or []
 
-        for call in calls:
-            if call.get("name") != "task":
-                renderer.tool_call(call.get("name", "tool"), call.get("args", {}))
+            task_calls = [c for c in call_list if (c.get("name") if isinstance(c, dict) else getattr(c, "name", "")) == "task"]
+            if task_calls:
+                renderer.delegation_started(task_calls)
+
+            for call in call_list:
+                name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "tool")
+                if name != "task":
+                    args = call.get("args", {}) if isinstance(call, dict) else getattr(call, "args", {})
+                    renderer.tool_call(name, args)
 
 
 async def _consume_tool_calls(tool_calls, renderer) -> None:
     async for call in tool_calls:
-        name = getattr(call, "name", None) or getattr(call, "tool_name", "tool")
+        name = getattr(call, "tool_name", None) or getattr(call, "name", "tool")
         output = await _tool_call_output(call)
 
         if isinstance(output, Command):
@@ -86,15 +106,12 @@ async def _consume_subagents(subagents, renderer) -> None:
     if hasattr(renderer, "start_subagent_live"):
         renderer.start_subagent_live()
     animation = asyncio.create_task(_animate_subagents(renderer))
+    tasks = []
 
     try:
-        # Collect subagent stream entries and spawn each task immediately so
-        # they run concurrently rather than waiting for all to be collected first.
-        tasks = []
         async for subagent in subagents:
             task = asyncio.create_task(_consume_subagent(subagent, renderer))
             tasks.append(task)
-            # Yield control so the new task can start running right away
             await asyncio.sleep(0)
 
         if tasks:
@@ -121,7 +138,6 @@ async def _consume_subagent(subagent, renderer) -> None:
 
     async for call in subagent.tool_calls:
         tool_name = _tool_call_name(call)
-        # Capture args BEFORE awaiting output (output consumption may clear the object)
         args = _tool_call_args(call)
         output = await _tool_call_output(call)
 
@@ -198,48 +214,6 @@ def _tool_call_args(call):
         except (TypeError, json.JSONDecodeError):
             return {}
     return {}
-
-
-async def _message_text(message) -> str:
-    text = getattr(message, "text", "")
-
-    if callable(text):
-        text = text()
-
-    if hasattr(text, "__await__"):
-        text = await text
-
-    if isinstance(text, list):
-        return "".join(str(part) for part in text)
-
-    return str(text or "")
-
-
-async def _message_reasoning(message) -> str:
-    reasoning = getattr(message, "reasoning", "")
-
-    if callable(reasoning):
-        reasoning = reasoning()
-
-    if hasattr(reasoning, "__await__"):
-        reasoning = await reasoning
-
-    return str(reasoning or "")
-
-
-async def _message_tool_calls(message) -> Iterable[dict]:
-    calls = getattr(message, "tool_calls", None)
-
-    if callable(calls):
-        calls = calls()
-
-    if hasattr(calls, "__await__"):
-        calls = await calls
-
-    if hasattr(calls, "__aiter__"):
-        return [call async for call in calls]
-
-    return calls or []
 
 
 def _tool_output_text(output) -> str:
