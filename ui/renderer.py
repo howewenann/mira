@@ -1,6 +1,6 @@
 import json
 import re
-import sys  # still needed for stdout.reconfigure in __init__
+import sys
 from itertools import cycle
 
 from faker import Faker
@@ -13,8 +13,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
-SUBAGENT_COLOURS = ["magenta", "yellow", "green", "cyan", "blue"]
+SUBAGENT_COLOURS = ["magenta", "yellow", "green", "#00FFFF", "blue"]
 SPINNER_FRAMES = ["-", "\\", "|", "/"]
+MIRA_CYAN = "cyan"
 
 
 class Renderer:
@@ -25,7 +26,6 @@ class Renderer:
         self.tool_output_chars = tool_output_chars
         self.console = Console(stderr=True)
         self.fake = Faker()
-        self.reasoning = []
         self.subagent_colours = {}
         self.subagent_labels = {}
         self.subagent_suffixes = set()
@@ -36,68 +36,175 @@ class Renderer:
         self.colours = cycle(SUBAGENT_COLOURS)
         self.section = None
 
+        # live panels for thinking and response
+        self._thinking_text = ""
+        self._thinking_live = None
+        self._response_text = ""
+        self._response_live = None
+
     def splash(self, model_name: str, session_id: str) -> None:
         wordmark = Figlet(font="blocky").renderText("mira").rstrip()
-        border = "[cyan]===[/cyan]"
-        divider = "[cyan]---[/cyan]"
+        border = f"[{MIRA_CYAN}]===[/{MIRA_CYAN}]"
+        divider = f"[{MIRA_CYAN}]---[/{MIRA_CYAN}]"
 
         self.console.print(border)
-        self.console.print(f"[cyan]{wordmark}[/cyan]")
+        self.console.print(f"[{MIRA_CYAN}]{wordmark}[/{MIRA_CYAN}]")
         self.console.print()
-        self.console.print("[bold cyan]Minimal Iterative Reasoning Agent[/bold cyan]")
+        self.console.print(f"[bold {MIRA_CYAN}]Minimal Iterative Reasoning Agent[/bold {MIRA_CYAN}]")
         self.console.print(divider)
         self.console.print(f"[dim]model:[/dim] {model_name}")
         self.console.print(f"[dim]session:[/dim] {session_id}")
         self.console.print(border)
         self.console.print()
 
-    def text(self, value: str) -> None:
-        self.flush_reasoning()
-        self.enter_main()
-        self.console.print(value, end="", highlight=False, markup=False)
+    # ── Thinking (streaming) ─────────────────────────────────────────────────
 
-    def newline(self) -> None:
-        self.console.print()
-
-    def add_reasoning(self, value: str) -> None:
-        cleaned = re.sub(r"</?[^>]+>", "", value).strip()
-        if cleaned:
-            self.reasoning.append(cleaned)
-
-    def flush_reasoning(self) -> None:
-        if not self.reasoning:
+    def reasoning_delta(self, delta: str) -> None:
+        cleaned = re.sub(r"</?[^>]+>", "", delta)
+        if not cleaned:
             return
 
-        text = "\n\n".join(self.reasoning)
-        self.console.print(Panel(text, title="Thinking", border_style="dim cyan"))
-        self.reasoning.clear()
+        self._stop_response_live()
+
+        if self._thinking_live is None:
+            self._thinking_text = ""
+            self._thinking_live = Live(
+                self._render_thinking(),
+                console=self.console,
+                refresh_per_second=12,
+                transient=False,
+            )
+            self._thinking_live.start()
+
+        self._thinking_text += cleaned
+        self._thinking_live.update(self._render_thinking())
+
+    def _render_thinking(self) -> Panel:
+        return Panel(
+            self._thinking_text,
+            title=f"[bold {MIRA_CYAN}]Thinking[/bold {MIRA_CYAN}]",
+            title_align="left",
+            border_style=f"dim {MIRA_CYAN}",
+        )
+
+    def _stop_thinking_live(self) -> None:
+        if self._thinking_live is None:
+            return
+        self._thinking_live.update(self._render_thinking())
+        self._thinking_live.stop()
+        self._thinking_live = None
+        self._thinking_text = ""
+
+    # ── Response (streaming) ─────────────────────────────────────────────────
+
+    def text_delta(self, delta: str) -> None:
+        if not delta:
+            return
+
+        self._stop_thinking_live()
+
+        if self._response_live is None:
+            self._response_text = ""
+            self._response_live = Live(
+                self._render_response(),
+                console=self.console,
+                refresh_per_second=12,
+                transient=False,
+            )
+            self._response_live.start()
+
+        self._response_text += delta
+        self._response_live.update(self._render_response())
+
+    def _render_response(self) -> Panel:
+        return Panel(
+            self._response_text,
+            title=f"[bold {MIRA_CYAN}]mira - response[/bold {MIRA_CYAN}]",
+            title_align="left",
+            border_style=MIRA_CYAN,
+        )
+
+    def _stop_response_live(self) -> None:
+        if self._response_live is None:
+            return
+        self._response_live.update(self._render_response())
+        self._response_live.stop()
+        self._response_live = None
+        self._response_text = ""
+
+    # ── Tool calls ───────────────────────────────────────────────────────────
 
     def tool_call(self, name: str, args) -> None:
-        self.flush_reasoning()
-        self.enter_main()
-        self.console.print()
-        self.console.print(f"  mira tool call: {name}", style="cyan")
-        self.console.print(f"  args: {self.truncate(args)}", style="bright_black")
+        self._stop_thinking_live()
+        self._stop_response_live()
+        text = Text()
+        text.append("args: ", style=MIRA_CYAN)
+        text.append(self.truncate(args), style="white")
+        self.console.print(
+            Panel(
+                text,
+                title=f"[bold {MIRA_CYAN}]mira - {name}[/bold {MIRA_CYAN}]",
+                title_align="left",
+                border_style=MIRA_CYAN,
+            )
+        )
 
     def tool_result(self, name: str, result: str) -> None:
-        self.enter_main()
-        self.console.print(f"  output: {self.truncate(result)}", style="white")
+        # results are shown inside the tool panel via subagent blocks;
+        # for coordinator tool calls just print quietly
+        self.console.print(f"  output: {self.truncate(result)}", style="dim white")
 
     def delegation_started(self, calls: list[dict]) -> None:
+        import json
+
         if not calls:
             return
 
-        self.flush_reasoning()
-        self.enter_main()
-        count = len(calls)
-        label = "subagent" if count == 1 else "subagents"
-        self.console.print(f"  delegating to {count} {label}...", style="bold yellow")
+        self._stop_thinking_live()
+        self._stop_response_live()
 
+        # Parse each call, separating valid delegations from malformed chunks
+        valid = []
+        errors = []
         for call in calls:
-            args = call.get("args", {}) if isinstance(call, dict) else {}
+            raw_args = call.get("args", {}) if isinstance(call, dict) else {}
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except (TypeError, json.JSONDecodeError):
+                    errors.append(f"could not parse args: {str(raw_args)[:60]}")
+                    continue
+            args = raw_args if isinstance(raw_args, dict) else {}
             description = args.get("description")
             if description:
-                self.console.print(f"  request: {self.truncate(description)}", style="cyan")
+                valid.append(description)
+            else:
+                errors.append(f"missing description in args: {str(args)[:60]}")
+
+        if not valid and not errors:
+            return
+
+        count = len(valid)
+        label = "subagent" if count == 1 else "subagents"
+
+        body = Text()
+        body.append(f"delegating to {count} {label}...\n", style="bold yellow")
+        for description in valid:
+            body.append("  request: ", style=MIRA_CYAN)
+            body.append(self.truncate(description) + "\n", style="white")
+        for error in errors:
+            body.append(f"  failed: {error}\n", style="dim red")
+
+        self.console.print(
+            Panel(
+                body,
+                title=f"[bold {MIRA_CYAN}]mira - task[/bold {MIRA_CYAN}]",
+                title_align="left",
+                border_style=MIRA_CYAN,
+            )
+        )
+
+    # ── Subagents ────────────────────────────────────────────────────────────
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         self.subagent_blocks[subagent] = {
@@ -138,10 +245,9 @@ class Renderer:
         self.subagent_finished(subagent, tool, {}, result)
 
     def finish_main(self) -> None:
-        self.flush_reasoning()
+        self._stop_thinking_live()
         self.stop_subagent_live()
-        self.enter_main()
-        self.console.print("  mira done", style="green")
+        self._stop_response_live()
 
     async def ask_approvals(self, interrupts: list) -> list[dict]:
         decisions = []
@@ -149,7 +255,7 @@ class Renderer:
         for interrupt in interrupts:
             for action in self.action_requests(interrupt):
                 self.console.print()
-                self.console.print(Panel(self.action_text(action), title="Approval", border_style="cyan"))
+                self.console.print(Panel(self.action_text(action), title="Approval", border_style=MIRA_CYAN))
                 answer = await self._choice()
 
                 if answer == "e":
@@ -270,11 +376,11 @@ class Renderer:
         text = Text()
 
         if block.get("request"):
-            text.append("request: ", style="cyan")
+            text.append("request: ", style=MIRA_CYAN)
             text.append(self.truncate(block["request"]), style="white")
             text.append("\n")
 
-        text.append("status: ", style="cyan")
+        text.append("status: ", style=MIRA_CYAN)
         if status == "RUNNING":
             frame = SPINNER_FRAMES[self.spinner_index]
             text.append(f"{frame} RUNNING", style="bold yellow")
@@ -282,11 +388,11 @@ class Renderer:
             text.append("DONE", style="bold green")
 
         if block.get("tool"):
-            text.append("\nfinal tool: ", style="cyan")
+            text.append("\nfinal tool: ", style=MIRA_CYAN)
             text.append(str(block["tool"]), style="bold white")
-            text.append("\nargs: ", style="cyan")
+            text.append("\nargs: ", style=MIRA_CYAN)
             text.append(self.format_args(block.get("args")), style="white")
-            text.append("\noutput: ", style="cyan")
+            text.append("\noutput: ", style=MIRA_CYAN)
             text.append(self.truncate_output(block.get("output", "")))
 
         return Panel(
@@ -325,27 +431,6 @@ class Renderer:
 
     def single_line(self, value) -> str:
         return re.sub(r"\s+", " ", str(value or "")).strip()
-
-    def enter_main(self) -> None:
-        if self.section == "main":
-            return
-
-        self.section = "main"
-        self.console.print()
-        self.console.print("mira [main]", style="bold cyan")
-
-    def enter_subagent(self, label: str) -> None:
-        if self.section == label:
-            return
-
-        self.section = label
-        if label in self.subagent_sections:
-            return
-
-        self.subagent_sections.add(label)
-        colour = self.subagent_colour(label)
-        self.console.print()
-        self.console.print(f"subagent - {label}", style=f"bold {colour}")
 
     def subagent_label(self, subagent) -> str:
         key = id(subagent)

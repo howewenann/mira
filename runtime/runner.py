@@ -83,14 +83,19 @@ async def _consume_tool_calls(tool_calls, renderer) -> None:
 
 
 async def _consume_subagents(subagents, renderer) -> None:
-    tasks = []
     if hasattr(renderer, "start_subagent_live"):
         renderer.start_subagent_live()
     animation = asyncio.create_task(_animate_subagents(renderer))
 
     try:
+        # Collect subagent stream entries and spawn each task immediately so
+        # they run concurrently rather than waiting for all to be collected first.
+        tasks = []
         async for subagent in subagents:
-            tasks.append(asyncio.create_task(_consume_subagent(subagent, renderer)))
+            task = asyncio.create_task(_consume_subagent(subagent, renderer))
+            tasks.append(task)
+            # Yield control so the new task can start running right away
+            await asyncio.sleep(0)
 
         if tasks:
             await asyncio.gather(*tasks)
