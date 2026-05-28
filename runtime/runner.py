@@ -21,7 +21,7 @@ async def run_turn(agent, text: str, renderer, thread_id: str) -> None:
         )
 
         renderer.finish_main()
-        interrupts = _find_interrupts(output.get("value"))
+        interrupts = await _collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
             return
@@ -247,4 +247,24 @@ def _find_interrupts(value) -> list:
         return value.get("__interrupt__", []) or value.get("interrupts", [])
 
     interrupts = getattr(value, "__interrupt__", None) or getattr(value, "interrupts", None)
+    return interrupts or []
+
+
+async def _collect_interrupts(stream, output_value) -> list:
+    interrupts = await _stream_interrupts(stream)
+    if interrupts:
+        return interrupts
+
+    return _find_interrupts(output_value)
+
+
+async def _stream_interrupts(stream) -> list:
+    interrupts = getattr(stream, "interrupts", None)
+
+    if callable(interrupts):
+        interrupts = interrupts()
+
+    if hasattr(interrupts, "__await__"):
+        interrupts = await interrupts
+
     return interrupts or []

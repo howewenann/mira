@@ -306,7 +306,7 @@ class Renderer:
         return await asyncio.to_thread(
             choice,
             "Approve this action?",
-            [("y", "approve"), ("e", "edit"), ("r", "reject")],
+            options=[("y", "approve"), ("e", "edit"), ("r", "reject")],
             show_frame=True,
         )
 
