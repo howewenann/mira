@@ -32,6 +32,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
 
     await start_repl(
         agent=app["agent"],
+        plan_agent=app["plan_agent"],
         renderer=app["renderer"],
         store=app["store"],
         session=app["session"],
@@ -40,7 +41,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
 
 
 def _bootstrap(workspace: Path, session: str | None, resume: bool) -> dict:
-    from agent.factory import build_agent
+    from agent.factory import build_agent, build_plan_agent
     from agent.llm import get_model_name
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
@@ -54,9 +55,11 @@ def _bootstrap(workspace: Path, session: str | None, resume: bool) -> dict:
     checkpointer = make_checkpointer()
     renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
+    plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer)
 
     return {
         "agent": agent,
+        "plan_agent": plan_agent,
         "config": config,
         "model_name": get_model_name(config),
         "renderer": renderer,

@@ -154,6 +154,26 @@ class Renderer:
         # for coordinator tool calls just print quietly
         self.console.print(f"  output: {self.truncate(result)}", style="dim white")
 
+    def plan(self, plan_id: int, text: str) -> None:
+        self.console.print(
+            Panel(
+                text,
+                title=f"[bold {MIRA_CYAN}]mira - plan #{plan_id}[/bold {MIRA_CYAN}]",
+                title_align="left",
+                border_style=MIRA_CYAN,
+            )
+        )
+
+    def no_plans(self) -> None:
+        self.console.print(
+            Panel(
+                "no saved plans",
+                title=f"[bold {MIRA_CYAN}]mira - plans[/bold {MIRA_CYAN}]",
+                title_align="left",
+                border_style=MIRA_CYAN,
+            )
+        )
+
     def delegation_started(self, calls: list[dict]) -> None:
         import json
 

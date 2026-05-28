@@ -1,30 +1,40 @@
 import asyncio
 from collections.abc import Iterable
 from contextlib import suppress
+from dataclasses import dataclass, field
 
 from langgraph.types import Command
 
 
-async def run_turn(agent, text: str, renderer, thread_id: str) -> None:
+@dataclass
+class TurnResult:
+    final_text: str = ""
+    tool_calls: list[str] = field(default_factory=list)
+    tool_results: list[str] = field(default_factory=list)
+
+
+async def run_turn(agent, text: str, renderer, thread_id: str) -> TurnResult:
     payload = {"messages": [{"role": "user", "content": text}]}
     config = {"configurable": {"thread_id": thread_id}}
+    result = TurnResult()
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
         output = {}
 
         await asyncio.gather(
-            _consume_messages(stream.messages, renderer),
-            _consume_tool_calls(stream.tool_calls, renderer),
+            _consume_messages(stream.messages, renderer, result),
+            _consume_tool_calls(stream.tool_calls, renderer, result),
             _consume_subagents(stream.subagents, renderer),
             _capture_output(stream.output(), output),
         )
 
+        result.final_text = _final_text(output.get("value")) or result.final_text
         renderer.finish_main()
         interrupts = await _collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
-            return
+            return result
 
         decisions = await renderer.ask_approvals(interrupts)
         payload = Command(resume={"decisions": decisions})
@@ -43,7 +53,7 @@ async def _capture_output(output_stream, output: dict) -> None:
     output["value"] = output_stream
 
 
-async def _consume_messages(messages, renderer) -> None:
+async def _consume_messages(messages, renderer, result: TurnResult | None = None) -> None:
     async for message in messages:
         # Stream reasoning deltas
         reasoning = getattr(message, "reasoning", None)
@@ -88,21 +98,28 @@ async def _consume_messages(messages, renderer) -> None:
 
             for call in call_list:
                 name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "tool")
+                if result is not None:
+                    result.tool_calls.append(name)
                 if name != "task":
                     args = call.get("args", {}) if isinstance(call, dict) else getattr(call, "args", {})
                     renderer.tool_call(name, args)
 
 
-async def _consume_tool_calls(tool_calls, renderer) -> None:
+async def _consume_tool_calls(tool_calls, renderer, result: TurnResult | None = None) -> None:
     async for call in tool_calls:
         name = getattr(call, "tool_name", None) or getattr(call, "name", "tool")
+        if result is not None:
+            result.tool_calls.append(name)
         output = await _tool_call_output(call)
 
         if isinstance(output, Command):
             continue
 
         if output:
-            renderer.tool_result(name, _tool_output_text(output))
+            text = _tool_output_text(output)
+            if result is not None:
+                result.tool_results.append(text)
+            renderer.tool_result(name, text)
 
 
 async def _consume_subagents(subagents, renderer) -> None:
@@ -237,6 +254,36 @@ def _tool_output_text(output) -> str:
         return str(content)
 
     return str(output)
+
+
+def _final_text(output) -> str:
+    if not isinstance(output, dict):
+        return ""
+
+    messages = output.get("messages") or []
+    if not messages:
+        return ""
+
+    return _message_text(messages[-1])
+
+
+def _message_text(message) -> str:
+    text = getattr(message, "text", None)
+    if text is not None:
+        return str(text)
+
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+        return "".join(parts)
+
+    return ""
 
 
 def _find_interrupts(value) -> list:

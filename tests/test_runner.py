@@ -22,6 +22,11 @@ class Message:
         self.tool_calls = tool_calls or []
 
 
+class OutputMessage:
+    def __init__(self, text):
+        self.text = text
+
+
 class ToolCall:
     def __init__(self, name, args, output):
         self.name = name
@@ -53,6 +58,9 @@ class RecordingRenderer:
 
     def tool_call(self, name, args):
         self.events.append(("tool_call", name, args))
+
+    def tool_result(self, name, result):
+        self.events.append(("tool_result", name, result))
 
     def delegation_started(self, calls):
         self.events.append(("delegation_started", calls))
@@ -133,12 +141,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
 
-        await runner.run_turn(agent, "write file", renderer, "thread-1")
+        result = await runner.run_turn(agent, "write file", renderer, "thread-1")
 
         self.assertEqual(renderer.approvals, [[interrupt]])
         self.assertEqual(len(agent.payloads), 2)
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertEqual(result.final_text, "")
 
     async def test_run_turn_exits_when_stream_has_no_interrupts(self):
         agent = FakeAgent([FakeStream(output={"messages": []})])
@@ -170,6 +179,32 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.approvals, [[interrupt]])
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "reject"}]})
+
+    async def test_run_turn_returns_final_text_from_output_messages(self):
+        agent = FakeAgent([FakeStream(output={"messages": [OutputMessage("final plan")]})])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "plan", renderer, "thread-1")
+
+        self.assertEqual(result.final_text, "final plan")
+
+    async def test_run_turn_records_tool_calls_and_results(self):
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={"messages": []},
+                    interrupts=[],
+                )
+            ]
+        )
+        agent.streams[0].messages = AsyncItems([Message([{"name": "write_file", "args": {}}])])
+        agent.streams[0].tool_calls = AsyncItems([ToolCall("write_file", {}, "permission denied for write on /x")])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "write", renderer, "thread-1")
+
+        self.assertIn("write_file", result.tool_calls)
+        self.assertIn("permission denied for write on /x", result.tool_results)
 
     async def test_task_tool_calls_are_hidden(self):
         renderer = RecordingRenderer()
