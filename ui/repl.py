@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
-from runtime.runner import run_turn
+from runtime.runner import TurnResult, run_turn
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -25,9 +28,21 @@ User request:
 {text}"""
 
 
-async def start_repl(agent, plan_agent, renderer, store, session: dict, model_name: str) -> None:
-    renderer.splash(model_name=model_name, session_id=session["id"])
-    mode = {"planning": False, "last_plan": "", "plan_pending": False, "plans": [], "plan_runs": 0}
+async def start_repl(
+    agent: Any,
+    plan_agent: Any,
+    renderer: Any,
+    store: Any,
+    session: dict[str, Any],
+    model_name: str,
+) -> None:
+    """Run the interactive prompt loop.
+
+    The REPL keeps a tiny mode dictionary instead of a larger state object so a
+    junior developer can see the planning/action transition in one place.
+    """
+    renderer.splash(model_name=model_name, session_id=session["id"], workspace=session["workspace"])
+    mode: dict[str, Any] = {"planning": False, "last_plan": "", "plan_pending": False, "plans": [], "plan_runs": 0}
 
     history_path = Path(session["workspace"]) / ".mira" / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,7 +80,15 @@ async def start_repl(agent, plan_agent, renderer, store, session: dict, model_na
         store.save(session)
 
 
-async def handle_command(text: str, renderer, store, session: dict, model_name: str, mode: dict | None = None) -> bool:
+async def handle_command(
+    text: str,
+    renderer: Any,
+    store: Any,
+    session: dict[str, Any],
+    model_name: str,
+    mode: dict[str, Any] | None = None,
+) -> bool:
+    """Handle slash commands and return whether the input was consumed."""
     if not text.startswith("/"):
         return False
 
@@ -121,14 +144,16 @@ async def handle_command(text: str, renderer, store, session: dict, model_name: 
     return True
 
 
-def plan_thread_id(session: dict, run_id: int | None = None) -> str:
+def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:
+    """Return the LangGraph thread id used for planning-mode memory."""
     if run_id is None:
         return f"{session['id']}:plan"
 
     return f"{session['id']}:plan:{run_id}"
 
 
-def save_clean_plan(mode: dict, result, renderer) -> None:
+def save_clean_plan(mode: dict[str, Any], result: TurnResult, renderer: Any) -> None:
+    """Save a planning result only when it did not try to edit the project."""
     if not has_clean_plan(result):
         mode["last_plan"] = ""
         mode["plan_pending"] = False
@@ -143,7 +168,8 @@ def save_clean_plan(mode: dict, result, renderer) -> None:
     mode["plan_pending"] = False
 
 
-def has_clean_plan(result) -> bool:
+def has_clean_plan(result: TurnResult) -> bool:
+    """Return whether a planning result is safe to reuse in action mode."""
     final_text = getattr(result, "final_text", "").strip()
     if not final_text:
         return False
@@ -160,11 +186,13 @@ def has_clean_plan(result) -> bool:
     return True
 
 
-def write_tool_was_used(result) -> bool:
+def write_tool_was_used(result: TurnResult) -> bool:
+    """Return whether the planning agent called a project write tool."""
     return bool(set(PLAN_PROJECT_WRITE_TOOLS).intersection(getattr(result, "tool_calls", [])))
 
 
-def write_was_blocked(result) -> bool:
+def write_was_blocked(result: TurnResult) -> bool:
+    """Return whether any tool result reports a blocked planning-mode write."""
     tool_results = getattr(result, "tool_results", [])
     return any(
         marker in value.lower()
@@ -173,7 +201,8 @@ def write_was_blocked(result) -> bool:
     )
 
 
-def print_plans(renderer, mode: dict) -> None:
+def print_plans(renderer: Any, mode: dict[str, Any]) -> None:
+    """Print all saved planning-mode responses."""
     plans = mode.get("plans", [])
     if not plans:
         if hasattr(renderer, "no_plans"):
@@ -190,10 +219,12 @@ def print_plans(renderer, mode: dict) -> None:
 
 
 def plan_request_text(text: str) -> str:
+    """Wrap user input in the planning-mode instruction template."""
     return PLAN_REQUEST_TEMPLATE.format(text=text)
 
 
-def action_request_text(mode: dict, text: str) -> str:
+def action_request_text(mode: dict[str, Any], text: str) -> str:
+    """Inject the latest saved plan into the next action-mode request once."""
     if not mode.get("plan_pending") or not mode.get("last_plan"):
         return text
 

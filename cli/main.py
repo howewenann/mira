@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import typer
@@ -15,6 +17,7 @@ def main(
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
     session: str | None = typer.Option(None, "--session", "-s", help="Session id."),
 ) -> None:
+    """Start MIRA unless Typer is dispatching to a subcommand."""
     if ctx.invoked_subcommand is None:
         run(prompt=prompt, resume=resume, workspace=workspace, session=session)
 

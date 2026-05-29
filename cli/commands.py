@@ -1,20 +1,26 @@
+from __future__ import annotations
+
 import asyncio
 import warnings
 from pathlib import Path
+from typing import Any
 
 
 def run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
+    """Bridge Typer's synchronous command callback into the async app."""
     _suppress_known_warnings()
     asyncio.run(_run(prompt=prompt, resume=resume, workspace=workspace, session=session))
 
 
 def _suppress_known_warnings() -> None:
+    """Hide expected LangChain beta warnings so the CLI stays readable."""
     from langchain_core._api import LangChainBetaWarning
 
     warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
 
 async def _run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
+    """Create the app objects, then run either one-shot or REPL mode."""
     from runtime.runner import run_turn
     from ui.repl import start_repl
 
@@ -40,7 +46,8 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
     )
 
 
-def _bootstrap(workspace: Path, session: str | None, resume: bool) -> dict:
+def _bootstrap(workspace: Path, session: str | None, resume: bool) -> dict[str, Any]:
+    """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
     from agent.llm import get_model_name
     from config.loader import load_config

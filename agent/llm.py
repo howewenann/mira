@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+from typing import Any
+
 from langchain_anyllm import ChatAnyLLM
 
 
-def get_llm(config: dict):
+def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
+    """Create the LangChain chat model from MIRA's config dictionary."""
     return ChatAnyLLM(
         model=config["lmstudio_model"],
         provider="lmstudio",
@@ -10,5 +15,6 @@ def get_llm(config: dict):
     )
 
 
-def get_model_name(config: dict) -> str:
-    return config["lmstudio_model"]
+def get_model_name(config: dict[str, Any]) -> str:
+    """Return the configured display name for the model."""
+    return str(config["lmstudio_model"])

@@ -1,25 +1,38 @@
+from __future__ import annotations
+
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from typing import Any
 
 from langgraph.types import Command
 
 
 @dataclass
 class TurnResult:
+    """Small summary of one agent turn used by REPL planning logic."""
+
     final_text: str = ""
     tool_calls: list[str] = field(default_factory=list)
     tool_results: list[str] = field(default_factory=list)
 
 
-async def run_turn(agent, text: str, renderer, thread_id: str) -> TurnResult:
-    payload = {"messages": [{"role": "user", "content": text}]}
+async def run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> TurnResult:
+    """Stream one top-level agent turn and handle HITL approval loops.
+
+    DeepAgents exposes separate async event streams for messages, tool calls,
+    subagents, and final output. MIRA consumes them concurrently so the terminal
+    can update as soon as each event arrives. If LangGraph interrupts for a
+    write approval, this function asks the renderer for decisions and resumes
+    the same thread with a ``Command`` payload.
+    """
+    payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
-        output = {}
+        output: dict[str, Any] = {}
 
         await asyncio.gather(
             _consume_messages(stream.messages, renderer, result),
@@ -39,7 +52,8 @@ async def run_turn(agent, text: str, renderer, thread_id: str) -> TurnResult:
         payload = Command(resume={"decisions": decisions})
 
 
-async def _capture_output(output_stream, output: dict) -> None:
+async def _capture_output(output_stream: Any, output: dict[str, Any]) -> None:
+    """Store the last final-output value from DeepAgents."""
     if hasattr(output_stream, "__aiter__"):
         async for item in output_stream:
             output["value"] = item
@@ -52,7 +66,13 @@ async def _capture_output(output_stream, output: dict) -> None:
     output["value"] = output_stream
 
 
-async def _consume_messages(messages, renderer, result: TurnResult | None = None) -> None:
+async def _consume_messages(messages: Any, renderer: Any, result: TurnResult | None = None) -> None:
+    """Consume streamed model messages and render reasoning, text, and tools.
+
+    LangChain message fields may be plain values, awaitables, or async
+    iterables depending on the provider. Each branch normalizes that shape into
+    text deltas before sending them to the renderer.
+    """
     async for message in messages:
         reasoning = getattr(message, "reasoning", None)
         if reasoning is not None:
@@ -86,24 +106,29 @@ async def _consume_messages(messages, renderer, result: TurnResult | None = None
                 finalized = await finalized
             call_list = finalized or []
 
-            task_calls = [c for c in call_list if (c.get("name") if isinstance(c, dict) else getattr(c, "name", "")) == "task"]
+            task_calls = [
+                call
+                for call in call_list
+                if (call.get("name") if isinstance(call, dict) else getattr(call, "name", "")) == "task"
+            ]
             if task_calls:
                 renderer.delegation_started(task_calls)
 
             for call in call_list:
                 name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "tool")
                 if result is not None:
-                    result.tool_calls.append(name)
+                    result.tool_calls.append(str(name))
                 if name != "task":
                     args = call.get("args", {}) if isinstance(call, dict) else getattr(call, "args", {})
-                    renderer.tool_call(name, args)
+                    renderer.tool_call(str(name), args)
 
 
-async def _consume_tool_calls(tool_calls, renderer, result: TurnResult | None = None) -> None:
+async def _consume_tool_calls(tool_calls: Any, renderer: Any, result: TurnResult | None = None) -> None:
+    """Consume completed tool-call events and render their output."""
     async for call in tool_calls:
         name = getattr(call, "tool_name", None) or getattr(call, "name", "tool")
         if result is not None:
-            result.tool_calls.append(name)
+            result.tool_calls.append(str(name))
         output = await _tool_call_output(call)
 
         if isinstance(output, Command):
@@ -113,14 +138,15 @@ async def _consume_tool_calls(tool_calls, renderer, result: TurnResult | None = 
             text = _tool_output_text(output)
             if result is not None:
                 result.tool_results.append(text)
-            renderer.tool_result(name, text)
+            renderer.tool_result(str(name), text)
 
 
-async def _consume_subagents(subagents, renderer) -> None:
+async def _consume_subagents(subagents: Any, renderer: Any) -> None:
+    """Consume subagent streams while a small spinner animation runs."""
     if hasattr(renderer, "start_subagent_live"):
         renderer.start_subagent_live()
     animation = asyncio.create_task(_animate_subagents(renderer))
-    tasks = []
+    tasks: list[asyncio.Task[None]] = []
 
     try:
         async for subagent in subagents:
@@ -138,14 +164,16 @@ async def _consume_subagents(subagents, renderer) -> None:
             renderer.stop_subagent_live()
 
 
-async def _animate_subagents(renderer) -> None:
+async def _animate_subagents(renderer: Any) -> None:
+    """Tick the subagent spinner until the parent task cancels it."""
     while True:
         if hasattr(renderer, "tick_subagents"):
             renderer.tick_subagents()
         await asyncio.sleep(0.12)
 
 
-async def _consume_subagent(subagent, renderer) -> None:
+async def _consume_subagent(subagent: Any, renderer: Any) -> None:
+    """Render one subagent lifecycle and capture its final answer text."""
     name = renderer.subagent_label(subagent)
     renderer.subagent_started(name, getattr(subagent, "task_input", ""))
 
@@ -157,7 +185,7 @@ async def _consume_subagent(subagent, renderer) -> None:
         if hasattr(output, "__await__"):
             output = await output
         elif hasattr(output, "__aiter__"):
-            chunks = []
+            chunks: list[str] = []
             async for chunk in output:
                 chunks.append(_tool_output_text(chunk))
             output = "\n".join(filter(None, chunks))
@@ -171,14 +199,15 @@ async def _consume_subagent(subagent, renderer) -> None:
                 result = ""
         else:
             result = _tool_output_text(output)
-    except Exception as e:
-        result = f"error: {e}"
+    except Exception as exc:
+        result = f"error: {exc}"
 
-    renderer.subagent_finished(name, result=result)
+    renderer.subagent_finished(name, result=str(result))
 
 
-async def _tool_call_output(call):
-    deltas = []
+async def _tool_call_output(call: Any) -> Any:
+    """Return a tool call's final output, collecting streamed deltas if needed."""
+    deltas: list[str] = []
 
     if hasattr(call, "__aiter__"):
         async for delta in call:
@@ -204,7 +233,8 @@ async def _tool_call_output(call):
     return "".join(deltas)
 
 
-def _tool_output_text(output) -> str:
+def _tool_output_text(output: Any) -> str:
+    """Convert a LangChain tool output object into displayable text."""
     if output is None:
         return ""
 
@@ -215,7 +245,8 @@ def _tool_output_text(output) -> str:
     return str(output)
 
 
-def _final_text(output) -> str:
+def _final_text(output: Any) -> str:
+    """Extract final assistant text from a DeepAgents output payload."""
     if not isinstance(output, dict):
         return ""
 
@@ -226,7 +257,8 @@ def _final_text(output) -> str:
     return _message_text(messages[-1])
 
 
-def _message_text(message) -> str:
+def _message_text(message: Any) -> str:
+    """Extract plain text from common LangChain message content shapes."""
     text = getattr(message, "text", None)
     if text is not None:
         return str(text)
@@ -245,7 +277,8 @@ def _message_text(message) -> str:
     return ""
 
 
-def _find_interrupts(value) -> list:
+def _find_interrupts(value: Any) -> list[Any]:
+    """Find interrupts stored on an output value or output dictionary."""
     if value is None:
         return []
 
@@ -256,7 +289,8 @@ def _find_interrupts(value) -> list:
     return interrupts or []
 
 
-async def _collect_interrupts(stream, output_value) -> list:
+async def _collect_interrupts(stream: Any, output_value: Any) -> list[Any]:
+    """Prefer stream interrupts, then fall back to interrupts in final output."""
     interrupts = await _stream_interrupts(stream)
     if interrupts:
         return interrupts
@@ -264,7 +298,8 @@ async def _collect_interrupts(stream, output_value) -> list:
     return _find_interrupts(output_value)
 
 
-async def _stream_interrupts(stream) -> list:
+async def _stream_interrupts(stream: Any) -> list[Any]:
+    """Return interrupts from a DeepAgents stream object if it exposes them."""
     interrupts = getattr(stream, "interrupts", None)
 
     if callable(interrupts):

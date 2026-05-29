@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
 
 def _int_env(name: str, default: int) -> int:
+    """Read an integer environment variable, falling back on invalid input."""
     value = os.getenv(name)
     if not value:
         return default
@@ -15,7 +19,8 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def load_config(workspace: Path) -> dict:
+def load_config(workspace: Path) -> dict[str, Any]:
+    """Load all runtime configuration from the environment and defaults."""
     load_dotenv()
 
     return {

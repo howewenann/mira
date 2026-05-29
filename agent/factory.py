@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
@@ -10,14 +12,15 @@ from langchain_quickjs import CodeInterpreterMiddleware
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
 
-SKILLS = []
-MEMORY = []
-SUBAGENTS = []
+SKILLS: list[Any] = []
+MEMORY: list[Any] = []
+SUBAGENTS: list[Any] = []
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
 
-def build_agent(config: dict, workspace: Path, checkpointer):
+def build_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
+    """Build the normal action agent with read/write filesystem access."""
     return _build_agent(
         config=config,
         workspace=workspace,
@@ -27,7 +30,8 @@ def build_agent(config: dict, workspace: Path, checkpointer):
     )
 
 
-def build_plan_agent(config: dict, workspace: Path, checkpointer):
+def build_plan_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
+    """Build the planning agent with project write tools hidden and denied."""
     return _build_agent(
         config=config,
         workspace=workspace,
@@ -40,18 +44,24 @@ def build_plan_agent(config: dict, workspace: Path, checkpointer):
 
 
 def _build_agent(
-    config: dict,
+    config: dict[str, Any],
     workspace: Path,
-    checkpointer,
+    checkpointer: Any,
     permissions: list[FilesystemPermission],
     system_prompt: str | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
-    interrupt_on: dict | None = None,
-):
+    interrupt_on: dict[str, Any] | None = None,
+) -> Any:
+    """Create a DeepAgents agent from shared MIRA wiring.
+
+    MIRA deliberately leans on DeepAgents for filesystem tools, subagent
+    orchestration, and middleware. Keeping that wiring here makes it obvious
+    where a learner can add skills or memory later without touching the REPL.
+    """
     model = get_llm(config)
     backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)
 
-    middleware = [
+    middleware: list[Any] = [
         CodeInterpreterMiddleware(),
         create_summarization_tool_middleware(model=model, backend=backend),
     ]
@@ -72,6 +82,7 @@ def _build_agent(
 
 
 def _action_permissions() -> list[FilesystemPermission]:
+    """Allow the action agent to read and write inside the workspace backend."""
     return [
         FilesystemPermission(
             operations=["read", "write"],
@@ -82,6 +93,7 @@ def _action_permissions() -> list[FilesystemPermission]:
 
 
 def _plan_permissions() -> list[FilesystemPermission]:
+    """Deny writes as a backstop while planning mode is active."""
     return [
         FilesystemPermission(
             operations=list(PLAN_DENIED_FS_OPERATIONS),
@@ -91,7 +103,8 @@ def _plan_permissions() -> list[FilesystemPermission]:
     ]
 
 
-def _write_interrupts() -> dict:
+def _write_interrupts() -> dict[str, dict[str, list[str]]]:
+    """Require human approval before the action agent writes project files."""
     return {
         "write_file": {"allowed_decisions": ["approve", "edit", "reject"]},
         "edit_file": {"allowed_decisions": ["approve", "edit", "reject"]},
@@ -99,21 +112,28 @@ def _write_interrupts() -> dict:
 
 
 class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):
+    """Middleware that removes project write tools from planning model calls."""
+
     def __init__(self, excluded_tools: tuple[str, ...]) -> None:
+        """Store tool names that should be hidden from the model."""
         self.excluded_tools = set(excluded_tools)
 
-    def wrap_model_call(self, request, handler):
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        """Filter tools for synchronous LangChain model calls."""
         return handler(self._filter_request(request))
 
-    async def awrap_model_call(self, request, handler):
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        """Filter tools for asynchronous LangChain model calls."""
         return await handler(self._filter_request(request))
 
-    def _filter_request(self, request):
+    def _filter_request(self, request: Any) -> Any:
+        """Return a request copy with excluded tools removed."""
         tools = [tool for tool in request.tools if _tool_name(tool) not in self.excluded_tools]
         return request.override(tools=tools)
 
 
-def _tool_name(tool) -> str | None:
+def _tool_name(tool: Any) -> str | None:
+    """Extract a tool name from either a dict tool or object tool."""
     if isinstance(tool, dict):
         name = tool.get("name")
         return name if isinstance(name, str) else None

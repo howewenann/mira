@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+import asyncio
 import json
 import re
 import sys
 from itertools import cycle
+from pathlib import Path
+from typing import Any
 
 from faker import Faker
 from prompt_toolkit import PromptSession
@@ -19,47 +24,62 @@ MIRA_CYAN = "cyan"
 
 
 class Renderer:
+    """Render all terminal output for MIRA.
+
+    The runner sends small events to this class while DeepAgents streams. The
+    renderer keeps the terminal-specific state here so the runtime can stay
+    focused on agent events rather than Rich panels, live displays, and colors.
+    """
+
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
+        """Create a renderer with an optional tool-output truncation limit."""
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
         self.tool_output_chars = tool_output_chars
         self.console = Console(stderr=True)
         self.fake = Faker()
-        self.subagent_colours = {}
-        self.subagent_labels = {}
-        self.subagent_suffixes = set()
-        self.subagent_sections = set()
-        self.subagent_blocks = {}
-        self.live = None
+        self.subagent_colours: dict[str, str] = {}
+        self.subagent_labels: dict[int, str] = {}
+        self.subagent_suffixes: set[str] = set()
+        self.subagent_blocks: dict[str, dict[str, str]] = {}
+        self.live: Live | None = None
         self.spinner_index = 0
         self.colours = cycle(SUBAGENT_COLOURS)
-        self.section = None
 
-        # live panels for thinking and response
+        # Live panels are updated token-by-token. Keep the source text separate
+        # from Rich renderables so streamed content can be re-rendered safely.
         self._thinking_text = ""
-        self._thinking_live = None
+        self._thinking_live: Live | None = None
         self._response_text = ""
-        self._response_live = None
+        self._response_live: Live | None = None
 
-    def splash(self, model_name: str, session_id: str) -> None:
-        wordmark = Figlet(font="blocky").renderText("mira").rstrip()
-        border = f"[{MIRA_CYAN}]===[/{MIRA_CYAN}]"
-        divider = f"[{MIRA_CYAN}]---[/{MIRA_CYAN}]"
+    def splash(self, model_name: str, session_id: str, workspace: str | Path) -> None:
+        """Print the startup banner, session metadata, and first-use hints."""
+        wordmark = Figlet(font="blocky").renderText("MIRA").rstrip()
+        logo_width = max((len(line.rstrip()) for line in wordmark.splitlines()), default=0)
+        divider = Text("-" * logo_width, style=MIRA_CYAN)
 
-        self.console.print(border)
-        self.console.print(f"[{MIRA_CYAN}]{wordmark}[/{MIRA_CYAN}]")
+        self.console.print(self._label_text("workspace", workspace, label_style="bold yellow"))
+        self.console.print(Text(wordmark, style=MIRA_CYAN))
         self.console.print()
-        self.console.print(f"[bold {MIRA_CYAN}]Minimal Iterative Reasoning Agent[/bold {MIRA_CYAN}]")
+        self.console.print(Text("Minimal Iterative Reasoning Agent", style=f"bold {MIRA_CYAN}"))
         self.console.print(divider)
-        self.console.print(f"[dim]model:[/dim] {model_name}")
-        self.console.print(f"[dim]session:[/dim] {session_id}")
-        self.console.print(border)
+        self.console.print(self._label_text("session", session_id))
+        self.console.print(self._label_text("model", model_name))
+        self.console.print(self._label_text("workspace", workspace))
+        self.console.print()
+        self.console.print(self._hint_text())
         self.console.print()
 
-    # ── Thinking (streaming) ─────────────────────────────────────────────────
+    def newline(self) -> None:
+        """Print a blank line after Ctrl+C/EOF so the shell prompt is clean."""
+        self.console.print()
+
+    # Thinking (streaming)
 
     def reasoning_delta(self, delta: str) -> None:
+        """Append a streamed reasoning token to the live thinking panel."""
         cleaned = re.sub(r"</?[^>]+>", "", delta)
         if not cleaned:
             return
@@ -80,14 +100,16 @@ class Renderer:
         self._thinking_live.update(self._render_thinking())
 
     def _render_thinking(self) -> Panel:
+        """Build the current thinking panel as literal text."""
         return Panel(
-            self._thinking_text,
+            Text(self._thinking_text),
             title=f"[bold {MIRA_CYAN}]Thinking[/bold {MIRA_CYAN}]",
             title_align="left",
             border_style=f"dim {MIRA_CYAN}",
         )
 
     def _stop_thinking_live(self) -> None:
+        """Finalize and clear the thinking live display if it is active."""
         if self._thinking_live is None:
             return
         self._thinking_live.update(self._render_thinking())
@@ -95,9 +117,15 @@ class Renderer:
         self._thinking_live = None
         self._thinking_text = ""
 
-    # ── Response (streaming) ─────────────────────────────────────────────────
+    # Response (streaming)
 
     def text_delta(self, delta: str) -> None:
+        """Append a streamed answer token to the live response panel.
+
+        Rich markup from the model is treated as plain text by
+        ``_render_response``. This protects file contents such as
+        ``[tool]`` or ``[red]`` from being interpreted as terminal styling.
+        """
         if not delta:
             return
 
@@ -117,14 +145,16 @@ class Renderer:
         self._response_live.update(self._render_response())
 
     def _render_response(self) -> Panel:
+        """Build the current response panel as literal text."""
         return Panel(
-            self._response_text,
+            Text(self._response_text),
             title=f"[bold {MIRA_CYAN}]mira - response[/bold {MIRA_CYAN}]",
             title_align="left",
             border_style=MIRA_CYAN,
         )
 
     def _stop_response_live(self) -> None:
+        """Finalize and clear the response live display if it is active."""
         if self._response_live is None:
             return
         self._response_live.update(self._render_response())
@@ -132,11 +162,13 @@ class Renderer:
         self._response_live = None
         self._response_text = ""
 
-    # ── Tool calls ───────────────────────────────────────────────────────────
+    # Tool calls
 
-    def tool_call(self, name: str, args) -> None:
+    def tool_call(self, name: str, args: Any) -> None:
+        """Render a non-task tool call and its arguments."""
         self._stop_thinking_live()
         self._stop_response_live()
+
         text = Text()
         text.append("args: ", style=MIRA_CYAN)
         text.append(self.truncate(args), style="white")
@@ -150,14 +182,16 @@ class Renderer:
         )
 
     def tool_result(self, name: str, result: str) -> None:
-        # results are shown inside the tool panel via subagent blocks;
-        # for coordinator tool calls just print quietly
-        self.console.print(f"  output: {self.truncate(result)}", style="dim white")
+        """Print a compact tool result for coordinator-level tool calls."""
+        text = Text("  output: ", style="dim white")
+        text.append(self.truncate(result), style="dim white")
+        self.console.print(text)
 
     def plan(self, plan_id: int, text: str) -> None:
+        """Render a saved planning-mode result."""
         self.console.print(
             Panel(
-                text,
+                Text(text),
                 title=f"[bold {MIRA_CYAN}]mira - plan #{plan_id}[/bold {MIRA_CYAN}]",
                 title_align="left",
                 border_style=MIRA_CYAN,
@@ -165,27 +199,26 @@ class Renderer:
         )
 
     def no_plans(self) -> None:
+        """Render the empty state for the saved-plan list."""
         self.console.print(
             Panel(
-                "no saved plans",
+                Text("no saved plans"),
                 title=f"[bold {MIRA_CYAN}]mira - plans[/bold {MIRA_CYAN}]",
                 title_align="left",
                 border_style=MIRA_CYAN,
             )
         )
 
-    def delegation_started(self, calls: list[dict]) -> None:
-        import json
-
+    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+        """Render the compact summary shown when MIRA delegates to subagents."""
         if not calls:
             return
 
         self._stop_thinking_live()
         self._stop_response_live()
 
-        # Parse each call, separating valid delegations from malformed chunks
-        valid = []
-        errors = []
+        valid: list[str] = []
+        errors: list[str] = []
         for call in calls:
             raw_args = call.get("args", {}) if isinstance(call, dict) else {}
             if isinstance(raw_args, str):
@@ -197,7 +230,7 @@ class Renderer:
             args = raw_args if isinstance(raw_args, dict) else {}
             description = args.get("description")
             if description:
-                valid.append(description)
+                valid.append(str(description))
             else:
                 errors.append(f"missing description in args: {str(args)[:60]}")
 
@@ -224,9 +257,10 @@ class Renderer:
             )
         )
 
-    # ── Subagents ────────────────────────────────────────────────────────────
+    # Subagents
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
+        """Create or replace the live block for a running subagent."""
         self.subagent_blocks[subagent] = {
             "request": task_input,
             "status": "RUNNING",
@@ -236,6 +270,7 @@ class Renderer:
         self.refresh_subagents()
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
+        """Mark a subagent block as done and attach its final output."""
         block = self.subagent_blocks.setdefault(
             subagent,
             {
@@ -250,20 +285,23 @@ class Renderer:
         self.refresh_subagents()
 
     def subagent_tool_result(self, subagent: str, tool: str, result: str) -> None:
+        """Compatibility hook for older subagent events that include a tool."""
         self.subagent_finished(subagent, result=result)
 
     def finish_main(self) -> None:
+        """Stop all live displays at the end of a top-level agent turn."""
         self._stop_thinking_live()
         self.stop_subagent_live()
         self._stop_response_live()
 
-    async def ask_approvals(self, interrupts: list) -> list[dict]:
-        decisions = []
+    async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
+        """Ask the user to approve, edit, or reject interrupted tool actions."""
+        decisions: list[dict[str, Any]] = []
 
         for interrupt in interrupts:
             for action in self.action_requests(interrupt):
                 self.console.print()
-                self.console.print(Panel(self.action_text(action), title="Approval", border_style=MIRA_CYAN))
+                self.console.print(Panel(Text(self.action_text(action)), title="Approval", border_style=MIRA_CYAN))
                 answer = await self._choice()
 
                 if answer == "e":
@@ -275,15 +313,17 @@ class Renderer:
 
         return decisions
 
-    def action_requests(self, interrupt) -> list:
+    def action_requests(self, interrupt: Any) -> list[Any]:
+        """Extract action requests from a LangGraph interrupt payload."""
         value = getattr(interrupt, "value", interrupt)
 
         if isinstance(value, dict) and value.get("action_requests"):
-            return value["action_requests"]
+            return list(value["action_requests"])
 
         return [value]
 
-    def action_text(self, action) -> str:
+    def action_text(self, action: Any) -> str:
+        """Format an approval action as readable text."""
         if isinstance(action, dict):
             name = action.get("name", "tool")
             args = action.get("args", {})
@@ -291,7 +331,8 @@ class Renderer:
 
         return str(action)
 
-    async def edit_decision(self, action) -> dict:
+    async def edit_decision(self, action: Any) -> dict[str, Any]:
+        """Prompt for edited JSON args and return a LangGraph decision."""
         if not isinstance(action, dict):
             return {"type": "reject"}
 
@@ -307,22 +348,22 @@ class Renderer:
             },
         }
 
-    async def prompt_json(self, original: dict) -> dict | None:
-        import asyncio
-
+    async def prompt_json(self, original: dict[str, Any]) -> dict[str, Any] | None:
+        """Prompt for replacement action arguments and parse them as JSON."""
         session = PromptSession()
         prompt = "edited args JSON> "
         text = await asyncio.to_thread(session.prompt, prompt, default=json.dumps(original))
 
         try:
-            return json.loads(text)
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             self.console.print("[dim]invalid JSON; rejecting action[/dim]")
             return None
 
-    async def _choice(self) -> str:
-        import asyncio
+        return parsed if isinstance(parsed, dict) else None
 
+    async def _choice(self) -> str:
+        """Run the blocking prompt-toolkit choice widget in a worker thread."""
         return await asyncio.to_thread(
             choice,
             "Approve this action?",
@@ -331,9 +372,11 @@ class Renderer:
         )
 
     def write_dim(self, value: str) -> None:
-        self.console.print(value, style="dim", end="")
+        """Write dim inline text without giving Rich a chance to parse markup."""
+        self.console.print(Text(value, style="dim"), end="")
 
     def start_subagent_live(self) -> None:
+        """Start the live group that contains subagent status panels."""
         if self.live is not None:
             return
 
@@ -348,6 +391,7 @@ class Renderer:
         self.live.start()
 
     def stop_subagent_live(self) -> None:
+        """Finalize and stop the subagent live group."""
         if self.live is None:
             return
 
@@ -356,6 +400,7 @@ class Renderer:
         self.live = None
 
     def tick_subagents(self) -> None:
+        """Advance the spinner for running subagents."""
         if not self.has_running_subagents():
             return
 
@@ -363,22 +408,26 @@ class Renderer:
         self.refresh_subagents()
 
     def has_running_subagents(self) -> bool:
+        """Return whether any subagent panel is still running."""
         return any(block["status"] == "RUNNING" for block in self.subagent_blocks.values())
 
     def refresh_subagents(self) -> None:
+        """Update the live subagent group or print a static snapshot."""
         if self.live is not None:
             self.live.update(self.render_subagents())
             return
 
         self.console.print(self.render_subagents())
 
-    def render_subagents(self):
+    def render_subagents(self) -> Group | str:
+        """Build the renderable group containing all current subagent blocks."""
         if not self.subagent_blocks:
             return ""
 
         return Group(*(self.render_subagent(label, block) for label, block in self.subagent_blocks.items()))
 
-    def render_subagent(self, label: str, block: dict) -> Panel:
+    def render_subagent(self, label: str, block: dict[str, str]) -> Panel:
+        """Build one subagent panel from its stored status block."""
         colour = block["colour"]
         status = block["status"]
         text = Text()
@@ -406,7 +455,8 @@ class Renderer:
             border_style=colour,
         )
 
-    def format_args(self, value) -> str:
+    def format_args(self, value: Any) -> str:
+        """Format arbitrary tool args into a short single-line string."""
         if value is None:
             return "{}"
 
@@ -415,7 +465,8 @@ class Renderer:
         except TypeError:
             return self.truncate(value)
 
-    def truncate_output(self, value) -> Text:
+    def truncate_output(self, value: Any) -> Text:
+        """Return tool output as literal Rich text, truncated when configured."""
         text = self.single_line(value)
 
         if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
@@ -425,7 +476,8 @@ class Renderer:
         rendered.append(" ... truncated ...", style="yellow")
         return rendered
 
-    def truncate(self, value: str) -> str:
+    def truncate(self, value: Any) -> str:
+        """Return a single-line string shortened to the configured display size."""
         text = self.single_line(value)
 
         if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
@@ -433,10 +485,12 @@ class Renderer:
 
         return text[: self.tool_output_chars] + " ... truncated ..."
 
-    def single_line(self, value) -> str:
+    def single_line(self, value: Any) -> str:
+        """Collapse whitespace so terminal panels stay compact."""
         return re.sub(r"\s+", " ", str(value or "")).strip()
 
-    def subagent_label(self, subagent) -> str:
+    def subagent_label(self, subagent: Any) -> str:
+        """Return a stable readable label for a subagent object."""
         key = id(subagent)
         if key not in self.subagent_labels:
             name = getattr(subagent, "name", "subagent")
@@ -445,6 +499,7 @@ class Renderer:
         return self.subagent_labels[key]
 
     def subagent_suffix(self) -> str:
+        """Generate a short unique suffix for a subagent label."""
         for _ in range(20):
             suffix = self.single_line(self.fake.word()).lower()
             if suffix and suffix not in self.subagent_suffixes:
@@ -456,7 +511,37 @@ class Renderer:
         return suffix
 
     def subagent_colour(self, name: str) -> str:
+        """Assign each subagent label a stable color for this process."""
         if name not in self.subagent_colours:
             self.subagent_colours[name] = next(self.colours)
 
         return self.subagent_colours[name]
+
+    def _label_text(
+        self,
+        label: str,
+        value: str | Path,
+        *,
+        label_style: str = "dim",
+        value_style: str = "white",
+    ) -> Text:
+        """Build a metadata line without parsing the value as Rich markup."""
+        text = Text()
+        text.append(f"{label}: ", style=label_style)
+        text.append(str(value), style=value_style)
+        return text
+
+    def _hint_text(self) -> Text:
+        """Build the compact command hints shown below the splash metadata."""
+        text = Text()
+        text.append("enter", style="bold white")
+        text.append(" to send  |  ", style="dim")
+        text.append("/help", style=MIRA_CYAN)
+        text.append("  |  ", style="dim")
+        text.append("/plan", style=MIRA_CYAN)
+        text.append("  |  ", style="dim")
+        text.append("/act", style=MIRA_CYAN)
+        text.append("  |  ", style="dim")
+        text.append("/plans", style=MIRA_CYAN)
+        text.append("  |  ctrl+c to quit", style="dim")
+        return text

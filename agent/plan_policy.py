@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 PLAN_PROJECT_WRITE_TOOLS = ("write_file", "edit_file")
 PLAN_DENIED_FS_OPERATIONS = ("write",)
 PLAN_BLOCKED_RESULT_MARKERS = ("permission denied for write",)
 
 
 def project_write_tools_text() -> str:
+    """Return a human-readable list of tools disabled in planning mode."""
     return ", ".join(PLAN_PROJECT_WRITE_TOOLS)
 
 
 def plan_system_prompt() -> str:
+    """Build the system prompt that keeps planning mode non-mutating."""
     tools = project_write_tools_text()
     return f"""You are MIRA in planning mode.
 
