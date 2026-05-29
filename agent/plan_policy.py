@@ -1,3 +1,5 @@
+"""Planning-mode policy constants and prompt text."""
+
 from __future__ import annotations
 
 PLAN_PROJECT_WRITE_TOOLS = ("write_file", "edit_file")

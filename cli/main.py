@@ -1,3 +1,5 @@
+"""Typer entrypoint for the MIRA command-line interface."""
+
 from __future__ import annotations
 
 from pathlib import Path

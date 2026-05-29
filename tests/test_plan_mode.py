@@ -1,3 +1,5 @@
+"""Tests for planning-mode policy and REPL routing."""
+
 from __future__ import annotations
 
 import unittest
@@ -58,7 +60,7 @@ class FakePromptSession:
     inputs: ClassVar[list[str]] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Copy the scripted inputs for this fake prompt instance."""
+        """Copy the scripted inputs for this prompt test double."""
         self.inputs = list(self.__class__.inputs)
 
     async def prompt_async(self, prompt: Any) -> str:
@@ -72,7 +74,7 @@ class FakeModelRequest:
     """Small request object used to test PlanningToolFilter."""
 
     def __init__(self, tools: list[Any]) -> None:
-        """Store the available tools on the fake request."""
+        """Store the available tools on the request test double."""
         self.tools = tools
 
     def override(self, **kwargs: Any) -> "FakeModelRequest":
@@ -167,13 +169,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         mode: dict[str, Any] = {"planning": False}
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
 
-        handled = await repl.handle_command("/plan", renderer, None, session, "model", mode)
+        handled = await repl.handle_command("/plan", renderer, session, "model", mode)
         self.assertTrue(handled)
         self.assertTrue(mode["planning"])
         self.assertIn("planning mode", renderer.console.lines[-1])
         self.assertIn(f"{project_write_tools_text()} disabled", renderer.console.lines[-1])
 
-        handled = await repl.handle_command("/act", renderer, None, session, "model", mode)
+        handled = await repl.handle_command("/act", renderer, session, "model", mode)
         self.assertTrue(handled)
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
@@ -183,7 +185,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         mode = {"planning": True, "last_plan": "Do the thing", "plan_pending": False}
 
-        handled = await repl.handle_command("/act", renderer, None, {}, "model", mode)
+        handled = await repl.handle_command("/act", renderer, {}, "model", mode)
 
         self.assertTrue(handled)
         self.assertFalse(mode["planning"])
@@ -194,7 +196,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The help command should mention planning commands."""
         renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/help", renderer, None, {}, "model", {"planning": False})
+        handled = await repl.handle_command("/help", renderer, {}, "model", {"planning": False})
 
         self.assertTrue(handled)
         self.assertIn("/plan", renderer.console.lines[-1])
@@ -206,7 +208,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The clear command should call the console clear method."""
         renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/clear", renderer, None, {}, "model", {"planning": False})
+        handled = await repl.handle_command("/clear", renderer, {}, "model", {"planning": False})
 
         self.assertTrue(handled)
         self.assertEqual(renderer.console.lines, ["clear"])
@@ -219,7 +221,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         calls: list[tuple[Any, str, str]] = []
 
         async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> None:
-            """Record fake agent invocations from the REPL."""
+            """Record agent invocations from the REPL."""
             calls.append((agent, text, thread_id))
 
         FakePromptSession.inputs = [
@@ -260,7 +262,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
-            """Record fake agent invocations and return scripted results."""
+            """Record agent invocations and return scripted results."""
             calls.append((agent, text, thread_id))
             return results.pop(0)
 
@@ -309,7 +311,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
-            """Record fake agent invocations and return scripted results."""
+            """Record agent invocations and return scripted results."""
             calls.append((agent, text, thread_id))
             return results.pop(0)
 
@@ -338,7 +340,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 3}
 
-        handled = await repl.handle_command("/session", renderer, None, session, "model", {"planning": True, "plans": []})
+        handled = await repl.handle_command("/session", renderer, session, "model", {"planning": True, "plans": []})
 
         self.assertTrue(handled)
         self.assertIn("session: thread-1", renderer.console.lines)
@@ -406,7 +408,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The plans command should render an empty state when no plans exist."""
         renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/plans", renderer, None, {}, "model", {"plans": []})
+        handled = await repl.handle_command("/plans", renderer, {}, "model", {"plans": []})
 
         self.assertTrue(handled)
         self.assertTrue(renderer.no_plans_called)
@@ -416,7 +418,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         mode = {"plans": [{"id": 1, "text": "First plan\nmore"}, {"id": 2, "text": "Latest plan"}]}
 
-        handled = await repl.handle_command("/plans", renderer, None, {}, "model", mode)
+        handled = await repl.handle_command("/plans", renderer, {}, "model", mode)
 
         self.assertTrue(handled)
         self.assertEqual(renderer.plan_panels, [(1, "First plan\nmore"), (2, "Latest plan")])

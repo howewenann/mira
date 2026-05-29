@@ -1,3 +1,5 @@
+"""Rich-based terminal renderer for MIRA."""
+
 from __future__ import annotations
 
 import asyncio
@@ -284,10 +286,6 @@ class Renderer:
         block["output"] = result
         self.refresh_subagents()
 
-    def subagent_tool_result(self, subagent: str, tool: str, result: str) -> None:
-        """Compatibility hook for older subagent events that include a tool."""
-        self.subagent_finished(subagent, result=result)
-
     def finish_main(self) -> None:
         """Stop all live displays at the end of a top-level agent turn."""
         self._stop_thinking_live()
@@ -371,10 +369,6 @@ class Renderer:
             show_frame=True,
         )
 
-    def write_dim(self, value: str) -> None:
-        """Write dim inline text without giving Rich a chance to parse markup."""
-        self.console.print(Text(value, style="dim"), end="")
-
     def start_subagent_live(self) -> None:
         """Start the live group that contains subagent status panels."""
         if self.live is not None:
@@ -454,16 +448,6 @@ class Renderer:
             title_align="left",
             border_style=colour,
         )
-
-    def format_args(self, value: Any) -> str:
-        """Format arbitrary tool args into a short single-line string."""
-        if value is None:
-            return "{}"
-
-        try:
-            return self.truncate(json.dumps(value, ensure_ascii=False, sort_keys=True))
-        except TypeError:
-            return self.truncate(value)
 
     def truncate_output(self, value: Any) -> Text:
         """Return tool output as literal Rich text, truncated when configured."""

@@ -1,3 +1,5 @@
+"""Agent construction for MIRA's action and planning modes."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -54,9 +56,9 @@ def _build_agent(
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
-    MIRA deliberately leans on DeepAgents for filesystem tools, subagent
-    orchestration, and middleware. Keeping that wiring here makes it obvious
-    where a learner can add skills or memory later without touching the REPL.
+    MIRA delegates filesystem tools, subagent orchestration, and middleware to
+    DeepAgents. Keeping that wiring here separates agent construction from REPL
+    control flow.
     """
     model = get_llm(config)
     backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)

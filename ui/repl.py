@@ -1,3 +1,5 @@
+"""Interactive REPL loop and slash-command handling."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,8 +40,8 @@ async def start_repl(
 ) -> None:
     """Run the interactive prompt loop.
 
-    The REPL keeps a tiny mode dictionary instead of a larger state object so a
-    junior developer can see the planning/action transition in one place.
+    The REPL keeps mode state local because planning and action transitions are
+    only needed inside the interactive prompt loop.
     """
     renderer.splash(model_name=model_name, session_id=session["id"], workspace=session["workspace"])
     mode: dict[str, Any] = {"planning": False, "last_plan": "", "plan_pending": False, "plans": [], "plan_runs": 0}
@@ -59,7 +61,7 @@ async def start_repl(
         if not text:
             continue
 
-        if await handle_command(text, renderer, store, session, model_name, mode):
+        if await handle_command(text, renderer, session, model_name, mode):
             if text in {"/exit", "/quit"}:
                 break
             continue
@@ -83,7 +85,6 @@ async def start_repl(
 async def handle_command(
     text: str,
     renderer: Any,
-    store: Any,
     session: dict[str, Any],
     model_name: str,
     mode: dict[str, Any] | None = None,

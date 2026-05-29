@@ -1,3 +1,5 @@
+"""Tests for runtime event handling and terminal rendering behavior."""
+
 from __future__ import annotations
 
 import unittest
@@ -8,12 +10,14 @@ from unittest.mock import patch
 from pyfiglet import Figlet
 from rich.console import Console
 
+from runtime.message_events import consume_messages
 from runtime import runner
+from runtime.subagent_events import consume_subagent, consume_subagents
 from ui.renderer import Renderer
 
 
 class AsyncItems:
-    """Tiny async iterable used to fake DeepAgents event streams."""
+    """Async iterable test double for DeepAgents event streams."""
 
     def __init__(self, items: list[Any]) -> None:
         """Store the items that should be yielded asynchronously."""
@@ -29,7 +33,7 @@ class Message:
     """Fake streamed message containing optional tool calls."""
 
     def __init__(self, tool_calls: list[Any] | None = None) -> None:
-        """Create a fake message with a tool-call list."""
+        """Create a message test double with a tool-call list."""
         self.tool_calls = tool_calls or []
 
 
@@ -55,7 +59,7 @@ class Subagent:
     """Fake subagent with a final message shaped like DeepAgents output."""
 
     def __init__(self, name: str, tool_calls: list[ToolCall]) -> None:
-        """Create a subagent whose final text is the last fake tool output."""
+        """Create a subagent test double with final tool output text."""
         self.name = name
         self.task_input = "look around"
         self.tool_calls = AsyncItems(tool_calls)
@@ -94,7 +98,7 @@ class RecordingRenderer:
         self.events.append(("delegation_started", calls))
 
     def subagent_label(self, subagent: Any) -> str:
-        """Use the fake subagent name directly."""
+        """Use the subagent test-double name directly."""
         return subagent.name
 
     def subagent_started(self, name: str, task_input: str = "") -> None:
@@ -150,11 +154,11 @@ class FakeStream:
         self.interrupt_values = interrupts or []
 
     async def output(self) -> Any:
-        """Return the fake final-output payload."""
+        """Return the configured final-output payload."""
         return self.output_value
 
     def interrupts(self) -> list[Any]:
-        """Return fake stream interrupts."""
+        """Return configured stream interrupts."""
         return self.interrupt_values
 
 
@@ -167,7 +171,7 @@ class FakeAgent:
         self.payloads: list[Any] = []
 
     async def astream_events(self, payload: Any, config: dict[str, Any], version: str) -> FakeStream:
-        """Return the next fake stream and remember the request payload."""
+        """Return the next stream test double and record the payload."""
         self.payloads.append(payload)
         return self.streams.pop(0)
 
@@ -305,7 +309,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        await runner._consume_messages(messages, renderer)
+        await consume_messages(messages, renderer)
 
         self.assertEqual(
             renderer.events,
@@ -332,7 +336,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        await runner._consume_messages(messages, renderer)
+        await consume_messages(messages, renderer)
 
         self.assertEqual(len(renderer.events), 1)
         self.assertEqual(renderer.events[0][0], "delegation_started")
@@ -349,7 +353,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-        await runner._consume_subagent(subagent, renderer)
+        await consume_subagent(subagent, renderer)
 
         self.assertEqual(
             renderer.events,
@@ -369,7 +373,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         """Two subagents should produce two separate status blocks."""
         renderer = RecordingRenderer()
 
-        await runner._consume_subagents(
+        await consume_subagents(
             AsyncItems(
                 [
                     Subagent("general-purpose [one]", [ToolCall("grep", {}, "one")]),
