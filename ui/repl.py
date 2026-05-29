@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,30 @@ If the user asks to create, write, edit, or delete files, describe the exact fil
 User request:
 {text}"""
 
+COMMAND_HELP = {
+    "/help": "show commands and what they do",
+    "/tools": "list tools available in the current mode",
+    "/plan": "enter planning mode; write/edit tools are disabled",
+    "/act": "return to action mode; include the latest saved plan once",
+    "/plans": "show saved plans from this REPL session",
+    "/session": "show session id, mode, workspace, and turn count",
+    "/model": "show the configured model name",
+    "/clear": "clear the terminal",
+    "/exit": "quit MIRA",
+}
+
+DEFAULT_TOOL_SPECS = [
+    {"name": "write_todos", "description": ""},
+    {"name": "ls", "description": ""},
+    {"name": "read_file", "description": ""},
+    {"name": "write_file", "description": ""},
+    {"name": "edit_file", "description": ""},
+    {"name": "glob", "description": ""},
+    {"name": "grep", "description": ""},
+    {"name": "execute", "description": ""},
+    {"name": "task", "description": ""},
+]
+
 
 async def start_repl(
     agent: Any,
@@ -44,7 +69,15 @@ async def start_repl(
     only needed inside the interactive prompt loop.
     """
     renderer.splash(model_name=model_name, session_id=session["id"], workspace=session["workspace"])
-    mode: dict[str, Any] = {"planning": False, "last_plan": "", "plan_pending": False, "plans": [], "plan_runs": 0}
+    mode: dict[str, Any] = {
+        "planning": False,
+        "last_plan": "",
+        "plan_pending": False,
+        "plans": [],
+        "plan_runs": 0,
+        "action_tools": tool_specs(agent),
+        "planning_tools": tool_specs(plan_agent),
+    }
 
     history_path = Path(session["workspace"]) / ".mira" / "history.txt"
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +85,7 @@ async def start_repl(
 
     while True:
         try:
-            text = await prompt.prompt_async(HTML("<b><ansicyan>you&gt;</ansicyan></b> "))
+            text = await prompt.prompt_async(prompt_label(mode))
         except (EOFError, KeyboardInterrupt):
             renderer.newline()
             break
@@ -100,7 +133,11 @@ async def handle_command(
         return True
 
     if text == "/help":
-        renderer.console.print("Commands: /help, /exit, /clear, /session, /model, /plan, /act, /plans")
+        print_help(renderer)
+        return True
+
+    if text == "/tools":
+        print_tools(renderer, mode)
         return True
 
     if text == "/plan":
@@ -143,6 +180,132 @@ async def handle_command(
 
     renderer.console.print(f"[dim]unknown command:[/dim] {text}")
     return True
+
+
+def prompt_label(mode: dict[str, Any]) -> HTML:
+    """Return the prompt label for the current REPL mode."""
+    if mode.get("planning"):
+        return HTML("<b><ansicyan>you</ansicyan> <ansiyellow>[plan]</ansiyellow>&gt;</b> ")
+
+    return HTML("<b><ansicyan>you&gt;</ansicyan></b> ")
+
+
+def print_help(renderer: Any) -> None:
+    """Print command descriptions."""
+    renderer.console.print("[bold cyan]Commands[/bold cyan]")
+    for command, description in COMMAND_HELP.items():
+        renderer.console.print(f"  {command:<8} {description}")
+
+
+def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
+    """Print tools available in the current mode."""
+    planning = bool(mode.get("planning"))
+    mode_name = "planning" if planning else "action"
+    renderer.console.print(f"[bold cyan]Tools ({mode_name})[/bold cyan]")
+    renderer.console.print(tool_table(available_tools(mode, planning=planning), width=console_width(renderer)))
+
+
+def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, str]]:
+    """Return tool display specs for the current mode."""
+    key = "planning_tools" if planning else "action_tools"
+    tools = mode.get(key)
+    if isinstance(tools, list) and tools:
+        return normalize_tool_specs(tools)
+
+    if not planning:
+        return DEFAULT_TOOL_SPECS.copy()
+
+    blocked = set(PLAN_PROJECT_WRITE_TOOLS)
+    return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
+
+
+def tool_specs(agent: Any) -> list[dict[str, str]]:
+    """Extract displayable tool specs from an agent-like object."""
+    explicit = getattr(agent, "mira_tool_specs", None)
+    if isinstance(explicit, list) and explicit:
+        return normalize_tool_specs(explicit)
+
+    get_tools = getattr(agent, "get_tools", None)
+    if callable(get_tools):
+        return normalize_tool_specs(get_tools())
+
+    tools = getattr(agent, "tools", None)
+    if isinstance(tools, list | tuple):
+        return normalize_tool_specs(tools)
+
+    return DEFAULT_TOOL_SPECS.copy()
+
+
+def normalize_tool_specs(tools: list[Any] | tuple[Any, ...]) -> list[dict[str, str]]:
+    """Normalize tool objects, callables, and dicts for display."""
+    specs: list[dict[str, str]] = []
+    for tool in tools:
+        name = tool_name(tool)
+        if not name:
+            continue
+        specs.append({"name": name, "description": first_sentence(tool_description(tool))})
+    return specs
+
+
+def tool_name(tool: Any) -> str:
+    """Return a display name for a supported tool shape."""
+    if isinstance(tool, dict):
+        name = tool.get("name")
+        return str(name) if name else ""
+
+    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+    return str(name) if name else ""
+
+
+def tool_description(tool: Any) -> str:
+    """Return a display description from metadata or docstring."""
+    if isinstance(tool, dict):
+        description = tool.get("description")
+        return str(description).strip() if description else ""
+
+    description = getattr(tool, "description", None)
+    if description:
+        return str(description).strip()
+
+    doc = getattr(tool, "__doc__", None)
+    return doc.strip().splitlines()[0] if isinstance(doc, str) and doc.strip() else ""
+
+
+def first_sentence(value: str) -> str:
+    """Return the first sentence or first non-empty line from text."""
+    text = " ".join(line.strip() for line in value.splitlines() if line.strip())
+    if not text:
+        return ""
+
+    for index, character in enumerate(text):
+        if character in {".", "!", "?"}:
+            return text[: index + 1]
+
+    return text
+
+
+def console_width(renderer: Any) -> int:
+    """Return the current console width with a stable fallback."""
+    width = getattr(getattr(renderer, "console", None), "width", None)
+    return width if isinstance(width, int) and width > 40 else 88
+
+
+def tool_table(tools: list[dict[str, str]], width: int) -> str:
+    """Render tools as a fixed-width markdown-style table."""
+    name_width = min(max([len("Tool"), *(len(tool["name"]) for tool in tools)], default=4), 24)
+    description_width = max(width - name_width - 7, 24)
+    lines = [
+        f"| {'Tool'.ljust(name_width)} | {'Description'.ljust(description_width)} |",
+        f"| {'-' * name_width} | {'-' * description_width} |",
+    ]
+
+    for tool in tools:
+        wrapped = textwrap.wrap(tool["description"] or "-", width=description_width) or ["-"]
+        lines.append(f"| {tool['name'].ljust(name_width)} | {wrapped[0].ljust(description_width)} |")
+        for continuation in wrapped[1:]:
+            lines.append(f"| {' '.ljust(name_width)} | {continuation.ljust(description_width)} |")
+
+    return "\n".join(lines)
 
 
 def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:

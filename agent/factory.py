@@ -7,7 +7,10 @@ from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import FilesystemBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
 from deepagents.middleware.summarization import create_summarization_tool_middleware
+from langchain.agents.middleware.todo import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -17,24 +20,27 @@ from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOL
 SKILLS: list[Any] = []
 MEMORY: list[Any] = []
 SUBAGENTS: list[Any] = []
+TOOLS: list[Any] = []
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
 
 def build_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
     """Build the normal action agent with read/write filesystem access."""
-    return _build_agent(
+    agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
         permissions=_action_permissions(),
         interrupt_on=_write_interrupts(),
+        excluded_tools=(),
     )
+    return agent
 
 
 def build_plan_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
-    return _build_agent(
+    agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
@@ -42,7 +48,9 @@ def build_plan_agent(config: dict[str, Any], workspace: Path, checkpointer: Any)
         system_prompt=PLAN_SYSTEM_PROMPT,
         extra_middleware=[PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)],
         interrupt_on=None,
+        excluded_tools=PLAN_PROJECT_WRITE_TOOLS,
     )
+    return agent
 
 
 def _build_agent(
@@ -53,6 +61,7 @@ def _build_agent(
     system_prompt: str | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
     interrupt_on: dict[str, Any] | None = None,
+    excluded_tools: tuple[str, ...] = (),
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
@@ -69,10 +78,11 @@ def _build_agent(
     ]
     middleware.extend(extra_middleware or [])
 
-    return create_deep_agent(
+    agent = create_deep_agent(
         model=model,
         backend=backend,
         middleware=middleware,
+        tools=TOOLS,
         skills=SKILLS,
         memory=MEMORY,
         subagents=SUBAGENTS,
@@ -81,6 +91,8 @@ def _build_agent(
         interrupt_on=interrupt_on,
         checkpointer=checkpointer,
     )
+    _attach_tool_specs(agent, _tool_specs(backend, middleware, excluded_tools))
+    return agent
 
 
 def _action_permissions() -> list[FilesystemPermission]:
@@ -142,3 +154,65 @@ def _tool_name(tool: Any) -> str | None:
 
     name = getattr(tool, "name", None)
     return name if isinstance(name, str) else None
+
+
+def _attach_tool_specs(agent: Any, specs: list[dict[str, str]]) -> None:
+    """Attach tool display metadata used by the REPL."""
+    try:
+        agent.mira_tool_specs = specs
+    except AttributeError:
+        return
+
+
+def _tool_specs(
+    backend: FilesystemBackend,
+    middleware: list[Any],
+    excluded_tools: tuple[str, ...],
+) -> list[dict[str, str]]:
+    """Collect display metadata from configured tool providers."""
+    blocked = set(excluded_tools)
+    specs: list[dict[str, str]] = []
+
+    providers = [
+        TodoListMiddleware(),
+        FilesystemMiddleware(backend=backend),
+        *middleware,
+    ]
+
+    for provider in providers:
+        for tool in getattr(provider, "tools", []):
+            _append_tool_spec(specs, tool, blocked)
+
+    if "task" not in blocked:
+        specs.append({"name": "task", "description": TASK_TOOL_DESCRIPTION.strip()})
+
+    for tool in TOOLS:
+        _append_tool_spec(specs, tool, blocked)
+
+    return specs
+
+
+def _append_tool_spec(specs: list[dict[str, str]], tool: Any, blocked: set[str]) -> None:
+    """Append tool metadata when a supported name is available."""
+    name = _tool_name(tool)
+    if not name or name in blocked:
+        return
+
+    if any(spec["name"] == name for spec in specs):
+        return
+
+    specs.append({"name": name, "description": _tool_description(tool)})
+
+
+def _tool_description(tool: Any) -> str:
+    """Return a concise tool description from metadata or docstring."""
+    if isinstance(tool, dict):
+        description = tool.get("description")
+        return str(description).strip() if description else ""
+
+    description = getattr(tool, "description", None)
+    if description:
+        return str(description).strip()
+
+    doc = getattr(tool, "__doc__", None)
+    return doc.strip().splitlines()[0] if isinstance(doc, str) and doc.strip() else ""

@@ -23,6 +23,7 @@ DEFAULT_TOOL_OUTPUT_CHARS = 240
 SUBAGENT_COLOURS = ["magenta", "yellow", "green", "#00FFFF", "blue"]
 SPINNER_FRAMES = ["-", "\\", "|", "/"]
 MIRA_CYAN = "cyan"
+MIRA_TITLE = "bold white"
 
 
 class Renderer:
@@ -60,12 +61,13 @@ class Renderer:
         """Print the startup banner, session metadata, and first-use hints."""
         wordmark = Figlet(font="blocky").renderText("MIRA").rstrip()
         logo_width = max((len(line.rstrip()) for line in wordmark.splitlines()), default=0)
+        border = Text("=" * logo_width, style=MIRA_CYAN)
         divider = Text("-" * logo_width, style=MIRA_CYAN)
 
-        self.console.print(self._label_text("workspace", workspace, label_style="bold yellow"))
+        self.console.print(border)
         self.console.print(Text(wordmark, style=MIRA_CYAN))
         self.console.print()
-        self.console.print(Text("Minimal Iterative Reasoning Agent", style=f"bold {MIRA_CYAN}"))
+        self.console.print(Text("Minimal Iterative Reasoning Agent", style=MIRA_TITLE))
         self.console.print(divider)
         self.console.print(self._label_text("session", session_id))
         self.console.print(self._label_text("model", model_name))
@@ -522,10 +524,14 @@ class Renderer:
         text.append(" to send  |  ", style="dim")
         text.append("/help", style=MIRA_CYAN)
         text.append("  |  ", style="dim")
+        text.append("/tools", style=MIRA_CYAN)
+        text.append("  |  ", style="dim")
         text.append("/plan", style=MIRA_CYAN)
         text.append("  |  ", style="dim")
         text.append("/act", style=MIRA_CYAN)
         text.append("  |  ", style="dim")
         text.append("/plans", style=MIRA_CYAN)
-        text.append("  |  ctrl+c to quit", style="dim")
+        text.append("  |  ", style="dim")
+        text.append("↑/↓", style="bold white")
+        text.append(" history  |  ctrl+c to quit", style="dim")
         return text

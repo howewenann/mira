@@ -386,30 +386,41 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         headers = [event for event in renderer.events if event[0] == "subagent_started"]
         self.assertEqual(len(headers), 2)
 
-    def test_splash_includes_workspace_and_hints(self) -> None:
-        """The splash should show workspace metadata and useful commands."""
+    def test_splash_includes_workspace_metadata_and_hints(self) -> None:
+        """The splash should show metadata and useful commands."""
         output = self._splash_output(workspace="D:\\Projects\\mira")
 
         self.assertIn("workspace: D:\\Projects\\mira", output)
         self.assertIn("enter to send", output)
+        self.assertIn("↑/↓ history", output)
         self.assertIn("/help", output)
+        self.assertIn("/tools", output)
         self.assertIn("/plan", output)
         self.assertIn("/act", output)
         self.assertIn("/plans", output)
         self.assertIn("ctrl+c to quit", output)
 
-    def test_splash_divider_matches_logo_width(self) -> None:
-        """The horizontal divider should match the rendered MIRA logo width."""
+    def test_splash_does_not_print_workspace_above_logo(self) -> None:
+        """Workspace metadata should stay below the logo."""
         output = self._splash_output()
         wordmark = Figlet(font="blocky").renderText("MIRA").rstrip()
         logo_width = max(len(line.rstrip()) for line in wordmark.splitlines())
-        divider_lines = [
-            line.strip()
-            for line in output.splitlines()
-            if line.strip() and set(line.strip()) == {"-"}
-        ]
+        lines = output.splitlines()
 
-        self.assertIn("-" * logo_width, divider_lines)
+        self.assertEqual(lines[0].strip(), "=" * logo_width)
+        self.assertNotIn("workspace:", lines[0])
+        self.assertNotIn("workspace:", lines[1])
+
+    def test_splash_separators_match_logo_width_and_do_not_close(self) -> None:
+        """The splash should use logo-width separators without a closing line."""
+        output = self._splash_output()
+        wordmark = Figlet(font="blocky").renderText("MIRA").rstrip()
+        logo_width = max(len(line.rstrip()) for line in wordmark.splitlines())
+        lines = [line.strip() for line in output.splitlines()]
+
+        self.assertEqual(lines.count("=" * logo_width), 1)
+        self.assertEqual(lines.count("-" * logo_width), 1)
+        self.assertNotEqual(lines[-1], "=" * logo_width)
 
     def test_renderer_newline_prints_blank_line(self) -> None:
         """Renderer.newline should print a clean blank line."""

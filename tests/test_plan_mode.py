@@ -90,6 +90,11 @@ class FakeStore:
         return None
 
 
+def sample_tool() -> None:
+    """Run a sample operation for tests."""
+    return None
+
+
 class PlanModeTests(unittest.IsolatedAsyncioTestCase):
     """Tests for planning-mode policy, REPL routing, and plan storage."""
 
@@ -145,6 +150,37 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].operations, ["read", "write"])
         self.assertEqual(kwargs["permissions"][0].mode, "allow")
+        self.assertEqual(kwargs["tools"], factory.TOOLS)
+
+    def test_agent_build_attaches_tool_metadata(self) -> None:
+        """Built agents should expose tool metadata for the REPL."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
+        ):
+            agent = factory.build_agent({}, ".", "checkpointer")
+
+        names = [tool["name"] for tool in agent.mira_tool_specs]
+        self.assertIn("read_file", names)
+        self.assertIn("write_file", names)
+        self.assertIn("edit_file", names)
+
+    def test_plan_agent_metadata_hides_write_tools(self) -> None:
+        """Plan agents should expose only planning-available tool metadata."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
+        ):
+            agent = factory.build_plan_agent({}, ".", "checkpointer")
+
+        names = [tool["name"] for tool in agent.mira_tool_specs]
+        self.assertIn("read_file", names)
+        self.assertNotIn("write_file", names)
+        self.assertNotIn("edit_file", names)
 
     def test_plan_tool_filter_hides_write_tools_from_model(self) -> None:
         """PlanningToolFilter should remove write/edit tools from requests."""
@@ -193,16 +229,95 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("last plan will be included", renderer.console.lines[-1])
 
     async def test_help_includes_plan_commands(self) -> None:
-        """The help command should mention planning commands."""
+        """The help command should describe available commands."""
         renderer = RecordingRenderer()
 
         handled = await repl.handle_command("/help", renderer, {}, "model", {"planning": False})
 
         self.assertTrue(handled)
-        self.assertIn("/plan", renderer.console.lines[-1])
-        self.assertIn("/act", renderer.console.lines[-1])
-        self.assertIn("/plans", renderer.console.lines[-1])
-        self.assertIn("/clear", renderer.console.lines[-1])
+        output = "\n".join(renderer.console.lines)
+        self.assertIn("Commands", output)
+        self.assertIn("/plan", output)
+        self.assertIn("enter planning mode", output)
+        self.assertIn("/act", output)
+        self.assertIn("return to action mode", output)
+        self.assertIn("/tools", output)
+        self.assertIn("list tools", output)
+
+    async def test_tools_command_lists_action_tools(self) -> None:
+        """The tools command should show action-mode tools."""
+        renderer = RecordingRenderer()
+
+        handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": False})
+
+        self.assertTrue(handled)
+        output = "\n".join(renderer.console.lines)
+        self.assertIn("Tools (action)", output)
+        self.assertIn("read_file", output)
+        self.assertIn("write_file", output)
+        self.assertIn("edit_file", output)
+        self.assertIn("task", output)
+        self.assertIn("|", output)
+
+    async def test_tools_command_hides_write_tools_in_planning_mode(self) -> None:
+        """The tools command should reflect planning-mode tool restrictions."""
+        renderer = RecordingRenderer()
+
+        handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": True})
+
+        self.assertTrue(handled)
+        output = "\n".join(renderer.console.lines)
+        self.assertIn("Tools (planning)", output)
+        self.assertIn("read_file", output)
+        self.assertNotIn("write_file", output)
+        self.assertNotIn("edit_file", output)
+
+    def test_tool_specs_use_agent_metadata(self) -> None:
+        """Tool specs should come from agent metadata when available."""
+        agent = type(
+            "Agent",
+            (),
+            {"mira_tool_specs": [{"name": "custom_tool", "description": "custom description"}]},
+        )()
+
+        self.assertEqual(repl.tool_specs(agent), [{"name": "custom_tool", "description": "custom description"}])
+
+    def test_tool_specs_use_docstrings_for_callables(self) -> None:
+        """Callable tool descriptions should fall back to docstrings."""
+        agent = type("Agent", (), {"tools": [sample_tool]})()
+
+        self.assertEqual(
+            repl.tool_specs(agent),
+            [{"name": "sample_tool", "description": "Run a sample operation for tests."}],
+        )
+
+    def test_tool_descriptions_use_first_sentence(self) -> None:
+        """Tool display descriptions should be shortened for the table."""
+        tools = [{"name": "read_file", "description": "Reads a file from the filesystem.\n\nUse this after listing files."}]
+
+        self.assertEqual(
+            repl.normalize_tool_specs(tools),
+            [{"name": "read_file", "description": "Reads a file from the filesystem."}],
+        )
+
+    def test_tool_table_wraps_to_console_width(self) -> None:
+        """The tools table should wrap descriptions to the available width."""
+        table = repl.tool_table(
+            [{"name": "long_tool", "description": "This description should wrap when the width is narrow."}],
+            width=48,
+        )
+
+        self.assertIn("| Tool", table)
+        self.assertIn("long_tool", table)
+        self.assertGreater(len(table.splitlines()), 3)
+
+    def test_prompt_label_shows_planning_mode(self) -> None:
+        """The prompt label should make planning mode visible."""
+        self.assertEqual(repl.prompt_label({"planning": False}).value, "<b><ansicyan>you&gt;</ansicyan></b> ")
+        self.assertEqual(
+            repl.prompt_label({"planning": True}).value,
+            "<b><ansicyan>you</ansicyan> <ansiyellow>[plan]</ansiyellow>&gt;</b> ",
+        )
 
     async def test_clear_command_clears_console(self) -> None:
         """The clear command should call the console clear method."""
