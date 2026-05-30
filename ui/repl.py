@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import textwrap
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
+from rich.table import Table
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
@@ -217,20 +217,53 @@ def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
     """Print tools available in the current mode."""
     planning = bool(mode.get("planning"))
     mode_name = "planning" if planning else "action"
-    renderer.console.print(f"[bold cyan]Tools ({mode_name})[/bold cyan]")
-    renderer.console.print(tool_table(available_tools(mode, planning=planning), width=console_width(renderer)))
+    renderer.console.print(tools_table(f"Tools ({mode_name})", available_tools(mode, planning=planning)))
 
 
 def print_resources(renderer: Any, title: str, items: list[dict[str, str]]) -> None:
     """Print loaded resources for one resource type."""
-    renderer.console.print(f"[bold cyan]{title}[/bold cyan]")
     if not items:
+        renderer.console.print(f"[bold cyan]{title}[/bold cyan]")
         renderer.console.print("[dim]none loaded[/dim]")
         return
 
+    renderer.console.print(resources_table(title, items))
+
+
+def tools_table(title: str, tools: list[dict[str, str]]) -> Table:
+    """Build a Rich table for tool metadata."""
+    table = Table(title=title, title_style="bold cyan")
+    table.add_column("Tool", style="cyan", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Replaces", no_wrap=True)
+    table.add_column("Description")
+
+    for tool in tools:
+        table.add_row(
+            tool["name"],
+            tool.get("source") or "-",
+            tool.get("replaces") or "-",
+            tool.get("description") or "-",
+        )
+    return table
+
+
+def resources_table(title: str, items: list[dict[str, str]]) -> Table:
+    """Build a Rich table for resource metadata."""
+    table = Table(title=title, title_style="bold cyan")
+    table.add_column("Name", style="cyan", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Replaces", no_wrap=True)
+    table.add_column("Path")
+
     for item in items:
-        replacement = f" replaces {item['replaces']}" if item.get("replaces") else ""
-        renderer.console.print(f"  {item['name']} [{item['source']}] {item['path']}{replacement}")
+        table.add_row(
+            item["name"],
+            item.get("source") or "-",
+            item.get("replaces") or "-",
+            item.get("path") or "-",
+        )
+    return table
 
 
 def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, str]]:
@@ -362,49 +395,6 @@ def first_sentence(value: str) -> str:
             return text[: index + 1]
 
     return text
-
-
-def console_width(renderer: Any) -> int:
-    """Return the current console width with a stable fallback."""
-    width = getattr(getattr(renderer, "console", None), "width", None)
-    return width if isinstance(width, int) and width > 40 else 88
-
-
-def tool_table(tools: list[dict[str, str]], width: int) -> str:
-    """Render tools as a fixed-width markdown-style table."""
-    name_width = min(max([len("Tool"), *(len(tool_label(tool)) for tool in tools)], default=4), 32)
-    description_width = max(width - name_width - 7, 24)
-    lines = [
-        f"| {'Tool'.ljust(name_width)} | {'Description'.ljust(description_width)} |",
-        f"| {'-' * name_width} | {'-' * description_width} |",
-    ]
-
-    for tool in tools:
-        label = tool_label(tool)
-        description = tool_table_description(tool)
-        wrapped = textwrap.wrap(description, width=description_width) or ["-"]
-        lines.append(f"| {label.ljust(name_width)} | {wrapped[0].ljust(description_width)} |")
-        for continuation in wrapped[1:]:
-            lines.append(f"| {' '.ljust(name_width)} | {continuation.ljust(description_width)} |")
-
-    return "\n".join(lines)
-
-
-def tool_label(tool: dict[str, str]) -> str:
-    """Return a table label for a tool."""
-    source = tool.get("source")
-    if source:
-        return f"{tool['name']} [{source}]"
-    return tool["name"]
-
-
-def tool_table_description(tool: dict[str, str]) -> str:
-    """Return a table description with replacement metadata."""
-    description = tool.get("description") or "-"
-    replaces = tool.get("replaces")
-    if replaces:
-        return f"replaces {replaces}. {description}"
-    return description
 
 
 def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:

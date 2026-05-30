@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from io import StringIO
 from typing import Any, ClassVar
 from unittest.mock import patch
+
+from rich.console import Console
 
 from agent import factory
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
@@ -21,7 +24,10 @@ class RecordingConsole:
 
     def print(self, *values: Any, **kwargs: Any) -> None:
         """Record printed values as a single string."""
-        self.lines.append(" ".join(str(value) for value in values))
+        output = StringIO()
+        console = Console(file=output, force_terminal=False, width=120)
+        console.print(*values, **kwargs)
+        self.lines.append(output.getvalue().rstrip("\n"))
 
     def clear(self) -> None:
         """Record that the screen was cleared."""
@@ -269,7 +275,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("write_file", output)
         self.assertIn("edit_file", output)
         self.assertIn("task", output)
-        self.assertIn("|", output)
+        self.assertIn("Description", output)
 
     async def test_tools_command_hides_write_tools_in_planning_mode(self) -> None:
         """The tools command should reflect planning-mode tool restrictions."""
@@ -322,12 +328,14 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         output = "\n".join(renderer.console.lines)
         self.assertIn("Memories", output)
-        self.assertIn("AGENTS.md [project]", output)
-        self.assertIn("replaces default", output)
+        self.assertIn("AGENTS.md", output)
+        self.assertIn("project", output)
+        self.assertIn("Replaces", output)
         self.assertIn("Skills", output)
-        self.assertIn("codebase-orientation [default]", output)
+        self.assertIn("codebase-orientation", output)
+        self.assertIn("default", output)
         self.assertIn("Subagents", output)
-        self.assertIn("code-reviewer [default]", output)
+        self.assertIn("code-reviewer", output)
 
     def test_tool_specs_use_agent_metadata(self) -> None:
         """Tool specs should come from agent metadata when available."""
@@ -357,20 +365,24 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             [{"name": "read_file", "description": "Reads a file from the filesystem."}],
         )
 
-    def test_tool_table_wraps_to_console_width(self) -> None:
-        """The tools table should wrap descriptions to the available width."""
-        table = repl.tool_table(
+    def test_tools_table_returns_rich_table(self) -> None:
+        """The tools table should expose tool metadata in a Rich table."""
+        table = repl.tools_table(
+            "Tools (action)",
             [{"name": "long_tool", "description": "This description should wrap when the width is narrow."}],
-            width=48,
         )
 
-        self.assertIn("| Tool", table)
-        self.assertIn("long_tool", table)
-        self.assertGreater(len(table.splitlines()), 3)
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=80).print(table)
+        rendered = output.getvalue()
+        self.assertIn("Tools (action)", rendered)
+        self.assertIn("long_tool", rendered)
+        self.assertIn("Description", rendered)
 
     def test_tool_table_shows_source_and_replacement(self) -> None:
         """The tools table should show custom tool source and replacement info."""
-        table = repl.tool_table(
+        table = repl.tools_table(
+            "Tools (action)",
             [
                 {
                     "name": "grep",
@@ -379,11 +391,36 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                     "replaces": "built-in",
                 }
             ],
-            width=80,
         )
 
-        self.assertIn("grep [default]", table)
-        self.assertIn("replaces built-in", table)
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=80).print(table)
+        rendered = output.getvalue()
+        self.assertIn("grep", rendered)
+        self.assertIn("default", rendered)
+        self.assertIn("built-in", rendered)
+
+    def test_resources_table_returns_rich_table(self) -> None:
+        """The resources table should expose source and replacement columns."""
+        table = repl.resources_table(
+            "Memories",
+            [
+                {
+                    "name": "AGENTS.md",
+                    "source": "project",
+                    "replaces": "default",
+                    "path": "/.mira/memories/AGENTS.md",
+                }
+            ],
+        )
+
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=100).print(table)
+        rendered = output.getvalue()
+        self.assertIn("Memories", rendered)
+        self.assertIn("AGENTS.md", rendered)
+        self.assertIn("project", rendered)
+        self.assertIn("default", rendered)
 
     def test_prompt_label_shows_planning_mode(self) -> None:
         """The prompt label should make planning mode visible."""
