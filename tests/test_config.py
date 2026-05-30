@@ -121,6 +121,7 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertEqual(config["llm_provider"], "lmstudio")
         self.assertEqual(config["llm_model"], "from-dotenv")
+        self.assertEqual(config["session_dir"], str(workspace / ".mira" / "_sessions"))
 
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:
         """The LangChain model should be created from normalized LLM keys."""

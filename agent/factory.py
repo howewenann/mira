@@ -6,16 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
-from deepagents.middleware.filesystem import FilesystemMiddleware
-from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
 from deepagents.middleware.summarization import create_summarization_tool_middleware
-from langchain.agents.middleware.todo import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
 from agent.resources import build_resources
+from agent.tools.specs import collect_tool_specs, tool_name
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -89,7 +87,7 @@ def _build_agent(
     )
     _attach_tool_specs(
         agent,
-        _tool_specs(
+        collect_tool_specs(
             backend,
             middleware,
             resources.tools,
@@ -153,18 +151,11 @@ class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):
 
     def _filter_request(self, request: Any) -> Any:
         """Return a request copy with excluded tools removed."""
-        tools = [tool for tool in request.tools if _tool_name(tool) not in self.excluded_tools]
+        tools = [tool for tool in request.tools if tool_name(tool) not in self.excluded_tools]
         return request.override(tools=tools)
 
 
-def _tool_name(tool: Any) -> str | None:
-    """Extract a tool name from either a dict tool or object tool."""
-    if isinstance(tool, dict):
-        name = tool.get("name")
-        return name if isinstance(name, str) else None
-
-    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
-    return name if isinstance(name, str) else None
+_tool_name = tool_name
 
 
 def _attach_tool_specs(agent: Any, specs: list[dict[str, str]]) -> None:
@@ -181,76 +172,3 @@ def _attach_resources(agent: Any, resources: dict[str, list[dict[str, str]]]) ->
         agent.mira_resources = resources
     except AttributeError:
         return
-
-
-def _tool_specs(
-    backend: Any,
-    middleware: list[Any],
-    tools: list[Any],
-    tool_metadata: list[dict[str, str]],
-    excluded_tools: tuple[str, ...],
-) -> list[dict[str, str]]:
-    """Collect display metadata from configured tool providers."""
-    blocked = set(excluded_tools)
-    specs: list[dict[str, str]] = []
-
-    providers = [
-        TodoListMiddleware(),
-        FilesystemMiddleware(backend=backend),
-        *middleware,
-    ]
-
-    for provider in providers:
-        for tool in getattr(provider, "tools", []):
-            _append_tool_spec(specs, tool, blocked)
-
-    if "task" not in blocked:
-        specs.append({"name": "task", "description": TASK_TOOL_DESCRIPTION.strip()})
-
-    metadata_by_name = {item["name"]: item for item in tool_metadata}
-    for tool in tools:
-        name = _tool_name(tool)
-        _append_tool_spec(specs, tool, blocked, metadata_by_name.get(name or ""))
-
-    return specs
-
-
-def _append_tool_spec(
-    specs: list[dict[str, str]],
-    tool: Any,
-    blocked: set[str],
-    metadata: dict[str, str] | None = None,
-) -> None:
-    """Append tool metadata when a supported name is available."""
-    name = _tool_name(tool)
-    if not name or name in blocked:
-        return
-
-    spec = {"name": name, "description": _tool_description(tool)}
-    if metadata:
-        spec.update(metadata)
-        spec["description"] = spec["description"] or _tool_description(tool)
-
-    for index, existing in enumerate(specs):
-        if existing["name"] != name:
-            continue
-        if not spec["description"]:
-            spec["description"] = existing.get("description", "")
-        specs[index] = spec
-        return
-
-    specs.append(spec)
-
-
-def _tool_description(tool: Any) -> str:
-    """Return a concise tool description from metadata or docstring."""
-    if isinstance(tool, dict):
-        description = tool.get("description")
-        return str(description).strip() if description else ""
-
-    description = getattr(tool, "description", None)
-    if description:
-        return str(description).strip()
-
-    doc = getattr(tool, "__doc__", None)
-    return doc.strip().splitlines()[0] if isinstance(doc, str) and doc.strip() else ""

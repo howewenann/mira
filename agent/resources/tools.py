@@ -1,12 +1,19 @@
-"""Discovery for MIRA custom tools."""
+"""Discovery for LangChain custom tools."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from hashlib import sha1
 from pathlib import Path
 from typing import Any
+
+from agent.resources.items import display_item
+from agent.resources.paths import (
+    TOOLS_DIR,
+    default_dir,
+    default_virtual_dir,
+    project_dir,
+    project_virtual_dir,
+)
+from agent.resources.python_files import import_python_file
 
 BUILT_IN_TOOL_NAMES = {
     "write_todos",
@@ -21,26 +28,22 @@ BUILT_IN_TOOL_NAMES = {
 }
 
 
-def discover_tools(
-    default_root: Path,
-    project_root: Path,
-    project_backend: Any,
-) -> tuple[list[Any], list[dict[str, str]]]:
-    """Load default and project tools, merging by tool name."""
-    defaults = tool_items(default_root, "/mira-defaults/tools", "default", project_backend)
-    projects = tool_items(project_root, "/.mira/tools", "project", project_backend)
+def load_tools(workspace: Path, project_backend: Any) -> tuple[list[Any], list[dict[str, str]]]:
+    """Load default tools first, then project tools."""
+    defaults = tool_files(default_dir(TOOLS_DIR), default_virtual_dir(TOOLS_DIR), "default", project_backend)
+    projects = tool_files(project_dir(workspace, TOOLS_DIR), project_virtual_dir(TOOLS_DIR), "project", project_backend)
     merged = merge_tool_items(defaults, projects)
     return [item["tool"] for item in merged], [display_item(item) for item in merged]
 
 
-def tool_items(root: Path, virtual_root: str, source: str, project_backend: Any) -> list[dict[str, Any]]:
-    """Import tool modules from one folder."""
+def tool_files(root: Path, virtual_root: str, source: str, project_backend: Any) -> list[dict[str, Any]]:
+    """Return all tools exported by Python files in one folder."""
     if not root.exists():
         return []
 
     items = []
     for path in sorted(root.glob("*.py")):
-        for tool in load_tools(path, project_backend):
+        for tool in tools_from_file(path, project_backend):
             items.append(
                 {
                     "name": tool_name(tool),
@@ -53,18 +56,9 @@ def tool_items(root: Path, virtual_root: str, source: str, project_backend: Any)
     return items
 
 
-def load_tools(path: Path, project_backend: Any) -> list[Any]:
-    """Import one Python file and return its tools."""
-    module_id = sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
-    module_name = f"mira_resource_tools_{module_id}"
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import tools from {path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-
+def tools_from_file(path: Path, project_backend: Any) -> list[Any]:
+    """Return tools from TOOLS and get_tools(project_backend)."""
+    module = import_python_file(path, "mira_resource_tools")
     tools = []
     declared = getattr(module, "TOOLS", [])
     if declared:
@@ -114,13 +108,3 @@ def merge_tool_items(defaults: list[dict[str, Any]], projects: list[dict[str, An
         merged[item["name"]] = {**item, "replaces": replaces}
 
     return list(merged.values())
-
-
-def display_item(item: dict[str, Any]) -> dict[str, str]:
-    """Drop runtime-only values from a tool display item."""
-    return {
-        "name": str(item["name"]),
-        "path": str(item["path"]),
-        "source": str(item["source"]),
-        "replaces": str(item.get("replaces") or ""),
-    }

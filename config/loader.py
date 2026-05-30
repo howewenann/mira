@@ -35,5 +35,5 @@ def load_config(workspace: Path) -> dict[str, Any]:
         "workspace": str(workspace),
         **load_llm_config(os.environ),
         "tool_output_chars": _int_env("MIRA_TOOL_OUTPUT_CHARS", 240),
-        "session_dir": os.getenv("MIRA_SESSION_DIR", str(workspace / ".mira" / "sessions")),
+        "session_dir": os.getenv("MIRA_SESSION_DIR", str(workspace / ".mira" / "_sessions")),
     }

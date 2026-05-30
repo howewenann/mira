@@ -82,34 +82,95 @@ MIRA_TOOL_OUTPUT_CHARS=240
 MIRA is split into a few small pieces:
 
 - `cli/` starts the app, loads a session, and chooses one-shot or REPL mode.
-- `config/loader.py` reads environment variables.
+- `config/` reads `.env` and normalizes LLM settings.
 - `agent/factory.py` builds the action agent and the planning agent.
+- `agent/resources/` gathers default and project memories, skills, subagents, and tools.
 - `runtime/runner.py` streams one agent turn and handles HITL approvals.
 - `ui/repl.py` handles slash commands like `/plan`, `/plans`, `/act`, and `/clear`.
 - `ui/renderer.py` owns terminal panels and streaming output.
 - `session/` stores lightweight session metadata and LangGraph checkpoints.
 
+## Project Folder Map
+
+```text
+mira/
+  .env.example
+  README.md
+  pyproject.toml
+  agent/
+    factory.py              # builds DeepAgents agents
+    llm.py                  # creates ChatAnyLLM
+    plan_policy.py          # planning-mode rules
+    default_resources/      # bundled MIRA defaults
+    resources/              # loads memories, skills, subagents, and tools
+    tools/                  # tool metadata helpers
+  cli/
+    main.py
+    commands.py
+  config/
+    loader.py
+    llm.py
+  runtime/
+    runner.py               # streams one agent turn
+    *_events.py             # handles stream event types
+  session/
+  ui/
+    repl.py
+    renderer.py
+  tests/
+```
+
+The main startup path is:
+
+```text
+cli/main.py -> cli/commands.py -> agent/factory.py -> agent/resources/ -> create_deep_agent(...)
+```
+
+Resource loading is kept one-step-per-file:
+
+```text
+agent/resources/__init__.py
+  -> memories.py
+  -> skills.py
+  -> subagents.py
+  -> tools.py
+```
+
+For example, the default regex `grep` starts in
+`agent/default_resources/tools/regex_grep.py`, is loaded by
+`agent/resources/tools.py`, is placed in the resource bundle by
+`agent/resources/__init__.py`, and is passed to DeepAgents in
+`agent/factory.py`.
+
 ## Project Resources
 
 MIRA ships small default resources, then layers project resources from `.mira/`
 on top. Project resources win when they use the same memory filename, skill
-name, or subagent name.
+name, subagent name, or tool name.
 
-On launch, MIRA creates these example files if they are missing:
+During normal use, a project folder looks like this:
 
 ```text
-.mira/
-  README.md
-  memories/
-    AGENTS.md
-  skills/
-    example-skill/
-      SKILL.md
-  subagents/
-    example_subagent.py
-  tools/
-    example_tool.py
+your-project/
+  .env
+  .mira/
+    _sessions/
+    README.md
+    history.txt
+    memories/
+      AGENTS.md
+    skills/
+      example-skill/
+        SKILL.md
+    subagents/
+      example_subagent.py
+    tools/
+      example_tool.py
 ```
+
+MIRA creates the `.mira` resource examples if they are missing and never
+overwrites existing files. `_sessions/` stores session metadata, and
+`history.txt` stores REPL prompt history.
 
 Use `.mira/memories/*.md` for always-on project context. The bundled default
 memory is only `AGENTS.md`; `.mira/memories/AGENTS.md` replaces it. Additional
