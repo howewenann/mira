@@ -9,14 +9,22 @@ from langchain_anyllm import ChatAnyLLM
 
 def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
     """Create the LangChain chat model from MIRA's config dictionary."""
-    return ChatAnyLLM(
-        model=config["lmstudio_model"],
-        provider="lmstudio",
-        api_base=config["lmstudio_base_url"],
-        api_key=config["lmstudio_api_key"],
-    )
+    kwargs: dict[str, Any] = {
+        "model": config["llm_model"],
+        "provider": config["llm_provider"],
+    }
+
+    optional_values = {
+        "api_base": config.get("llm_base_url"),
+        "api_key": config.get("llm_api_key"),
+        "temperature": config.get("llm_temperature"),
+        "max_tokens": config.get("llm_max_tokens"),
+        "top_p": config.get("llm_top_p"),
+    }
+    kwargs.update({key: value for key, value in optional_values.items() if value is not None})
+    return ChatAnyLLM(**kwargs)
 
 
 def get_model_name(config: dict[str, Any]) -> str:
     """Return the configured display name for the model."""
-    return str(config["lmstudio_model"])
+    return f"{config['llm_provider']}:{config['llm_model']}"

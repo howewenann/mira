@@ -10,8 +10,16 @@ from typing import Any
 
 def run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
-    _suppress_known_warnings()
-    asyncio.run(_run(prompt=prompt, resume=resume, workspace=workspace, session=session))
+    from config.llm import ConfigError
+
+    try:
+        _suppress_known_warnings()
+        asyncio.run(_run(prompt=prompt, resume=resume, workspace=workspace, session=session))
+    except ConfigError as error:
+        import typer
+
+        typer.echo(f"Configuration error: {error}", err=True)
+        raise typer.Exit(code=2) from error
 
 
 def _suppress_known_warnings() -> None:

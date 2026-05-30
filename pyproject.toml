@@ -28,3 +28,4 @@ packages = ["agent", "cli", "config", "runtime", "session", "ui"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "agent/defaults" = "agent/defaults"
+".env.example" = ".env.example"

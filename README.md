@@ -21,43 +21,59 @@ mira --help
 mira
 ```
 
-MIRA defaults to an LMStudio-compatible OpenAI endpoint at
+MIRA defaults to an LM Studio-compatible local endpoint at
 `http://localhost:1234/v1`.
 
 ## Configuration
 
-MIRA reads configuration from environment variables. You can set them in your
-shell before running `mira`:
+MIRA reads configuration from environment variables and from a `.env` file in
+your workspace. Start with `.env.example`, copy the values you want into your
+own `.env`, and keep exactly one LLM provider active.
+
+You can set values in your shell before running `mira`:
 
 ```powershell
-$env:MIRA_LMSTUDIO_MODEL = "your-loaded-model-name"
-$env:MIRA_LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
-$env:MIRA_LMSTUDIO_API_KEY = "lm-studio"
+$env:MIRA_LLM_PROVIDER = "lmstudio"
+$env:MIRA_LLM_MODEL = "your-loaded-model-name"
+$env:MIRA_LLM_BASE_URL = "http://localhost:1234/v1"
+$env:MIRA_LLM_API_KEY = "lm-studio"
 mira
 ```
 
-Or put them in a `.env` file in the directory where you run `mira`:
+Or put them in a `.env` file in the workspace directory:
 
 ```dotenv
-MIRA_LMSTUDIO_MODEL=your-loaded-model-name
-MIRA_LMSTUDIO_BASE_URL=http://localhost:1234/v1
-MIRA_LMSTUDIO_API_KEY=lm-studio
+MIRA_LLM_PROVIDER=lmstudio
+MIRA_LLM_MODEL=your-loaded-model-name
+MIRA_LLM_BASE_URL=http://localhost:1234/v1
+MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
 ```
 
-These values are loaded in `config/loader.py` and passed to `ChatAnyLLM` in
-`agent/llm.py`. MIRA currently uses the `lmstudio` provider through
-`langchain-anyllm`. `MIRA_TOOL_OUTPUT_CHARS` controls how many characters of each
-tool result are shown in the terminal, including the final tool output shown
-for subagents. Tool output is shown on one line; set the value to `0` to show
-full output.
+`MIRA_LLM_PROVIDER` is the selector for `langchain-anyllm`. Common values
+include `lmstudio`, `ollama`, `openai`, `anthropic`, `gemini`, `groq`, and
+`openrouter`; use `anthropic` for Claude models. MIRA also accepts optional
+generation values: `MIRA_LLM_TEMPERATURE`, `MIRA_LLM_MAX_TOKENS`, and
+`MIRA_LLM_TOP_P`.
+
+MIRA does not create or overwrite `.env`. If you already have one, use
+`.env.example` as a reference and update your own file by hand. Old
+`MIRA_LMSTUDIO_*` variables still work for LM Studio when no `MIRA_LLM_*`
+provider config is present, but the `MIRA_LLM_*` names are preferred.
+
+These values are loaded in `config/loader.py` and normalized in `config/llm.py`
+before being passed to `ChatAnyLLM` in `agent/llm.py`.
+`MIRA_TOOL_OUTPUT_CHARS` controls how many characters of each tool result are
+shown in the terminal, including the final tool output shown for subagents.
+Tool output is shown on one line; set the value to `0` to show full output.
 
 If you do not set them, MIRA uses:
 
 ```text
-MIRA_LMSTUDIO_MODEL=local-model
-MIRA_LMSTUDIO_BASE_URL=http://localhost:1234/v1
-MIRA_LMSTUDIO_API_KEY=lm-studio
+MIRA_LLM_PROVIDER=lmstudio
+MIRA_LLM_MODEL=local-model
+MIRA_LLM_BASE_URL=http://localhost:1234/v1
+MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
 ```
 
