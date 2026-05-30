@@ -33,6 +33,9 @@ User request:
 COMMAND_HELP = {
     "/help": "show commands and what they do",
     "/tools": "list tools available in the current mode",
+    "/memories": "list loaded memory files and replacements",
+    "/skills": "list loaded skills and replacements",
+    "/subagents": "list loaded subagents and replacements",
     "/plan": "enter planning mode; write/edit tools are disabled",
     "/act": "return to action mode; include the latest saved plan once",
     "/plans": "show saved plans from this REPL session",
@@ -77,6 +80,7 @@ async def start_repl(
         "plan_runs": 0,
         "action_tools": tool_specs(agent),
         "planning_tools": tool_specs(plan_agent),
+        "resources": resource_specs(agent),
     }
 
     history_path = Path(session["workspace"]) / ".mira" / "history.txt"
@@ -138,6 +142,18 @@ async def handle_command(
 
     if text == "/tools":
         print_tools(renderer, mode)
+        return True
+
+    if text == "/memories":
+        print_resources(renderer, "Memories", resources_for(mode, "memories"))
+        return True
+
+    if text == "/skills":
+        print_resources(renderer, "Skills", resources_for(mode, "skills"))
+        return True
+
+    if text == "/subagents":
+        print_resources(renderer, "Subagents", resources_for(mode, "subagents"))
         return True
 
     if text == "/plan":
@@ -205,6 +221,18 @@ def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
     renderer.console.print(tool_table(available_tools(mode, planning=planning), width=console_width(renderer)))
 
 
+def print_resources(renderer: Any, title: str, items: list[dict[str, str]]) -> None:
+    """Print loaded resources for one resource type."""
+    renderer.console.print(f"[bold cyan]{title}[/bold cyan]")
+    if not items:
+        renderer.console.print("[dim]none loaded[/dim]")
+        return
+
+    for item in items:
+        replacement = f" replaces {item['replaces']}" if item.get("replaces") else ""
+        renderer.console.print(f"  {item['name']} [{item['source']}] {item['path']}{replacement}")
+
+
 def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, str]]:
     """Return tool display specs for the current mode."""
     key = "planning_tools" if planning else "action_tools"
@@ -236,6 +264,52 @@ def tool_specs(agent: Any) -> list[dict[str, str]]:
     return DEFAULT_TOOL_SPECS.copy()
 
 
+def resource_specs(agent: Any) -> dict[str, list[dict[str, str]]]:
+    """Extract resource display metadata from an agent-like object."""
+    resources = getattr(agent, "mira_resources", None)
+    if not isinstance(resources, dict):
+        return {"memories": [], "skills": [], "subagents": []}
+
+    return {
+        "memories": normalize_resource_items(resources.get("memories", [])),
+        "skills": normalize_resource_items(resources.get("skills", [])),
+        "subagents": normalize_resource_items(resources.get("subagents", [])),
+    }
+
+
+def resources_for(mode: dict[str, Any], key: str) -> list[dict[str, str]]:
+    """Return display metadata for a resource type."""
+    resources = mode.get("resources")
+    if not isinstance(resources, dict):
+        return []
+    return normalize_resource_items(resources.get(key, []))
+
+
+def normalize_resource_items(items: Any) -> list[dict[str, str]]:
+    """Normalize resource metadata for REPL display."""
+    if not isinstance(items, list):
+        return []
+
+    normalized = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        path = str(item.get("path") or "")
+        source = str(item.get("source") or "")
+        if not name or not path or not source:
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "path": path,
+                "source": source,
+                "replaces": str(item.get("replaces") or ""),
+            }
+        )
+    return normalized
+
+
 def normalize_tool_specs(tools: list[Any] | tuple[Any, ...]) -> list[dict[str, str]]:
     """Normalize tool objects, callables, and dicts for display."""
     specs: list[dict[str, str]] = []
@@ -243,7 +317,13 @@ def normalize_tool_specs(tools: list[Any] | tuple[Any, ...]) -> list[dict[str, s
         name = tool_name(tool)
         if not name:
             continue
-        specs.append({"name": name, "description": first_sentence(tool_description(tool))})
+        spec = {"name": name, "description": first_sentence(tool_description(tool))}
+        if isinstance(tool, dict):
+            for key in ("source", "replaces", "path"):
+                value = tool.get(key)
+                if value:
+                    spec[key] = str(value)
+        specs.append(spec)
     return specs
 
 
@@ -292,7 +372,7 @@ def console_width(renderer: Any) -> int:
 
 def tool_table(tools: list[dict[str, str]], width: int) -> str:
     """Render tools as a fixed-width markdown-style table."""
-    name_width = min(max([len("Tool"), *(len(tool["name"]) for tool in tools)], default=4), 24)
+    name_width = min(max([len("Tool"), *(len(tool_label(tool)) for tool in tools)], default=4), 32)
     description_width = max(width - name_width - 7, 24)
     lines = [
         f"| {'Tool'.ljust(name_width)} | {'Description'.ljust(description_width)} |",
@@ -300,12 +380,31 @@ def tool_table(tools: list[dict[str, str]], width: int) -> str:
     ]
 
     for tool in tools:
-        wrapped = textwrap.wrap(tool["description"] or "-", width=description_width) or ["-"]
-        lines.append(f"| {tool['name'].ljust(name_width)} | {wrapped[0].ljust(description_width)} |")
+        label = tool_label(tool)
+        description = tool_table_description(tool)
+        wrapped = textwrap.wrap(description, width=description_width) or ["-"]
+        lines.append(f"| {label.ljust(name_width)} | {wrapped[0].ljust(description_width)} |")
         for continuation in wrapped[1:]:
             lines.append(f"| {' '.ljust(name_width)} | {continuation.ljust(description_width)} |")
 
     return "\n".join(lines)
+
+
+def tool_label(tool: dict[str, str]) -> str:
+    """Return a table label for a tool."""
+    source = tool.get("source")
+    if source:
+        return f"{tool['name']} [{source}]"
+    return tool["name"]
+
+
+def tool_table_description(tool: dict[str, str]) -> str:
+    """Return a table description with replacement metadata."""
+    description = tool.get("description") or "-"
+    replaces = tool.get("replaces")
+    if replaces:
+        return f"replaces {replaces}. {description}"
+    return description
 
 
 def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:

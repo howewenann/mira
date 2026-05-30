@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
-from deepagents.backends import FilesystemBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
 from deepagents.middleware.summarization import create_summarization_tool_middleware
@@ -16,11 +15,7 @@ from langchain_quickjs import CodeInterpreterMiddleware
 
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
-
-SKILLS: list[Any] = []
-MEMORY: list[Any] = []
-SUBAGENTS: list[Any] = []
-TOOLS: list[Any] = []
+from agent.resources import build_resources
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -70,7 +65,8 @@ def _build_agent(
     control flow.
     """
     model = get_llm(config)
-    backend = FilesystemBackend(root_dir=str(workspace), virtual_mode=True)
+    resources = build_resources(Path(workspace))
+    backend = resources.backend
 
     middleware: list[Any] = [
         CodeInterpreterMiddleware(),
@@ -82,22 +78,37 @@ def _build_agent(
         model=model,
         backend=backend,
         middleware=middleware,
-        tools=TOOLS,
-        skills=SKILLS,
-        memory=MEMORY,
-        subagents=SUBAGENTS,
+        tools=resources.tools,
+        skills=resources.skills,
+        memory=resources.memory,
+        subagents=resources.subagents,
         permissions=permissions,
         system_prompt=system_prompt,
         interrupt_on=interrupt_on,
         checkpointer=checkpointer,
     )
-    _attach_tool_specs(agent, _tool_specs(backend, middleware, excluded_tools))
+    _attach_tool_specs(
+        agent,
+        _tool_specs(
+            backend,
+            middleware,
+            resources.tools,
+            resources.metadata["tools"],
+            excluded_tools,
+        ),
+    )
+    _attach_resources(agent, resources.metadata)
     return agent
 
 
 def _action_permissions() -> list[FilesystemPermission]:
     """Allow the action agent to read and write inside the workspace backend."""
     return [
+        FilesystemPermission(
+            operations=["write"],
+            paths=["/mira-defaults/**"],
+            mode="deny",
+        ),
         FilesystemPermission(
             operations=["read", "write"],
             paths=["/**"],
@@ -152,7 +163,7 @@ def _tool_name(tool: Any) -> str | None:
         name = tool.get("name")
         return name if isinstance(name, str) else None
 
-    name = getattr(tool, "name", None)
+    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
     return name if isinstance(name, str) else None
 
 
@@ -164,9 +175,19 @@ def _attach_tool_specs(agent: Any, specs: list[dict[str, str]]) -> None:
         return
 
 
+def _attach_resources(agent: Any, resources: dict[str, list[dict[str, str]]]) -> None:
+    """Attach resource display metadata used by the REPL."""
+    try:
+        agent.mira_resources = resources
+    except AttributeError:
+        return
+
+
 def _tool_specs(
-    backend: FilesystemBackend,
+    backend: Any,
     middleware: list[Any],
+    tools: list[Any],
+    tool_metadata: list[dict[str, str]],
     excluded_tools: tuple[str, ...],
 ) -> list[dict[str, str]]:
     """Collect display metadata from configured tool providers."""
@@ -186,22 +207,39 @@ def _tool_specs(
     if "task" not in blocked:
         specs.append({"name": "task", "description": TASK_TOOL_DESCRIPTION.strip()})
 
-    for tool in TOOLS:
-        _append_tool_spec(specs, tool, blocked)
+    metadata_by_name = {item["name"]: item for item in tool_metadata}
+    for tool in tools:
+        name = _tool_name(tool)
+        _append_tool_spec(specs, tool, blocked, metadata_by_name.get(name or ""))
 
     return specs
 
 
-def _append_tool_spec(specs: list[dict[str, str]], tool: Any, blocked: set[str]) -> None:
+def _append_tool_spec(
+    specs: list[dict[str, str]],
+    tool: Any,
+    blocked: set[str],
+    metadata: dict[str, str] | None = None,
+) -> None:
     """Append tool metadata when a supported name is available."""
     name = _tool_name(tool)
     if not name or name in blocked:
         return
 
-    if any(spec["name"] == name for spec in specs):
+    spec = {"name": name, "description": _tool_description(tool)}
+    if metadata:
+        spec.update(metadata)
+        spec["description"] = spec["description"] or _tool_description(tool)
+
+    for index, existing in enumerate(specs):
+        if existing["name"] != name:
+            continue
+        if not spec["description"]:
+            spec["description"] = existing.get("description", "")
+        specs[index] = spec
         return
 
-    specs.append({"name": name, "description": _tool_description(tool)})
+    specs.append(spec)
 
 
 def _tool_description(tool: Any) -> str:

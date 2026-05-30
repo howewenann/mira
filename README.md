@@ -73,6 +73,51 @@ MIRA is split into a few small pieces:
 - `ui/renderer.py` owns terminal panels and streaming output.
 - `session/` stores lightweight session metadata and LangGraph checkpoints.
 
+## Project Resources
+
+MIRA ships small default resources, then layers project resources from `.mira/`
+on top. Project resources win when they use the same memory filename, skill
+name, or subagent name.
+
+On launch, MIRA creates these example files if they are missing:
+
+```text
+.mira/
+  README.md
+  memories/
+    AGENTS.md
+  skills/
+    example-skill/
+      SKILL.md
+  subagents/
+    example_subagent.py
+  tools/
+    example_tool.py
+```
+
+Use `.mira/memories/*.md` for always-on project context. The bundled default
+memory is only `AGENTS.md`; `.mira/memories/AGENTS.md` replaces it. Additional
+Markdown files in `.mira/memories/` are added as extra memories.
+
+Use `.mira/skills/<skill>/SKILL.md` for DeepAgents skills. Skills need YAML
+frontmatter with `name` and `description`; a project skill with the same `name`
+as a default skill takes priority.
+
+Use `.mira/subagents/*.py` for DeepAgents subagents. Each file should export
+`SUBAGENTS = [...]`. MIRA accepts the same subagent objects DeepAgents accepts,
+including dictionary specs, compiled subagents, and async subagents. A project
+subagent with the same `name` as a default subagent takes priority.
+
+Use `.mira/tools/*.py` for LangChain tools. Each file can export `TOOLS = [...]`
+or `get_tools(project_backend) -> list[...]` for tools that need workspace file
+access. MIRA includes a default regex-capable `grep` tool that replaces
+DeepAgents' literal-only `grep`; a project tool with the same `name` takes
+priority.
+
+In the REPL, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
+the final resources MIRA loaded and see which project resources replaced
+defaults.
+
 ## Plan Mode
 
 Use `/plan` when you want MIRA to think through a change without editing files.

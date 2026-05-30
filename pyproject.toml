@@ -25,3 +25,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agent", "cli", "config", "runtime", "session", "ui"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"agent/defaults" = "agent/defaults"

@@ -111,10 +111,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Action permissions should allow filesystem reads and writes."""
         permissions = factory._action_permissions()
 
-        self.assertEqual(len(permissions), 1)
-        self.assertEqual(permissions[0].operations, ["read", "write"])
-        self.assertEqual(permissions[0].paths, ["/**"])
-        self.assertEqual(permissions[0].mode, "allow")
+        self.assertEqual(len(permissions), 2)
+        self.assertEqual(permissions[0].operations, ["write"])
+        self.assertEqual(permissions[0].paths, ["/mira-defaults/**"])
+        self.assertEqual(permissions[0].mode, "deny")
+        self.assertEqual(permissions[1].operations, ["read", "write"])
+        self.assertEqual(permissions[1].paths, ["/**"])
+        self.assertEqual(permissions[1].mode, "allow")
 
     def test_plan_agent_disables_write_interrupts_and_denies_writes(self) -> None:
         """The planning agent should hide writes instead of requesting approval."""
@@ -148,9 +151,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         kwargs = create_deep_agent.call_args.kwargs
         self.assertEqual(kwargs["interrupt_on"], factory._write_interrupts())
         self.assertIsNone(kwargs["system_prompt"])
-        self.assertEqual(kwargs["permissions"][0].operations, ["read", "write"])
-        self.assertEqual(kwargs["permissions"][0].mode, "allow")
-        self.assertEqual(kwargs["tools"], factory.TOOLS)
+        self.assertEqual(kwargs["permissions"][0].paths, ["/mira-defaults/**"])
+        self.assertEqual(kwargs["permissions"][0].mode, "deny")
+        self.assertEqual(kwargs["permissions"][1].operations, ["read", "write"])
+        self.assertEqual(kwargs["permissions"][1].mode, "allow")
+        self.assertTrue(any(factory._tool_name(tool) == "grep" for tool in kwargs["tools"]))
 
     def test_agent_build_attaches_tool_metadata(self) -> None:
         """Built agents should expose tool metadata for the REPL."""
@@ -166,6 +171,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("edit_file", names)
+        self.assertIn("grep", names)
+        grep = next(tool for tool in agent.mira_tool_specs if tool["name"] == "grep")
+        self.assertEqual(grep["source"], "default")
+        self.assertEqual(grep["replaces"], "built-in")
 
     def test_plan_agent_metadata_hides_write_tools(self) -> None:
         """Plan agents should expose only planning-available tool metadata."""
@@ -243,6 +252,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("return to action mode", output)
         self.assertIn("/tools", output)
         self.assertIn("list tools", output)
+        self.assertIn("/memories", output)
+        self.assertIn("/skills", output)
+        self.assertIn("/subagents", output)
 
     async def test_tools_command_lists_action_tools(self) -> None:
         """The tools command should show action-mode tools."""
@@ -271,6 +283,51 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", output)
         self.assertNotIn("write_file", output)
         self.assertNotIn("edit_file", output)
+
+    async def test_resource_commands_show_loaded_resources(self) -> None:
+        """Resource commands should print attached resource metadata."""
+        renderer = RecordingRenderer()
+        mode = {
+            "resources": {
+                "memories": [
+                    {
+                        "name": "AGENTS.md",
+                        "source": "project",
+                        "path": "/.mira/memories/AGENTS.md",
+                        "replaces": "default",
+                    }
+                ],
+                "skills": [
+                    {
+                        "name": "codebase-orientation",
+                        "source": "default",
+                        "path": "/mira-defaults/skills/codebase-orientation/SKILL.md",
+                        "replaces": "",
+                    }
+                ],
+                "subagents": [
+                    {
+                        "name": "code-reviewer",
+                        "source": "default",
+                        "path": "/mira-defaults/subagents/code_reviewer.py",
+                        "replaces": "",
+                    }
+                ],
+            }
+        }
+
+        self.assertTrue(await repl.handle_command("/memories", renderer, {}, "model", mode))
+        self.assertTrue(await repl.handle_command("/skills", renderer, {}, "model", mode))
+        self.assertTrue(await repl.handle_command("/subagents", renderer, {}, "model", mode))
+
+        output = "\n".join(renderer.console.lines)
+        self.assertIn("Memories", output)
+        self.assertIn("AGENTS.md [project]", output)
+        self.assertIn("replaces default", output)
+        self.assertIn("Skills", output)
+        self.assertIn("codebase-orientation [default]", output)
+        self.assertIn("Subagents", output)
+        self.assertIn("code-reviewer [default]", output)
 
     def test_tool_specs_use_agent_metadata(self) -> None:
         """Tool specs should come from agent metadata when available."""
@@ -310,6 +367,23 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("| Tool", table)
         self.assertIn("long_tool", table)
         self.assertGreater(len(table.splitlines()), 3)
+
+    def test_tool_table_shows_source_and_replacement(self) -> None:
+        """The tools table should show custom tool source and replacement info."""
+        table = repl.tool_table(
+            [
+                {
+                    "name": "grep",
+                    "description": "Search with regex.",
+                    "source": "default",
+                    "replaces": "built-in",
+                }
+            ],
+            width=80,
+        )
+
+        self.assertIn("grep [default]", table)
+        self.assertIn("replaces built-in", table)
 
     def test_prompt_label_shows_planning_mode(self) -> None:
         """The prompt label should make planning mode visible."""
