@@ -533,6 +533,30 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(choice.call_args.kwargs["show_frame"])
 
+    async def test_renderer_git_repo_prompt_uses_yes_no_menu(self) -> None:
+        """The Git creation prompt should use a framed yes/no choice menu."""
+        renderer = Renderer()
+
+        with patch("ui.renderer.choice", return_value="y") as choice:
+            answer = await renderer.ask_create_git_repo("Create Git?")
+
+        self.assertTrue(answer)
+        self.assertEqual(choice.call_args.args, ("Create Git?",))
+        self.assertEqual(choice.call_args.kwargs["options"], [("y", "yes"), ("n", "no")])
+        self.assertTrue(choice.call_args.kwargs["show_frame"])
+
+    async def test_renderer_continue_without_git_prompt_uses_continue_exit_menu(self) -> None:
+        """The Git failure prompt should let the user continue or exit."""
+        renderer = Renderer()
+
+        with patch("ui.renderer.choice", return_value="c") as choice:
+            answer = await renderer.ask_continue_without_git("Continue?")
+
+        self.assertTrue(answer)
+        self.assertEqual(choice.call_args.args, ("Continue?",))
+        self.assertEqual(choice.call_args.kwargs["options"], [("c", "continue"), ("e", "exit")])
+        self.assertTrue(choice.call_args.kwargs["show_frame"])
+
     def _splash_output(self, workspace: str = "D:\\Projects\\mira") -> str:
         """Render the splash to an in-memory Rich console and return text."""
         renderer = Renderer()

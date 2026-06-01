@@ -173,5 +173,98 @@ class CLIConfigTests(unittest.TestCase):
         echo.assert_called_once_with("Configuration error: choose one provider", err=True)
 
 
+class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for startup ordering around the Git safety guard."""
+
+    async def test_run_checks_git_before_bootstrap(self) -> None:
+        """The Git guard should run before sessions, resources, or agents are created."""
+        events: list[str] = []
+        config = {
+            "tool_output_chars": 123,
+            "session_dir": "unused",
+            "llm_provider": "lmstudio",
+            "llm_model": "local-model",
+        }
+        renderer = object()
+        session_record = {"id": "thread-1"}
+        case = self
+
+        class Store:
+            """Store double that records saves."""
+
+            def save(self, record: dict[str, str]) -> None:
+                """Record that the one-shot session was saved."""
+                events.append("save")
+                case.assertEqual(record, session_record)
+
+        def load_config(workspace: Path) -> dict[str, object]:
+            events.append("config")
+            return config
+
+        def make_renderer(tool_output_chars: int) -> object:
+            events.append("renderer")
+            self.assertEqual(tool_output_chars, 123)
+            return renderer
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            events.append("guard")
+            self.assertIs(guard_renderer, renderer)
+            return True
+
+        def bootstrap(
+            workspace: Path,
+            session: str | None,
+            resume: bool,
+            config: dict[str, object] | None = None,
+            renderer: object | None = None,
+        ) -> dict[str, object]:
+            events.append("bootstrap")
+            self.assertIs(config, config_data)
+            self.assertIs(renderer, renderer_obj)
+            return {
+                "agent": "agent",
+                "renderer": renderer_obj,
+                "session": session_record,
+                "store": Store(),
+            }
+
+        async def run_turn(agent: object, text: str, renderer: object, thread_id: str) -> None:
+            events.append("run_turn")
+            self.assertEqual((agent, text, renderer, thread_id), ("agent", "hello", renderer_obj, "thread-1"))
+
+        config_data = config
+        renderer_obj = renderer
+
+        with (
+            patch("config.loader.load_config", load_config),
+            patch("ui.renderer.Renderer", make_renderer),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap", bootstrap),
+            patch("runtime.runner.run_turn", run_turn),
+        ):
+            await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
+
+        self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "run_turn", "save"])
+
+    async def test_run_exits_when_git_guard_blocks_startup(self) -> None:
+        """Choosing exit after a Git failure should stop before bootstrap."""
+        renderer = object()
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            return False
+
+        with (
+            patch("config.loader.load_config", return_value={"tool_output_chars": 123}),
+            patch("ui.renderer.Renderer", return_value=renderer),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap") as bootstrap,
+        ):
+            with self.assertRaises(typer.Exit) as raised:
+                await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
+
+        self.assertEqual(raised.exception.exit_code, 1)
+        bootstrap.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -362,12 +362,29 @@ class Renderer:
 
         return parsed if isinstance(parsed, dict) else None
 
+    async def ask_create_git_repo(self, message: str) -> bool:
+        """Ask whether MIRA should initialize Git for the workspace."""
+        answer = await self._prompt_choice(message, [("y", "yes"), ("n", "no")])
+        return answer == "y"
+
+    async def ask_continue_without_git(self, message: str) -> bool:
+        """Ask whether startup should continue without Git protection."""
+        answer = await self._prompt_choice(message, [("c", "continue"), ("e", "exit")])
+        return answer == "c"
+
     async def _choice(self) -> str:
         """Run the blocking prompt-toolkit choice widget in a worker thread."""
+        return await self._prompt_choice(
+            "Approve this action?",
+            [("y", "approve"), ("e", "edit"), ("r", "reject")],
+        )
+
+    async def _prompt_choice(self, message: str, options: list[tuple[str, str]]) -> str:
+        """Run a blocking prompt-toolkit choice widget in a worker thread."""
         return await asyncio.to_thread(
             choice,
-            "Approve this action?",
-            options=[("y", "approve"), ("e", "edit"), ("r", "reject")],
+            message,
+            options=options,
             show_frame=True,
         )
 

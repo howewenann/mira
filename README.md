@@ -24,6 +24,10 @@ mira
 MIRA defaults to an LM Studio-compatible local endpoint at
 `http://localhost:1234/v1`.
 
+On startup, MIRA checks whether your workspace is covered by Git. If it is not,
+MIRA asks whether to create a repository before the agent can run. If you choose
+to continue without Git, that choice is remembered for the workspace.
+
 ## Configuration
 
 MIRA reads configuration from environment variables and from a `.env` file in
@@ -156,6 +160,7 @@ your-project/
   .mira/
     _sessions/
     README.md
+    git_safety.json
     history.txt
     memories/
       AGENTS.md
@@ -169,8 +174,10 @@ your-project/
 ```
 
 MIRA creates the `.mira` resource examples if they are missing and never
-overwrites existing files. `_sessions/` stores session metadata, and
-`history.txt` stores REPL prompt history.
+overwrites existing files. `_sessions/` stores session metadata,
+`history.txt` stores REPL prompt history, and `git_safety.json` remembers when
+you choose to continue in a workspace without Git. Delete `git_safety.json` if
+you want MIRA to ask again.
 
 Use `.mira/memories/*.md` for always-on project context. The bundled default
 memory is only `AGENTS.md`; `.mira/memories/AGENTS.md` replaces it. Additional
