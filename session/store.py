@@ -11,6 +11,13 @@ from typing import Any
 from session.context import context_policy, normalize_session
 
 
+def new_session_id() -> str:
+    """Return a sortable, readable default session id."""
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S%z")
+    suffix = uuid.uuid4().hex[:8]
+    return f"{timestamp}-{suffix}"
+
+
 class SessionStore:
     """Persist durable session records as JSON files."""
 
@@ -55,7 +62,7 @@ class SessionStore:
         now = datetime.now(timezone.utc).isoformat()
 
         return {
-            "id": session_id or uuid.uuid4().hex[:12],
+            "id": session_id or new_session_id(),
             "title": "Untitled session",
             "workspace": str(workspace),
             "created_at": now,

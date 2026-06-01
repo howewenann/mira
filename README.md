@@ -217,9 +217,11 @@ defaults.
 ## Session Resume
 
 MIRA v1.0.0 stores each session in one JSON file under `.mira/_sessions/`. The
-file starts with a generated `title` so you can identify it quickly, then stores
-the workspace, turn count, context policy, optional compacted summary, and
-recent messages.
+filename starts with a local timestamp and timezone offset so the folder sorts
+by creation time, for example `20260602-171423+0800-a1b2c3d4.json`. The file
+starts with a generated `title` so you can identify it quickly, then stores the
+workspace, turn count, context policy, optional compacted summary, and recent
+messages.
 
 Resume the latest session:
 
@@ -231,9 +233,12 @@ mira -r
 Resume a specific session id:
 
 ```powershell
-mira --session 0d9f0c37eaf2
-mira -s 0d9f0c37eaf2
+mira --session 20260602-171423+0800-a1b2c3d4
+mira -s 20260602-171423+0800-a1b2c3d4
 ```
+
+Older UUID-style session files and UTC `Z` timestamp ids still work with
+`--session`; new sessions use the local timestamped id by default.
 
 Short sessions keep exact user and assistant messages. When stored message
 content exceeds `MIRA_SESSION_MAX_CHARS` (default `40000`), MIRA asks the

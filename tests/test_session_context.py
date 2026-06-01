@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +27,36 @@ class FakeModel:
 
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     """Tests for one-file session resume data."""
+
+    def test_new_session_id_is_timestamped(self) -> None:
+        """Default session ids should sort alphabetically by creation time."""
+        record = SessionStore(Path(".")).new(session_id=None, workspace=Path("workspace"))
+
+        self.assertRegex(record["id"], r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$")
+
+    def test_explicit_and_legacy_session_ids_still_load_exactly(self) -> None:
+        """Readable ids should not break old UUID session files or explicit ids."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+
+            explicit = store.load("thread-1", resume=False, workspace=Path("workspace"))
+            legacy = {
+                "id": "0dc61ead7e38",
+                "title": "Legacy Session",
+                "workspace": "workspace",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "turns": 0,
+                "context_policy": context.context_policy(),
+                "summary": None,
+                "messages": [],
+            }
+            store.save(legacy)
+            loaded = store.load("0dc61ead7e38", resume=False, workspace=Path("workspace"))
+
+        self.assertEqual(explicit["id"], "thread-1")
+        self.assertEqual(loaded["id"], "0dc61ead7e38")
+        self.assertFalse(re.match(r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$", loaded["id"]))
 
     def test_new_session_has_v1_context_fields(self) -> None:
         """New records should include readable V1 session fields."""
