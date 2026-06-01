@@ -12,6 +12,7 @@ from rich.table import Table
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
+from session.context import append_turn, compact_if_needed, update_title_once, will_compact, with_resume_context
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -65,6 +66,7 @@ async def start_repl(
     store: Any,
     session: dict[str, Any],
     model_name: str,
+    session_model: Any | None = None,
 ) -> None:
     """Run the interactive prompt loop.
 
@@ -104,18 +106,29 @@ async def start_repl(
             continue
 
         if mode["planning"]:
+            request_text = with_resume_context(session, plan_request_text(text))
             result = await run_turn(
                 agent=plan_agent,
-                text=plan_request_text(text),
+                text=request_text,
                 renderer=renderer,
                 thread_id=mode["plan_thread_id"],
             )
             save_clean_plan(mode, result, renderer)
+            append_turn(session, text, getattr(result, "final_text", ""), "planning")
         else:
             action_text = action_request_text(mode, text)
-            await run_turn(agent=agent, text=action_text, renderer=renderer, thread_id=session["id"])
+            request_text = with_resume_context(session, action_text)
+            result = await run_turn(agent=agent, text=request_text, renderer=renderer, thread_id=session["id"])
+            append_turn(session, text, getattr(result, "final_text", ""), "action")
 
         session["turns"] += 1
+        await update_title_once(session, session_model)
+        if will_compact(session):
+            renderer.context_compaction_started()
+            try:
+                await compact_if_needed(session, session_model)
+            finally:
+                renderer.context_compaction_finished()
         store.save(session)
 
 
@@ -184,6 +197,7 @@ async def handle_command(
 
     if text == "/session":
         renderer.console.print(f"session: {session['id']}")
+        renderer.console.print(f"title: {session.get('title', 'Untitled session')}")
         renderer.console.print(f"mode: {'planning' if mode['planning'] else 'action'}")
         renderer.console.print(f"saved plans: {len(mode.get('plans', []))}")
         renderer.console.print(f"workspace: {session['workspace']}")

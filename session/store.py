@@ -8,55 +8,76 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from session.context import context_policy, normalize_session
+
 
 class SessionStore:
-    """Persist lightweight session metadata as JSON files."""
+    """Persist durable session records as JSON files."""
 
     def __init__(self, root: Path) -> None:
         """Create the session directory if it does not exist yet."""
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def load(self, session_id: str | None, resume: bool, workspace: Path) -> dict[str, Any]:
+    def load(
+        self,
+        session_id: str | None,
+        resume: bool,
+        workspace: Path,
+        policy: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """Load an explicit session, resume the latest, or create a new one."""
         if session_id:
             path = self.path(session_id)
             if path.exists():
-                return self.read(path)
+                return self.read(path, policy=policy)
 
-            record = self.new(session_id=session_id, workspace=workspace)
+            record = self.new(session_id=session_id, workspace=workspace, policy=policy)
             self.save(record)
             return record
 
         if resume:
             latest = self.latest()
             if latest:
-                return self.read(latest)
+                return self.read(latest, policy=policy)
 
-        record = self.new(session_id=None, workspace=workspace)
+        record = self.new(session_id=None, workspace=workspace, policy=policy)
         self.save(record)
         return record
 
-    def new(self, session_id: str | None, workspace: Path) -> dict[str, Any]:
+    def new(
+        self,
+        session_id: str | None,
+        workspace: Path,
+        policy: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """Build a new session record without writing it to disk."""
         now = datetime.now(timezone.utc).isoformat()
 
         return {
             "id": session_id or uuid.uuid4().hex[:12],
+            "title": "Untitled session",
             "workspace": str(workspace),
             "created_at": now,
             "updated_at": now,
             "turns": 0,
+            "context_policy": policy or context_policy(),
+            "summary": None,
+            "messages": [],
         }
 
     def save(self, record: dict[str, Any]) -> None:
         """Update the timestamp and write the session JSON file."""
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        self.path(str(record["id"])).write_text(json.dumps(record, indent=2), encoding="utf-8")
+        normalized = normalize_session(record, policy=record.get("context_policy"))
+        self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+        record.clear()
+        record.update(normalized)
 
-    def read(self, path: Path) -> dict[str, Any]:
+    def read(self, path: Path, policy: dict[str, int] | None = None) -> dict[str, Any]:
         """Read a session record from a JSON file."""
-        return json.loads(path.read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        return normalize_session(record, policy=policy or record.get("context_policy"))
 
     def latest(self) -> Path | None:
         """Return the most recently modified session file, if any exist."""

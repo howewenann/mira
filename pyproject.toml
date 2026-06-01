@@ -1,6 +1,6 @@
 [project]
 name = "mira"
-version = "0.3.0"
+version = "1.0.0"
 description = "Minimal Iterative Reasoning Agent"
 readme = "README.md"
 requires-python = ">=3.10"

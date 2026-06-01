@@ -1,6 +1,6 @@
 # MIRA
 
-Minimal Iterative Reasoning Agent.
+Minimal Iterative Reasoning Agent V1.
 
 MIRA is an educational Python CLI coding agent. The code is intentionally small
 and direct so it is easy to read, change, and learn from.
@@ -52,6 +52,9 @@ MIRA_LLM_MODEL=your-loaded-model-name
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
+MIRA_SESSION_MAX_CHARS=40000
+MIRA_SESSION_RECENT_MESSAGES=10
+MIRA_SESSION_SUMMARY_MAX_CHARS=6000
 ```
 
 `MIRA_LLM_PROVIDER` is the selector for `langchain-anyllm`. Common values
@@ -71,6 +74,12 @@ before being passed to `ChatAnyLLM` in `agent/llm.py`.
 shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
 
+Session resume uses the same configured LLM to title sessions and compact long
+sessions into durable continuation state. `MIRA_SESSION_MAX_CHARS` controls when
+stored messages become long enough to compact, `MIRA_SESSION_RECENT_MESSAGES`
+controls how many recent messages stay verbatim, and
+`MIRA_SESSION_SUMMARY_MAX_CHARS` caps the stored structured summary.
+
 If you do not set them, MIRA uses:
 
 ```text
@@ -79,6 +88,9 @@ MIRA_LLM_MODEL=local-model
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
+MIRA_SESSION_MAX_CHARS=40000
+MIRA_SESSION_RECENT_MESSAGES=10
+MIRA_SESSION_SUMMARY_MAX_CHARS=6000
 ```
 
 ## How MIRA Works
@@ -92,7 +104,7 @@ MIRA is split into a few small pieces:
 - `runtime/runner.py` streams one agent turn and handles HITL approvals.
 - `ui/repl.py` handles slash commands like `/plan`, `/plans`, `/act`, and `/clear`.
 - `ui/renderer.py` owns terminal panels and streaming output.
-- `session/` stores lightweight session metadata and LangGraph checkpoints.
+- `session/` stores durable session JSON, resume context, and checkpoints.
 
 ## Project Folder Map
 
@@ -174,7 +186,7 @@ your-project/
 ```
 
 MIRA creates the `.mira` resource examples if they are missing and never
-overwrites existing files. `_sessions/` stores session metadata,
+overwrites existing files. `_sessions/` stores durable session JSON,
 `history.txt` stores REPL prompt history, and `git_safety.json` remembers when
 you choose to continue in a workspace without Git. Delete `git_safety.json` if
 you want MIRA to ask again.
@@ -201,6 +213,37 @@ priority.
 In the REPL, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
 the final resources MIRA loaded and see which project resources replaced
 defaults.
+
+## Session Resume
+
+MIRA V1 stores each session in one JSON file under `.mira/_sessions/`. The file
+starts with a generated `title` so you can identify it quickly, then stores the
+workspace, turn count, context policy, optional compacted summary, and recent
+messages.
+
+Resume the latest session:
+
+```powershell
+mira --resume
+mira -r
+```
+
+Resume a specific session id:
+
+```powershell
+mira --session 0d9f0c37eaf2
+mira -s 0d9f0c37eaf2
+```
+
+Short sessions keep exact user and assistant messages. When stored message
+content exceeds `MIRA_SESSION_MAX_CHARS` (default `40000`), MIRA asks the
+configured LLM to compact older messages into structured continuation state and
+keeps the most recent `MIRA_SESSION_RECENT_MESSAGES` messages (default `10`)
+verbatim. The compacted state is capped by `MIRA_SESSION_SUMMARY_MAX_CHARS`
+(default `6000`).
+
+DeepAgents may manage its own runtime memory while MIRA is running, but the
+session JSON is MIRA's durable source of truth after restart.
 
 ## Plan Mode
 

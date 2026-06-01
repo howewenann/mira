@@ -17,6 +17,7 @@ from pyfiglet import Figlet
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
+from rich.spinner import Spinner
 from rich.text import Text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -56,6 +57,8 @@ class Renderer:
         self._thinking_live: Live | None = None
         self._response_text = ""
         self._response_live: Live | None = None
+        self._context_compaction_live: Live | None = None
+        self._context_compaction_spinner: Spinner | None = None
 
     def splash(self, model_name: str, session_id: str, workspace: str | Path) -> None:
         """Print the startup banner, session metadata, and first-use hints."""
@@ -67,7 +70,7 @@ class Renderer:
         self.console.print(border)
         self.console.print(Text(wordmark, style=MIRA_CYAN))
         self.console.print()
-        self.console.print(Text("Minimal Iterative Reasoning Agent", style=MIRA_TITLE))
+        self.console.print(Text("Minimal Iterative Reasoning Agent - V1", style=MIRA_TITLE))
         self.console.print(divider)
         self.console.print(self._label_text("session", session_id))
         self.console.print(self._label_text("model", model_name))
@@ -293,6 +296,51 @@ class Renderer:
         self._stop_thinking_live()
         self.stop_subagent_live()
         self._stop_response_live()
+        self.context_compaction_finished()
+
+    def context_compaction_started(self) -> None:
+        """Show a live panel while MIRA compacts saved session context."""
+        if self._context_compaction_live is not None:
+            return
+
+        self._stop_thinking_live()
+        self.stop_subagent_live()
+        self._stop_response_live()
+
+        self._context_compaction_spinner = Spinner(
+            "dots",
+            text=Text("compacting context", style="bold yellow"),
+        )
+        self._context_compaction_live = Live(
+            self._render_context_compaction(),
+            console=self.console,
+            refresh_per_second=12,
+            transient=False,
+        )
+        self._context_compaction_live.start()
+
+    def context_compaction_finished(self) -> None:
+        """Finalize and stop the context-compaction live panel."""
+        if self._context_compaction_live is None:
+            return
+
+        self._context_compaction_live.update(self._render_context_compaction())
+        self._context_compaction_live.stop()
+        self._context_compaction_live = None
+        self._context_compaction_spinner = None
+
+    def _render_context_compaction(self) -> Panel:
+        """Build the context-compaction status panel."""
+        spinner = self._context_compaction_spinner or Spinner(
+            "dots",
+            text=Text("compacting context", style="bold yellow"),
+        )
+        return Panel(
+            spinner,
+            title=f"[bold {MIRA_CYAN}]mira - compacting[/bold {MIRA_CYAN}]",
+            title_align="left",
+            border_style=MIRA_CYAN,
+        )
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted tool actions."""

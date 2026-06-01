@@ -36,6 +36,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
     from cli.git_guard import ensure_git_repository
     from config.loader import load_config
     from runtime.runner import run_turn
+    from session.context import append_turn, compact_if_needed, update_title_once, will_compact, with_resume_context
     from ui.renderer import Renderer
     from ui.repl import start_repl
 
@@ -49,12 +50,22 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
     app = _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
 
     if prompt:
-        await run_turn(
+        request_text = with_resume_context(app["session"], prompt)
+        result = await run_turn(
             agent=app["agent"],
-            text=prompt,
+            text=request_text,
             renderer=app["renderer"],
             thread_id=app["session"]["id"],
         )
+        append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
+        app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
+        await update_title_once(app["session"], app.get("session_model"))
+        if will_compact(app["session"]):
+            app["renderer"].context_compaction_started()
+            try:
+                await compact_if_needed(app["session"], app.get("session_model"))
+            finally:
+                app["renderer"].context_compaction_finished()
         app["store"].save(app["session"])
         return
 
@@ -65,6 +76,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
         store=app["store"],
         session=app["session"],
         model_name=app["model_name"],
+        session_model=app.get("session_model"),
     )
 
 
@@ -77,9 +89,10 @@ def _bootstrap(
 ) -> dict[str, Any]:
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
-    from agent.llm import get_model_name
+    from agent.llm import get_llm, get_model_name
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
+    from session.context import context_policy, mark_resume_context_pending
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -89,10 +102,12 @@ def _bootstrap(
     if renderer is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     store = SessionStore(Path(config["session_dir"]))
-    record = store.load(session, resume=resume, workspace=workspace)
+    record = store.load(session, resume=resume, workspace=workspace, policy=context_policy(config))
+    mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
     plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer)
+    session_model = get_llm(config)
 
     return {
         "agent": agent,
@@ -101,5 +116,6 @@ def _bootstrap(
         "model_name": get_model_name(config),
         "renderer": renderer,
         "session": record,
+        "session_model": session_model,
         "store": store,
     }

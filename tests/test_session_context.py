@@ -1,0 +1,152 @@
+"""Tests for durable session context helpers."""
+
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from session import context
+from session.store import SessionStore
+
+
+class FakeModel:
+    """Simple async model double for title and summary generation."""
+
+    def __init__(self, outputs: list[str]) -> None:
+        """Store scripted model outputs."""
+        self.outputs = list(outputs)
+        self.prompts: list[str] = []
+
+    async def ainvoke(self, prompt: str) -> str:
+        """Record the prompt and return the next scripted output."""
+        self.prompts.append(prompt)
+        return self.outputs.pop(0)
+
+
+class SessionContextTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for one-file session resume data."""
+
+    def test_new_session_has_v1_context_fields(self) -> None:
+        """New records should include readable V1 session fields."""
+        record = SessionStore(Path(".")).new(
+            session_id="thread-1",
+            workspace=Path("workspace"),
+            policy={"max_chars": 40, "recent_messages": 2, "summary_max_chars": 500},
+        )
+
+        self.assertEqual(list(record.keys()), [
+            "id",
+            "title",
+            "workspace",
+            "created_at",
+            "updated_at",
+            "turns",
+            "context_policy",
+            "summary",
+            "messages",
+        ])
+        self.assertEqual(record["title"], "Untitled session")
+        self.assertEqual(record["messages"], [])
+        self.assertIsNone(record["summary"])
+
+    async def test_title_generation_runs_once(self) -> None:
+        """The LLM should title an untitled session and then leave it stable."""
+        record = {
+            "id": "thread-1",
+            "title": "Untitled session",
+            "messages": [],
+            "context_policy": context.context_policy(),
+        }
+        context.append_turn(record, "add resume", "done", "action")
+        model = FakeModel(["Durable Resume"])
+
+        await context.update_title_once(record, model)
+        await context.update_title_once(record, model)
+
+        self.assertEqual(record["title"], "Durable Resume")
+        self.assertEqual(len(model.prompts), 1)
+
+    async def test_compaction_keeps_recent_messages_and_structured_summary(self) -> None:
+        """Long sessions should compact older messages into continuation state."""
+        record = {
+            "id": "thread-1",
+            "title": "Title",
+            "messages": [],
+            "context_policy": {"max_chars": 10, "recent_messages": 2, "summary_max_chars": 1000},
+        }
+        context.append_turn(record, "first request", "first response", "action")
+        context.append_turn(record, "second request", "second response", "action")
+        model = FakeModel(
+            [
+                """
+                {
+                  "objective": "Resume sessions",
+                  "current_status": "Compacting older context",
+                  "important_decisions": ["Use one JSON file"],
+                  "user_preferences": ["Readable session files"],
+                  "relevant_files": ["session/context.py"],
+                  "next_steps": ["Inject context on resume"]
+                }
+                """
+            ]
+        )
+
+        await context.compact_if_needed(record, model)
+
+        self.assertEqual([message["content"] for message in record["messages"]], ["second request", "second response"])
+        self.assertEqual(record["summary"]["through_message"], 2)
+        self.assertEqual(record["summary"]["state"]["objective"], "Resume sessions")
+        self.assertEqual(record["summary"]["state"]["next_steps"], ["Inject context on resume"])
+
+    def test_will_compact_detects_long_sessions_with_older_messages(self) -> None:
+        """The compaction predicate should be true only when older messages exist."""
+        record = {
+            "messages": [],
+            "context_policy": {"max_chars": 10, "recent_messages": 2, "summary_max_chars": 1000},
+        }
+        context.append_turn(record, "short", "ok", "action")
+        self.assertFalse(context.will_compact(record))
+
+        context.append_turn(record, "a much longer request", "a much longer response", "action")
+        self.assertTrue(context.will_compact(record))
+
+    def test_resume_context_injects_once(self) -> None:
+        """Resumed session context should be added to only one request."""
+        record = {
+            "resume_context_pending": True,
+            "summary": {
+                "version": 1,
+                "kind": "llm_compaction",
+                "through_message": 2,
+                "updated_at": "now",
+                "state": {
+                    "objective": "Resume sessions",
+                    "current_status": "Testing",
+                    "important_decisions": [],
+                    "user_preferences": [],
+                    "relevant_files": [],
+                    "next_steps": ["Continue"],
+                },
+            },
+            "messages": [
+                {
+                    "id": 3,
+                    "role": "user",
+                    "mode": "action",
+                    "created_at": "now",
+                    "content": "recent request",
+                }
+            ],
+        }
+
+        first = context.with_resume_context(record, "next request")
+        second = context.with_resume_context(record, "another request")
+
+        self.assertIn("Previous MIRA session context:", first)
+        self.assertIn("Resume sessions", first)
+        self.assertIn("recent request", first)
+        self.assertEqual(second, "another request")
+
+
+if __name__ == "__main__":
+    unittest.main()

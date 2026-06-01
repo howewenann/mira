@@ -113,7 +113,15 @@ class LLMConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
             (workspace / ".env").write_text(
-                "MIRA_LLM_PROVIDER=lmstudio\nMIRA_LLM_MODEL=from-dotenv\n",
+                "\n".join(
+                    [
+                        "MIRA_LLM_PROVIDER=lmstudio",
+                        "MIRA_LLM_MODEL=from-dotenv",
+                        "MIRA_SESSION_MAX_CHARS=12345",
+                        "MIRA_SESSION_RECENT_MESSAGES=7",
+                        "MIRA_SESSION_SUMMARY_MAX_CHARS=2345",
+                    ]
+                ),
                 encoding="utf-8",
             )
 
@@ -122,6 +130,9 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_provider"], "lmstudio")
         self.assertEqual(config["llm_model"], "from-dotenv")
         self.assertEqual(config["session_dir"], str(workspace / ".mira" / "_sessions"))
+        self.assertEqual(config["session_max_chars"], 12345)
+        self.assertEqual(config["session_recent_messages"], 7)
+        self.assertEqual(config["session_summary_max_chars"], 2345)
 
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:
         """The LangChain model should be created from normalized LLM keys."""
@@ -195,7 +206,8 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             def save(self, record: dict[str, str]) -> None:
                 """Record that the one-shot session was saved."""
                 events.append("save")
-                case.assertEqual(record, session_record)
+                case.assertEqual(record["id"], session_record["id"])
+                case.assertEqual(record["messages"][0]["content"], "hello")
 
         def load_config(workspace: Path) -> dict[str, object]:
             events.append("config")

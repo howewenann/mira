@@ -390,6 +390,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         """The splash should show metadata and useful commands."""
         output = self._splash_output(workspace="D:\\Projects\\mira")
 
+        self.assertIn("Minimal Iterative Reasoning Agent - V1", output)
         self.assertIn("workspace: D:\\Projects\\mira", output)
         self.assertIn("enter to send", output)
         self.assertIn("↑/↓ history", output)
@@ -464,6 +465,23 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(renderer._response_live)
         self.assertEqual(renderer._response_text, "")
         self.assertEqual(len(live.updates), 3)
+
+    def test_context_compaction_live_panel_starts_and_stops(self) -> None:
+        """Context compaction should render a live spinner panel."""
+        renderer = Renderer()
+        FakeLive.instances = []
+
+        with patch("ui.renderer.Live", FakeLive):
+            renderer.context_compaction_started()
+            live = FakeLive.instances[0]
+
+            self.assertTrue(live.started)
+            self.assertIn("mira - compacting", str(getattr(live.renderable, "title", "")))
+
+            renderer.context_compaction_finished()
+
+        self.assertTrue(live.stopped)
+        self.assertIsNone(renderer._context_compaction_live)
 
     def test_renderer_truncates_final_subagent_output(self) -> None:
         """Tool output should be shortened when a display limit is configured."""
