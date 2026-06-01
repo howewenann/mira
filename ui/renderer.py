@@ -70,7 +70,7 @@ class Renderer:
         self.console.print(border)
         self.console.print(Text(wordmark, style=MIRA_CYAN))
         self.console.print()
-        self.console.print(Text("Minimal Iterative Reasoning Agent - V1", style=MIRA_TITLE))
+        self.console.print(Text("Minimal Iterative Reasoning Agent v1.0.0", style=MIRA_TITLE))
         self.console.print(divider)
         self.console.print(self._label_text("session", session_id))
         self.console.print(self._label_text("model", model_name))

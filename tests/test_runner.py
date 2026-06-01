@@ -390,7 +390,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         """The splash should show metadata and useful commands."""
         output = self._splash_output(workspace="D:\\Projects\\mira")
 
-        self.assertIn("Minimal Iterative Reasoning Agent - V1", output)
+        self.assertIn("Minimal Iterative Reasoning Agent v1.0.0", output)
         self.assertIn("workspace: D:\\Projects\\mira", output)
         self.assertIn("enter to send", output)
         self.assertIn("↑/↓ history", output)

@@ -1,6 +1,6 @@
 # MIRA
 
-Minimal Iterative Reasoning Agent V1.
+Minimal Iterative Reasoning Agent v1.0.0.
 
 MIRA is an educational Python CLI coding agent. The code is intentionally small
 and direct so it is easy to read, change, and learn from.
@@ -216,10 +216,10 @@ defaults.
 
 ## Session Resume
 
-MIRA V1 stores each session in one JSON file under `.mira/_sessions/`. The file
-starts with a generated `title` so you can identify it quickly, then stores the
-workspace, turn count, context policy, optional compacted summary, and recent
-messages.
+MIRA v1.0.0 stores each session in one JSON file under `.mira/_sessions/`. The
+file starts with a generated `title` so you can identify it quickly, then stores
+the workspace, turn count, context policy, optional compacted summary, and
+recent messages.
 
 Resume the latest session:
 
