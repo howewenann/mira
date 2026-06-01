@@ -75,7 +75,9 @@ shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
 
 Session resume uses the same configured LLM to title sessions and compact long
-sessions into durable continuation state. `MIRA_SESSION_MAX_CHARS` controls when
+sessions into durable continuation state. Titles are generated after the first
+completed response, refreshed after the next early turn, and then updated
+periodically as the session changes. `MIRA_SESSION_MAX_CHARS` controls when
 stored messages become long enough to compact, `MIRA_SESSION_RECENT_MESSAGES`
 controls how many recent messages stay verbatim, and
 `MIRA_SESSION_SUMMARY_MAX_CHARS` caps the stored structured summary.
@@ -219,9 +221,10 @@ defaults.
 MIRA v1.0.0 stores each session in one JSON file under `.mira/_sessions/`. The
 filename starts with a local timestamp and timezone offset so the folder sorts
 by creation time, for example `20260602-171423+0800-a1b2c3d4.json`. The file
-starts with a generated `title` so you can identify it quickly, then stores the
-workspace, turn count, context policy, optional compacted summary, and recent
-messages.
+starts with a generated `title` so you can identify it quickly. MIRA refreshes
+that title after early follow-up work and then periodically during longer
+sessions. The file also stores the workspace, turn count, context policy,
+optional compacted summary, and recent messages.
 
 Resume the latest session:
 

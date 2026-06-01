@@ -81,21 +81,60 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["messages"], [])
         self.assertIsNone(record["summary"])
 
-    async def test_title_generation_runs_once(self) -> None:
-        """The LLM should title an untitled session and then leave it stable."""
+    async def test_title_generation_refreshes_after_early_turns(self) -> None:
+        """The title should mature after the first real follow-up turn."""
         record = {
             "id": "thread-1",
             "title": "Untitled session",
             "messages": [],
             "context_policy": context.context_policy(),
+            "turns": 1,
         }
         context.append_turn(record, "add resume", "done", "action")
-        model = FakeModel(["Durable Resume"])
+        model = FakeModel(["MIRA Session Kickoff", "Durable Resume Work"])
 
-        await context.update_title_once(record, model)
-        await context.update_title_once(record, model)
+        await context.update_title(record, model)
+        self.assertEqual(record["title"], "MIRA Session Kickoff")
 
-        self.assertEqual(record["title"], "Durable Resume")
+        record["turns"] = 2
+        context.append_turn(record, "make resume durable", "updated session code", "action")
+        await context.update_title(record, model)
+
+        self.assertEqual(record["title"], "Durable Resume Work")
+        self.assertEqual(len(model.prompts), 2)
+
+    async def test_title_generation_skips_between_periodic_updates(self) -> None:
+        """The LLM should not be called on every completed turn."""
+        record = {
+            "id": "thread-1",
+            "title": "Durable Resume Work",
+            "messages": [],
+            "context_policy": context.context_policy(),
+            "turns": 3,
+        }
+        context.append_turn(record, "next task", "done", "action")
+        model = FakeModel(["Unexpected Title"])
+
+        await context.update_title(record, model)
+
+        self.assertEqual(record["title"], "Durable Resume Work")
+        self.assertEqual(len(model.prompts), 0)
+
+    async def test_title_generation_runs_on_periodic_turns(self) -> None:
+        """Longer sessions should occasionally refresh their title."""
+        record = {
+            "id": "thread-1",
+            "title": "Durable Resume Work",
+            "messages": [],
+            "context_policy": context.context_policy(),
+            "turns": 5,
+        }
+        context.append_turn(record, "add local session filenames", "done", "action")
+        model = FakeModel(["Local Session Filenames"])
+
+        await context.update_title(record, model)
+
+        self.assertEqual(record["title"], "Local Session Filenames")
         self.assertEqual(len(model.prompts), 1)
 
     async def test_compaction_keeps_recent_messages_and_structured_summary(self) -> None:

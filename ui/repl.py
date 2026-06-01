@@ -12,7 +12,7 @@ from rich.table import Table
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
-from session.context import append_turn, compact_if_needed, update_title_once, will_compact, with_resume_context
+from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -122,7 +122,7 @@ async def start_repl(
             append_turn(session, text, getattr(result, "final_text", ""), "action")
 
         session["turns"] += 1
-        await update_title_once(session, session_model)
+        await update_title(session, session_model)
         if will_compact(session):
             renderer.context_compaction_started()
             try:

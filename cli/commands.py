@@ -36,7 +36,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
     from cli.git_guard import ensure_git_repository
     from config.loader import load_config
     from runtime.runner import run_turn
-    from session.context import append_turn, compact_if_needed, update_title_once, will_compact, with_resume_context
+    from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
     from ui.renderer import Renderer
     from ui.repl import start_repl
 
@@ -59,7 +59,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
         )
         append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
         app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
-        await update_title_once(app["session"], app.get("session_model"))
+        await update_title(app["session"], app.get("session_model"))
         if will_compact(app["session"]):
             app["renderer"].context_compaction_started()
             try:

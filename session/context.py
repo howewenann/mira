@@ -20,6 +20,8 @@ SUMMARY_KEYS = (
     "relevant_files",
     "next_steps",
 )
+TITLE_UPDATE_INTERVAL = 5
+EARLY_TITLE_UPDATE_TURNS = {1, 2}
 
 
 def context_policy(config: dict[str, Any] | None = None) -> dict[str, int]:
@@ -142,26 +144,43 @@ def append_message(record: dict[str, Any], role: str, content: str, mode: str) -
     )
 
 
-def needs_title(record: dict[str, Any]) -> bool:
-    """Return whether the session needs its first generated title."""
-    return (
-        safe_title(record.get("title")) == UNTITLED_SESSION
-        and bool(first_user_message(record))
-        and bool(first_assistant_message(record))
+def needs_title_update(record: dict[str, Any]) -> bool:
+    """Return whether the session title should be generated or refreshed."""
+    if not first_user_message(record) or not first_assistant_message(record):
+        return False
+
+    if safe_title(record.get("title")) == UNTITLED_SESSION:
+        return True
+
+    turns = int(record.get("turns") or 0)
+    return turns in EARLY_TITLE_UPDATE_TURNS or (
+        turns > 0 and turns % TITLE_UPDATE_INTERVAL == 0
     )
 
 
-async def update_title_once(record: dict[str, Any], model: Any) -> None:
-    """Generate and store a stable session title if the record is untitled."""
-    if not needs_title(record):
+def needs_title(record: dict[str, Any]) -> bool:
+    """Return whether the session needs its first generated title."""
+    return needs_title_update(record)
+
+
+async def update_title(record: dict[str, Any], model: Any) -> None:
+    """Generate or refresh a concise title for the current session."""
+    if not needs_title_update(record):
         return
 
-    user = first_user_message(record)
-    assistant = first_assistant_message(record)
-    prompt = TITLE_PROMPT.format(user=user, assistant=assistant)
+    messages = normalize_messages(record.get("messages"))[-12:]
+    prompt = TITLE_PROMPT.format(messages=json.dumps(messages, indent=2))
     raw_title = compact_line(await model_text(model, prompt))
-    title = safe_title(raw_title) if raw_title else fallback_title(user)
+    if not raw_title and safe_title(record.get("title")) != UNTITLED_SESSION:
+        return
+
+    title = safe_title(raw_title) if raw_title else fallback_title(first_user_message(record))
     record["title"] = title
+
+
+async def update_title_once(record: dict[str, Any], model: Any) -> None:
+    """Backward-compatible alias for title generation."""
+    await update_title(record, model)
 
 
 async def compact_if_needed(record: dict[str, Any], model: Any) -> None:
@@ -445,12 +464,11 @@ def now_iso() -> str:
 TITLE_PROMPT = """Create a concise title for this MIRA coding session.
 Return only the title, with no quotes or punctuation wrapper.
 Maximum 8 words.
+Use the current goal of the session, not greetings or setup chatter.
+Avoid generic titles like "MIRA Session Kickoff" or "Greeting".
 
-First user request:
-{user}
-
-First MIRA response:
-{assistant}
+Recent session messages:
+{messages}
 """
 
 SUMMARY_PROMPT = """Compact this MIRA session for durable resume.
