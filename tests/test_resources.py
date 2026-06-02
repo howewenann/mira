@@ -135,15 +135,22 @@ description: Project-specific orientation.
                 ],
             )
 
-    def test_default_regex_grep_replaces_builtin_grep(self) -> None:
-        """The default regex grep tool should replace the built-in grep display item."""
+    def test_default_tools_include_ask_user_and_regex_grep(self) -> None:
+        """Default tools should include ask_user and the built-in grep replacement."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
 
+            self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
                 resources.metadata["tools"],
                 [
+                    {
+                        "name": "ask_user",
+                        "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
                     {
                         "name": "grep",
                         "path": "/mira-defaults/tools/regex_grep.py",
@@ -208,11 +215,17 @@ TOOLS = [project_grep, project_status]
             resources = build_resources(workspace, create_examples=False)
 
             names = [tool.name for tool in resources.tools]
-            self.assertEqual(names, ["grep", "project_status"])
-            self.assertEqual(resources.tools[0].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(names, ["ask_user", "grep", "project_status"])
+            self.assertEqual(resources.tools[1].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
+                    {
+                        "name": "ask_user",
+                        "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
                     {
                         "name": "grep",
                         "path": "/.mira/tools/custom_tools.py",

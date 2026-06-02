@@ -47,6 +47,10 @@ COMMAND_HELP = {
 }
 
 DEFAULT_TOOL_SPECS = [
+    {
+        "name": "ask_user",
+        "description": "Ask the user to choose between concrete next steps when MIRA is blocked.",
+    },
     {"name": "write_todos", "description": ""},
     {"name": "ls", "description": ""},
     {"name": "read_file", "description": ""},

@@ -25,6 +25,7 @@ SUBAGENT_COLOURS = ["magenta", "yellow", "green", "#00FFFF", "blue"]
 SPINNER_FRAMES = ["-", "\\", "|", "/"]
 MIRA_CYAN = "cyan"
 MIRA_TITLE = "bold white"
+ASK_USER_OPEN_OPTION = "Tell MIRA what to do"
 
 
 class Renderer:
@@ -361,6 +362,62 @@ class Renderer:
 
         return decisions
 
+    async def ask_user(self, interrupt: Any) -> str:
+        """Ask the user for a concrete next-step choice from an ask_user interrupt."""
+        request = self.ask_user_request(interrupt)
+        question = self.ask_user_question(request)
+        options = self.ask_user_options(request)
+
+        self.console.print()
+        self.console.print(Panel(Text(question), title="Question", border_style=MIRA_CYAN))
+        answer = await self._prompt_choice("Choose an option", self.ask_user_choice_options(options))
+        selected = self.ask_user_selection(answer, options)
+
+        if selected == ASK_USER_OPEN_OPTION:
+            response = (await self.prompt_text("tell mira> ")).strip()
+            return response or ASK_USER_OPEN_OPTION
+
+        return selected
+
+    def ask_user_request(self, interrupt: Any) -> dict[str, Any]:
+        """Extract an ask_user request from a LangGraph interrupt payload."""
+        value = getattr(interrupt, "value", interrupt)
+        return value if isinstance(value, dict) else {}
+
+    def ask_user_question(self, request: dict[str, Any]) -> str:
+        """Return the ask_user question text with a compact fallback."""
+        question = " ".join(str(request.get("question") or "").split())
+        return question or "MIRA needs a decision."
+
+    def ask_user_options(self, request: dict[str, Any]) -> list[str]:
+        """Return concrete ask_user choices with the open-ended option last."""
+        raw_options = request.get("options", [])
+        if not isinstance(raw_options, list | tuple):
+            raw_options = []
+
+        options = []
+        seen = set()
+        for option in raw_options:
+            text = " ".join(str(option).split())
+            if not text or text == ASK_USER_OPEN_OPTION or text in seen:
+                continue
+            options.append(text)
+            seen.add(text)
+
+        options.append(ASK_USER_OPEN_OPTION)
+        return options
+
+    def ask_user_choice_options(self, options: list[str]) -> list[tuple[str, str]]:
+        """Return prompt-toolkit choice tuples for ask_user options."""
+        return [(str(index), option) for index, option in enumerate(options, 1)]
+
+    def ask_user_selection(self, answer: str, options: list[str]) -> str:
+        """Map a prompt-toolkit choice key back to the selected option text."""
+        try:
+            return options[int(answer) - 1]
+        except (ValueError, IndexError):
+            return options[-1]
+
     def action_requests(self, interrupt: Any) -> list[Any]:
         """Extract action requests from a LangGraph interrupt payload."""
         value = getattr(interrupt, "value", interrupt)
@@ -409,6 +466,11 @@ class Renderer:
             return None
 
         return parsed if isinstance(parsed, dict) else None
+
+    async def prompt_text(self, prompt: str) -> str:
+        """Prompt for plain text input."""
+        session = PromptSession()
+        return await asyncio.to_thread(session.prompt, prompt)
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""

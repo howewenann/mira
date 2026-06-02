@@ -174,6 +174,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             agent = factory.build_agent({}, ".", "checkpointer")
 
         names = [tool["name"] for tool in agent.mira_tool_specs]
+        self.assertIn("ask_user", names)
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("edit_file", names)
@@ -193,6 +194,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
 
         names = [tool["name"] for tool in agent.mira_tool_specs]
+        self.assertIn("ask_user", names)
         self.assertIn("read_file", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
@@ -271,6 +273,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         output = "\n".join(renderer.console.lines)
         self.assertIn("Tools (action)", output)
+        self.assertIn("ask_user", output)
         self.assertIn("read_file", output)
         self.assertIn("write_file", output)
         self.assertIn("edit_file", output)
@@ -286,6 +289,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         output = "\n".join(renderer.console.lines)
         self.assertIn("Tools (planning)", output)
+        self.assertIn("ask_user", output)
         self.assertIn("read_file", output)
         self.assertNotIn("write_file", output)
         self.assertNotIn("edit_file", output)

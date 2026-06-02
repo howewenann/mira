@@ -209,8 +209,9 @@ subagent with the same `name` as a default subagent takes priority.
 Use `.mira/tools/*.py` for LangChain tools. Each file can export `TOOLS = [...]`
 or `get_tools(project_backend) -> list[...]` for tools that need workspace file
 access. MIRA includes a default regex-capable `grep` tool that replaces
-DeepAgents' literal-only `grep`; a project tool with the same `name` takes
-priority.
+DeepAgents' literal-only `grep`, plus `ask_user`, which lets the model pause
+for a concrete multiple-choice user decision. A project tool with the same
+`name` takes priority.
 
 In the REPL, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
 the final resources MIRA loaded and see which project resources replaced
@@ -282,3 +283,8 @@ then each subagent block shows the request and an animated
 that subagent's final tool call, args, and output. The final output follows
 `MIRA_TOOL_OUTPUT_CHARS`; set it to `0` when you want the full result. When the
 main agent responds directly, the response appears in a `mira - response` panel.
+
+When MIRA is blocked on a specific user decision, it can call `ask_user` to show
+a framed multiple-choice prompt. The final choice is always open-ended:
+`Tell MIRA what to do`. Normal assistant replies are not converted into prompts;
+if MIRA ends with a question, answer it in the next turn.

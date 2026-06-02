@@ -13,7 +13,7 @@ from rich.console import Console
 from runtime.message_events import consume_messages
 from runtime import runner
 from runtime.subagent_events import consume_subagent, consume_subagents
-from ui.renderer import Renderer
+from ui.renderer import ASK_USER_OPEN_OPTION, Renderer
 
 
 class AsyncItems:
@@ -113,11 +113,13 @@ class RecordingRenderer:
 class RunTurnRenderer(RecordingRenderer):
     """Renderer double with approval support for full run-turn tests."""
 
-    def __init__(self, decisions: list[dict[str, Any]] | None = None) -> None:
+    def __init__(self, decisions: list[dict[str, Any]] | None = None, ask_user_answer: str = "Use B") -> None:
         """Create approval storage and optional canned decisions."""
         super().__init__()
         self.decisions = decisions or [{"type": "approve"}]
         self.approvals: list[list[Any]] = []
+        self.ask_user_answer = ask_user_answer
+        self.ask_user_prompts: list[Any] = []
 
     def finish_main(self) -> None:
         """Record the end of the main turn."""
@@ -128,6 +130,12 @@ class RunTurnRenderer(RecordingRenderer):
         self.approvals.append(interrupts)
         self.events.append(("ask_approvals", interrupts))
         return self.decisions
+
+    async def ask_user(self, interrupt: Any) -> str:
+        """Return a canned ask_user answer."""
+        self.ask_user_prompts.append(interrupt)
+        self.events.append(("ask_user", interrupt))
+        return self.ask_user_answer
 
 
 class RecordingConsole:
@@ -233,6 +241,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
+
+    async def test_run_turn_resumes_ask_user_interrupt_with_answer(self) -> None:
+        """An ask_user interrupt should pause for a choice and resume with that answer."""
+        interrupt = {
+            "type": "ask_user",
+            "question": "Which path should MIRA take?",
+            "options": ["Use A", "Use B", ASK_USER_OPEN_OPTION],
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(ask_user_answer="Use B")
+
+        await runner.run_turn(agent, "choose", renderer, "thread-1")
+
+        self.assertEqual(renderer.ask_user_prompts, [interrupt])
+        self.assertEqual(renderer.approvals, [])
+        self.assertEqual(agent.payloads[1].resume, "Use B")
 
     async def test_run_turn_exits_when_stream_has_no_interrupts(self) -> None:
         """A normal stream should finish after one agent invocation."""
@@ -550,6 +579,75 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             [("y", "approve"), ("e", "edit"), ("r", "reject")],
         )
         self.assertTrue(choice.call_args.kwargs["show_frame"])
+
+    async def test_renderer_ask_user_returns_selected_option(self) -> None:
+        """ask_user should map a menu key back to the selected option text."""
+        renderer = Renderer()
+        renderer.console = RecordingConsole()
+
+        with patch("ui.renderer.choice", return_value="2") as choice:
+            answer = await renderer.ask_user(
+                {
+                    "type": "ask_user",
+                    "question": "Which implementation?",
+                    "options": ["Use A", "Use B"],
+                }
+            )
+
+        self.assertEqual(answer, "Use B")
+        self.assertEqual(choice.call_args.args, ("Choose an option",))
+        self.assertEqual(
+            choice.call_args.kwargs["options"],
+            [("1", "Use A"), ("2", "Use B"), ("3", ASK_USER_OPEN_OPTION)],
+        )
+        self.assertTrue(choice.call_args.kwargs["show_frame"])
+
+    async def test_renderer_ask_user_prompts_for_open_ended_option(self) -> None:
+        """The final ask_user option should collect freeform instructions."""
+
+        class FakePromptSession:
+            prompts: ClassVar[list[str]] = []
+
+            def prompt(self, prompt: str) -> str:
+                self.__class__.prompts.append(prompt)
+                return "Do the custom thing"
+
+        renderer = Renderer()
+        renderer.console = RecordingConsole()
+        FakePromptSession.prompts = []
+
+        with (
+            patch("ui.renderer.choice", return_value="3"),
+            patch("ui.renderer.PromptSession", FakePromptSession),
+        ):
+            answer = await renderer.ask_user(
+                {
+                    "type": "ask_user",
+                    "question": "Which implementation?",
+                    "options": ["Use A", "Use B"],
+                }
+            )
+
+        self.assertEqual(answer, "Do the custom thing")
+        self.assertEqual(FakePromptSession.prompts, ["tell mira> "])
+
+    def test_renderer_ask_user_keeps_open_ended_option_last(self) -> None:
+        """ask_user should append one open-ended option at the end."""
+        renderer = Renderer()
+
+        options = renderer.ask_user_options(
+            {
+                "options": [
+                    "Use A",
+                    ASK_USER_OPEN_OPTION,
+                    "Use B",
+                    "Use A",
+                    "",
+                ]
+            }
+        )
+
+        self.assertEqual(options, ["Use A", "Use B", ASK_USER_OPEN_OPTION])
 
     async def test_renderer_git_repo_prompt_uses_yes_no_menu(self) -> None:
         """The Git creation prompt should use a framed yes/no choice menu."""
