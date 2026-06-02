@@ -160,7 +160,7 @@ class LLMConfigTests(unittest.TestCase):
         )
 
     def test_get_model_name_includes_provider(self) -> None:
-        """The REPL splash should identify both provider and model."""
+        """The UI should identify both provider and model."""
         self.assertEqual(
             get_model_name({"llm_provider": "anthropic", "llm_model": "claude-sonnet"}),
             "anthropic:claude-sonnet",
@@ -174,7 +174,7 @@ class CLIConfigTests(unittest.TestCase):
         """Config errors should exit cleanly through Typer."""
         with (
             patch("cli.commands._suppress_known_warnings"),
-            patch("cli.commands._bootstrap", side_effect=ConfigError("choose one provider")),
+            patch("config.loader.load_config", side_effect=ConfigError("choose one provider")),
             patch("typer.echo") as echo,
         ):
             with self.assertRaises(typer.Exit) as raised:

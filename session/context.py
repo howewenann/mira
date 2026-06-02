@@ -8,7 +8,10 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from session.dashboard import normalize_dashboard
+
 UNTITLED_SESSION = "Untitled session"
+TITLE_MAX_CHARS = 48
 DEFAULT_MAX_CHARS = 40000
 DEFAULT_RECENT_MESSAGES = 10
 DEFAULT_SUMMARY_MAX_CHARS = 6000
@@ -59,6 +62,7 @@ def normalize_session(record: dict[str, Any], policy: dict[str, int] | None = No
         "created_at": str(record.get("created_at", now_iso())),
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
         "turns": int(record.get("turns") or 0),
+        "dashboard": normalize_dashboard(record.get("dashboard")),
         "context_policy": policy,
         "summary": normalize_summary(record.get("summary")),
         "messages": normalize_messages(record.get("messages")),
@@ -443,7 +447,7 @@ def safe_title(value: Any) -> str:
     if not title:
         return UNTITLED_SESSION
     title = title.strip("\"'` ")
-    return title[:80].rstrip() or UNTITLED_SESSION
+    return title[:TITLE_MAX_CHARS].rstrip() or UNTITLED_SESSION
 
 
 def fallback_title(user_text: str) -> str:
@@ -463,7 +467,8 @@ def now_iso() -> str:
 
 TITLE_PROMPT = """Create a concise title for this MIRA coding session.
 Return only the title, with no quotes or punctuation wrapper.
-Maximum 8 words.
+Maximum 48 characters.
+Keep the concrete task or topic if possible.
 Use the current goal of the session, not greetings or setup chatter.
 Avoid generic titles like "MIRA Session Kickoff" or "Greeting".
 

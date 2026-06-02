@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from session import context
+from session.dashboard import apply_turn_usage
 from session.store import SessionStore
 
 
@@ -73,13 +74,38 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             "created_at",
             "updated_at",
             "turns",
+            "dashboard",
             "context_policy",
             "summary",
             "messages",
         ])
         self.assertEqual(record["title"], "Untitled session")
+        self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["messages"], [])
         self.assertIsNone(record["summary"])
+
+    def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
+        """Turn usage should become the compact dashboard object saved to JSON."""
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+        result = type(
+            "Result",
+            (),
+            {
+                "usage": {
+                    "input_tokens": 5512,
+                    "output_tokens": 91,
+                    "context_tokens": 5512,
+                    "source": "usage_metadata",
+                }
+            },
+        )()
+
+        apply_turn_usage(record, result, model_name="lmstudio:gemma", context_limit_tokens=8192)
+        normalized = context.normalize_session(record)
+
+        self.assertEqual(normalized["dashboard"]["model"], "lmstudio:gemma")
+        self.assertEqual(normalized["dashboard"]["tokens"], {"in": 5512, "out": 91})
+        self.assertEqual(normalized["dashboard"]["context"]["percent"], 67.3)
 
     async def test_title_generation_refreshes_after_early_turns(self) -> None:
         """The title should mature after the first real follow-up turn."""

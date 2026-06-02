@@ -1,0 +1,190 @@
+Screen {
+    background: #0c0f10;
+    color: #e8edef;
+}
+
+#app-shell {
+    height: 100%;
+    width: 100%;
+}
+
+#main-panel {
+    width: 1fr;
+    height: 100%;
+}
+
+#sessions {
+    width: 30;
+    min-width: 22;
+    height: 100%;
+    padding: 0 1;
+    border: solid #2d5661;
+    border-right: heavy #5bb8b1;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#sessions > .session-row {
+    height: 3;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    color: #b8c1c7;
+}
+
+#sessions > .session-row.--highlight,
+#sessions > .session-row.active {
+    background: #1b3036;
+    color: #eef7f8;
+}
+
+#sessions > .session-row.active {
+    border-left: solid #d2a957;
+}
+
+.session-label {
+    height: 2;
+}
+
+.session-empty {
+    color: #7d8b95;
+}
+
+#status {
+    height: 1;
+    padding: 0 1;
+    background: #17313a;
+    color: #eef7f8;
+}
+
+#chat-log {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    border: solid #2d5661;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#prompt {
+    height: 3;
+    border: tall #5bb8b1;
+    padding: 0 1;
+    background: #101516;
+}
+
+.message {
+    margin: 0 0 1 0;
+    padding: 0 1;
+    border: solid #3c4a50;
+    color: #e8edef;
+}
+
+.message.user {
+    border: solid #d2a957;
+}
+
+.message.assistant {
+    border: solid #5bb8b1;
+}
+
+.message.reasoning {
+    border: solid #7d8b95;
+    color: #b8c1c7;
+}
+
+.message.status {
+    border: solid #4f75b5;
+    color: #d8e4ff;
+}
+
+.message.warning {
+    border: solid #d2a957;
+    color: #f0dfb5;
+}
+
+.message.error {
+    border: solid #cf665f;
+    color: #ffd7d4;
+}
+
+.message.muted {
+    border: solid #4d555b;
+    color: #a5adb2;
+}
+
+.message.heading {
+    border: solid #5bb8b1;
+    color: #eef7f8;
+}
+
+.message.plan {
+    border: solid #92b66b;
+    color: #ecf6df;
+}
+
+.message.command {
+    border: solid #6f7782;
+}
+
+.message.tool-call {
+    border: solid #5bb8b1;
+}
+
+.message.tool-result {
+    border: solid #6f7782;
+    color: #cbd1d5;
+}
+
+.message.delegation {
+    border: solid #d2a957;
+}
+
+.message.subagent {
+    border: solid #92b66b;
+}
+
+.dialog {
+    width: 54;
+    height: auto;
+    max-width: 80%;
+    max-height: 55%;
+    margin: 3 2;
+    padding: 1;
+    background: #11181b;
+    border: solid #5bb8b1;
+}
+
+.json-dialog {
+    width: 72;
+    height: 52%;
+}
+
+.dialog-title {
+    text-style: bold;
+    color: #eef7f8;
+    margin-bottom: 1;
+}
+
+.dialog-message {
+    margin-bottom: 1;
+    color: #e8edef;
+}
+
+.dialog-detail {
+    color: #b8c1c7;
+    margin-bottom: 1;
+}
+
+.dialog-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+.dialog-buttons Button {
+    margin-right: 1;
+}
+
+#json-editor {
+    height: 1fr;
+    border: solid #4a5360;
+}

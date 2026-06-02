@@ -1,17 +1,14 @@
-"""Interactive REPL loop and slash-command handling."""
+"""Interactive-mode state and slash-command helpers."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
 from rich.table import Table
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
+from session.dashboard import apply_turn_usage
 from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
@@ -39,10 +36,10 @@ COMMAND_HELP = {
     "/subagents": "list loaded subagents and replacements",
     "/plan": "enter planning mode; write/edit tools are disabled",
     "/act": "return to action mode; include the latest saved plan once",
-    "/plans": "show saved plans from this REPL session",
+    "/plans": "show saved plans from this session",
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
-    "/clear": "clear the terminal",
+    "/clear": "clear the log",
     "/exit": "quit MIRA",
 }
 
@@ -63,22 +60,9 @@ DEFAULT_TOOL_SPECS = [
 ]
 
 
-async def start_repl(
-    agent: Any,
-    plan_agent: Any,
-    renderer: Any,
-    store: Any,
-    session: dict[str, Any],
-    model_name: str,
-    session_model: Any | None = None,
-) -> None:
-    """Run the interactive prompt loop.
-
-    The REPL keeps mode state local because planning and action transitions are
-    only needed inside the interactive prompt loop.
-    """
-    renderer.splash(model_name=model_name, session_id=session["id"], workspace=session["workspace"])
-    mode: dict[str, Any] = {
+def initial_mode(agent: Any, plan_agent: Any) -> dict[str, Any]:
+    """Return the mutable interactive state for one TUI session."""
+    return {
         "planning": False,
         "last_plan": "",
         "plan_pending": False,
@@ -89,51 +73,55 @@ async def start_repl(
         "resources": resource_specs(agent),
     }
 
-    history_path = Path(session["workspace"]) / ".mira" / "history.txt"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt = PromptSession(history=FileHistory(str(history_path)))
 
-    while True:
+async def run_user_turn(
+    *,
+    agent: Any,
+    plan_agent: Any,
+    renderer: Any,
+    store: Any,
+    session: dict[str, Any],
+    session_model: Any | None,
+    mode: dict[str, Any],
+    text: str,
+    model_name: str = "",
+    context_limit_tokens: int | None = None,
+    context_limit_source: str = "unknown",
+) -> TurnResult:
+    """Route one submitted user prompt through planning or action mode."""
+    if mode["planning"]:
+        request_text = with_resume_context(session, plan_request_text(text))
+        result = await run_turn(
+            agent=plan_agent,
+            text=request_text,
+            renderer=renderer,
+            thread_id=mode["plan_thread_id"],
+        )
+        save_clean_plan(mode, result, renderer)
+        append_turn(session, text, getattr(result, "final_text", ""), "planning")
+    else:
+        action_text = action_request_text(mode, text)
+        request_text = with_resume_context(session, action_text)
+        result = await run_turn(agent=agent, text=request_text, renderer=renderer, thread_id=session["id"])
+        append_turn(session, text, getattr(result, "final_text", ""), "action")
+
+    session["turns"] = int(session.get("turns") or 0) + 1
+    await update_title(session, session_model)
+    if will_compact(session):
+        context_compaction_started(renderer)
         try:
-            text = await prompt.prompt_async(prompt_label(mode))
-        except (EOFError, KeyboardInterrupt):
-            renderer.newline()
-            break
-
-        text = text.strip()
-        if not text:
-            continue
-
-        if await handle_command(text, renderer, session, model_name, mode):
-            if text in {"/exit", "/quit"}:
-                break
-            continue
-
-        if mode["planning"]:
-            request_text = with_resume_context(session, plan_request_text(text))
-            result = await run_turn(
-                agent=plan_agent,
-                text=request_text,
-                renderer=renderer,
-                thread_id=mode["plan_thread_id"],
-            )
-            save_clean_plan(mode, result, renderer)
-            append_turn(session, text, getattr(result, "final_text", ""), "planning")
-        else:
-            action_text = action_request_text(mode, text)
-            request_text = with_resume_context(session, action_text)
-            result = await run_turn(agent=agent, text=request_text, renderer=renderer, thread_id=session["id"])
-            append_turn(session, text, getattr(result, "final_text", ""), "action")
-
-        session["turns"] += 1
-        await update_title(session, session_model)
-        if will_compact(session):
-            renderer.context_compaction_started()
-            try:
-                await compact_if_needed(session, session_model)
-            finally:
-                renderer.context_compaction_finished()
-        store.save(session)
+            await compact_if_needed(session, session_model)
+        finally:
+            context_compaction_finished(renderer)
+    apply_turn_usage(
+        session,
+        result,
+        model_name=model_name,
+        context_limit_tokens=context_limit_tokens,
+        context_limit_source=context_limit_source,
+    )
+    store.save(session)
+    return result
 
 
 async def handle_command(
@@ -150,7 +138,7 @@ async def handle_command(
     mode = mode if mode is not None else {"planning": False}
 
     if text in {"/exit", "/quit"}:
-        renderer.console.print("[dim]bye[/dim]")
+        write_line(renderer, "bye", kind="muted")
         return True
 
     if text == "/help":
@@ -179,20 +167,20 @@ async def handle_command(
         mode["plan_pending"] = False
         mode["plan_runs"] = mode.get("plan_runs", 0) + 1
         mode["plan_thread_id"] = plan_thread_id(session, mode["plan_runs"])
-        renderer.console.print(f"[cyan]planning mode[/cyan]: {project_write_tools_text()} disabled; use /act to leave")
+        write_line(renderer, f"planning mode: {project_write_tools_text()} disabled; use /act to leave", kind="status")
         return True
 
     if text == "/act":
         mode["planning"] = False
         if mode.get("last_plan"):
             mode["plan_pending"] = True
-            renderer.console.print("[cyan]action mode[/cyan]: last plan will be included in your next request")
+            write_line(renderer, "action mode: last plan will be included in your next request", kind="status")
         else:
-            renderer.console.print("[cyan]action mode[/cyan]")
+            write_line(renderer, "action mode", kind="status")
         return True
 
     if text == "/clear":
-        renderer.console.clear()
+        clear(renderer)
         return True
 
     if text == "/plans":
@@ -200,52 +188,44 @@ async def handle_command(
         return True
 
     if text == "/session":
-        renderer.console.print(f"session: {session['id']}")
-        renderer.console.print(f"title: {session.get('title', 'Untitled session')}")
-        renderer.console.print(f"mode: {'planning' if mode['planning'] else 'action'}")
-        renderer.console.print(f"saved plans: {len(mode.get('plans', []))}")
-        renderer.console.print(f"workspace: {session['workspace']}")
-        renderer.console.print(f"turns: {session['turns']}")
+        write_line(renderer, f"session: {session['id']}")
+        write_line(renderer, f"title: {session.get('title', 'Untitled session')}")
+        write_line(renderer, f"mode: {'planning' if mode['planning'] else 'action'}")
+        write_line(renderer, f"saved plans: {len(mode.get('plans', []))}")
+        write_line(renderer, f"workspace: {session['workspace']}")
+        write_line(renderer, f"turns: {session['turns']}")
         return True
 
     if text == "/model":
-        renderer.console.print(f"model: {model_name}")
+        write_line(renderer, f"model: {model_name}")
         return True
 
-    renderer.console.print(f"[dim]unknown command:[/dim] {text}")
+    write_line(renderer, f"unknown command: {text}", kind="muted")
     return True
-
-
-def prompt_label(mode: dict[str, Any]) -> HTML:
-    """Return the prompt label for the current REPL mode."""
-    if mode.get("planning"):
-        return HTML("<b><ansicyan>you</ansicyan> <ansiyellow>[plan]</ansiyellow>&gt;</b> ")
-
-    return HTML("<b><ansicyan>you&gt;</ansicyan></b> ")
 
 
 def print_help(renderer: Any) -> None:
     """Print command descriptions."""
-    renderer.console.print("[bold cyan]Commands[/bold cyan]")
+    write_line(renderer, "Commands", kind="heading")
     for command, description in COMMAND_HELP.items():
-        renderer.console.print(f"  {command:<8} {description}")
+        write_line(renderer, f"  {command:<10} {description}")
 
 
 def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
     """Print tools available in the current mode."""
     planning = bool(mode.get("planning"))
     mode_name = "planning" if planning else "action"
-    renderer.console.print(tools_table(f"Tools ({mode_name})", available_tools(mode, planning=planning)))
+    write_renderable(renderer, tools_table(f"Tools ({mode_name})", available_tools(mode, planning=planning)))
 
 
 def print_resources(renderer: Any, title: str, items: list[dict[str, str]]) -> None:
     """Print loaded resources for one resource type."""
     if not items:
-        renderer.console.print(f"[bold cyan]{title}[/bold cyan]")
-        renderer.console.print("[dim]none loaded[/dim]")
+        write_line(renderer, title, kind="heading")
+        write_line(renderer, "none loaded", kind="muted")
         return
 
-    renderer.console.print(resources_table(title, items))
+    write_renderable(renderer, resources_table(title, items))
 
 
 def tools_table(title: str, tools: list[dict[str, str]]) -> Table:
@@ -337,7 +317,7 @@ def resources_for(mode: dict[str, Any], key: str) -> list[dict[str, str]]:
 
 
 def normalize_resource_items(items: Any) -> list[dict[str, str]]:
-    """Normalize resource metadata for REPL display."""
+    """Normalize resource metadata for display."""
     if not isinstance(items, list):
         return []
 
@@ -419,7 +399,6 @@ def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:
     """Return the LangGraph thread id used for planning-mode memory."""
     if run_id is None:
         return f"{session['id']}:plan"
-
     return f"{session['id']}:plan:{run_id}"
 
 
@@ -429,7 +408,7 @@ def save_clean_plan(mode: dict[str, Any], result: TurnResult, renderer: Any) -> 
         mode["last_plan"] = ""
         mode["plan_pending"] = False
         if write_was_blocked(result) or write_tool_was_used(result):
-            renderer.console.print("[yellow]planning mode[/yellow]: write/edit was blocked; no plan was saved")
+            write_line(renderer, "planning mode: write/edit was blocked; no plan was saved", kind="warning")
         return
 
     plan_text = result.final_text.strip()
@@ -465,11 +444,7 @@ def write_tool_was_used(result: TurnResult) -> bool:
 def write_was_blocked(result: TurnResult) -> bool:
     """Return whether any tool result reports a blocked planning-mode write."""
     tool_results = getattr(result, "tool_results", [])
-    return any(
-        marker in value.lower()
-        for value in tool_results
-        for marker in PLAN_BLOCKED_RESULT_MARKERS
-    )
+    return any(marker in value.lower() for value in tool_results for marker in PLAN_BLOCKED_RESULT_MARKERS)
 
 
 def print_plans(renderer: Any, mode: dict[str, Any]) -> None:
@@ -479,14 +454,14 @@ def print_plans(renderer: Any, mode: dict[str, Any]) -> None:
         if hasattr(renderer, "no_plans"):
             renderer.no_plans()
         else:
-            renderer.console.print("[dim]no saved plans[/dim]")
+            write_line(renderer, "no saved plans", kind="muted")
         return
 
     for plan in plans:
         if hasattr(renderer, "plan"):
             renderer.plan(plan["id"], plan["text"])
         else:
-            renderer.console.print(plan["text"])
+            write_line(renderer, plan["text"])
 
 
 def plan_request_text(text: str) -> str:
@@ -503,3 +478,39 @@ def action_request_text(mode: dict[str, Any], text: str) -> str:
     mode["last_plan"] = ""
     mode["plan_pending"] = False
     return PLAN_CONTEXT_TEMPLATE.format(plan=plan, text=text)
+
+
+def write_line(renderer: Any, text: str, *, kind: str = "system") -> None:
+    """Write one command/status line through the current UI adapter."""
+    if hasattr(renderer, "system_message"):
+        renderer.system_message(text, kind=kind)
+        return
+    renderer.console.print(text)
+
+
+def write_renderable(renderer: Any, renderable: Any) -> None:
+    """Write a Rich renderable through the current UI adapter."""
+    if hasattr(renderer, "command_output"):
+        renderer.command_output(renderable)
+        return
+    renderer.console.print(renderable)
+
+
+def clear(renderer: Any) -> None:
+    """Clear the current interactive output surface."""
+    if hasattr(renderer, "clear_log"):
+        renderer.clear_log()
+        return
+    renderer.console.clear()
+
+
+def context_compaction_started(renderer: Any) -> None:
+    """Notify the renderer that session context compaction has started."""
+    if hasattr(renderer, "context_compaction_started"):
+        renderer.context_compaction_started()
+
+
+def context_compaction_finished(renderer: Any) -> None:
+    """Notify the renderer that session context compaction has finished."""
+    if hasattr(renderer, "context_compaction_finished"):
+        renderer.context_compaction_finished()

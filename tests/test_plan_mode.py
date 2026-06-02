@@ -1,10 +1,10 @@
-"""Tests for planning-mode policy and REPL routing."""
+"""Tests for planning-mode policy and interactive routing."""
 
 from __future__ import annotations
 
 import unittest
 from io import StringIO
-from typing import Any, ClassVar
+from typing import Any
 from unittest.mock import patch
 
 from rich.console import Console
@@ -35,7 +35,7 @@ class RecordingConsole:
 
 
 class RecordingRenderer:
-    """Renderer double for REPL and plan-mode tests."""
+    """Renderer double for interactive and plan-mode tests."""
 
     def __init__(self) -> None:
         """Create console and plan-panel storage."""
@@ -60,22 +60,6 @@ class RecordingRenderer:
         self.no_plans_called = True
 
 
-class FakePromptSession:
-    """PromptSession double that returns a class-level input script."""
-
-    inputs: ClassVar[list[str]] = []
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        """Copy the scripted inputs for this prompt test double."""
-        self.inputs = list(self.__class__.inputs)
-
-    async def prompt_async(self, prompt: Any) -> str:
-        """Return the next scripted input or end the REPL."""
-        if not self.inputs:
-            raise EOFError
-        return self.inputs.pop(0)
-
-
 class FakeModelRequest:
     """Small request object used to test PlanningToolFilter."""
 
@@ -89,10 +73,10 @@ class FakeModelRequest:
 
 
 class FakeStore:
-    """Store double that accepts session saves from the REPL."""
+    """Store double that accepts session saves from interactive turns."""
 
     def save(self, record: dict[str, Any]) -> None:
-        """Ignore saved records; tests assert REPL routing instead."""
+        """Ignore saved records; tests assert routing instead."""
         return None
 
 
@@ -102,7 +86,7 @@ def sample_tool() -> None:
 
 
 class PlanModeTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for planning-mode policy, REPL routing, and plan storage."""
+    """Tests for planning-mode policy, interactive routing, and plan storage."""
 
     def test_plan_permissions_deny_writes(self) -> None:
         """Planning permissions should deny all filesystem writes."""
@@ -164,7 +148,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(factory._tool_name(tool) == "grep" for tool in kwargs["tools"]))
 
     def test_agent_build_attaches_tool_metadata(self) -> None:
-        """Built agents should expose tool metadata for the REPL."""
+        """Built agents should expose tool metadata for the UI."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
@@ -426,14 +410,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("project", rendered)
         self.assertIn("default", rendered)
 
-    def test_prompt_label_shows_planning_mode(self) -> None:
-        """The prompt label should make planning mode visible."""
-        self.assertEqual(repl.prompt_label({"planning": False}).value, "<b><ansicyan>you&gt;</ansicyan></b> ")
-        self.assertEqual(
-            repl.prompt_label({"planning": True}).value,
-            "<b><ansicyan>you</ansicyan> <ansiyellow>[plan]</ansiyellow>&gt;</b> ",
-        )
-
     async def test_clear_command_clears_console(self) -> None:
         """The clear command should call the console clear method."""
         renderer = RecordingRenderer()
@@ -443,32 +419,41 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(renderer.console.lines, ["clear"])
 
-    async def test_start_repl_routes_turns_to_plan_agent_while_planning(self) -> None:
+    async def test_run_user_turn_routes_to_plan_agent_while_planning(self) -> None:
         """User text in planning mode should go to the planning agent."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
 
-        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> None:
-            """Record agent invocations from the REPL."""
+        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+            """Record agent invocations from interactive routing."""
             calls.append((agent, text, thread_id))
+            return runner.TurnResult()
 
-        FakePromptSession.inputs = [
-            "/plan",
-            "write a file",
-            "/act",
-            "write it now",
-        ]
-
-        with patch("ui.repl.PromptSession", FakePromptSession), patch("ui.repl.run_turn", fake_run_turn):
-            await repl.start_repl(
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.handle_command("/plan", renderer, session, "model", mode)
+            await repl.run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
                 store=store,
                 session=session,
-                model_name="model",
+                session_model=None,
+                mode=mode,
+                text="write a file",
+            )
+            await repl.handle_command("/act", renderer, session, "model", mode)
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                session_model=None,
+                mode=mode,
+                text="write it now",
             )
 
         self.assertEqual(calls[0][0], "plan-agent")
@@ -479,11 +464,12 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
 
-    async def test_start_repl_injects_valid_plan_once_after_act(self) -> None:
+    async def test_run_user_turn_injects_valid_plan_once_after_act(self) -> None:
         """A clean saved plan should be injected into one action request."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
         results = [
             runner.TurnResult(final_text="Create test.txt with hello world."),
@@ -496,22 +482,38 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append((agent, text, thread_id))
             return results.pop(0)
 
-        FakePromptSession.inputs = [
-            "/plan",
-            "plan the write",
-            "/act",
-            "do it",
-            "do another thing",
-        ]
-
-        with patch("ui.repl.PromptSession", FakePromptSession), patch("ui.repl.run_turn", fake_run_turn):
-            await repl.start_repl(
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.handle_command("/plan", renderer, session, "model", mode)
+            await repl.run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
                 store=store,
                 session=session,
-                model_name="model",
+                session_model=None,
+                mode=mode,
+                text="plan the write",
+            )
+            await repl.handle_command("/act", renderer, session, "model", mode)
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                session_model=None,
+                mode=mode,
+                text="do it",
+            )
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                session_model=None,
+                mode=mode,
+                text="do another thing",
             )
 
         self.assertEqual(calls[0][0], "plan-agent")
@@ -525,11 +527,12 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("User request:\ndo it", calls[1][1])
         self.assertEqual(calls[2], ("action-agent", "do another thing", "thread-1"))
 
-    async def test_start_repl_does_not_save_blocked_plan(self) -> None:
+    async def test_run_user_turn_does_not_save_blocked_plan(self) -> None:
         """A plan that tried to write should not be reused in action mode."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
         results = [
             runner.TurnResult(
@@ -545,21 +548,28 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append((agent, text, thread_id))
             return results.pop(0)
 
-        FakePromptSession.inputs = [
-            "/plan",
-            "write a file",
-            "/act",
-            "do it",
-        ]
-
-        with patch("ui.repl.PromptSession", FakePromptSession), patch("ui.repl.run_turn", fake_run_turn):
-            await repl.start_repl(
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.handle_command("/plan", renderer, session, "model", mode)
+            await repl.run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
                 store=store,
                 session=session,
-                model_name="model",
+                session_model=None,
+                mode=mode,
+                text="write a file",
+            )
+            await repl.handle_command("/act", renderer, session, "model", mode)
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                session_model=None,
+                mode=mode,
+                text="do it",
             )
 
         self.assertTrue(any("no plan was saved" in line for line in renderer.console.lines))
@@ -625,7 +635,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("User request:\nwrite a file", text)
 
     def test_save_plan_result_records_memory_plan(self) -> None:
-        """A clean plan should be saved in the REPL mode dictionary."""
+        """A clean plan should be saved in the interactive mode dictionary."""
         renderer = RecordingRenderer()
         mode: dict[str, Any] = {"plans": [], "last_plan": "", "plan_pending": False}
 

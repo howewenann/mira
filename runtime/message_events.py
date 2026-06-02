@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+from runtime.usage import has_usage, usage_from_message
+
 
 async def consume_messages(messages: Any, renderer: Any, result: Any | None = None) -> None:
     """Consume streamed model messages and render reasoning, text, and tools.
@@ -25,6 +27,11 @@ async def consume_messages(messages: Any, renderer: Any, result: Any | None = No
         call_list = await _finalized_tool_calls(message)
         if call_list:
             _render_tool_calls(call_list, renderer, result)
+
+        if result is not None:
+            usage = usage_from_message(message)
+            if has_usage(usage):
+                result.add_stream_usage(usage)
 
 
 async def _consume_reasoning(message: Any, renderer: Any) -> None:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from session.context import context_policy, normalize_session
+from session.dashboard import normalize_dashboard
 
 
 def new_session_id() -> str:
@@ -68,6 +69,7 @@ class SessionStore:
             "created_at": now,
             "updated_at": now,
             "turns": 0,
+            "dashboard": normalize_dashboard(None),
             "context_policy": policy or context_policy(),
             "summary": None,
             "messages": [],

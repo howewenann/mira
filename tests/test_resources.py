@@ -266,7 +266,7 @@ TOOLS = [project_grep, project_status]
         self.assertIn("tools", agent.mira_resources)
 
     def test_resource_specs_normalize_agent_metadata(self) -> None:
-        """REPL resource specs should come from attached agent metadata."""
+        """UI resource specs should come from attached agent metadata."""
         agent = type(
             "Agent",
             (),

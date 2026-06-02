@@ -12,6 +12,7 @@ from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text
 from runtime.subagent_events import consume_subagents
 from runtime.tool_events import consume_tool_calls
+from runtime.usage import empty_usage, has_usage, merge_usage, usage_from_output
 
 
 @dataclass
@@ -21,6 +22,45 @@ class TurnResult:
     final_text: str = ""
     tool_calls: list[str] = field(default_factory=list)
     tool_results: list[str] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    context_tokens: int = 0
+    usage_source: str = "unknown"
+    _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        """Return normalized token usage for this turn."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "context_tokens": self.context_tokens,
+            "source": self.usage_source,
+        }
+
+    def add_usage(self, usage: dict[str, Any]) -> None:
+        """Add one usage object to the persisted turn totals."""
+        merged = merge_usage(self.usage, usage)
+        self.input_tokens = int(merged["input_tokens"])
+        self.output_tokens = int(merged["output_tokens"])
+        self.total_tokens = int(merged["total_tokens"])
+        self.context_tokens = int(merged["context_tokens"])
+        self.usage_source = str(merged["source"])
+
+    def add_stream_usage(self, usage: dict[str, Any]) -> None:
+        """Capture streamed usage as a fallback for providers that omit final usage."""
+        self._stream_usage = merge_usage(self._stream_usage, usage)
+
+    def commit_loop_usage(self, output: Any) -> None:
+        """Prefer final-output usage, falling back to streamed message usage."""
+        output_usage = usage_from_output(output)
+        if has_usage(output_usage):
+            self.add_usage(output_usage)
+        elif has_usage(self._stream_usage):
+            self.add_usage(self._stream_usage)
+        self._stream_usage = empty_usage()
 
 
 async def run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> TurnResult:
@@ -48,6 +88,7 @@ async def run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> Turn
         )
 
         result.final_text = final_text(output.get("value")) or result.final_text
+        result.commit_loop_usage(output.get("value"))
         renderer.finish_main()
         interrupts = await collect_interrupts(stream, output.get("value"))
 

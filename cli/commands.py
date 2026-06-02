@@ -30,54 +30,70 @@ def _suppress_known_warnings() -> None:
 
 
 async def _run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
-    """Create the app objects, then run either one-shot or REPL mode."""
+    """Create the app objects, then run either one-shot or TUI mode."""
     import typer
 
     from cli.git_guard import ensure_git_repository
     from config.loader import load_config
-    from runtime.runner import run_turn
-    from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
-    from ui.renderer import Renderer
-    from ui.repl import start_repl
 
     workspace = workspace.expanduser().resolve()
     config = load_config(workspace)
-    renderer = Renderer(tool_output_chars=config["tool_output_chars"])
 
+    if prompt is None:
+        from ui.app import MiraApp
+
+        tui = MiraApp(
+            workspace=workspace,
+            resume=resume,
+            session_id=session,
+            config=config,
+            bootstrap=_bootstrap,
+            ensure_git_repository=ensure_git_repository,
+            tool_output_chars=config["tool_output_chars"],
+        )
+        await tui.run_async()
+        return
+
+    from ui.renderer import Renderer
+
+    renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     if not await ensure_git_repository(workspace, renderer):
         raise typer.Exit(code=1)
 
     app = _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
+    await _run_one_shot(app, prompt)
 
-    if prompt:
-        request_text = with_resume_context(app["session"], prompt)
-        result = await run_turn(
-            agent=app["agent"],
-            text=request_text,
-            renderer=app["renderer"],
-            thread_id=app["session"]["id"],
-        )
-        append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
-        app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
-        await update_title(app["session"], app.get("session_model"))
-        if will_compact(app["session"]):
-            app["renderer"].context_compaction_started()
-            try:
-                await compact_if_needed(app["session"], app.get("session_model"))
-            finally:
-                app["renderer"].context_compaction_finished()
-        app["store"].save(app["session"])
-        return
 
-    await start_repl(
+async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
+    """Run one prompt, persist the turn, and compact session context if needed."""
+    from runtime.runner import run_turn
+    from session.dashboard import apply_turn_usage
+    from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
+
+    request_text = with_resume_context(app["session"], prompt)
+    result = await run_turn(
         agent=app["agent"],
-        plan_agent=app["plan_agent"],
+        text=request_text,
         renderer=app["renderer"],
-        store=app["store"],
-        session=app["session"],
-        model_name=app["model_name"],
-        session_model=app.get("session_model"),
+        thread_id=app["session"]["id"],
     )
+    append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
+    app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
+    await update_title(app["session"], app.get("session_model"))
+    if will_compact(app["session"]):
+        app["renderer"].context_compaction_started()
+        try:
+            await compact_if_needed(app["session"], app.get("session_model"))
+        finally:
+            app["renderer"].context_compaction_finished()
+    apply_turn_usage(
+        app["session"],
+        result,
+        model_name=app.get("model_name", ""),
+        context_limit_tokens=app.get("context_limit_tokens"),
+        context_limit_source=app.get("context_limit_source", "unknown"),
+    )
+    app["store"].save(app["session"])
 
 
 def _bootstrap(
@@ -93,6 +109,7 @@ def _bootstrap(
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
     from session.context import context_policy, mark_resume_context_pending
+    from session.dashboard import context_limit_for_config, ensure_dashboard
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -108,12 +125,22 @@ def _bootstrap(
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
     plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer)
     session_model = get_llm(config)
+    model_name = get_model_name(config)
+    context_limit_tokens, context_limit_source = context_limit_for_config(config)
+    ensure_dashboard(
+        record,
+        model_name=model_name,
+        context_limit_tokens=context_limit_tokens,
+        context_limit_source=context_limit_source,
+    )
 
     return {
         "agent": agent,
         "plan_agent": plan_agent,
         "config": config,
-        "model_name": get_model_name(config),
+        "model_name": model_name,
+        "context_limit_tokens": context_limit_tokens,
+        "context_limit_source": context_limit_source,
         "renderer": renderer,
         "session": record,
         "session_model": session_model,

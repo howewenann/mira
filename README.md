@@ -23,6 +23,8 @@ mira
 
 MIRA defaults to an LM Studio-compatible local endpoint at
 `http://localhost:1234/v1`.
+Running `mira` opens the Textual TUI. Use `mira --prompt "..."` for a one-shot
+plain terminal run.
 
 On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent can run. If you choose
@@ -73,6 +75,8 @@ before being passed to `ChatAnyLLM` in `agent/llm.py`.
 `MIRA_TOOL_OUTPUT_CHARS` controls how many characters of each tool result are
 shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
+For LM Studio, MIRA also asks the local LM Studio SDK for the loaded model's
+context length so the TUI can show context pressure as a colored bar.
 
 Session resume uses the same configured LLM to title sessions and compact long
 sessions into durable continuation state. Titles are generated after the first
@@ -99,13 +103,17 @@ MIRA_SESSION_SUMMARY_MAX_CHARS=6000
 
 MIRA is split into a few small pieces:
 
-- `cli/` starts the app, loads a session, and chooses one-shot or REPL mode.
+- `cli/` starts the app, loads a session, and chooses one-shot or TUI mode.
 - `config/` reads `.env` and normalizes LLM settings.
 - `agent/factory.py` builds the action agent and the planning agent.
 - `agent/resources/` gathers default and project memories, skills, subagents, and tools.
 - `runtime/runner.py` streams one agent turn and handles HITL approvals.
-- `ui/repl.py` handles slash commands like `/plan`, `/plans`, `/act`, and `/clear`.
-- `ui/renderer.py` owns terminal panels and streaming output.
+- `ui/app.py` is the Textual TUI shell for interactive mode.
+- `ui/dialogs.py` contains the modal prompts used by the TUI.
+- `ui/interrupts.py` normalizes approval and `ask_user` interrupt payloads.
+- `ui/widgets/` contains the chat log, session list, prompt input, and status bar.
+- `ui/repl.py` keeps slash-command and planning-mode state helpers.
+- `ui/renderer.py` is the plain one-shot renderer used by `--prompt`.
 - `session/` stores durable session JSON, resume context, and checkpoints.
 
 ## Project Folder Map
@@ -133,7 +141,17 @@ mira/
     *_events.py             # handles stream event types
   session/
   ui/
+    app.py
+    dialogs.py
+    interrupts.py
     repl.py
+    styles/
+      mira.tcss
+    widgets/
+      chat_log.py
+      prompt_box.py
+      session_history.py
+      status_bar.py
     renderer.py
   tests/
 ```
@@ -175,7 +193,6 @@ your-project/
     _sessions/
     README.md
     git_safety.json
-    history.txt
     memories/
       AGENTS.md
     skills/
@@ -188,9 +205,8 @@ your-project/
 ```
 
 MIRA creates the `.mira` resource examples if they are missing and never
-overwrites existing files. `_sessions/` stores durable session JSON,
-`history.txt` stores REPL prompt history, and `git_safety.json` remembers when
-you choose to continue in a workspace without Git. Delete `git_safety.json` if
+overwrites existing files. `_sessions/` stores durable session JSON, and
+`git_safety.json` remembers when you choose to continue in a workspace without Git. Delete `git_safety.json` if
 you want MIRA to ask again.
 
 Use `.mira/memories/*.md` for always-on project context. The bundled default
@@ -213,7 +229,7 @@ DeepAgents' literal-only `grep`, plus `ask_user`, which lets the model pause
 for a concrete multiple-choice user decision. A project tool with the same
 `name` takes priority.
 
-In the REPL, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
+In the TUI, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
 the final resources MIRA loaded and see which project resources replaced
 defaults.
 
@@ -224,8 +240,8 @@ filename starts with a local timestamp and timezone offset so the folder sorts
 by creation time, for example `20260602-171423+0800-a1b2c3d4.json`. The file
 starts with a generated `title` so you can identify it quickly. MIRA refreshes
 that title after early follow-up work and then periodically during longer
-sessions. The file also stores the workspace, turn count, context policy,
-optional compacted summary, and recent messages.
+sessions. The file also stores the workspace, turn count, dashboard stats,
+context policy, optional compacted summary, and recent messages.
 
 Resume the latest session:
 
@@ -254,6 +270,11 @@ verbatim. The compacted state is capped by `MIRA_SESSION_SUMMARY_MAX_CHARS`
 DeepAgents may manage its own runtime memory while MIRA is running, but the
 session JSON is MIRA's durable source of truth after restart.
 
+The Textual TUI shows a compact dashboard line above the chat:
+mode, run state, model, context bar with percent and size, input/output tokens,
+turns, and duration. The same dashboard values are stored in the session JSON
+under `dashboard`.
+
 ## Plan Mode
 
 Use `/plan` when you want MIRA to think through a change without editing files.
@@ -268,23 +289,23 @@ write a file called test.txt with the content 'hello world'
 write a file called test.txt with the content 'hello world'
 ```
 
-`/plans` shows clean plans saved in memory for the current REPL. When you run
+`/plans` shows clean plans saved in memory for the current TUI session. When you run
 `/act`, MIRA includes the latest saved plan in the next action request once,
 then clears that pending plan context.
 
 ## Tool Calls And Subagents
 
-When MIRA delegates work, the main agent calls the `task` tool. In the terminal
-MIRA keeps this compact: each delegated worker appears once under its own
-colored block with a readable suffix, for example
-`subagent - general-purpose [ember]`. MIRA first shows a short delegation panel,
-then each subagent block shows the request and an animated
-`RUNNING` status. When it finishes, the block switches to `DONE` and shows only
-that subagent's final tool call, args, and output. The final output follows
-`MIRA_TOOL_OUTPUT_CHARS`; set it to `0` when you want the full result. When the
-main agent responds directly, the response appears in a `mira - response` panel.
+When MIRA delegates work, the main agent calls the `task` tool. In the Textual
+TUI, normal chat, tool calls, tool results, and subagent progress all stay in
+the central scrollable log so their order is preserved. Each delegated worker
+appears once under its own block with a readable suffix, for example
+`subagent - general-purpose [luna]`. MIRA first shows a short delegation entry,
+then each subagent block shows the request and an animated `RUNNING` status.
+When it finishes, the block switches to `DONE` and shows that subagent's final
+output. The final output follows `MIRA_TOOL_OUTPUT_CHARS`; set it to `0` when
+you want the full result.
 
 When MIRA is blocked on a specific user decision, it can call `ask_user` to show
 a framed multiple-choice prompt. The final choice is always open-ended:
-`Tell MIRA what to do`. Normal assistant replies are not converted into prompts;
-if MIRA ends with a question, answer it in the next turn.
+`Tell MIRA what to do differently`. Normal assistant replies are not converted
+into prompts; if MIRA ends with a question, answer it in the next turn.

@@ -1,664 +1,240 @@
-"""Rich-based terminal renderer for MIRA."""
+"""Plain terminal renderer used by one-shot prompts."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-import sys
-from itertools import cycle
-from pathlib import Path
+from itertools import count
 from typing import Any
 
-from faker import Faker
-from prompt_toolkit import PromptSession
-from prompt_toolkit.shortcuts import choice
-from pyfiglet import Figlet
-from rich.console import Console, Group
-from rich.live import Live
-from rich.panel import Panel
-from rich.spinner import Spinner
-from rich.text import Text
+from ui.interrupts import (
+    ASK_USER_OPEN_OPTION,
+    action_requests,
+    action_text,
+    ask_user_options,
+    ask_user_question,
+    ask_user_request,
+)
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
-SUBAGENT_COLOURS = ["magenta", "yellow", "green", "#00FFFF", "blue"]
-SPINNER_FRAMES = ["-", "\\", "|", "/"]
-MIRA_CYAN = "cyan"
-MIRA_TITLE = "bold white"
-ASK_USER_OPEN_OPTION = "Tell MIRA what to do"
 
 
 class Renderer:
-    """Render all terminal output for MIRA.
-
-    The runner sends small events to this class while DeepAgents streams. The
-    renderer keeps the terminal-specific state here so the runtime can stay
-    focused on agent events rather than Rich panels, live displays, and colors.
-    """
+    """Small stdout renderer for non-interactive `mira --prompt` runs."""
 
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
-        """Create a renderer with an optional tool-output truncation limit."""
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
         self.tool_output_chars = tool_output_chars
-        self.console = Console(stderr=True)
-        self.fake = Faker()
-        self.subagent_colours: dict[str, str] = {}
-        self.subagent_labels: dict[int, str] = {}
-        self.subagent_suffixes: set[str] = set()
-        self.subagent_blocks: dict[str, dict[str, str]] = {}
-        self.live: Live | None = None
-        self.spinner_index = 0
-        self.colours = cycle(SUBAGENT_COLOURS)
+        self._section = ""
+        self._subagent_ids = count(1)
+        self._subagent_labels: dict[int, str] = {}
+        self._faker: Any | None = None
+        try:
+            from faker import Faker
 
-        # Live panels are updated token-by-token. Keep the source text separate
-        # from Rich renderables so streamed content can be re-rendered safely.
-        self._thinking_text = ""
-        self._thinking_live: Live | None = None
-        self._response_text = ""
-        self._response_live: Live | None = None
-        self._context_compaction_live: Live | None = None
-        self._context_compaction_spinner: Spinner | None = None
-
-    def splash(self, model_name: str, session_id: str, workspace: str | Path) -> None:
-        """Print the startup banner, session metadata, and first-use hints."""
-        wordmark = Figlet(font="blocky").renderText("MIRA").rstrip()
-        logo_width = max((len(line.rstrip()) for line in wordmark.splitlines()), default=0)
-        border = Text("=" * logo_width, style=MIRA_CYAN)
-        divider = Text("-" * logo_width, style=MIRA_CYAN)
-
-        self.console.print(border)
-        self.console.print(Text(wordmark, style=MIRA_CYAN))
-        self.console.print()
-        self.console.print(Text("Minimal Iterative Reasoning Agent v1.0.0", style=MIRA_TITLE))
-        self.console.print(divider)
-        self.console.print(self._label_text("session", session_id))
-        self.console.print(self._label_text("model", model_name))
-        self.console.print(self._label_text("workspace", workspace))
-        self.console.print()
-        self.console.print(self._hint_text())
-        self.console.print()
-
-    def newline(self) -> None:
-        """Print a blank line after Ctrl+C/EOF so the shell prompt is clean."""
-        self.console.print()
-
-    # Thinking (streaming)
+            self._faker = Faker()
+        except Exception:
+            self._faker = None
 
     def reasoning_delta(self, delta: str) -> None:
-        """Append a streamed reasoning token to the live thinking panel."""
-        cleaned = re.sub(r"</?[^>]+>", "", delta)
-        if not cleaned:
-            return
-
-        self._stop_response_live()
-
-        if self._thinking_live is None:
-            self._thinking_text = ""
-            self._thinking_live = Live(
-                self._render_thinking(),
-                console=self.console,
-                refresh_per_second=12,
-                transient=False,
-            )
-            self._thinking_live.start()
-
-        self._thinking_text += cleaned
-        self._thinking_live.update(self._render_thinking())
-
-    def _render_thinking(self) -> Panel:
-        """Build the current thinking panel as literal text."""
-        return Panel(
-            Text(self._thinking_text),
-            title=f"[bold {MIRA_CYAN}]Thinking[/bold {MIRA_CYAN}]",
-            title_align="left",
-            border_style=f"dim {MIRA_CYAN}",
-        )
-
-    def _stop_thinking_live(self) -> None:
-        """Finalize and clear the thinking live display if it is active."""
-        if self._thinking_live is None:
-            return
-        self._thinking_live.update(self._render_thinking())
-        self._thinking_live.stop()
-        self._thinking_live = None
-        self._thinking_text = ""
-
-    # Response (streaming)
+        """Print streamed reasoning text."""
+        text = re.sub(r"</?[^>]+>", "", delta)
+        if text:
+            self._stream("thinking", text)
 
     def text_delta(self, delta: str) -> None:
-        """Append a streamed answer token to the live response panel.
-
-        Rich markup from the model is treated as plain text by
-        ``_render_response``. This protects file contents such as
-        ``[tool]`` or ``[red]`` from being interpreted as terminal styling.
-        """
-        if not delta:
-            return
-
-        self._stop_thinking_live()
-
-        if self._response_live is None:
-            self._response_text = ""
-            self._response_live = Live(
-                self._render_response(),
-                console=self.console,
-                refresh_per_second=12,
-                transient=False,
-            )
-            self._response_live.start()
-
-        self._response_text += delta
-        self._response_live.update(self._render_response())
-
-    def _render_response(self) -> Panel:
-        """Build the current response panel as literal text."""
-        return Panel(
-            Text(self._response_text),
-            title=f"[bold {MIRA_CYAN}]mira - response[/bold {MIRA_CYAN}]",
-            title_align="left",
-            border_style=MIRA_CYAN,
-        )
-
-    def _stop_response_live(self) -> None:
-        """Finalize and clear the response live display if it is active."""
-        if self._response_live is None:
-            return
-        self._response_live.update(self._render_response())
-        self._response_live.stop()
-        self._response_live = None
-        self._response_text = ""
-
-    # Tool calls
+        """Print streamed assistant text."""
+        if delta:
+            self._stream("mira", delta)
 
     def tool_call(self, name: str, args: Any) -> None:
-        """Render a non-task tool call and its arguments."""
-        self._stop_thinking_live()
-        self._stop_response_live()
-
-        text = Text()
-        text.append("args: ", style=MIRA_CYAN)
-        text.append(self.truncate(args), style="white")
-        self.console.print(
-            Panel(
-                text,
-                title=f"[bold {MIRA_CYAN}]mira - {name}[/bold {MIRA_CYAN}]",
-                title_align="left",
-                border_style=MIRA_CYAN,
-            )
-        )
+        """Print a compact tool call."""
+        self._block(name, f"args: {self.truncate(args)}")
 
     def tool_result(self, name: str, result: str) -> None:
-        """Print a compact tool result for coordinator-level tool calls."""
-        text = Text("  output: ", style="dim white")
-        text.append(self.truncate(result), style="dim white")
-        self.console.print(text)
-
-    def plan(self, plan_id: int, text: str) -> None:
-        """Render a saved planning-mode result."""
-        self.console.print(
-            Panel(
-                Text(text),
-                title=f"[bold {MIRA_CYAN}]mira - plan #{plan_id}[/bold {MIRA_CYAN}]",
-                title_align="left",
-                border_style=MIRA_CYAN,
-            )
-        )
-
-    def no_plans(self) -> None:
-        """Render the empty state for the saved-plan list."""
-        self.console.print(
-            Panel(
-                Text("no saved plans"),
-                title=f"[bold {MIRA_CYAN}]mira - plans[/bold {MIRA_CYAN}]",
-                title_align="left",
-                border_style=MIRA_CYAN,
-            )
-        )
+        """Print a compact tool result."""
+        if result:
+            self._line(f"{name} output: {self.truncate(result)}")
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
-        """Render the compact summary shown when MIRA delegates to subagents."""
-        if not calls:
-            return
-
-        self._stop_thinking_live()
-        self._stop_response_live()
-
-        valid: list[str] = []
-        errors: list[str] = []
+        """Print a compact task delegation summary."""
+        descriptions = []
         for call in calls:
             raw_args = call.get("args", {}) if isinstance(call, dict) else {}
             if isinstance(raw_args, str):
                 try:
                     raw_args = json.loads(raw_args)
-                except (TypeError, json.JSONDecodeError):
-                    errors.append(f"could not parse args: {str(raw_args)[:60]}")
-                    continue
-            args = raw_args if isinstance(raw_args, dict) else {}
-            description = args.get("description")
-            if description:
-                valid.append(str(description))
-            else:
-                errors.append(f"missing description in args: {str(args)[:60]}")
+                except json.JSONDecodeError:
+                    raw_args = {}
+            if isinstance(raw_args, dict) and raw_args.get("description"):
+                descriptions.append(str(raw_args["description"]))
 
-        if not valid and not errors:
-            return
+        if descriptions:
+            lines = [f"delegating to {len(descriptions)} subagent(s)"]
+            lines.extend(f"request: {self.truncate(description)}" for description in descriptions)
+            self._block("task", "\n".join(lines))
 
-        count = len(valid)
-        label = "subagent" if count == 1 else "subagents"
+    def start_subagent_live(self) -> None:
+        """Runtime compatibility hook."""
+        return None
 
-        body = Text()
-        body.append(f"delegating to {count} {label}...\n", style="bold yellow")
-        for description in valid:
-            body.append("  request: ", style=MIRA_CYAN)
-            body.append(self.truncate(description) + "\n", style="white")
-        for error in errors:
-            body.append(f"  failed: {error}\n", style="dim red")
+    def stop_subagent_live(self) -> None:
+        """Runtime compatibility hook."""
+        return None
 
-        self.console.print(
-            Panel(
-                body,
-                title=f"[bold {MIRA_CYAN}]mira - task[/bold {MIRA_CYAN}]",
-                title_align="left",
-                border_style=MIRA_CYAN,
-            )
-        )
+    def tick_subagents(self) -> None:
+        """Runtime compatibility hook."""
+        return None
 
-    # Subagents
+    def subagent_label(self, subagent: Any) -> str:
+        """Return a stable readable label for a subagent object."""
+        key = id(subagent)
+        if key not in self._subagent_labels:
+            name = getattr(subagent, "name", "subagent")
+            self._subagent_labels[key] = f"{name} [{self._next_suffix()}]"
+        return self._subagent_labels[key]
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
-        """Create or replace the live block for a running subagent."""
-        self.subagent_blocks[subagent] = {
-            "request": task_input,
-            "status": "RUNNING",
-            "output": "",
-            "colour": self.subagent_colour(subagent),
-        }
-        self.refresh_subagents()
+        """Print a subagent start."""
+        details = f"request: {self.truncate(task_input)}" if task_input else "running"
+        self._block(f"subagent - {subagent}", details)
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
-        """Mark a subagent block as done and attach its final output."""
-        block = self.subagent_blocks.setdefault(
-            subagent,
-            {
-                "request": "",
-                "status": "RUNNING",
-                "output": "",
-                "colour": self.subagent_colour(subagent),
-            },
-        )
-        block["status"] = "DONE"
-        block["output"] = result
-        self.refresh_subagents()
+        """Print a subagent finish."""
+        details = "done"
+        if result:
+            details += f"\noutput: {self.truncate(result)}"
+        self._block(f"subagent - {subagent}", details)
 
     def finish_main(self) -> None:
-        """Stop all live displays at the end of a top-level agent turn."""
-        self._stop_thinking_live()
-        self.stop_subagent_live()
-        self._stop_response_live()
-        self.context_compaction_finished()
+        """Finish the current streamed section."""
+        if self._section:
+            print()
+        self._section = ""
 
     def context_compaction_started(self) -> None:
-        """Show a live panel while MIRA compacts saved session context."""
-        if self._context_compaction_live is not None:
-            return
-
-        self._stop_thinking_live()
-        self.stop_subagent_live()
-        self._stop_response_live()
-
-        self._context_compaction_spinner = Spinner(
-            "dots",
-            text=Text("compacting context", style="bold yellow"),
-        )
-        self._context_compaction_live = Live(
-            self._render_context_compaction(),
-            console=self.console,
-            refresh_per_second=12,
-            transient=False,
-        )
-        self._context_compaction_live.start()
+        """Print context compaction status."""
+        self._line("compacting context")
 
     def context_compaction_finished(self) -> None:
-        """Finalize and stop the context-compaction live panel."""
-        if self._context_compaction_live is None:
-            return
-
-        self._context_compaction_live.update(self._render_context_compaction())
-        self._context_compaction_live.stop()
-        self._context_compaction_live = None
-        self._context_compaction_spinner = None
-
-    def _render_context_compaction(self) -> Panel:
-        """Build the context-compaction status panel."""
-        spinner = self._context_compaction_spinner or Spinner(
-            "dots",
-            text=Text("compacting context", style="bold yellow"),
-        )
-        return Panel(
-            spinner,
-            title=f"[bold {MIRA_CYAN}]mira - compacting[/bold {MIRA_CYAN}]",
-            title_align="left",
-            border_style=MIRA_CYAN,
-        )
+        """Runtime compatibility hook."""
+        return None
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted tool actions."""
-        decisions: list[dict[str, Any]] = []
-
+        decisions = []
         for interrupt in interrupts:
-            for action in self.action_requests(interrupt):
-                self.console.print()
-                self.console.print(Panel(Text(self.action_text(action)), title="Approval", border_style=MIRA_CYAN))
-                answer = await self._choice()
-
+            for action in action_requests(interrupt):
+                self._block("approval", action_text(action))
+                answer = await self._choice("Approve this action?", [("a", "approve"), ("e", "edit"), ("r", "reject")])
                 if answer == "e":
-                    decisions.append(await self.edit_decision(action))
+                    decisions.append(await self._edit_decision(action))
                 elif answer == "r":
                     decisions.append({"type": "reject"})
                 else:
                     decisions.append({"type": "approve"})
-
         return decisions
 
     async def ask_user(self, interrupt: Any) -> str:
-        """Ask the user for a concrete next-step choice from an ask_user interrupt."""
-        request = self.ask_user_request(interrupt)
-        question = self.ask_user_question(request)
-        options = self.ask_user_options(request)
+        """Ask the user for a concrete next-step choice."""
+        request = ask_user_request(interrupt)
+        options = ask_user_options(request)
+        self._block("question", ask_user_question(request))
+        for index, option in enumerate(options, start=1):
+            self._line(f"{index}. {option}")
 
-        self.console.print()
-        self.console.print(Panel(Text(question), title="Question", border_style=MIRA_CYAN))
-        answer = await self._prompt_choice("Choose an option", self.ask_user_choice_options(options))
-        selected = self.ask_user_selection(answer, options)
-
-        if selected == ASK_USER_OPEN_OPTION:
-            response = (await self.prompt_text("tell mira> ")).strip()
-            return response or ASK_USER_OPEN_OPTION
-
-        return selected
-
-    def ask_user_request(self, interrupt: Any) -> dict[str, Any]:
-        """Extract an ask_user request from a LangGraph interrupt payload."""
-        value = getattr(interrupt, "value", interrupt)
-        return value if isinstance(value, dict) else {}
-
-    def ask_user_question(self, request: dict[str, Any]) -> str:
-        """Return the ask_user question text with a compact fallback."""
-        question = " ".join(str(request.get("question") or "").split())
-        return question or "MIRA needs a decision."
-
-    def ask_user_options(self, request: dict[str, Any]) -> list[str]:
-        """Return concrete ask_user choices with the open-ended option last."""
-        raw_options = request.get("options", [])
-        if not isinstance(raw_options, list | tuple):
-            raw_options = []
-
-        options = []
-        seen = set()
-        for option in raw_options:
-            text = " ".join(str(option).split())
-            if not text or text == ASK_USER_OPEN_OPTION or text in seen:
-                continue
-            options.append(text)
-            seen.add(text)
-
-        options.append(ASK_USER_OPEN_OPTION)
-        return options
-
-    def ask_user_choice_options(self, options: list[str]) -> list[tuple[str, str]]:
-        """Return prompt-toolkit choice tuples for ask_user options."""
-        return [(str(index), option) for index, option in enumerate(options, 1)]
-
-    def ask_user_selection(self, answer: str, options: list[str]) -> str:
-        """Map a prompt-toolkit choice key back to the selected option text."""
+        answer = await self._input("Choose an option: ")
         try:
-            return options[int(answer) - 1]
+            selected = options[int(answer) - 1]
         except (ValueError, IndexError):
-            return options[-1]
+            selected = options[-1]
 
-    def action_requests(self, interrupt: Any) -> list[Any]:
-        """Extract action requests from a LangGraph interrupt payload."""
-        value = getattr(interrupt, "value", interrupt)
+        if selected != ASK_USER_OPEN_OPTION:
+            return selected
 
-        if isinstance(value, dict) and value.get("action_requests"):
-            return list(value["action_requests"])
+        response = (await self._input(f"{ASK_USER_OPEN_OPTION}: ")).strip()
+        return response or ASK_USER_OPEN_OPTION
 
-        return [value]
+    async def ask_create_git_repo(self, message: str) -> bool:
+        """Ask whether MIRA should initialize Git for the workspace."""
+        return await self._choice(message, [("y", "yes"), ("n", "no")]) == "y"
 
-    def action_text(self, action: Any) -> str:
-        """Format an approval action as readable text."""
-        if isinstance(action, dict):
-            name = action.get("name", "tool")
-            args = action.get("args", {})
-            return f"{name}\n\n{json.dumps(args, indent=2)}"
+    async def ask_continue_without_git(self, message: str) -> bool:
+        """Ask whether startup should continue without Git protection."""
+        return await self._choice(message, [("c", "continue"), ("e", "exit")]) == "c"
 
-        return str(action)
+    def truncate(self, value: Any) -> str:
+        """Return a single-line string shortened to the configured display size."""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
+            return text
+        return text[: self.tool_output_chars] + " ... truncated ..."
 
-    async def edit_decision(self, action: Any) -> dict[str, Any]:
-        """Prompt for edited JSON args and return a LangGraph decision."""
+    async def _edit_decision(self, action: Any) -> dict[str, Any]:
+        """Ask for edited JSON args."""
         if not isinstance(action, dict):
             return {"type": "reject"}
 
-        edited_args = await self.prompt_json(action.get("args", {}))
-        if edited_args is None:
+        original = json.dumps(action.get("args", {}), indent=2)
+        edited = await self._input(f"Edited args JSON [{original}]: ")
+        try:
+            args = json.loads(edited or original)
+        except json.JSONDecodeError:
+            self._line("invalid JSON; rejecting action")
+            return {"type": "reject"}
+
+        if not isinstance(args, dict):
+            self._line("edited args must be a JSON object; rejecting action")
             return {"type": "reject"}
 
         return {
             "type": "edit",
             "edited_action": {
                 "name": action.get("name", "tool"),
-                "args": edited_args,
+                "args": args,
             },
         }
 
-    async def prompt_json(self, original: dict[str, Any]) -> dict[str, Any] | None:
-        """Prompt for replacement action arguments and parse them as JSON."""
-        session = PromptSession()
-        prompt = "edited args JSON> "
-        text = await asyncio.to_thread(session.prompt, prompt, default=json.dumps(original))
+    async def _choice(self, message: str, options: list[tuple[str, str]]) -> str:
+        """Prompt until the user chooses one of the given keys."""
+        labels = ", ".join(f"{key}={label}" for key, label in options)
+        keys = {key for key, _ in options}
+        while True:
+            answer = (await self._input(f"{message} ({labels}): ")).strip().lower()
+            if answer in keys:
+                return answer
 
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            self.console.print("[dim]invalid JSON; rejecting action[/dim]")
-            return None
+    async def _input(self, prompt: str) -> str:
+        """Read input without blocking the event loop."""
+        return await asyncio.to_thread(input, prompt)
 
-        return parsed if isinstance(parsed, dict) else None
+    def _stream(self, title: str, text: str) -> None:
+        """Print streamed text under a simple section heading."""
+        if self._section != title:
+            if self._section:
+                print()
+            print(f"\n{title}:")
+            self._section = title
+        print(text, end="", flush=True)
 
-    async def prompt_text(self, prompt: str) -> str:
-        """Prompt for plain text input."""
-        session = PromptSession()
-        return await asyncio.to_thread(session.prompt, prompt)
+    def _block(self, title: str, body: str) -> None:
+        """Print a titled block."""
+        self.finish_main()
+        print(f"\n{title}:")
+        print(body)
 
-    async def ask_create_git_repo(self, message: str) -> bool:
-        """Ask whether MIRA should initialize Git for the workspace."""
-        answer = await self._prompt_choice(message, [("y", "yes"), ("n", "no")])
-        return answer == "y"
+    def _line(self, text: str) -> None:
+        """Print one status line."""
+        self.finish_main()
+        print(text)
 
-    async def ask_continue_without_git(self, message: str) -> bool:
-        """Ask whether startup should continue without Git protection."""
-        answer = await self._prompt_choice(message, [("c", "continue"), ("e", "exit")])
-        return answer == "c"
+    def _next_suffix(self) -> str:
+        """Return a readable subagent suffix."""
+        if self._faker is None:
+            return str(next(self._subagent_ids))
 
-    async def _choice(self) -> str:
-        """Run the blocking prompt-toolkit choice widget in a worker thread."""
-        return await self._prompt_choice(
-            "Approve this action?",
-            [("y", "approve"), ("e", "edit"), ("r", "reject")],
-        )
-
-    async def _prompt_choice(self, message: str, options: list[tuple[str, str]]) -> str:
-        """Run a blocking prompt-toolkit choice widget in a worker thread."""
-        return await asyncio.to_thread(
-            choice,
-            message,
-            options=options,
-            show_frame=True,
-        )
-
-    def start_subagent_live(self) -> None:
-        """Start the live group that contains subagent status panels."""
-        if self.live is not None:
-            return
-
-        self.subagent_blocks = {}
-        self.spinner_index = 0
-        self.live = Live(
-            self.render_subagents(),
-            console=self.console,
-            refresh_per_second=8,
-            transient=False,
-        )
-        self.live.start()
-
-    def stop_subagent_live(self) -> None:
-        """Finalize and stop the subagent live group."""
-        if self.live is None:
-            return
-
-        self.live.update(self.render_subagents())
-        self.live.stop()
-        self.live = None
-
-    def tick_subagents(self) -> None:
-        """Advance the spinner for running subagents."""
-        if not self.has_running_subagents():
-            return
-
-        self.spinner_index = (self.spinner_index + 1) % len(SPINNER_FRAMES)
-        self.refresh_subagents()
-
-    def has_running_subagents(self) -> bool:
-        """Return whether any subagent panel is still running."""
-        return any(block["status"] == "RUNNING" for block in self.subagent_blocks.values())
-
-    def refresh_subagents(self) -> None:
-        """Update the live subagent group or print a static snapshot."""
-        if self.live is not None:
-            self.live.update(self.render_subagents())
-            return
-
-        self.console.print(self.render_subagents())
-
-    def render_subagents(self) -> Group | str:
-        """Build the renderable group containing all current subagent blocks."""
-        if not self.subagent_blocks:
-            return ""
-
-        return Group(*(self.render_subagent(label, block) for label, block in self.subagent_blocks.items()))
-
-    def render_subagent(self, label: str, block: dict[str, str]) -> Panel:
-        """Build one subagent panel from its stored status block."""
-        colour = block["colour"]
-        status = block["status"]
-        text = Text()
-
-        if block.get("request"):
-            text.append("request: ", style=MIRA_CYAN)
-            text.append(self.truncate(block["request"]), style="white")
-            text.append("\n")
-
-        text.append("status: ", style=MIRA_CYAN)
-        if status == "RUNNING":
-            frame = SPINNER_FRAMES[self.spinner_index]
-            text.append(f"{frame} RUNNING", style="bold yellow")
-        else:
-            text.append("DONE", style="bold green")
-
-        if block.get("output"):
-            text.append("\noutput: ", style=MIRA_CYAN)
-            text.append(self.truncate_output(block.get("output", "")))
-
-        return Panel(
-            text,
-            title=Text(f"subagent - {label}", style=f"bold {colour}"),
-            title_align="left",
-            border_style=colour,
-        )
-
-    def truncate_output(self, value: Any) -> Text:
-        """Return tool output as literal Rich text, truncated when configured."""
-        text = self.single_line(value)
-
-        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
-            return Text(text, style="white")
-
-        rendered = Text(text[: self.tool_output_chars], style="white")
-        rendered.append(" ... truncated ...", style="yellow")
-        return rendered
-
-    def truncate(self, value: Any) -> str:
-        """Return a single-line string shortened to the configured display size."""
-        text = self.single_line(value)
-
-        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
-            return text
-
-        return text[: self.tool_output_chars] + " ... truncated ..."
-
-    def single_line(self, value: Any) -> str:
-        """Collapse whitespace so terminal panels stay compact."""
-        return re.sub(r"\s+", " ", str(value or "")).strip()
-
-    def subagent_label(self, subagent: Any) -> str:
-        """Return a stable readable label for a subagent object."""
-        key = id(subagent)
-        if key not in self.subagent_labels:
-            name = getattr(subagent, "name", "subagent")
-            self.subagent_labels[key] = f"{name} [{self.subagent_suffix()}]"
-
-        return self.subagent_labels[key]
-
-    def subagent_suffix(self) -> str:
-        """Generate a short unique suffix for a subagent label."""
-        for _ in range(20):
-            suffix = self.single_line(self.fake.word()).lower()
-            if suffix and suffix not in self.subagent_suffixes:
-                self.subagent_suffixes.add(suffix)
-                return suffix
-
-        suffix = self.single_line(self.fake.uuid4())[:8]
-        self.subagent_suffixes.add(suffix)
-        return suffix
-
-    def subagent_colour(self, name: str) -> str:
-        """Assign each subagent label a stable color for this process."""
-        if name not in self.subagent_colours:
-            self.subagent_colours[name] = next(self.colours)
-
-        return self.subagent_colours[name]
-
-    def _label_text(
-        self,
-        label: str,
-        value: str | Path,
-        *,
-        label_style: str = "dim",
-        value_style: str = "white",
-    ) -> Text:
-        """Build a metadata line without parsing the value as Rich markup."""
-        text = Text()
-        text.append(f"{label}: ", style=label_style)
-        text.append(str(value), style=value_style)
-        return text
-
-    def _hint_text(self) -> Text:
-        """Build the compact command hints shown below the splash metadata."""
-        text = Text()
-        text.append("enter", style="bold white")
-        text.append(" to send  |  ", style="dim")
-        text.append("/help", style=MIRA_CYAN)
-        text.append("  |  ", style="dim")
-        text.append("/tools", style=MIRA_CYAN)
-        text.append("  |  ", style="dim")
-        text.append("/plan", style=MIRA_CYAN)
-        text.append("  |  ", style="dim")
-        text.append("/act", style=MIRA_CYAN)
-        text.append("  |  ", style="dim")
-        text.append("/plans", style=MIRA_CYAN)
-        text.append("  |  ", style="dim")
-        text.append("↑/↓", style="bold white")
-        text.append(" history  |  ctrl+c to quit", style="dim")
-        return text
+        for _ in range(8):
+            word = re.sub(r"[^a-z0-9-]", "", str(self._faker.unique.first_name()).lower())
+            if word:
+                return word
+        return str(next(self._subagent_ids))

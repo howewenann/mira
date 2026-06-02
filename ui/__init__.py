@@ -1,1 +1,1 @@
-"""UI package for terminal rendering and REPL control."""
+"""UI package for Textual and one-shot terminal rendering."""
