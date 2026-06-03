@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,9 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, ListView
+from textual.widgets import Input, ListView, Static
 
 from session.dashboard import ensure_dashboard, update_duration
-from ui.dialogs import ChoiceScreen, JSONEditScreen, TextPromptScreen
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_requests,
@@ -25,7 +25,7 @@ from ui.interrupts import (
     ask_user_request,
 )
 from ui.repl import handle_command, initial_mode, run_user_turn
-from ui.widgets import ChatLog, PromptBox, SessionHistory, StatusBar
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 
@@ -64,6 +64,8 @@ class MiraApp(App[None]):
         self.ensure_git_repository = ensure_git_repository
         self.prebuilt = prebuilt
         self.tool_output_chars = int(tool_output_chars)
+        self.history_path = self.workspace / ".mira" / "history.txt"
+        self.persist_prompt_history = prebuilt is None
 
         self.agent: Any = None
         self.plan_agent: Any = None
@@ -81,10 +83,13 @@ class MiraApp(App[None]):
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
         with Horizontal(id="app-shell"):
-            yield SessionHistory(id="sessions")
+            with Vertical(id="session-sidebar"):
+                yield Static("Chat History", id="session-sidebar-title")
+                yield SessionHistory(id="sessions")
             with Vertical(id="main-panel"):
                 yield StatusBar(id="status")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
+                yield PromptPanel()
                 yield PromptBox()
 
     def on_mount(self) -> None:
@@ -136,7 +141,9 @@ class MiraApp(App[None]):
         self.mode = initial_mode(self.agent, self.plan_agent)
         self.ready = True
         self.busy = False
-        self.query_one(PromptBox).disabled = False
+        prompt = self.query_one(PromptBox)
+        prompt.disabled = False
+        prompt.set_history(read_prompt_history(self.history_path))
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -165,6 +172,7 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
             return
 
+        self._record_prompt_history(text)
         if await handle_command(text, self, self.session, self.model_name, self.mode):
             self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -299,12 +307,10 @@ class MiraApp(App[None]):
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
             for action in action_requests(interrupt):
-                answer = await self.push_screen_wait(
-                    ChoiceScreen(
-                        "Approval",
-                        action_text(action),
-                        [("a", "a approve"), ("e", "e edit"), ("r", "r reject")],
-                    )
+                answer = await self._prompt_choice(
+                    "Approval",
+                    action_text(action),
+                    [("a", "a approve"), ("e", "e edit"), ("r", "r reject")],
                 )
                 if answer == "e":
                     decisions.append(await self.edit_decision(action))
@@ -320,24 +326,22 @@ class MiraApp(App[None]):
         question = ask_user_question(request)
         options = ask_user_options(request)
         choices = [(str(index), f"{index} {option}") for index, option in enumerate(options, start=1)]
-        answer = str(await self.push_screen_wait(ChoiceScreen("Question", question, choices)) or "")
+        answer = str(await self._prompt_choice("Question", question, choices) or "")
         selected = options[int(answer) - 1] if answer.isdigit() and 0 < int(answer) <= len(options) else options[-1]
         if selected != ASK_USER_OPEN_OPTION:
             return selected
 
-        response = await self.push_screen_wait(TextPromptScreen("Question", ASK_USER_OPEN_OPTION))
+        response = await self._prompt_text("Question", ASK_USER_OPEN_OPTION)
         return (response or "").strip() or ASK_USER_OPEN_OPTION
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""
-        answer = await self.push_screen_wait(ChoiceScreen("Git", message, [("y", "y yes"), ("n", "n no")]))
+        answer = await self._prompt_choice("Git", message, [("y", "y yes"), ("n", "n no")])
         return answer == "y"
 
     async def ask_continue_without_git(self, message: str) -> bool:
         """Ask whether startup should continue without Git protection."""
-        answer = await self.push_screen_wait(
-            ChoiceScreen("Git", message, [("c", "c continue"), ("e", "e exit")])
-        )
+        answer = await self._prompt_choice("Git", message, [("c", "c continue"), ("e", "e exit")])
         return answer == "c"
 
     async def edit_decision(self, action: Any) -> dict[str, Any]:
@@ -345,9 +349,7 @@ class MiraApp(App[None]):
         if not isinstance(action, dict):
             return {"type": "reject"}
 
-        edited_text = await self.push_screen_wait(
-            JSONEditScreen("Edited Args", json.dumps(action.get("args", {}), indent=2))
-        )
+        edited_text = await self._prompt_json("Edited Args", json.dumps(action.get("args", {}), indent=2))
         if edited_text is None:
             return {"type": "reject"}
 
@@ -368,6 +370,30 @@ class MiraApp(App[None]):
                 "args": edited_args,
             },
         }
+
+    async def _prompt_choice(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
+        """Show a choice prompt in the main window."""
+        return await self._with_prompt_lock(self.query_one(PromptPanel).choose(title, message, choices))
+
+    async def _prompt_text(self, title: str, message: str) -> str | None:
+        """Show a text prompt in the main window."""
+        return await self._with_prompt_lock(self.query_one(PromptPanel).ask_text(title, message))
+
+    async def _prompt_json(self, title: str, text: str) -> str | None:
+        """Show a JSON editor prompt in the main window."""
+        return await self._with_prompt_lock(self.query_one(PromptPanel).edit_json(title, text))
+
+    async def _with_prompt_lock(self, prompt_waiter: Any) -> str | None:
+        """Disable the prompt box while an in-window prompt is active."""
+        prompt = self.query_one(PromptBox)
+        was_disabled = prompt.disabled
+        prompt.disabled = True
+        try:
+            return await prompt_waiter
+        finally:
+            prompt.disabled = was_disabled
+            if self.is_mounted and self.ready and not self.busy and not prompt.disabled:
+                self.action_focus_prompt()
 
     def _set_status(self, *, state: str, detail: str = "") -> None:
         """Update the status bar if it has been mounted."""
@@ -450,3 +476,43 @@ class MiraApp(App[None]):
         if self.mode.get("plan_pending"):
             return "Action + Plan"
         return "Action"
+
+    def _record_prompt_history(self, text: str) -> None:
+        """Remember submitted prompt text and persist it for normal app runs."""
+        self.query_one(PromptBox).remember(text)
+        if not self.persist_prompt_history:
+            return
+        try:
+            append_prompt_history(self.history_path, text)
+        except OSError as exc:
+            self.system_message(f"could not update prompt history: {exc}", kind="warning")
+
+
+def read_prompt_history(path: Path) -> list[str]:
+    """Read MIRA prompt history entries from a prompt-toolkit-style file."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    entries: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("+"):
+            stripped = stripped[1:].strip()
+        if stripped:
+            entries.append(stripped)
+    return entries
+
+
+def append_prompt_history(path: Path, text: str) -> None:
+    """Append one submitted prompt to the workspace history file."""
+    entry = text.strip()
+    if not entry:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().isoformat(sep=" ", timespec="microseconds")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n# {timestamp}\n+{entry}\n")

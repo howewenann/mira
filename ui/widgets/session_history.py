@@ -59,10 +59,9 @@ def session_records(store: Any) -> list[dict[str, Any]]:
 
 def session_label(record: dict[str, Any]) -> str:
     """Return a compact two-line session row."""
-    title = truncate(str(record.get("title") or "Untitled session"), 30)
+    title = truncate(str(record.get("title") or "Untitled session"), 24)
     timestamp = timestamp_text(record.get("updated_at") or record.get("created_at"))
-    turns = int(record.get("turns") or 0)
-    return f"{title}\n{timestamp}  {turns} turns"
+    return f"{title}\n{timestamp}"
 
 
 def timestamp_text(value: Any) -> str:
@@ -82,4 +81,4 @@ def truncate(value: str, limit: int) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
         return text
-    return text[: max(0, limit - 1)].rstrip() + "…"
+    return text[: max(0, limit - 3)].rstrip() + "..."

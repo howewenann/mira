@@ -71,3 +71,5 @@ Expected:
 - MIRA shows a `write_file` tool call.
 - MIRA shows an approval prompt.
 - Approving writes `test.txt` with `hello world`.
+
+Use the ask_user tool to ask me which implementation path to take: minimal change, full refactor, or planning only. Do not proceed until I choose.

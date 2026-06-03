@@ -10,6 +10,7 @@ dependencies = [
     "langgraph>=0.2",
     "langchain-anyllm",
     "lmstudio>=1.5",
+    "pyfiglet>=1.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
     "textual>=8.2",

@@ -11,6 +11,8 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from ui.splash import splash_text
+
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 SPINNER_FRAMES = ["-", "\\", "|", "/"]
 
@@ -40,13 +42,11 @@ class ChatLog(VerticalScroll):
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""
-        lines = [
-            "Minimal Iterative Reasoning Agent v1.0.0",
-            f"session: {session_id}",
-            f"model: {model_name}",
-            f"workspace: {workspace}",
-        ]
-        self.system_message("\n".join(lines), kind="startup")
+        self._add_block(
+            "mira",
+            splash_text(model_name=model_name, session_id=session_id, workspace=workspace),
+            "message startup",
+        )
 
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""

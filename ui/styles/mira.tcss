@@ -13,13 +13,27 @@ Screen {
     height: 100%;
 }
 
-#sessions {
+#session-sidebar {
     width: 30;
     min-width: 22;
     height: 100%;
     padding: 0 1;
     border: solid #2d5661;
     border-right: heavy #5bb8b1;
+    background: #101516;
+}
+
+#session-sidebar-title {
+    height: 1;
+    margin: 0 0 1 0;
+    color: #eef7f8;
+    text-style: bold;
+}
+
+#sessions {
+    width: 1fr;
+    height: 1fr;
+    padding: 0;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
@@ -72,6 +86,56 @@ Screen {
     background: #101516;
 }
 
+#prompt-panel {
+    height: auto;
+    max-height: 60%;
+    padding: 1;
+    background: #11181b;
+    border: solid #d2a957;
+}
+
+#prompt-panel-title {
+    height: 1;
+    margin-bottom: 1;
+    text-style: bold;
+    color: #eef7f8;
+}
+
+#prompt-panel-body {
+    height: 5;
+    padding: 0 1;
+    border: solid #3c4a50;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#prompt-panel-message {
+    color: #e8edef;
+}
+
+#prompt-panel-input {
+    height: 3;
+    margin-top: 1;
+    border: tall #5bb8b1;
+    padding: 0 1;
+    background: #101516;
+}
+
+#prompt-panel-editor {
+    height: 8;
+    margin-top: 1;
+    border: solid #4a5360;
+}
+
+#prompt-panel-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+.prompt-panel-button {
+    margin-right: 1;
+}
+
 .message {
     margin: 0 0 1 0;
     padding: 0 1;
@@ -115,6 +179,11 @@ Screen {
 .message.heading {
     border: solid #5bb8b1;
     color: #eef7f8;
+}
+
+.message.startup {
+    border: solid #5bb8b1;
+    color: #e8edef;
 }
 
 .message.plan {
