@@ -236,6 +236,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         handled = await repl.handle_command("/help", renderer, {}, "model", {"planning": False})
 
         self.assertTrue(handled)
+        self.assertEqual(len(renderer.console.lines), 1)
         output = "\n".join(renderer.console.lines)
         self.assertIn("Commands", output)
         self.assertIn("/plan", output)
@@ -247,6 +248,20 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/memories", output)
         self.assertIn("/skills", output)
         self.assertIn("/subagents", output)
+
+    def test_help_table_returns_rich_table(self) -> None:
+        """The help table should render all commands together."""
+        table = repl.help_table()
+
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=100).print(table)
+        rendered = output.getvalue()
+
+        self.assertIn("Commands", rendered)
+        self.assertIn("Command", rendered)
+        self.assertIn("Description", rendered)
+        self.assertIn("/help", rendered)
+        self.assertIn("/subagents", rendered)
 
     async def test_tools_command_lists_action_tools(self) -> None:
         """The tools command should show action-mode tools."""

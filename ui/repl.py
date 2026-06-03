@@ -206,9 +206,17 @@ async def handle_command(
 
 def print_help(renderer: Any) -> None:
     """Print command descriptions."""
-    write_line(renderer, "Commands", kind="heading")
+    write_renderable(renderer, help_table())
+
+
+def help_table() -> Table:
+    """Build a single Rich table for slash-command help."""
+    table = Table(title="Commands", title_style="bold cyan")
+    table.add_column("Command", style="cyan", no_wrap=True)
+    table.add_column("Description")
     for command, description in COMMAND_HELP.items():
-        write_line(renderer, f"  {command:<10} {description}")
+        table.add_row(command, description)
+    return table
 
 
 def print_tools(renderer: Any, mode: dict[str, Any]) -> None:

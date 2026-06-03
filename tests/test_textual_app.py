@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 from pyfiglet import Figlet
+from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
 from ui.interrupts import ASK_USER_OPEN_OPTION
@@ -30,7 +32,14 @@ class FakeStore:
 def renderable_plain(widget: Any) -> str:
     """Return plain text from a Textual Static-like widget."""
     renderable = getattr(widget, "renderable", None) or getattr(widget, "_renderable", None) or getattr(widget, "content", "")
-    return str(getattr(renderable, "plain", renderable))
+    plain = getattr(renderable, "plain", None)
+    if plain is not None:
+        return str(plain)
+    if isinstance(renderable, str):
+        return renderable
+    output = StringIO()
+    Console(file=output, force_terminal=False, width=120).print(renderable)
+    return output.getvalue()
 
 
 def make_app(workspace: Path | None = None) -> MiraApp:
@@ -148,6 +157,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["hello"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
+
+    async def test_help_command_renders_as_one_command_panel(self) -> None:
+        """The help command should not create one chat block per command."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+
+            await app.submit_prompt(Input.Submitted(prompt, "/help"))
+            await pilot.pause()
+
+            command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+            self.assertEqual(len(command_blocks), 1)
+            output = renderable_plain(command_blocks[0])
+            self.assertIn("Commands", output)
+            self.assertIn("/help", output)
+            self.assertIn("/subagents", output)
 
     async def test_approval_prompt_uses_in_window_panel_with_arrow_keys(self) -> None:
         """Approval prompts should stay in the app layout and accept arrow keys."""
