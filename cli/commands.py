@@ -13,7 +13,7 @@ def run(
     resume: bool,
     workspace: Path,
     session: str | None,
-    insecure_direct: bool = False,
+    direct: bool = False,
 ) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
     from config.llm import ConfigError
@@ -26,7 +26,7 @@ def run(
                 resume=resume,
                 workspace=workspace,
                 session=session,
-                insecure_direct=insecure_direct,
+                direct=direct,
             )
         )
     except ConfigError as error:
@@ -48,7 +48,7 @@ async def _run(
     resume: bool,
     workspace: Path,
     session: str | None,
-    insecure_direct: bool = False,
+    direct: bool = False,
 ) -> None:
     """Create the app objects, then run either one-shot or TUI mode."""
     import typer
@@ -58,7 +58,7 @@ async def _run(
 
     workspace = workspace.expanduser().resolve()
     config = load_config(workspace)
-    config["llm_insecure_direct"] = bool(insecure_direct)
+    config["llm_direct"] = bool(direct)
 
     if prompt is None:
         from ui.app import MiraApp

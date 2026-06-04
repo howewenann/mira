@@ -18,10 +18,10 @@ def main(
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume the most recent session."),
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
     session: str | None = typer.Option(None, "--session", "-s", help="Session id."),
-    insecure_direct: bool = typer.Option(
+    direct: bool = typer.Option(
         False,
-        "--insecure-direct",
-        help="Connect directly for LLM calls and disable TLS verification.",
+        "--direct",
+        help="Connect to the LLM directly, ignoring proxy env vars and disabling TLS verification.",
     ),
 ) -> None:
     """Start MIRA unless Typer is dispatching to a subcommand."""
@@ -31,7 +31,7 @@ def main(
             resume=resume,
             workspace=workspace,
             session=session,
-            insecure_direct=insecure_direct,
+            direct=direct,
         )
 
 

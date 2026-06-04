@@ -37,7 +37,7 @@ MIRA defaults to an LM Studio-compatible local endpoint at
 Running `mira` opens the Textual TUI. Use `mira --prompt "..."` for a one-shot
 plain terminal run.
 For trusted local setups that need direct LLM HTTP calls with TLS verification
-disabled, use `mira --insecure-direct`.
+disabled, use `mira --direct`.
 
 On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent can run. If you choose
@@ -79,9 +79,7 @@ generation values: `MIRA_LLM_TEMPERATURE`, `MIRA_LLM_MAX_TOKENS`, and
 `MIRA_LLM_TOP_P`.
 
 MIRA does not create or overwrite `.env`. If you already have one, use
-`.env.example` as a reference and update your own file by hand. Old
-`MIRA_LMSTUDIO_*` variables still work for LM Studio when no `MIRA_LLM_*`
-provider config is present, but the `MIRA_LLM_*` names are preferred.
+`.env.example` as a reference and update your own file by hand.
 
 These values are loaded in `config/loader.py` and normalized in `config/llm.py`
 before being passed to `ChatAnyLLM` in `agent/llm.py`.
@@ -269,9 +267,6 @@ Resume a specific session id:
 mira --session 20260602-171423+0800-a1b2c3d4
 mira -s 20260602-171423+0800-a1b2c3d4
 ```
-
-Older UUID-style session files and UTC `Z` timestamp ids still work with
-`--session`; new sessions use the local timestamped id by default.
 
 Short sessions keep exact user and assistant messages. When stored message
 content exceeds `MIRA_SESSION_MAX_CHARS` (default `40000`), MIRA asks the

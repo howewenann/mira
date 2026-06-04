@@ -35,15 +35,15 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertRegex(record["id"], r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$")
 
-    def test_explicit_and_legacy_session_ids_still_load_exactly(self) -> None:
-        """Readable ids should not break old UUID session files or explicit ids."""
+    def test_explicit_session_ids_load_exactly(self) -> None:
+        """Explicit session ids should load the matching JSON file."""
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
 
             explicit = store.load("thread-1", resume=False, workspace=Path("workspace"))
-            legacy = {
-                "id": "0dc61ead7e38",
-                "title": "Legacy Session",
+            custom = {
+                "id": "custom-session",
+                "title": "Custom Session",
                 "workspace": "workspace",
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "updated_at": "2026-01-01T00:00:00+00:00",
@@ -52,11 +52,11 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "summary": None,
                 "messages": [],
             }
-            store.save(legacy)
-            loaded = store.load("0dc61ead7e38", resume=False, workspace=Path("workspace"))
+            store.save(custom)
+            loaded = store.load("custom-session", resume=False, workspace=Path("workspace"))
 
         self.assertEqual(explicit["id"], "thread-1")
-        self.assertEqual(loaded["id"], "0dc61ead7e38")
+        self.assertEqual(loaded["id"], "custom-session")
         self.assertFalse(re.match(r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$", loaded["id"]))
 
     def test_new_session_has_v1_context_fields(self) -> None:

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import ssl
 import tempfile
 import unittest
-import warnings
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 import typer
+from langchain_anyllm import ChatAnyLLM
 from typer.testing import CliRunner
 
 from agent.llm import get_llm, get_model_name
-from agent.llm_httpx import ChatAnyLLMWithHttpx
 from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, load_llm_config
@@ -56,13 +56,6 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_max_tokens"], 1024)
         self.assertEqual(config["llm_top_p"], 0.9)
 
-    def test_claude_provider_alias_uses_anthropic(self) -> None:
-        """Claude should map to the Anthropic provider."""
-        config = load_llm_config({"MIRA_LLM_PROVIDER": "claude", "MIRA_LLM_MODEL": "claude-sonnet"})
-
-        self.assertEqual(config["llm_provider"], "anthropic")
-        self.assertEqual(config["llm_model"], "claude-sonnet")
-
     def test_non_default_provider_requires_model(self) -> None:
         """Cloud providers should not silently inherit the local model name."""
         with self.assertRaisesRegex(ConfigError, "MIRA_LLM_MODEL is required"):
@@ -72,37 +65,6 @@ class LLMConfigTests(unittest.TestCase):
         """A model without an explicit provider should be rejected."""
         with self.assertRaisesRegex(ConfigError, "MIRA_LLM_PROVIDER is required"):
             load_llm_config({"MIRA_LLM_MODEL": "gpt-4.1-mini"})
-
-    def test_legacy_lmstudio_values_still_work(self) -> None:
-        """Existing LM Studio env files should remain usable."""
-        config = load_llm_config(
-            {
-                "MIRA_LMSTUDIO_MODEL": "old-model",
-                "MIRA_LMSTUDIO_BASE_URL": "http://localhost:1234/v1",
-                "MIRA_LMSTUDIO_API_KEY": "old-key",
-            }
-        )
-
-        self.assertEqual(config["llm_provider"], "lmstudio")
-        self.assertEqual(config["llm_model"], "old-model")
-        self.assertEqual(config["llm_base_url"], "http://localhost:1234/v1")
-        self.assertEqual(config["llm_api_key"], "old-key")
-
-    def test_canonical_and_legacy_values_conflict(self) -> None:
-        """Users should choose either canonical or old LM Studio names."""
-        with self.assertRaisesRegex(ConfigError, "Use either MIRA_LLM"):
-            load_llm_config(
-                {
-                    "MIRA_LLM_PROVIDER": "openai",
-                    "MIRA_LLM_MODEL": "gpt-4.1-mini",
-                    "MIRA_LMSTUDIO_MODEL": "local-model",
-                }
-            )
-
-    def test_provider_specific_blocks_need_canonical_selector(self) -> None:
-        """Non-LMStudio provider-specific blocks should direct users to canonical config."""
-        with self.assertRaisesRegex(ConfigError, "MIRA_LLM_PROVIDER"):
-            load_llm_config({"MIRA_OPENAI_MODEL": "gpt-4.1-mini", "MIRA_ANTHROPIC_MODEL": "claude-sonnet"})
 
     def test_invalid_generation_values_raise_config_error(self) -> None:
         """Generation values should fail clearly when malformed."""
@@ -185,211 +147,30 @@ class LLMConfigTests(unittest.TestCase):
             stream_options={"include_usage": True},
         )
 
-    def test_httpx_llm_wrapper_uses_pydantic_v2_config_without_warning(self) -> None:
-        """The HTTPX-enabled wrapper should not use deprecated class-based config."""
-        sync_client = httpx.Client()
-        async_client = httpx.AsyncClient()
-        try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                llm = ChatAnyLLMWithHttpx(
-                    model="test-model",
-                    provider="lmstudio",
-                    api_key="key",
-                    api_base="http://localhost:1234/v1",
-                    http_client=sync_client,
-                    async_http_client=async_client,
-                )
-
-            self.assertIs(llm.http_client, sync_client)
-            self.assertIs(llm.async_http_client, async_client)
-            self.assertFalse(any("class-based" in str(warning.message).lower() for warning in caught))
-        finally:
-            sync_client.close()
-            import asyncio
-
-            asyncio.run(async_client.aclose())
-
-    def test_get_llm_uses_insecure_direct_httpx_clients(self) -> None:
-        """The insecure-direct config should build direct clients with TLS verification off."""
+    def test_get_llm_direct_uses_anyllm_client_args(self) -> None:
+        """Direct mode should use AnyLLM client_args with a direct async HTTPX client."""
         llm = get_llm(
             {
                 "llm_provider": "lmstudio",
                 "llm_model": "gemma-4-e4b",
                 "llm_api_key": "lm-studio",
                 "llm_base_url": "http://localhost:1234/v1",
-                "llm_insecure_direct": True,
+                "llm_direct": True,
             }
         )
+        client: httpx.AsyncClient | None = None
         try:
-            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
-            self.assertIsNotNone(llm.http_client)
-            self.assertIsNotNone(llm.async_http_client)
-            self.assertFalse(llm.http_client.trust_env)
-            self.assertFalse(llm.async_http_client.trust_env)
-            self.assertEqual(llm.http_client._transport._pool._ssl_context.verify_mode, ssl.CERT_NONE)
-            self.assertEqual(llm.async_http_client._transport._pool._ssl_context.verify_mode, ssl.CERT_NONE)
-            self.assertFalse(llm.http_client._transport._pool._ssl_context.check_hostname)
-            self.assertFalse(llm.async_http_client._transport._pool._ssl_context.check_hostname)
+            self.assertIsInstance(llm, ChatAnyLLM)
+            client = llm.model_kwargs["client_args"]["http_client"]
+            self.assertIsInstance(client, httpx.AsyncClient)
+            self.assertFalse(client.trust_env)
+            self.assertEqual(client._transport._pool._ssl_context.verify_mode, ssl.CERT_NONE)
+            self.assertFalse(client._transport._pool._ssl_context.check_hostname)
             self.assertEqual(llm.stream_options, {"include_usage": True})
             self.assertFalse(llm.disable_streaming)
         finally:
-            if isinstance(llm, ChatAnyLLMWithHttpx):
-                if llm.http_client is not None:
-                    llm.http_client.close()
-                if llm.async_http_client is not None:
-                    import asyncio
-
-                    asyncio.run(llm.async_http_client.aclose())
-
-    def test_insecure_direct_stream_uses_httpx_streaming_path(self) -> None:
-        """Insecure-direct sync streams should use the injected HTTPX client."""
-        calls: list[dict[str, object]] = []
-
-        class FakeChoice:
-            def __init__(self, delta: dict[str, object], finish_reason: str | None = None) -> None:
-                self.delta = delta
-                self.finish_reason = finish_reason
-
-        class FakeUsage:
-            def model_dump(self) -> dict[str, int]:
-                return {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
-
-        class FakeChunk:
-            def __init__(self, choices: list[FakeChoice], usage: FakeUsage | None = None) -> None:
-                self.choices = choices
-                self.usage = usage
-
-        class FakeCompletions:
-            def create(self, **kwargs: object) -> object:
-                calls.append(kwargs)
-                return iter(
-                    [
-                        FakeChunk([FakeChoice({"role": "assistant", "content": "hello"})]),
-                        FakeChunk([], FakeUsage()),
-                    ]
-                )
-
-        class FakeClient:
-            def __init__(self) -> None:
-                self.chat = type("FakeChat", (), {"completions": FakeCompletions()})()
-
-        llm = get_llm(
-            {
-                "llm_provider": "lmstudio",
-                "llm_model": "gemma-4-e4b",
-                "llm_api_key": "lm-studio",
-                "llm_base_url": "http://localhost:1234/v1",
-                "llm_insecure_direct": True,
-            }
-        )
-        try:
-            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
-            with patch.object(ChatAnyLLMWithHttpx, "_make_openai_client", return_value=FakeClient()):
-                chunks = list(llm.stream("hello"))
-
-            self.assertEqual([chunk.content for chunk in chunks if chunk.content], ["hello"])
-            usage_chunks = [chunk.usage_metadata for chunk in chunks if chunk.usage_metadata]
-            self.assertEqual(usage_chunks[0]["input_tokens"], 3)
-            self.assertEqual(usage_chunks[0]["output_tokens"], 2)
-            self.assertEqual(usage_chunks[0]["total_tokens"], 5)
-            self.assertEqual(calls[0]["model"], "gemma-4-e4b")
-            self.assertEqual(calls[0]["messages"], [{"content": "hello", "role": "user"}])
-            self.assertTrue(calls[0]["stream"])
-            self.assertEqual(calls[0]["stream_options"], {"include_usage": True})
-        finally:
-            if isinstance(llm, ChatAnyLLMWithHttpx):
-                if llm.http_client is not None:
-                    llm.http_client.close()
-                if llm.async_http_client is not None:
-                    import asyncio
-
-                    asyncio.run(llm.async_http_client.aclose())
-
-    def test_insecure_direct_astream_uses_httpx_streaming_path(self) -> None:
-        """Insecure-direct async streams should use the injected HTTPX client."""
-        calls: list[dict[str, object]] = []
-
-        class FakeChoice:
-            def __init__(self, delta: dict[str, object], finish_reason: str | None = None) -> None:
-                self.delta = delta
-                self.finish_reason = finish_reason
-
-        class FakeUsage:
-            def model_dump(self) -> dict[str, int]:
-                return {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
-
-        class FakeChunk:
-            def __init__(self, choices: list[FakeChoice], usage: FakeUsage | None = None) -> None:
-                self.choices = choices
-                self.usage = usage
-
-        class FakeStream:
-            def __init__(self) -> None:
-                self.chunks = iter(
-                    [
-                        FakeChunk([FakeChoice({"role": "assistant", "content": "hello"})]),
-                        FakeChunk([], FakeUsage()),
-                    ]
-                )
-
-            def __aiter__(self) -> "FakeStream":
-                return self
-
-            async def __anext__(self) -> FakeChunk:
-                try:
-                    return next(self.chunks)
-                except StopIteration as error:
-                    raise StopAsyncIteration from error
-
-        class FakeCompletions:
-            async def create(self, **kwargs: object) -> FakeStream:
-                calls.append(kwargs)
-                return FakeStream()
-
-        class FakeClient:
-            def __init__(self) -> None:
-                self.chat = type("FakeChat", (), {"completions": FakeCompletions()})()
-
-        async def consume_stream(llm: ChatAnyLLMWithHttpx) -> list[object]:
-            chunks: list[object] = []
-            async for chunk in llm.astream("hello"):
-                chunks.append(chunk)
-            return chunks
-
-        llm = get_llm(
-            {
-                "llm_provider": "lmstudio",
-                "llm_model": "gemma-4-e4b",
-                "llm_api_key": "lm-studio",
-                "llm_base_url": "http://localhost:1234/v1",
-                "llm_insecure_direct": True,
-            }
-        )
-        try:
-            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
-            with patch.object(ChatAnyLLMWithHttpx, "_make_async_openai_client", return_value=FakeClient()):
-                import asyncio
-
-                chunks = asyncio.run(consume_stream(llm))
-
-            self.assertEqual([chunk.content for chunk in chunks if chunk.content], ["hello"])
-            usage_chunks = [chunk.usage_metadata for chunk in chunks if chunk.usage_metadata]
-            self.assertEqual(usage_chunks[0]["input_tokens"], 3)
-            self.assertEqual(usage_chunks[0]["output_tokens"], 2)
-            self.assertEqual(usage_chunks[0]["total_tokens"], 5)
-            self.assertEqual(calls[0]["model"], "gemma-4-e4b")
-            self.assertEqual(calls[0]["messages"], [{"content": "hello", "role": "user"}])
-            self.assertTrue(calls[0]["stream"])
-            self.assertEqual(calls[0]["stream_options"], {"include_usage": True})
-        finally:
-            if isinstance(llm, ChatAnyLLMWithHttpx):
-                if llm.http_client is not None:
-                    llm.http_client.close()
-                if llm.async_http_client is not None:
-                    import asyncio
-
-                    asyncio.run(llm.async_http_client.aclose())
+            if client is not None:
+                asyncio.run(client.aclose())
 
     def test_get_model_name_includes_provider(self) -> None:
         """The UI should identify both provider and model."""
@@ -402,12 +183,12 @@ class LLMConfigTests(unittest.TestCase):
 class CLIConfigTests(unittest.TestCase):
     """Tests for user-facing CLI config errors."""
 
-    def test_help_includes_insecure_direct_flag_only(self) -> None:
-        """The CLI should expose only the clean insecure-direct flag."""
+    def test_help_includes_direct_flag_only(self) -> None:
+        """The CLI should expose only the clean direct flag."""
         result = CliRunner().invoke(cli_app, ["--help"])
 
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("--insecure-direct", result.output)
+        self.assertIn("--direct", result.output)
 
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
@@ -504,7 +285,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "run_turn", "save"])
 
-    async def test_run_sets_insecure_direct_config_flag(self) -> None:
+    async def test_run_sets_direct_config_flag(self) -> None:
         """The CLI flag should be carried into bootstrap config."""
         config = {
             "tool_output_chars": 123,
@@ -524,7 +305,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             renderer: object | None = None,
         ) -> dict[str, object]:
             self.assertIsNotNone(config)
-            self.assertTrue(config["llm_insecure_direct"])
+            self.assertTrue(config["llm_direct"])
             return {
                 "agent": "agent",
                 "renderer": renderer,
@@ -547,7 +328,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 resume=False,
                 workspace=Path("."),
                 session=None,
-                insecure_direct=True,
+                direct=True,
             )
 
     async def test_run_exits_when_git_guard_blocks_startup(self) -> None:

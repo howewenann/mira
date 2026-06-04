@@ -26,16 +26,14 @@ def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
     kwargs.update({key: value for key, value in optional_values.items() if value is not None})
     if str(config.get("llm_provider") or "").lower() in STREAM_USAGE_PROVIDERS:
         kwargs["stream_options"] = {"include_usage": True}
-    if config.get("llm_insecure_direct"):
+    if config.get("llm_direct"):
         import httpx
 
-        from agent.llm_httpx import ChatAnyLLMWithHttpx
-
-        return ChatAnyLLMWithHttpx(
-            **kwargs,
-            http_client=httpx.Client(trust_env=False, verify=False),
-            async_http_client=httpx.AsyncClient(trust_env=False, verify=False),
-        )
+        kwargs["model_kwargs"] = {
+            "client_args": {
+                "http_client": httpx.AsyncClient(trust_env=False, verify=False),
+            }
+        }
     return ChatAnyLLM(**kwargs)
 
 
