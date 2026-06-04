@@ -15,6 +15,17 @@ and direct so it is easy to read, change, and learn from.
 
 ## Quick Start
 
+With Conda, create a Python 3.12 environment before installing MIRA:
+
+```powershell
+conda env create -f environment.yml
+conda activate mira
+mira --help
+mira
+```
+
+Or install into an existing compatible Python environment:
+
 ```powershell
 pip install -e .
 mira --help
