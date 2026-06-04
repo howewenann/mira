@@ -6,6 +6,8 @@ from typing import Any
 
 from langchain_anyllm import ChatAnyLLM
 
+STREAM_USAGE_PROVIDERS = {"lmstudio"}
+
 
 def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
     """Create the LangChain chat model from MIRA's config dictionary."""
@@ -22,6 +24,8 @@ def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
         "top_p": config.get("llm_top_p"),
     }
     kwargs.update({key: value for key, value in optional_values.items() if value is not None})
+    if str(config.get("llm_provider") or "").lower() in STREAM_USAGE_PROVIDERS:
+        kwargs["stream_options"] = {"include_usage": True}
     return ChatAnyLLM(**kwargs)
 
 

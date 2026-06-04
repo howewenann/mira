@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -150,6 +151,26 @@ def context_limit_for_config(config: dict[str, Any] | None) -> tuple[int | None,
         return None, "unknown"
 
     return (limit, "lmstudio_sdk") if limit else (None, "unknown")
+
+
+def token_counter_for_config(config: dict[str, Any] | None) -> Callable[[str], int] | None:
+    """Return a provider tokenizer for current context estimates."""
+    config = config or {}
+    provider = str(config.get("llm_provider") or "").lower()
+    if provider != "lmstudio":
+        return None
+
+    try:
+        import lmstudio as lms
+
+        model = lms.llm()
+    except Exception:
+        return None
+
+    def count_tokens(text: str) -> int:
+        return positive_int(model.count_tokens(text))
+
+    return count_tokens
 
 
 def result_usage(result: Any) -> dict[str, Any]:

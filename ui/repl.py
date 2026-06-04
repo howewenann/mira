@@ -87,8 +87,10 @@ async def run_user_turn(
     model_name: str = "",
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
+    token_counter: Any | None = None,
 ) -> TurnResult:
     """Route one submitted user prompt through planning or action mode."""
+    run_kwargs = {"token_counter": token_counter} if token_counter is not None else {}
     if mode["planning"]:
         request_text = with_resume_context(session, plan_request_text(text))
         result = await run_turn(
@@ -96,13 +98,20 @@ async def run_user_turn(
             text=request_text,
             renderer=renderer,
             thread_id=mode["plan_thread_id"],
+            **run_kwargs,
         )
         save_clean_plan(mode, result, renderer)
         append_turn(session, text, getattr(result, "final_text", ""), "planning")
     else:
         action_text = action_request_text(mode, text)
         request_text = with_resume_context(session, action_text)
-        result = await run_turn(agent=agent, text=request_text, renderer=renderer, thread_id=session["id"])
+        result = await run_turn(
+            agent=agent,
+            text=request_text,
+            renderer=renderer,
+            thread_id=session["id"],
+            **run_kwargs,
+        )
         append_turn(session, text, getattr(result, "final_text", ""), "action")
 
     session["turns"] = int(session.get("turns") or 0) + 1

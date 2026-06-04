@@ -11,6 +11,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from session.context import SUMMARY_KEYS, normalize_messages, normalize_summary
 from ui.splash import splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -50,8 +51,25 @@ class ChatLog(VerticalScroll):
 
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
-        title = "you [plan]" if planning else "you"
+        title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
+
+    def assistant_message(self, text: str) -> None:
+        """Append a completed assistant message."""
+        self._add_block("mira", Text(text), "message assistant")
+
+    def restore_session(self, session: dict[str, Any]) -> None:
+        """Replay persisted summary and messages into the transcript."""
+        self.finish_main()
+        summary = normalize_summary(session.get("summary"))
+        if summary:
+            self._add_block("session summary", self._summary_text(summary), "message summary")
+
+        for message in normalize_messages(session.get("messages")):
+            if message["role"] == "user":
+                self.user_message(message["content"], planning=message.get("mode") == "planning")
+            else:
+                self.assistant_message(message["content"])
 
     def reasoning_delta(self, delta: str) -> None:
         """Append streamed reasoning text to the current reasoning block."""
@@ -245,6 +263,26 @@ class ChatLog(VerticalScroll):
                 errors.append(f"missing description in args: {str(args)[:60]}")
         return descriptions, errors
 
+    def _summary_text(self, summary: dict[str, Any]) -> Text:
+        """Render compacted continuation state for a resumed session."""
+        state = summary.get("state", {})
+        text = Text()
+        for key in SUMMARY_KEYS:
+            value = state.get(key)
+            if isinstance(value, list):
+                if not value:
+                    continue
+                text.append(label_text(key), style="bold cyan")
+                text.append(": ")
+                text.append("; ".join(str(item) for item in value))
+                text.append("\n")
+            elif value:
+                text.append(label_text(key), style="bold cyan")
+                text.append(": ")
+                text.append(str(value))
+                text.append("\n")
+        return text
+
     def _render_subagent(self, label: str) -> Text:
         """Render one subagent status block."""
         block = self._subagent_blocks[label]
@@ -288,3 +326,8 @@ class ChatLog(VerticalScroll):
             if word:
                 return word
         return str(next(self._fallback_suffixes))
+
+
+def label_text(value: str) -> str:
+    """Convert a summary key to a compact label."""
+    return str(value).replace("_", " ")

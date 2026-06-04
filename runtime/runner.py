@@ -12,7 +12,15 @@ from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text
 from runtime.subagent_events import consume_subagents
 from runtime.tool_events import consume_tool_calls
-from runtime.usage import empty_usage, has_usage, merge_usage, usage_from_output
+from runtime.usage import (
+    TokenCounter,
+    context_from_output,
+    empty_usage,
+    has_context_usage,
+    has_usage,
+    merge_usage,
+    usage_from_output,
+)
 
 
 @dataclass
@@ -53,17 +61,33 @@ class TurnResult:
         """Capture streamed usage as a fallback for providers that omit final usage."""
         self._stream_usage = merge_usage(self._stream_usage, usage)
 
-    def commit_loop_usage(self, output: Any) -> None:
-        """Prefer final-output usage, falling back to streamed message usage."""
+    def set_context_usage(self, usage: dict[str, Any]) -> None:
+        """Set current context usage without changing cumulative In/Out totals."""
+        if not has_context_usage(usage):
+            return
+        self.context_tokens = int(usage["context_tokens"])
+        if self.usage_source == "unknown" and usage.get("source"):
+            self.usage_source = str(usage["source"])
+
+    def commit_loop_usage(self, output: Any, token_counter: TokenCounter | None = None) -> None:
+        """Commit LangChain token usage and provider-tokenized context usage."""
         output_usage = usage_from_output(output)
         if has_usage(output_usage):
             self.add_usage(output_usage)
         elif has_usage(self._stream_usage):
             self.add_usage(self._stream_usage)
+
+        self.set_context_usage(context_from_output(output, token_counter))
         self._stream_usage = empty_usage()
 
 
-async def run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> TurnResult:
+async def run_turn(
+    agent: Any,
+    text: str,
+    renderer: Any,
+    thread_id: str,
+    token_counter: TokenCounter | None = None,
+) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
     DeepAgents exposes separate async event streams for messages, tool calls,
@@ -88,7 +112,7 @@ async def run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> Turn
         )
 
         result.final_text = final_text(output.get("value")) or result.final_text
-        result.commit_loop_usage(output.get("value"))
+        result.commit_loop_usage(output.get("value"), token_counter=token_counter)
         renderer.finish_main()
         interrupts = await collect_interrupts(stream, output.get("value"))
 

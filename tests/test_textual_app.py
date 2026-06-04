@@ -42,37 +42,40 @@ def renderable_plain(widget: Any) -> str:
     return output.getvalue()
 
 
-def make_app(workspace: Path | None = None) -> MiraApp:
+def make_app(workspace: Path | None = None, session: dict[str, Any] | None = None, **state_overrides: Any) -> MiraApp:
     """Return a bootstrapped app with fake agents and session state."""
     workspace = workspace or Path(".")
+    session_record = session or {
+        "id": "thread-1",
+        "workspace": str(workspace),
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "turns": 0,
+        "dashboard": {
+            "model": "test-model",
+            "context": {
+                "used_tokens": 5512,
+                "limit_tokens": 8192,
+                "percent": 67.2,
+                "source": "usage_metadata",
+            },
+            "tokens": {"in": 45230, "out": 12991},
+            "duration_seconds": 12,
+        },
+    }
+    state = {
+        "agent": "agent",
+        "plan_agent": "plan-agent",
+        "store": FakeStore(),
+        "session": session_record,
+        "model_name": "test-model",
+        "session_model": None,
+        "context_limit_tokens": 8192,
+        "context_limit_source": "test",
+    }
+    state.update(state_overrides)
     return MiraApp(
         workspace=workspace,
-        prebuilt={
-            "agent": "agent",
-            "plan_agent": "plan-agent",
-            "store": FakeStore(),
-            "session": {
-                "id": "thread-1",
-                "workspace": str(workspace),
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "turns": 0,
-                "dashboard": {
-                    "model": "test-model",
-                    "context": {
-                        "used_tokens": 5512,
-                        "limit_tokens": 8192,
-                        "percent": 67.2,
-                        "source": "usage_metadata",
-                    },
-                    "tokens": {"in": 45230, "out": 12991},
-                    "duration_seconds": 12,
-                },
-            },
-            "model_name": "test-model",
-            "session_model": None,
-            "context_limit_tokens": 8192,
-            "context_limit_source": "test",
-        },
+        prebuilt=state,
         tool_output_chars=80,
     )
 
@@ -157,6 +160,79 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["hello"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
+
+    async def test_loading_past_session_replays_summary_and_messages(self) -> None:
+        """Selecting an older session should rebuild its visible transcript."""
+        workspace = Path(".")
+        past_session = {
+            "id": "past-1",
+            "workspace": str(workspace),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 2,
+            "summary": {
+                "version": 1,
+                "kind": "llm_compaction",
+                "through_message": 2,
+                "updated_at": "2026-01-01T00:01:00+00:00",
+                "state": {
+                    "objective": "Test session replay",
+                    "current_status": "Older turns compacted",
+                    "important_decisions": ["Keep summary visible"],
+                    "user_preferences": [],
+                    "relevant_files": ["README.md"],
+                    "next_steps": ["Continue the selected session"],
+                },
+            },
+            "messages": [
+                {
+                    "id": 3,
+                    "role": "user",
+                    "mode": "planning",
+                    "created_at": "2026-01-01T00:02:00+00:00",
+                    "content": "make a plan",
+                },
+                {
+                    "id": 4,
+                    "role": "assistant",
+                    "mode": "planning",
+                    "created_at": "2026-01-01T00:02:01+00:00",
+                    "content": "plan saved",
+                },
+            ],
+        }
+
+        def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "agent": "agent",
+                "plan_agent": "plan-agent",
+                "store": FakeStore(),
+                "session": past_session,
+                "model_name": "test-model",
+                "session_model": None,
+                "context_limit_tokens": 8192,
+                "context_limit_source": "test",
+            }
+
+        app = make_app(workspace=workspace)
+        app.bootstrap = bootstrap
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            await app._load_session("past-1")
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            rendered = "\n".join(renderable_plain(block) for block in blocks)
+            titles = [str(getattr(block, "border_title", "")) for block in blocks]
+
+            self.assertIn("session summary", titles)
+            self.assertIn("you (plan)", titles)
+            self.assertIn("mira", titles)
+            self.assertIn("Test session replay", rendered)
+            self.assertIn("README.md", rendered)
+            self.assertIn("make a plan", rendered)
+            self.assertIn("plan saved", rendered)
 
     async def test_help_command_renders_as_one_command_panel(self) -> None:
         """The help command should not create one chat block per command."""

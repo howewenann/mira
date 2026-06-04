@@ -71,11 +71,13 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
 
     request_text = with_resume_context(app["session"], prompt)
+    run_kwargs = {"token_counter": app["token_counter"]} if app.get("token_counter") is not None else {}
     result = await run_turn(
         agent=app["agent"],
         text=request_text,
         renderer=app["renderer"],
         thread_id=app["session"]["id"],
+        **run_kwargs,
     )
     append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
@@ -109,7 +111,7 @@ def _bootstrap(
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
     from session.context import context_policy, mark_resume_context_pending
-    from session.dashboard import context_limit_for_config, ensure_dashboard
+    from session.dashboard import context_limit_for_config, ensure_dashboard, token_counter_for_config
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -127,6 +129,7 @@ def _bootstrap(
     session_model = get_llm(config)
     model_name = get_model_name(config)
     context_limit_tokens, context_limit_source = context_limit_for_config(config)
+    token_counter = token_counter_for_config(config)
     ensure_dashboard(
         record,
         model_name=model_name,
@@ -141,6 +144,7 @@ def _bootstrap(
         "model_name": model_name,
         "context_limit_tokens": context_limit_tokens,
         "context_limit_source": context_limit_source,
+        "token_counter": token_counter,
         "renderer": renderer,
         "session": record,
         "session_model": session_model,

@@ -8,6 +8,7 @@ from typing import Any
 from runtime import runner
 from runtime.message_events import consume_messages
 from runtime.subagent_events import consume_subagent, consume_subagents
+from runtime.usage import usage_from_message
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
 
 
@@ -254,6 +255,65 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["context_tokens"], 5512)
 
+    async def test_run_turn_uses_sdk_counter_only_for_context_when_metadata_is_missing(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            {"role": "user", "content": "hello world"},
+                            {"role": "assistant", "content": "OK"},
+                        ]
+                    }
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "use tokens",
+            renderer,
+            "thread-1",
+            token_counter=lambda text: len(text.split()),
+        )
+
+        self.assertEqual(result.usage["input_tokens"], 0)
+        self.assertEqual(result.usage["output_tokens"], 0)
+        self.assertEqual(result.usage["context_tokens"], 5)
+        self.assertEqual(result.usage["source"], "lmstudio_sdk.count_tokens")
+
+    async def test_run_turn_uses_langchain_totals_and_sdk_context_separately(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            {"role": "user", "content": "hello world"},
+                            OutputMessage(
+                                "OK",
+                                {"input_tokens": 5512, "output_tokens": 91, "total_tokens": 5603},
+                            ),
+                        ]
+                    }
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "use tokens",
+            renderer,
+            "thread-1",
+            token_counter=lambda text: len(text.split()),
+        )
+
+        self.assertEqual(result.usage["input_tokens"], 5512)
+        self.assertEqual(result.usage["output_tokens"], 91)
+        self.assertEqual(result.usage["total_tokens"], 5603)
+        self.assertEqual(result.usage["context_tokens"], 5)
+
     async def test_run_turn_records_tool_calls_and_results(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
         agent.streams[0].messages = AsyncItems([Message([{"name": "write_file", "args": {}}])])
@@ -360,6 +420,40 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(options, ["Use A", "Use B", ASK_USER_OPEN_OPTION])
+
+    def test_usage_parser_accepts_lmstudio_native_stats_object(self) -> None:
+        stats = type(
+            "Stats",
+            (),
+            {
+                "prompt_tokens_count": 21,
+                "predicted_tokens_count": 2,
+                "total_tokens_count": 23,
+            },
+        )()
+        message = type("Message", (), {"response_metadata": {"stats": stats}})()
+
+        usage = usage_from_message(message)
+
+        self.assertEqual(usage["input_tokens"], 21)
+        self.assertEqual(usage["output_tokens"], 2)
+        self.assertEqual(usage["total_tokens"], 23)
+        self.assertEqual(usage["source"], "response_metadata.stats")
+
+    def test_usage_parser_accepts_lmstudio_native_stats_dict(self) -> None:
+        usage = usage_from_message(
+            {
+                "stats": {
+                    "promptTokensCount": 21,
+                    "predictedTokensCount": 2,
+                    "totalTokensCount": 23,
+                }
+            }
+        )
+
+        self.assertEqual(usage["input_tokens"], 21)
+        self.assertEqual(usage["output_tokens"], 2)
+        self.assertEqual(usage["total_tokens"], 23)
 
 
 if __name__ == "__main__":

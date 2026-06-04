@@ -75,6 +75,7 @@ class MiraApp(App[None]):
         self.model_name = ""
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
+        self.token_counter: Any | None = None
         self.mode: dict[str, Any] = {"planning": False}
         self.ready = False
         self.busy = False
@@ -138,6 +139,7 @@ class MiraApp(App[None]):
         self.model_name = str(state.get("model_name") or "")
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
+        self.token_counter = state.get("token_counter")
         self.mode = initial_mode(self.agent, self.plan_agent)
         self.ready = True
         self.busy = False
@@ -158,6 +160,7 @@ class MiraApp(App[None]):
             session_id=self.session["id"],
             workspace=str(self.session["workspace"]),
         )
+        chat.restore_session(self.session)
         self._refresh_sessions()
         self._set_status(state="ready")
         self.action_focus_prompt()
@@ -202,6 +205,7 @@ class MiraApp(App[None]):
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
+                token_counter=self.token_counter,
             )
             self._refresh_sessions()
             self._set_status(state="ready")

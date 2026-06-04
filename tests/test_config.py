@@ -159,6 +159,26 @@ class LLMConfigTests(unittest.TestCase):
             top_p=0.9,
         )
 
+    def test_get_llm_requests_lmstudio_stream_usage(self) -> None:
+        """LM Studio streaming should ask for final usage chunks."""
+        config = {
+            "llm_provider": "lmstudio",
+            "llm_model": "gemma-4-e4b",
+            "llm_api_key": "lm-studio",
+            "llm_base_url": "http://localhost:1234/v1",
+        }
+
+        with patch("agent.llm.ChatAnyLLM", return_value="llm") as chat:
+            self.assertEqual(get_llm(config), "llm")
+
+        chat.assert_called_once_with(
+            model="gemma-4-e4b",
+            provider="lmstudio",
+            api_base="http://localhost:1234/v1",
+            api_key="lm-studio",
+            stream_options={"include_usage": True},
+        )
+
     def test_get_model_name_includes_provider(self) -> None:
         """The UI should identify both provider and model."""
         self.assertEqual(
@@ -240,9 +260,16 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 "store": Store(),
             }
 
-        async def run_turn(agent: object, text: str, renderer: object, thread_id: str) -> None:
+        async def run_turn(
+            agent: object,
+            text: str,
+            renderer: object,
+            thread_id: str,
+            token_counter: object | None = None,
+        ) -> None:
             events.append("run_turn")
             self.assertEqual((agent, text, renderer, thread_id), ("agent", "hello", renderer_obj, "thread-1"))
+            self.assertIsNone(token_counter)
 
         config_data = config
         renderer_obj = renderer
