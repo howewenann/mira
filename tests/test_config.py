@@ -232,6 +232,156 @@ class LLMConfigTests(unittest.TestCase):
             self.assertFalse(llm.http_client._transport._pool._ssl_context.check_hostname)
             self.assertFalse(llm.async_http_client._transport._pool._ssl_context.check_hostname)
             self.assertEqual(llm.stream_options, {"include_usage": True})
+            self.assertFalse(llm.disable_streaming)
+        finally:
+            if isinstance(llm, ChatAnyLLMWithHttpx):
+                if llm.http_client is not None:
+                    llm.http_client.close()
+                if llm.async_http_client is not None:
+                    import asyncio
+
+                    asyncio.run(llm.async_http_client.aclose())
+
+    def test_insecure_direct_stream_uses_httpx_streaming_path(self) -> None:
+        """Insecure-direct sync streams should use the injected HTTPX client."""
+        calls: list[dict[str, object]] = []
+
+        class FakeChoice:
+            def __init__(self, delta: dict[str, object], finish_reason: str | None = None) -> None:
+                self.delta = delta
+                self.finish_reason = finish_reason
+
+        class FakeUsage:
+            def model_dump(self) -> dict[str, int]:
+                return {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+        class FakeChunk:
+            def __init__(self, choices: list[FakeChoice], usage: FakeUsage | None = None) -> None:
+                self.choices = choices
+                self.usage = usage
+
+        class FakeCompletions:
+            def create(self, **kwargs: object) -> object:
+                calls.append(kwargs)
+                return iter(
+                    [
+                        FakeChunk([FakeChoice({"role": "assistant", "content": "hello"})]),
+                        FakeChunk([], FakeUsage()),
+                    ]
+                )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.chat = type("FakeChat", (), {"completions": FakeCompletions()})()
+
+        llm = get_llm(
+            {
+                "llm_provider": "lmstudio",
+                "llm_model": "gemma-4-e4b",
+                "llm_api_key": "lm-studio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_insecure_direct": True,
+            }
+        )
+        try:
+            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
+            with patch.object(ChatAnyLLMWithHttpx, "_make_openai_client", return_value=FakeClient()):
+                chunks = list(llm.stream("hello"))
+
+            self.assertEqual([chunk.content for chunk in chunks if chunk.content], ["hello"])
+            usage_chunks = [chunk.usage_metadata for chunk in chunks if chunk.usage_metadata]
+            self.assertEqual(usage_chunks[0]["input_tokens"], 3)
+            self.assertEqual(usage_chunks[0]["output_tokens"], 2)
+            self.assertEqual(usage_chunks[0]["total_tokens"], 5)
+            self.assertEqual(calls[0]["model"], "gemma-4-e4b")
+            self.assertEqual(calls[0]["messages"], [{"content": "hello", "role": "user"}])
+            self.assertTrue(calls[0]["stream"])
+            self.assertEqual(calls[0]["stream_options"], {"include_usage": True})
+        finally:
+            if isinstance(llm, ChatAnyLLMWithHttpx):
+                if llm.http_client is not None:
+                    llm.http_client.close()
+                if llm.async_http_client is not None:
+                    import asyncio
+
+                    asyncio.run(llm.async_http_client.aclose())
+
+    def test_insecure_direct_astream_uses_httpx_streaming_path(self) -> None:
+        """Insecure-direct async streams should use the injected HTTPX client."""
+        calls: list[dict[str, object]] = []
+
+        class FakeChoice:
+            def __init__(self, delta: dict[str, object], finish_reason: str | None = None) -> None:
+                self.delta = delta
+                self.finish_reason = finish_reason
+
+        class FakeUsage:
+            def model_dump(self) -> dict[str, int]:
+                return {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+        class FakeChunk:
+            def __init__(self, choices: list[FakeChoice], usage: FakeUsage | None = None) -> None:
+                self.choices = choices
+                self.usage = usage
+
+        class FakeStream:
+            def __init__(self) -> None:
+                self.chunks = iter(
+                    [
+                        FakeChunk([FakeChoice({"role": "assistant", "content": "hello"})]),
+                        FakeChunk([], FakeUsage()),
+                    ]
+                )
+
+            def __aiter__(self) -> "FakeStream":
+                return self
+
+            async def __anext__(self) -> FakeChunk:
+                try:
+                    return next(self.chunks)
+                except StopIteration as error:
+                    raise StopAsyncIteration from error
+
+        class FakeCompletions:
+            async def create(self, **kwargs: object) -> FakeStream:
+                calls.append(kwargs)
+                return FakeStream()
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.chat = type("FakeChat", (), {"completions": FakeCompletions()})()
+
+        async def consume_stream(llm: ChatAnyLLMWithHttpx) -> list[object]:
+            chunks: list[object] = []
+            async for chunk in llm.astream("hello"):
+                chunks.append(chunk)
+            return chunks
+
+        llm = get_llm(
+            {
+                "llm_provider": "lmstudio",
+                "llm_model": "gemma-4-e4b",
+                "llm_api_key": "lm-studio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_insecure_direct": True,
+            }
+        )
+        try:
+            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
+            with patch.object(ChatAnyLLMWithHttpx, "_make_async_openai_client", return_value=FakeClient()):
+                import asyncio
+
+                chunks = asyncio.run(consume_stream(llm))
+
+            self.assertEqual([chunk.content for chunk in chunks if chunk.content], ["hello"])
+            usage_chunks = [chunk.usage_metadata for chunk in chunks if chunk.usage_metadata]
+            self.assertEqual(usage_chunks[0]["input_tokens"], 3)
+            self.assertEqual(usage_chunks[0]["output_tokens"], 2)
+            self.assertEqual(usage_chunks[0]["total_tokens"], 5)
+            self.assertEqual(calls[0]["model"], "gemma-4-e4b")
+            self.assertEqual(calls[0]["messages"], [{"content": "hello", "role": "user"}])
+            self.assertTrue(calls[0]["stream"])
+            self.assertEqual(calls[0]["stream_options"], {"include_usage": True})
         finally:
             if isinstance(llm, ChatAnyLLMWithHttpx):
                 if llm.http_client is not None:
