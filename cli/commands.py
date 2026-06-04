@@ -8,13 +8,27 @@ from pathlib import Path
 from typing import Any
 
 
-def run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
+def run(
+    prompt: str | None,
+    resume: bool,
+    workspace: Path,
+    session: str | None,
+    insecure_direct: bool = False,
+) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
     from config.llm import ConfigError
 
     try:
         _suppress_known_warnings()
-        asyncio.run(_run(prompt=prompt, resume=resume, workspace=workspace, session=session))
+        asyncio.run(
+            _run(
+                prompt=prompt,
+                resume=resume,
+                workspace=workspace,
+                session=session,
+                insecure_direct=insecure_direct,
+            )
+        )
     except ConfigError as error:
         import typer
 
@@ -29,7 +43,13 @@ def _suppress_known_warnings() -> None:
     warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 
 
-async def _run(prompt: str | None, resume: bool, workspace: Path, session: str | None) -> None:
+async def _run(
+    prompt: str | None,
+    resume: bool,
+    workspace: Path,
+    session: str | None,
+    insecure_direct: bool = False,
+) -> None:
     """Create the app objects, then run either one-shot or TUI mode."""
     import typer
 
@@ -38,6 +58,7 @@ async def _run(prompt: str | None, resume: bool, workspace: Path, session: str |
 
     workspace = workspace.expanduser().resolve()
     config = load_config(workspace)
+    config["llm_insecure_direct"] = bool(insecure_direct)
 
     if prompt is None:
         from ui.app import MiraApp

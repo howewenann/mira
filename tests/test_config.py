@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import os
+import ssl
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import typer
+from typer.testing import CliRunner
 
 from agent.llm import get_llm, get_model_name
+from agent.llm_httpx import ChatAnyLLMWithHttpx
 from cli import commands
+from cli.main import app as cli_app
 from config.llm import ConfigError, load_llm_config
 from config.loader import load_config
 
@@ -179,6 +185,62 @@ class LLMConfigTests(unittest.TestCase):
             stream_options={"include_usage": True},
         )
 
+    def test_httpx_llm_wrapper_uses_pydantic_v2_config_without_warning(self) -> None:
+        """The HTTPX-enabled wrapper should not use deprecated class-based config."""
+        sync_client = httpx.Client()
+        async_client = httpx.AsyncClient()
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                llm = ChatAnyLLMWithHttpx(
+                    model="test-model",
+                    provider="lmstudio",
+                    api_key="key",
+                    api_base="http://localhost:1234/v1",
+                    http_client=sync_client,
+                    async_http_client=async_client,
+                )
+
+            self.assertIs(llm.http_client, sync_client)
+            self.assertIs(llm.async_http_client, async_client)
+            self.assertFalse(any("class-based" in str(warning.message).lower() for warning in caught))
+        finally:
+            sync_client.close()
+            import asyncio
+
+            asyncio.run(async_client.aclose())
+
+    def test_get_llm_uses_insecure_direct_httpx_clients(self) -> None:
+        """The insecure-direct config should build direct clients with TLS verification off."""
+        llm = get_llm(
+            {
+                "llm_provider": "lmstudio",
+                "llm_model": "gemma-4-e4b",
+                "llm_api_key": "lm-studio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_insecure_direct": True,
+            }
+        )
+        try:
+            self.assertIsInstance(llm, ChatAnyLLMWithHttpx)
+            self.assertIsNotNone(llm.http_client)
+            self.assertIsNotNone(llm.async_http_client)
+            self.assertFalse(llm.http_client.trust_env)
+            self.assertFalse(llm.async_http_client.trust_env)
+            self.assertEqual(llm.http_client._transport._pool._ssl_context.verify_mode, ssl.CERT_NONE)
+            self.assertEqual(llm.async_http_client._transport._pool._ssl_context.verify_mode, ssl.CERT_NONE)
+            self.assertFalse(llm.http_client._transport._pool._ssl_context.check_hostname)
+            self.assertFalse(llm.async_http_client._transport._pool._ssl_context.check_hostname)
+            self.assertEqual(llm.stream_options, {"include_usage": True})
+        finally:
+            if isinstance(llm, ChatAnyLLMWithHttpx):
+                if llm.http_client is not None:
+                    llm.http_client.close()
+                if llm.async_http_client is not None:
+                    import asyncio
+
+                    asyncio.run(llm.async_http_client.aclose())
+
     def test_get_model_name_includes_provider(self) -> None:
         """The UI should identify both provider and model."""
         self.assertEqual(
@@ -189,6 +251,13 @@ class LLMConfigTests(unittest.TestCase):
 
 class CLIConfigTests(unittest.TestCase):
     """Tests for user-facing CLI config errors."""
+
+    def test_help_includes_insecure_direct_flag_only(self) -> None:
+        """The CLI should expose only the clean insecure-direct flag."""
+        result = CliRunner().invoke(cli_app, ["--help"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--insecure-direct", result.output)
 
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
@@ -284,6 +353,52 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
         self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "run_turn", "save"])
+
+    async def test_run_sets_insecure_direct_config_flag(self) -> None:
+        """The CLI flag should be carried into bootstrap config."""
+        config = {
+            "tool_output_chars": 123,
+            "session_dir": "unused",
+            "llm_provider": "lmstudio",
+            "llm_model": "local-model",
+        }
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            return True
+
+        def bootstrap(
+            workspace: Path,
+            session: str | None,
+            resume: bool,
+            config: dict[str, object] | None = None,
+            renderer: object | None = None,
+        ) -> dict[str, object]:
+            self.assertIsNotNone(config)
+            self.assertTrue(config["llm_insecure_direct"])
+            return {
+                "agent": "agent",
+                "renderer": renderer,
+                "session": {"id": "thread-1"},
+                "store": type("Store", (), {"save": lambda self, record: None})(),
+            }
+
+        async def run_turn(*args: object, **kwargs: object) -> object:
+            return type("Result", (), {"final_text": "done"})()
+
+        with (
+            patch("config.loader.load_config", return_value=config),
+            patch("ui.renderer.Renderer", return_value=object()),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap", bootstrap),
+            patch("runtime.runner.run_turn", run_turn),
+        ):
+            await commands._run(
+                prompt="hello",
+                resume=False,
+                workspace=Path("."),
+                session=None,
+                insecure_direct=True,
+            )
 
     async def test_run_exits_when_git_guard_blocks_startup(self) -> None:
         """Choosing exit after a Git failure should stop before bootstrap."""

@@ -18,10 +18,21 @@ def main(
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume the most recent session."),
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
     session: str | None = typer.Option(None, "--session", "-s", help="Session id."),
+    insecure_direct: bool = typer.Option(
+        False,
+        "--insecure-direct",
+        help="Connect directly for LLM calls and disable TLS verification.",
+    ),
 ) -> None:
     """Start MIRA unless Typer is dispatching to a subcommand."""
     if ctx.invoked_subcommand is None:
-        run(prompt=prompt, resume=resume, workspace=workspace, session=session)
+        run(
+            prompt=prompt,
+            resume=resume,
+            workspace=workspace,
+            session=session,
+            insecure_direct=insecure_direct,
+        )
 
 
 if __name__ == "__main__":

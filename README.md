@@ -36,6 +36,8 @@ MIRA defaults to an LM Studio-compatible local endpoint at
 `http://localhost:1234/v1`.
 Running `mira` opens the Textual TUI. Use `mira --prompt "..."` for a one-shot
 plain terminal run.
+For trusted local setups that need direct LLM HTTP calls with TLS verification
+disabled, use `mira --insecure-direct`.
 
 On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent can run. If you choose
