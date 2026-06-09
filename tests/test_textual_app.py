@@ -29,6 +29,16 @@ class FakeStore:
         return None
 
 
+class FakeWorker:
+    """Worker double for cancel binding tests."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
 def renderable_plain(widget: Any) -> str:
     """Return plain text from a Textual Static-like widget."""
     renderable = getattr(widget, "renderable", None) or getattr(widget, "_renderable", None) or getattr(widget, "content", "")
@@ -159,6 +169,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["hello\nsecond line"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
+
+    async def test_ctrl_c_action_cancels_running_turn(self) -> None:
+        """The VS Code-friendly interrupt binding should cancel an active turn."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+
+            app.action_interrupt_or_quit()
+            await pilot.pause()
+
+            self.assertTrue(worker.cancelled)
+            self.assertEqual(app.status_state, "cancelling")
 
     async def test_loading_past_session_replays_ordered_events(self) -> None:
         """Selecting an older session should rebuild its visible transcript."""

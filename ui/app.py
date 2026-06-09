@@ -40,6 +40,7 @@ class MiraApp(App[None]):
 
     CSS_PATH = "styles/mira.tcss"
     BINDINGS = [
+        Binding("ctrl+c", "interrupt_or_quit", "Cancel/Quit", priority=True),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "clear_log", "Clear"),
         Binding("escape", "focus_prompt", "Prompt"),
@@ -81,6 +82,7 @@ class MiraApp(App[None]):
         self.ready = False
         self.busy = False
         self.status_state = "starting"
+        self.turn_worker: Any | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -188,7 +190,7 @@ class MiraApp(App[None]):
         self.busy = True
         self._set_status(state="running")
         prompt.disabled = True
-        self.run_worker(self._run_turn(text), name="turn", exclusive=True)
+        self.turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=True)
 
     async def _run_turn(self, text: str) -> None:
         """Run one agent turn and restore prompt focus when done."""
@@ -208,14 +210,27 @@ class MiraApp(App[None]):
             )
             self._refresh_sessions()
             self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.system_message("turn cancelled", kind="warning")
+            self._set_status(state="ready")
+            raise
         except Exception as exc:
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
+            self.turn_worker = None
             self.busy = False
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
+
+    def action_interrupt_or_quit(self) -> None:
+        """Cancel a running turn, otherwise quit the app."""
+        if self.busy and self.turn_worker is not None:
+            self.turn_worker.cancel()
+            self._set_status(state="cancelling")
+            return
+        self.exit()
 
     def action_clear_log(self) -> None:
         """Clear chat and tool output."""
