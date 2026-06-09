@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
+
+from langchain_core.messages.utils import count_tokens_approximately
 
 DEFAULT_DASHBOARD = {
     "model": "",
@@ -136,39 +138,64 @@ def update_duration(record: dict[str, Any], now: datetime | None = None) -> int:
     return duration
 
 
-def context_limit_for_config(config: dict[str, Any] | None) -> tuple[int | None, str]:
-    """Return the current provider context limit when it can be discovered."""
-    config = config or {}
-    provider = str(config.get("llm_provider") or "").lower()
-    if provider != "lmstudio":
+def context_limit_for_model(model: Any) -> tuple[int | None, str]:
+    """Return the model context limit MIRA should display."""
+    profile_limit = model_profile_limit(model)
+    if profile_limit:
+        return profile_limit, "model_profile.max_input_tokens"
+
+    trigger = deepagents_compaction_trigger(model)
+    if trigger is None:
         return None, "unknown"
 
+    kind, value = trigger
+    if kind == "tokens":
+        limit = positive_int(value)
+        return (limit, "deepagents.compaction_trigger") if limit else (None, "unknown")
+
+    return None, "unknown"
+
+
+def model_profile_limit(model: Any) -> int | None:
+    """Return `model.profile.max_input_tokens` when a LangChain model exposes it."""
     try:
-        import lmstudio as lms
-
-        limit = positive_int(lms.llm().get_context_length())
-    except Exception:
-        return None, "unknown"
-
-    return (limit, "lmstudio_sdk") if limit else (None, "unknown")
-
-
-def token_counter_for_config(config: dict[str, Any] | None) -> Callable[[str], int] | None:
-    """Return a provider tokenizer for current context estimates."""
-    config = config or {}
-    provider = str(config.get("llm_provider") or "").lower()
-    if provider != "lmstudio":
+        profile = model.profile
+    except AttributeError:
         return None
 
-    try:
-        import lmstudio as lms
+    if not isinstance(profile, dict):
+        return None
 
-        model = lms.llm()
+    limit = positive_int(profile.get("max_input_tokens"))
+    return limit or None
+
+
+def deepagents_compaction_trigger(model: Any) -> tuple[str, Any] | None:
+    """Return DeepAgents' auto-compaction trigger for a model."""
+    try:
+        from deepagents.middleware.summarization import compute_summarization_defaults
+
+        trigger = compute_summarization_defaults(model)["trigger"]
     except Exception:
         return None
+
+    if isinstance(trigger, tuple) and len(trigger) == 2:
+        return trigger
+    return None
+
+
+def token_counter_for_model(model: Any | None = None) -> Callable[[str], int]:
+    """Return a model-independent LangChain approximate token counter."""
 
     def count_tokens(text: str) -> int:
-        return positive_int(model.count_tokens(text))
+        if not text:
+            return 0
+        return positive_int(
+            count_tokens_approximately(
+                [{"role": "user", "content": text}],
+                use_usage_metadata_scaling=False,
+            )
+        )
 
     return count_tokens
 

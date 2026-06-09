@@ -255,7 +255,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["context_tokens"], 5512)
 
-    async def test_run_turn_uses_sdk_counter_only_for_context_when_metadata_is_missing(self) -> None:
+    async def test_run_turn_uses_counter_only_for_context_when_metadata_is_missing(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(
@@ -281,9 +281,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 0)
         self.assertEqual(result.usage["output_tokens"], 0)
         self.assertEqual(result.usage["context_tokens"], 5)
-        self.assertEqual(result.usage["source"], "lmstudio_sdk.count_tokens")
+        self.assertEqual(result.usage["source"], "langchain_approx.count_tokens")
 
-    async def test_run_turn_uses_langchain_totals_and_sdk_context_separately(self) -> None:
+    async def test_run_turn_uses_langchain_totals_and_estimated_context_separately(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(

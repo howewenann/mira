@@ -117,7 +117,7 @@ def context_from_output(output: Any, token_counter: TokenCounter | None) -> dict
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": context_tokens,
-        "source": "lmstudio_sdk.count_tokens" if context_tokens else "unknown",
+        "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
 
@@ -176,7 +176,7 @@ def context_from_message_texts(messages: list[Any], token_counter: TokenCounter 
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": context_tokens,
-        "source": "lmstudio_sdk.count_tokens" if context_tokens else "unknown",
+        "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
 

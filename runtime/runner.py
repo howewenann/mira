@@ -70,7 +70,7 @@ class TurnResult:
             self.usage_source = str(usage["source"])
 
     def commit_loop_usage(self, output: Any, token_counter: TokenCounter | None = None) -> None:
-        """Commit LangChain token usage and provider-tokenized context usage."""
+        """Commit LangChain token usage and estimated context usage."""
         output_usage = usage_from_output(output)
         if has_usage(output_usage):
             self.add_usage(output_usage)
