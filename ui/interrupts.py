@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
+ACTION_TEXT_LIMIT = 220
 
 
 def ask_user_request(interrupt: Any) -> dict[str, Any]:
@@ -49,8 +50,49 @@ def action_requests(interrupt: Any) -> list[Any]:
 
 def action_text(action: Any) -> str:
     """Format an approval action as readable text."""
-    if isinstance(action, dict):
-        name = action.get("name", "tool")
-        args = action.get("args", {})
-        return f"{name}\n\n{json.dumps(args, indent=2)}"
-    return str(action)
+    if not isinstance(action, dict):
+        return str(action)
+
+    name = str(action.get("name") or "tool")
+    args = action.get("args", {})
+    if not isinstance(args, dict):
+        return f"{name}\n\n{_preview_text(args)}"
+
+    lines = [
+        _action_header(name, args),
+        "",
+        json.dumps(_preview_value(args), indent=2),
+        "",
+        "Full args available with e edit.",
+    ]
+    return "\n".join(lines)
+
+
+def _action_header(name: str, args: dict[str, Any]) -> str:
+    target = _target_arg(args)
+    return f"{name}\ntarget: {target}" if target else name
+
+
+def _target_arg(args: dict[str, Any]) -> str:
+    for key in ("file_path", "path", "filename", "command"):
+        value = args.get(key)
+        if value:
+            return _preview_text(value, limit=120)
+    return ""
+
+
+def _preview_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _preview_text(value)
+    if isinstance(value, dict):
+        return {str(key): _preview_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_preview_value(item) for item in value[:20]]
+    return value
+
+
+def _preview_text(value: Any, *, limit: int = ACTION_TEXT_LIMIT) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()} ... truncated ..."

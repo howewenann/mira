@@ -14,7 +14,7 @@ from pyfiglet import Figlet
 from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
-from ui.interrupts import ASK_USER_OPEN_OPTION
+from ui.interrupts import ASK_USER_OPEN_OPTION, action_text
 from ui.app import MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory
@@ -321,6 +321,29 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt\nwith paste"])
 
+    def test_action_text_previews_large_json_args(self) -> None:
+        """Approval text should show useful compact JSON, not full raw payloads."""
+        text = action_text(
+            {
+                "name": "edit_file",
+                "args": {
+                    "file_path": "/.mira/memories/AGENTS.md",
+                    "old_string": "old " * 100,
+                    "new_string": "new " * 100,
+                    "replace_all": False,
+                },
+            }
+        )
+
+        self.assertIn("edit_file", text)
+        self.assertIn("target: /.mira/memories/AGENTS.md", text)
+        self.assertIn('"old_string"', text)
+        self.assertIn('"new_string"', text)
+        self.assertIn('"replace_all": false', text)
+        self.assertIn("truncated", text)
+        self.assertIn("Full args available with e edit.", text)
+        self.assertLess(len(text), 900)
+
     async def test_long_approval_text_keeps_buttons_above_prompt_box(self) -> None:
         """Large approval bodies should not push the action buttons offscreen."""
         app = make_app()
@@ -343,8 +366,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(PromptPanel)
+            message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             prompt_y = app.query_one(PromptBox).region.y
             panel_bottom = panel.region.y + panel.region.height
+            self.assertIn("target: ui/dialogs.py", message)
+            self.assertIn("truncated", message)
+            self.assertLess(len(message), 900)
             for button in panel.query(Button):
                 self.assertLess(button.region.y, prompt_y)
                 self.assertLessEqual(button.region.y + button.region.height, panel_bottom)

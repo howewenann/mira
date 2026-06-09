@@ -88,7 +88,7 @@ Screen {
 
 #prompt-panel {
     height: auto;
-    max-height: 60%;
+    max-height: 70%;
     padding: 1;
     background: #11181b;
     border: solid #d2a957;
@@ -102,7 +102,7 @@ Screen {
 }
 
 #prompt-panel-body {
-    height: 5;
+    height: 7;
     padding: 0 1;
     border: solid #3c4a50;
     scrollbar-color: #5bb8b1;
@@ -133,6 +133,8 @@ Screen {
 }
 
 .prompt-panel-button {
+    min-width: 10;
+    width: auto;
     margin-right: 1;
 }
 
