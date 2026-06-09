@@ -455,7 +455,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="write a file",
             )
@@ -466,7 +465,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="write it now",
             )
@@ -505,7 +503,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="plan the write",
             )
@@ -516,7 +513,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="do it",
             )
@@ -526,7 +522,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="do another thing",
             )
@@ -571,7 +566,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="write a file",
             )
@@ -582,7 +576,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 renderer=renderer,
                 store=store,
                 session=session,
-                session_model=None,
                 mode=mode,
                 text="do it",
             )

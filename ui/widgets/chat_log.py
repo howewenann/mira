@@ -11,7 +11,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from session.context import SUMMARY_KEYS, normalize_messages, normalize_summary
+from session.context import normalize_compactions, normalize_messages
 from ui.splash import splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -59,11 +59,10 @@ class ChatLog(VerticalScroll):
         self._add_block("mira", Text(text), "message assistant")
 
     def restore_session(self, session: dict[str, Any]) -> None:
-        """Replay persisted summary and messages into the transcript."""
+        """Replay persisted compaction markers and visible messages."""
         self.finish_main()
-        summary = normalize_summary(session.get("summary"))
-        if summary:
-            self._add_block("session summary", self._summary_text(summary), "message summary")
+        for compaction in normalize_compactions(session.get("compactions")):
+            self._add_block("session compacted", self._compaction_text(compaction), "message summary")
 
         for message in normalize_messages(session.get("messages")):
             if message["role"] == "user":
@@ -263,24 +262,22 @@ class ChatLog(VerticalScroll):
                 errors.append(f"missing description in args: {str(args)[:60]}")
         return descriptions, errors
 
-    def _summary_text(self, summary: dict[str, Any]) -> Text:
-        """Render compacted continuation state for a resumed session."""
-        state = summary.get("state", {})
+    def _compaction_text(self, compaction: dict[str, Any]) -> Text:
+        """Render a DeepAgents compaction marker."""
         text = Text()
-        for key in SUMMARY_KEYS:
-            value = state.get(key)
-            if isinstance(value, list):
-                if not value:
-                    continue
-                text.append(label_text(key), style="bold cyan")
-                text.append(": ")
-                text.append("; ".join(str(item) for item in value))
-                text.append("\n")
-            elif value:
-                text.append(label_text(key), style="bold cyan")
-                text.append(": ")
-                text.append(str(value))
-                text.append("\n")
+        if compaction.get("summary"):
+            text.append("summary", style="bold cyan")
+            text.append(": ")
+            text.append(str(compaction["summary"]))
+            text.append("\n")
+        if compaction.get("file_path"):
+            text.append("archive", style="bold cyan")
+            text.append(": ")
+            text.append(str(compaction["file_path"]))
+            text.append("\n")
+        text.append("cutoff", style="bold cyan")
+        text.append(": ")
+        text.append(str(compaction.get("cutoff_index", 0)))
         return text
 
     def _render_subagent(self, label: str) -> Text:
@@ -326,8 +323,3 @@ class ChatLog(VerticalScroll):
             if word:
                 return word
         return str(next(self._fallback_suffixes))
-
-
-def label_text(value: str) -> str:
-    """Convert a summary key to a compact label."""
-    return str(value).replace("_", " ")

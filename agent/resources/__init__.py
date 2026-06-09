@@ -70,6 +70,7 @@ def build_backends(workspace: Path) -> ResourceBackends:
     combined_backend = CompositeBackend(
         default=project_backend,
         routes={f"{DEFAULT_ROUTE}/": defaults_backend},
+        artifacts_root="/.mira",
     )
 
     return ResourceBackends(project=project_backend, combined=combined_backend)

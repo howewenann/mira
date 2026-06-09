@@ -9,7 +9,7 @@ from rich.table import Table
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_turn_usage
-from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
+from session.context import append_turn, sync_deepagents_compaction, update_title, with_resume_context
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -81,7 +81,6 @@ async def run_user_turn(
     renderer: Any,
     store: Any,
     session: dict[str, Any],
-    session_model: Any | None,
     mode: dict[str, Any],
     text: str,
     model_name: str = "",
@@ -92,36 +91,35 @@ async def run_user_turn(
     """Route one submitted user prompt through planning or action mode."""
     run_kwargs = {"token_counter": token_counter} if token_counter is not None else {}
     if mode["planning"]:
+        active_agent = plan_agent
+        thread_id = mode["plan_thread_id"]
         request_text = with_resume_context(session, plan_request_text(text))
         result = await run_turn(
-            agent=plan_agent,
+            agent=active_agent,
             text=request_text,
             renderer=renderer,
-            thread_id=mode["plan_thread_id"],
+            thread_id=thread_id,
             **run_kwargs,
         )
         save_clean_plan(mode, result, renderer)
         append_turn(session, text, getattr(result, "final_text", ""), "planning")
     else:
+        active_agent = agent
+        thread_id = session["id"]
         action_text = action_request_text(mode, text)
         request_text = with_resume_context(session, action_text)
         result = await run_turn(
-            agent=agent,
+            agent=active_agent,
             text=request_text,
             renderer=renderer,
-            thread_id=session["id"],
+            thread_id=thread_id,
             **run_kwargs,
         )
         append_turn(session, text, getattr(result, "final_text", ""), "action")
 
     session["turns"] = int(session.get("turns") or 0) + 1
-    await update_title(session, session_model)
-    if will_compact(session):
-        context_compaction_started(renderer)
-        try:
-            await compact_if_needed(session, session_model)
-        finally:
-            context_compaction_finished(renderer)
+    update_title(session)
+    await sync_deepagents_compaction(session, active_agent, thread_id)
     apply_turn_usage(
         session,
         result,
@@ -519,15 +517,3 @@ def clear(renderer: Any) -> None:
         renderer.clear_log()
         return
     renderer.console.clear()
-
-
-def context_compaction_started(renderer: Any) -> None:
-    """Notify the renderer that session context compaction has started."""
-    if hasattr(renderer, "context_compaction_started"):
-        renderer.context_compaction_started()
-
-
-def context_compaction_finished(renderer: Any) -> None:
-    """Notify the renderer that session context compaction has finished."""
-    if hasattr(renderer, "context_compaction_finished"):
-        renderer.context_compaction_finished()

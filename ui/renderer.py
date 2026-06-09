@@ -112,14 +112,6 @@ class Renderer:
             print()
         self._section = ""
 
-    def context_compaction_started(self) -> None:
-        """Print context compaction status."""
-        self._line("compacting context")
-
-    def context_compaction_finished(self) -> None:
-        """Runtime compatibility hook."""
-        return None
-
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted tool actions."""
         decisions = []

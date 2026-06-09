@@ -67,9 +67,6 @@ MIRA_LLM_MODEL=your-loaded-model-name
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
-MIRA_SESSION_MAX_CHARS=40000
-MIRA_SESSION_RECENT_MESSAGES=10
-MIRA_SESSION_SUMMARY_MAX_CHARS=6000
 ```
 
 `MIRA_LLM_PROVIDER` is the selector for `langchain-anyllm`. Common values
@@ -89,13 +86,11 @@ Tool output is shown on one line; set the value to `0` to show full output.
 For LM Studio, MIRA also asks the local LM Studio SDK for the loaded model's
 context length so the TUI can show context pressure as a colored bar.
 
-Session resume uses the same configured LLM to title sessions and compact long
-sessions into durable continuation state. Titles are generated after the first
-completed response, refreshed after the next early turn, and then updated
-periodically as the session changes. `MIRA_SESSION_MAX_CHARS` controls when
-stored messages become long enough to compact, `MIRA_SESSION_RECENT_MESSAGES`
-controls how many recent messages stay verbatim, and
-`MIRA_SESSION_SUMMARY_MAX_CHARS` caps the stored structured summary.
+Session titles are generated deterministically from recent user messages. MIRA
+stores its own replayable user/assistant transcript for session history.
+Context compaction is handled by DeepAgents during agent execution; when
+DeepAgents compacts, MIRA records a visible compaction marker and archive path
+in the session file.
 
 If you do not set them, MIRA uses:
 
@@ -105,9 +100,6 @@ MIRA_LLM_MODEL=local-model
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
 MIRA_TOOL_OUTPUT_CHARS=240
-MIRA_SESSION_MAX_CHARS=40000
-MIRA_SESSION_RECENT_MESSAGES=10
-MIRA_SESSION_SUMMARY_MAX_CHARS=6000
 ```
 
 ## How MIRA Works
@@ -268,15 +260,11 @@ mira --session 20260602-171423+0800-a1b2c3d4
 mira -s 20260602-171423+0800-a1b2c3d4
 ```
 
-Short sessions keep exact user and assistant messages. When stored message
-content exceeds `MIRA_SESSION_MAX_CHARS` (default `40000`), MIRA asks the
-configured LLM to compact older messages into structured continuation state and
-keeps the most recent `MIRA_SESSION_RECENT_MESSAGES` messages (default `10`)
-verbatim. The compacted state is capped by `MIRA_SESSION_SUMMARY_MAX_CHARS`
-(default `6000`).
-
-DeepAgents may manage its own runtime memory while MIRA is running, but the
-session JSON is MIRA's durable source of truth after restart.
+MIRA keeps exact user and assistant messages for session replay. DeepAgents
+manages runtime context compaction while MIRA is running and writes evicted
+conversation history under `.mira/conversation_history/`. MIRA records those
+DeepAgents compaction events in the session JSON, which remains the durable
+source of truth for the chat history UI after restart.
 
 The Textual TUI shows a compact dashboard line above the chat:
 mode, run state, model, context bar with percent and size, input/output tokens,

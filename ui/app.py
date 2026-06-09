@@ -71,7 +71,6 @@ class MiraApp(App[None]):
         self.plan_agent: Any = None
         self.store: Any = None
         self.session: dict[str, Any] = {"id": "", "workspace": str(self.workspace), "turns": 0}
-        self.session_model: Any = None
         self.model_name = ""
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
@@ -135,7 +134,6 @@ class MiraApp(App[None]):
         self.plan_agent = state["plan_agent"]
         self.store = state["store"]
         self.session = state["session"]
-        self.session_model = state.get("session_model")
         self.model_name = str(state.get("model_name") or "")
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
@@ -199,7 +197,6 @@ class MiraApp(App[None]):
                 renderer=self,
                 store=self.store,
                 session=self.session,
-                session_model=self.session_model,
                 mode=self.mode,
                 text=text,
                 model_name=self.model_name,
@@ -297,14 +294,6 @@ class MiraApp(App[None]):
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
         self.query_one(ChatLog).finish_main()
-
-    def context_compaction_started(self) -> None:
-        """Show context compaction status."""
-        self._set_status(state="compacting")
-
-    def context_compaction_finished(self) -> None:
-        """Restore status after context compaction."""
-        self._set_status(state="running" if self.busy else "ready")
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted tool actions."""

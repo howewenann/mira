@@ -68,7 +68,6 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
         "store": FakeStore(),
         "session": session_record,
         "model_name": "test-model",
-        "session_model": None,
         "context_limit_tokens": 8192,
         "context_limit_source": "test",
     }
@@ -161,7 +160,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
-    async def test_loading_past_session_replays_summary_and_messages(self) -> None:
+    async def test_loading_past_session_replays_compactions_and_messages(self) -> None:
         """Selecting an older session should rebuild its visible transcript."""
         workspace = Path(".")
         past_session = {
@@ -169,20 +168,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "workspace": str(workspace),
             "created_at": "2026-01-01T00:00:00+00:00",
             "turns": 2,
-            "summary": {
-                "version": 1,
-                "kind": "llm_compaction",
-                "through_message": 2,
-                "updated_at": "2026-01-01T00:01:00+00:00",
-                "state": {
-                    "objective": "Test session replay",
-                    "current_status": "Older turns compacted",
-                    "important_decisions": ["Keep summary visible"],
-                    "user_preferences": [],
-                    "relevant_files": ["README.md"],
-                    "next_steps": ["Continue the selected session"],
-                },
-            },
+            "compactions": [
+                {
+                    "cutoff_index": 2,
+                    "file_path": "/.mira/conversation_history/past-1.md",
+                    "summary": "Older turns compacted for replay testing.",
+                    "created_at": "2026-01-01T00:01:00+00:00",
+                }
+            ],
             "messages": [
                 {
                     "id": 3,
@@ -208,7 +201,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 "store": FakeStore(),
                 "session": past_session,
                 "model_name": "test-model",
-                "session_model": None,
                 "context_limit_tokens": 8192,
                 "context_limit_source": "test",
             }
@@ -226,11 +218,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = "\n".join(renderable_plain(block) for block in blocks)
             titles = [str(getattr(block, "border_title", "")) for block in blocks]
 
-            self.assertIn("session summary", titles)
+            self.assertIn("session compacted", titles)
             self.assertIn("you (plan)", titles)
             self.assertIn("mira", titles)
-            self.assertIn("Test session replay", rendered)
-            self.assertIn("README.md", rendered)
+            self.assertIn("Older turns compacted", rendered)
+            self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)
 
