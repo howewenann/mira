@@ -8,7 +8,11 @@ import typer
 
 from cli.commands import run
 
-app = typer.Typer(add_completion=False, no_args_is_help=False)
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 @app.callback(invoke_without_command=True)
@@ -16,11 +20,12 @@ def main(
     ctx: typer.Context,
     prompt: str | None = typer.Option(None, "--prompt", "-p", help="Run one prompt and exit."),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume the most recent session."),
-    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root."),
+    workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root.", show_default=False),
     session: str | None = typer.Option(None, "--session", "-s", help="Session id."),
     direct: bool = typer.Option(
         False,
         "--direct",
+        "-d",
         help="Connect to the LLM directly, ignoring proxy env vars and disabling TLS verification.",
     ),
 ) -> None:

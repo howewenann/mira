@@ -211,12 +211,18 @@ class LLMConfigTests(unittest.TestCase):
 class CLIConfigTests(unittest.TestCase):
     """Tests for user-facing CLI config errors."""
 
-    def test_help_includes_direct_flag_only(self) -> None:
-        """The CLI should expose only the clean direct flag."""
+    def test_help_includes_short_flags_without_workspace_default_path(self) -> None:
+        """The CLI should expose short aliases without leaking cwd as a default."""
         result = CliRunner().invoke(cli_app, ["--help"])
 
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("-d", result.output)
         self.assertIn("--direct", result.output)
+        self.assertIn("-h", result.output)
+        self.assertIn("--help", result.output)
+        self.assertIn("-w", result.output)
+        self.assertIn("--workspace", result.output)
+        self.assertNotIn("[default: ", result.output)
 
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
