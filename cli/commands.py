@@ -89,21 +89,28 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     """Run one prompt and persist the visible transcript."""
     from runtime.runner import run_turn
     from session.dashboard import apply_turn_usage
-    from session.context import append_turn, sync_deepagents_compaction, update_title, with_resume_context
+    from session.context import sync_deepagents_compaction, update_title, with_resume_context
+    from session.recorder import RecordingRenderer, SessionRecorder
 
     request_text = with_resume_context(app["session"], prompt)
     run_kwargs = {"token_counter": app["token_counter"]} if app.get("token_counter") is not None else {}
+    recorder = SessionRecorder(app["session"], app["store"], "action")
+    recorder.user_message(prompt)
+    update_title(app["session"])
+    recorder.save()
+    renderer = RecordingRenderer(app["renderer"], recorder)
     result = await run_turn(
         agent=app["agent"],
         text=request_text,
-        renderer=app["renderer"],
+        renderer=renderer,
         thread_id=app["session"]["id"],
         **run_kwargs,
     )
-    append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
+    recorder.ensure_assistant(getattr(result, "final_text", ""))
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
     update_title(app["session"])
-    await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"])
+    if await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"]):
+        recorder.save()
     apply_turn_usage(
         app["session"],
         result,

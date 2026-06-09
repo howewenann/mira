@@ -11,7 +11,7 @@ from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from session.context import normalize_compactions, normalize_messages
+from session.context import normalize_events
 from ui.splash import splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -59,16 +59,31 @@ class ChatLog(VerticalScroll):
         self._add_block("mira", Text(text), "message assistant")
 
     def restore_session(self, session: dict[str, Any]) -> None:
-        """Replay persisted compaction markers and visible messages."""
+        """Replay persisted visible session events."""
         self.finish_main()
-        for compaction in normalize_compactions(session.get("compactions")):
-            self._add_block("session compacted", self._compaction_text(compaction), "message summary")
-
-        for message in normalize_messages(session.get("messages")):
-            if message["role"] == "user":
-                self.user_message(message["content"], planning=message.get("mode") == "planning")
-            else:
-                self.assistant_message(message["content"])
+        for event in normalize_events(session.get("events")):
+            event_type = event["type"]
+            if event_type == "user":
+                self.user_message(event["text"], planning=event.get("mode") == "planning")
+            elif event_type == "assistant":
+                self.assistant_message(event["text"])
+            elif event_type == "reasoning":
+                self._add_block("thinking", Text(event["text"]), "message reasoning")
+            elif event_type == "tool_call":
+                self.tool_call(event["name"], event.get("args", {}))
+            elif event_type == "tool_result":
+                self.tool_result(event["name"], event["output"])
+            elif event_type == "delegation":
+                self.delegation_started(event["calls"])
+            elif event_type == "subagent":
+                if event.get("status") == "DONE":
+                    self.subagent_finished(event["name"], event.get("output", ""))
+                else:
+                    self.subagent_started(event["name"], event.get("task_input", ""))
+            elif event_type == "compaction":
+                self._add_block("session compacted", self._compaction_text(event), "message summary")
+            elif event_type in {"system_error", "interrupted"}:
+                self.system_message(event["text"], kind="error" if event_type == "system_error" else "warning")
 
     def reasoning_delta(self, delta: str) -> None:
         """Append streamed reasoning text to the current reasoning block."""

@@ -160,7 +160,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
-    async def test_loading_past_session_replays_compactions_and_messages(self) -> None:
+    async def test_loading_past_session_replays_ordered_events(self) -> None:
         """Selecting an older session should rebuild its visible transcript."""
         workspace = Path(".")
         past_session = {
@@ -168,28 +168,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "workspace": str(workspace),
             "created_at": "2026-01-01T00:00:00+00:00",
             "turns": 2,
-            "compactions": [
+            "events": [
                 {
+                    "id": 1,
+                    "type": "compaction",
                     "cutoff_index": 2,
                     "file_path": "/.mira/conversation_history/past-1.md",
                     "summary": "Older turns compacted for replay testing.",
                     "created_at": "2026-01-01T00:01:00+00:00",
-                }
-            ],
-            "messages": [
-                {
-                    "id": 3,
-                    "role": "user",
-                    "mode": "planning",
-                    "created_at": "2026-01-01T00:02:00+00:00",
-                    "content": "make a plan",
                 },
                 {
-                    "id": 4,
-                    "role": "assistant",
+                    "id": 2,
+                    "type": "user",
+                    "mode": "planning",
+                    "created_at": "2026-01-01T00:02:00+00:00",
+                    "text": "make a plan",
+                },
+                {
+                    "id": 3,
+                    "type": "assistant",
                     "mode": "planning",
                     "created_at": "2026-01-01T00:02:01+00:00",
-                    "content": "plan saved",
+                    "text": "plan saved",
                 },
             ],
         }
@@ -285,6 +285,45 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(decisions, [{"type": "reject"}])
                 self.assertFalse(panel.display)
 
+    async def test_approval_prompt_supports_respond_decision(self) -> None:
+        """Respond decisions should return a synthetic successful tool result."""
+        app = make_app()
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "edit_file",
+                    "args": {"file_path": "loop.txt", "old_string": "a", "new_string": "b"},
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": "edit_file",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.ask_approvals([interrupt]))
+            await pilot.pause()
+
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual([button.label.plain for button in buttons], ["a approve", "e edit", "r reject", "s respond"])
+
+            await pilot.press("s")
+            await pilot.pause()
+            answer = app.query_one("#prompt-panel-input", Input)
+            self.assertTrue(answer.has_focus)
+            answer.value = "Stop retrying; the file change is not needed."
+            await pilot.press("enter")
+
+            self.assertEqual(
+                await asyncio.wait_for(task, timeout=2),
+                [{"type": "respond", "message": "Stop retrying; the file change is not needed."}],
+            )
+
     async def test_prompt_box_uses_up_down_history_from_workspace_file(self) -> None:
         """The main prompt should navigate workspace history with Up and Down."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -366,9 +405,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(PromptPanel)
+            body = app.query_one("#prompt-panel-body")
             message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             prompt_y = app.query_one(PromptBox).region.y
             panel_bottom = panel.region.y + panel.region.height
+            self.assertEqual(body.styles.overflow_y, "hidden")
             self.assertIn("target: ui/dialogs.py", message)
             self.assertIn("truncated", message)
             self.assertLess(len(message), 900)

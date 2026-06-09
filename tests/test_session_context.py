@@ -52,8 +52,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at": "2026-01-01T00:00:00+00:00",
                 "turns": 0,
                 "dashboard": {},
-                "compactions": [],
-                "messages": [],
+                "events": [],
             }
             store.save(custom)
             loaded = store.load("custom-session", resume=False, workspace=Path("workspace"))
@@ -75,14 +74,12 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at",
                 "turns",
                 "dashboard",
-                "compactions",
-                "messages",
+                "events",
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
-        self.assertEqual(record["compactions"], [])
-        self.assertEqual(record["messages"], [])
+        self.assertEqual(record["events"], [])
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -107,23 +104,26 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["dashboard"]["context"]["percent"], 67.3)
 
     def test_title_uses_recent_topic(self) -> None:
-        record = {"title": "Untitled session", "messages": []}
-        context.append_turn(record, "hello", "Hello", "action")
+        record = {"title": "Untitled session", "events": []}
+        context.append_message(record, "user", "hello", "action")
+        context.append_message(record, "assistant", "Hello", "action")
         context.update_title(record)
         self.assertEqual(record["title"], "Untitled session")
 
-        context.append_turn(record, "help me debug qwen reasoning_content", "done", "action")
+        context.append_message(record, "user", "help me debug qwen reasoning_content", "action")
+        context.append_message(record, "assistant", "done", "action")
         context.update_title(record)
         self.assertEqual(record["title"], "Debug Qwen reasoning_content")
 
-        context.append_turn(record, "now check deepagents compact_conversation history", "done", "action")
+        context.append_message(record, "user", "now check deepagents compact_conversation history", "action")
+        context.append_message(record, "assistant", "done", "action")
         context.update_title(record)
         title = record["title"].lower()
         self.assertIn("deepagents", title)
         self.assertIn("compact_conversation", title)
 
     async def test_deepagents_compaction_event_is_copied_once(self) -> None:
-        record = {"compactions": []}
+        record = {"events": []}
         agent = AgentWithState(
             {
                 "_summarization_event": {
@@ -140,30 +140,31 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         await context.sync_deepagents_compaction(record, agent, "thread-1")
 
         self.assertEqual(agent.configs[0], {"configurable": {"thread_id": "thread-1"}})
-        self.assertEqual(len(record["compactions"]), 1)
-        self.assertEqual(record["compactions"][0]["cutoff_index"], 12)
-        self.assertEqual(record["compactions"][0]["file_path"], "/.mira/conversation_history/thread-1.md")
-        self.assertEqual(record["compactions"][0]["summary"], "Debugged Qwen helper latency.")
+        compactions = context.normalize_compactions(record["events"])
+        self.assertEqual(len(compactions), 1)
+        self.assertEqual(compactions[0]["cutoff_index"], 12)
+        self.assertEqual(compactions[0]["file_path"], "/.mira/conversation_history/thread-1.md")
+        self.assertEqual(compactions[0]["summary"], "Debugged Qwen helper latency.")
 
     def test_resume_context_injects_once(self) -> None:
         record = {
             "resume_context_pending": True,
-            "compactions": [
+            "events": [
                 {
+                    "id": 1,
+                    "type": "compaction",
                     "cutoff_index": 8,
                     "file_path": "/.mira/conversation_history/thread-1.md",
                     "summary": "Earlier work debugged session latency.",
                     "created_at": "now",
-                }
-            ],
-            "messages": [
+                },
                 {
-                    "id": 9,
-                    "role": "user",
+                    "id": 2,
+                    "type": "user",
                     "mode": "action",
                     "created_at": "now",
-                    "content": "recent request",
-                }
+                    "text": "recent request",
+                },
             ],
         }
 

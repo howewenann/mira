@@ -68,8 +68,7 @@ class SessionStore:
             "updated_at": now,
             "turns": 0,
             "dashboard": normalize_dashboard(None),
-            "compactions": [],
-            "messages": [],
+            "events": [],
         }
 
     def save(self, record: dict[str, Any]) -> None:

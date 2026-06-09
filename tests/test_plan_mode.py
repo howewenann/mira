@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 from io import StringIO
 from typing import Any
@@ -59,6 +60,38 @@ class RecordingRenderer:
         """Record that the no-plans empty state was rendered."""
         self.no_plans_called = True
 
+    def text_delta(self, value: str) -> None:
+        """Record streamed assistant text."""
+        self.console.print(value)
+
+    def reasoning_delta(self, value: str) -> None:
+        """Record streamed reasoning text."""
+        self.console.print(value)
+
+    def tool_call(self, name: str, args: Any) -> None:
+        """Record a visible tool call."""
+        self.console.print(f"{name}: {args}")
+
+    def tool_result(self, name: str, result: str) -> None:
+        """Record a visible tool result."""
+        self.console.print(f"{name}: {result}")
+
+    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+        """Record delegation."""
+        self.console.print(str(calls))
+
+    def subagent_started(self, name: str, task_input: str = "") -> None:
+        """Record subagent start."""
+        self.console.print(f"{name}: {task_input}")
+
+    def subagent_finished(self, name: str, result: str = "") -> None:
+        """Record subagent finish."""
+        self.console.print(f"{name}: {result}")
+
+    def finish_main(self) -> None:
+        """Record stream finalization."""
+        return None
+
 
 class FakeModelRequest:
     """Small request object used to test PlanningToolFilter."""
@@ -78,6 +111,16 @@ class FakeStore:
     def save(self, record: dict[str, Any]) -> None:
         """Ignore saved records; tests assert routing instead."""
         return None
+
+
+class CapturingStore:
+    """Store double that snapshots every save."""
+
+    def __init__(self) -> None:
+        self.saves: list[dict[str, Any]] = []
+
+    def save(self, record: dict[str, Any]) -> None:
+        self.saves.append(deepcopy(record))
 
 
 def sample_tool() -> None:
@@ -140,6 +183,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent, "agent")
         kwargs = create_deep_agent.call_args.kwargs
         self.assertEqual(kwargs["interrupt_on"], factory._write_interrupts())
+        self.assertIn("respond", kwargs["interrupt_on"]["write_file"]["allowed_decisions"])
+        self.assertIn("respond", kwargs["interrupt_on"]["edit_file"]["allowed_decisions"])
         self.assertIsNone(kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].paths, ["/mira-defaults/**"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")
@@ -582,6 +627,39 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(any("no plan was saved" in line for line in renderer.console.lines))
         self.assertEqual(calls[1], ("action-agent", "do it", "thread-1"))
+
+    async def test_run_user_turn_persists_visible_events_before_failure(self) -> None:
+        """In-flight user, assistant, and tool events should survive failed turns."""
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
+        store = CapturingStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
+
+        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+            renderer.text_delta("working")
+            renderer.tool_call("read_file", {"path": "README.md"})
+            raise RuntimeError("model stopped")
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            with self.assertRaisesRegex(RuntimeError, "model stopped"):
+                await repl.run_user_turn(
+                    agent="action-agent",
+                    plan_agent="plan-agent",
+                    renderer=renderer,
+                    store=store,
+                    session=session,
+                    mode=mode,
+                    text="inspect the repo",
+                )
+
+        self.assertEqual(session["turns"], 0)
+        self.assertGreaterEqual(len(store.saves), 4)
+        event_types = [event["type"] for event in store.saves[-1]["events"]]
+        self.assertEqual(event_types, ["user", "assistant", "tool_call", "system_error"])
+        self.assertEqual(store.saves[0]["events"][0]["text"], "inspect the repo")
+        self.assertEqual(store.saves[-1]["events"][1]["text"], "working")
+        self.assertEqual(store.saves[-1]["events"][2]["name"], "read_file")
+        self.assertIn("model stopped", store.saves[-1]["events"][3]["text"])
 
     async def test_session_command_shows_current_mode(self) -> None:
         """The session command should print mode and saved-plan count."""

@@ -10,11 +10,13 @@ from typing import Any
 
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
+    action_choices,
     action_requests,
     action_text,
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    response_message,
 )
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -113,16 +115,18 @@ class Renderer:
         self._section = ""
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
-        """Ask the user to approve, edit, or reject interrupted tool actions."""
+        """Ask the user to approve, edit, reject, or respond to interrupted actions."""
         decisions = []
         for interrupt in interrupts:
-            for action in action_requests(interrupt):
+            for index, action in enumerate(action_requests(interrupt)):
                 self._block("approval", action_text(action))
-                answer = await self._choice("Approve this action?", [("a", "approve"), ("e", "edit"), ("r", "reject")])
+                answer = await self._choice("Approve this action?", action_choices(interrupt, action, index))
                 if answer == "e":
                     decisions.append(await self._edit_decision(action))
                 elif answer == "r":
                     decisions.append({"type": "reject"})
+                elif answer == "s":
+                    decisions.append(await self._respond_decision(action))
                 else:
                     decisions.append({"type": "approve"})
         return decisions
@@ -186,6 +190,11 @@ class Renderer:
                 "args": args,
             },
         }
+
+    async def _respond_decision(self, action: Any) -> dict[str, Any]:
+        """Ask for a synthetic successful tool response."""
+        message = await self._input("Tool response to return instead: ")
+        return {"type": "respond", "message": response_message(message, action)}
 
     async def _choice(self, message: str, options: list[tuple[str, str]]) -> str:
         """Prompt until the user chooses one of the given keys."""

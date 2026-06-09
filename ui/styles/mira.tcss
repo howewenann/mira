@@ -105,6 +105,8 @@ Screen {
     height: 7;
     padding: 0 1;
     border: solid #3c4a50;
+    overflow-x: hidden;
+    overflow-y: hidden;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }

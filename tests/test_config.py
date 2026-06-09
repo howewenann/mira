@@ -221,7 +221,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 """Record that the one-shot session was saved."""
                 events.append("save")
                 case.assertEqual(record["id"], session_record["id"])
-                case.assertEqual(record["messages"][0]["content"], "hello")
+                case.assertEqual(record["events"][0]["text"], "hello")
 
         def load_config(workspace: Path) -> dict[str, object]:
             events.append("config")
@@ -262,7 +262,8 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             token_counter: object | None = None,
         ) -> None:
             events.append("run_turn")
-            self.assertEqual((agent, text, renderer, thread_id), ("agent", "hello", renderer_obj, "thread-1"))
+            self.assertEqual((agent, text, thread_id), ("agent", "hello", "thread-1"))
+            self.assertIs(getattr(renderer, "renderer", None), renderer_obj)
             self.assertIsNone(token_counter)
 
         config_data = config
@@ -277,7 +278,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         ):
             await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
-        self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "run_turn", "save"])
+        self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "save", "run_turn", "save"])
 
     async def test_run_sets_direct_config_flag(self) -> None:
         """The CLI flag should be carried into bootstrap config."""

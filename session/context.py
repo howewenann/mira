@@ -94,63 +94,98 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
         "turns": int(record.get("turns") or 0),
         "dashboard": normalize_dashboard(record.get("dashboard")),
-        "compactions": normalize_compactions(record.get("compactions")),
-        "messages": normalize_messages(record.get("messages")),
+        "events": normalize_events(record.get("events")),
     }
 
 
-def normalize_messages(value: Any) -> list[dict[str, Any]]:
+def normalize_events(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
 
-    messages = []
+    events = []
     for index, item in enumerate(value, start=1):
         if not isinstance(item, dict):
             continue
-        role = str(item.get("role") or "")
-        content = str(item.get("content") or "").strip()
-        if role not in {"user", "assistant"} or not content:
+
+        event_type = str(item.get("type") or "")
+        event = {
+            "id": int(item.get("id") or index),
+            "type": event_type,
+            "created_at": str(item.get("created_at") or now_iso()),
+        }
+        mode = str(item.get("mode") or "")
+        if mode:
+            event["mode"] = mode
+
+        if event_type in {"user", "assistant", "reasoning", "system_error", "interrupted"}:
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            event["text"] = text
+        elif event_type == "tool_call":
+            event["name"] = compact_line(item.get("name") or "tool")
+            event["args"] = item.get("args", {})
+        elif event_type == "tool_result":
+            output = str(item.get("output") or "").strip()
+            if not output:
+                continue
+            event["name"] = compact_line(item.get("name") or "tool")
+            event["output"] = output
+        elif event_type == "delegation":
+            calls = item.get("calls")
+            if not isinstance(calls, list) or not calls:
+                continue
+            event["calls"] = calls
+        elif event_type == "subagent":
+            event["name"] = compact_line(item.get("name") or "subagent")
+            event["status"] = compact_line(item.get("status") or "RUNNING")
+            event["task_input"] = str(item.get("task_input") or "")
+            event["output"] = str(item.get("output") or "")
+        elif event_type == "compaction":
+            summary = compact_text(item.get("summary"))
+            file_path = compact_line(item.get("file_path"))
+            cutoff_index = int(item.get("cutoff_index") or 0)
+            if not summary and not file_path and cutoff_index <= 0:
+                continue
+            event["cutoff_index"] = cutoff_index
+            event["file_path"] = file_path
+            event["summary"] = summary
+        else:
             continue
-        messages.append(
-            {
-                "id": int(item.get("id") or index),
-                "role": role,
-                "mode": str(item.get("mode") or "action"),
-                "created_at": str(item.get("created_at") or now_iso()),
-                "content": content,
-            }
-        )
+
+        events.append(event)
+    return events
+
+
+def normalize_messages(value: Any) -> list[dict[str, Any]]:
+    messages = []
+    for item in normalize_events(value):
+        if item["type"] not in {"user", "assistant"}:
+            continue
+        messages.append({
+            "id": item["id"],
+            "role": item["type"],
+            "mode": str(item.get("mode") or "action"),
+            "created_at": item["created_at"],
+            "content": item["text"],
+        })
     return messages
 
 
 def normalize_compactions(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-
     compactions = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        summary = compact_text(item.get("summary"))
-        file_path = compact_line(item.get("file_path"))
-        cutoff_index = int(item.get("cutoff_index") or 0)
-        if not summary and not file_path and cutoff_index <= 0:
+    for item in normalize_events(value):
+        if item["type"] != "compaction":
             continue
         compactions.append(
             {
-                "cutoff_index": cutoff_index,
-                "file_path": file_path,
-                "summary": summary,
-                "created_at": str(item.get("created_at") or now_iso()),
+                "cutoff_index": item["cutoff_index"],
+                "file_path": item["file_path"],
+                "summary": item["summary"],
+                "created_at": item["created_at"],
             }
         )
     return compactions
-
-
-def append_turn(record: dict[str, Any], user_text: str, assistant_text: str, mode: str) -> None:
-    append_message(record, "user", user_text, mode)
-    if assistant_text.strip():
-        append_message(record, "assistant", assistant_text, mode)
 
 
 def append_message(record: dict[str, Any], role: str, content: str, mode: str) -> None:
@@ -158,21 +193,26 @@ def append_message(record: dict[str, Any], role: str, content: str, mode: str) -
     if role not in {"user", "assistant"} or not content:
         return
 
-    messages = record.setdefault("messages", [])
-    next_id = max((int(message.get("id", 0)) for message in messages), default=0) + 1
-    messages.append(
-        {
-            "id": next_id,
-            "role": role,
-            "mode": mode,
-            "created_at": now_iso(),
-            "content": content,
-        }
-    )
+    append_event(record, {"type": role, "mode": mode, "text": content})
+
+
+def append_event(record: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    events = record.setdefault("events", [])
+    next_id = max((int(item.get("id", 0)) for item in events if isinstance(item, dict)), default=0) + 1
+    stored = {"id": next_id, "created_at": now_iso(), **event}
+    events.append(stored)
+    return stored
+
+
+def update_event_text(record: dict[str, Any], event_id: int, text: str) -> None:
+    for event in record.get("events", []):
+        if isinstance(event, dict) and int(event.get("id") or 0) == event_id:
+            event["text"] = text
+            return
 
 
 def update_title(record: dict[str, Any]) -> None:
-    title = title_from_messages(normalize_messages(record.get("messages")))
+    title = title_from_messages(normalize_messages(record.get("events")))
     record["title"] = title or UNTITLED_SESSION
 
 
@@ -235,17 +275,18 @@ def is_technical(word: str) -> bool:
     )
 
 
-async def sync_deepagents_compaction(record: dict[str, Any], agent: Any, thread_id: str) -> None:
+async def sync_deepagents_compaction(record: dict[str, Any], agent: Any, thread_id: str) -> bool:
     state = await agent_state(agent, thread_id)
     event = state.get("_summarization_event")
     if not isinstance(event, dict):
-        return
+        return False
 
     compaction = compaction_from_event(event)
     if compaction is None or is_known_compaction(record, compaction):
-        return
+        return False
 
-    record.setdefault("compactions", []).append(compaction)
+    append_event(record, {"type": "compaction", **compaction})
+    return True
 
 
 async def agent_state(agent: Any, thread_id: str) -> dict[str, Any]:
@@ -282,7 +323,7 @@ def summary_text(message: Any) -> str:
 
 
 def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> bool:
-    for existing in normalize_compactions(record.get("compactions")):
+    for existing in normalize_compactions(record.get("events")):
         if (
             existing["cutoff_index"] == compaction["cutoff_index"]
             and existing["file_path"] == compaction["file_path"]
@@ -292,8 +333,8 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
 
 
 def build_resume_context(record: dict[str, Any]) -> str:
-    compactions = normalize_compactions(record.get("compactions"))
-    messages = normalize_messages(record.get("messages"))[-RESUME_MESSAGE_LIMIT:]
+    compactions = normalize_compactions(record.get("events"))
+    messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
     if not compactions and not messages:
         return ""
 
@@ -325,7 +366,7 @@ def with_resume_context(session: dict[str, Any], text: str) -> str:
 
 def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> None:
     record["resume_context_pending"] = resumed and (
-        bool(record.get("compactions")) or bool(record.get("messages"))
+        bool(normalize_compactions(record.get("events"))) or bool(normalize_messages(record.get("events")))
     )
 
 

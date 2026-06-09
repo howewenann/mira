@@ -18,11 +18,13 @@ from textual.widgets import ListView, Static
 from session.dashboard import ensure_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
+    action_choices,
     action_requests,
     action_text,
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    response_message,
 )
 from ui.repl import handle_command, initial_mode, run_user_turn
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, StatusBar
@@ -296,19 +298,21 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).finish_main()
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
-        """Ask the user to approve, edit, or reject interrupted tool actions."""
+        """Ask the user to approve, edit, reject, or respond to interrupted actions."""
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
-            for action in action_requests(interrupt):
+            for index, action in enumerate(action_requests(interrupt)):
                 answer = await self._prompt_choice(
                     "Approval",
                     action_text(action),
-                    [("a", "a approve"), ("e", "e edit"), ("r", "r reject")],
+                    action_choices(interrupt, action, index),
                 )
                 if answer == "e":
                     decisions.append(await self.edit_decision(action))
                 elif answer == "r":
                     decisions.append({"type": "reject"})
+                elif answer == "s":
+                    decisions.append(await self.respond_decision(action))
                 else:
                     decisions.append({"type": "approve"})
         return decisions
@@ -363,6 +367,11 @@ class MiraApp(App[None]):
                 "args": edited_args,
             },
         }
+
+    async def respond_decision(self, action: Any) -> dict[str, Any]:
+        """Prompt for a synthetic successful tool response."""
+        message = await self._prompt_text("Respond", "Type the tool result to return without running it.")
+        return {"type": "respond", "message": response_message(message, action)}
 
     async def _prompt_choice(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
         """Show a choice prompt in the main window."""
