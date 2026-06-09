@@ -153,10 +153,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 prompt = app.query_one(PromptBox)
                 prompt.focus()
 
-                await app.submit_prompt(Input.Submitted(prompt, "hello"))
+                await app.submit_prompt(PromptBox.Submitted(prompt, "hello\nsecond line"))
                 await pilot.pause()
 
-                self.assertEqual(calls, ["hello"])
+                self.assertEqual(calls, ["hello\nsecond line"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
@@ -234,7 +234,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             prompt = app.query_one(PromptBox)
 
-            await app.submit_prompt(Input.Submitted(prompt, "/help"))
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/help"))
             await pilot.pause()
 
             command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
@@ -317,9 +317,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             history_path = Path(directory) / ".mira" / "history.txt"
             append_prompt_history(history_path, "first prompt")
-            append_prompt_history(history_path, "second prompt")
+            append_prompt_history(history_path, "second prompt\nwith paste")
 
-            self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt"])
+            self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt\nwith paste"])
 
     async def test_long_approval_text_keeps_buttons_above_prompt_box(self) -> None:
         """Large approval bodies should not push the action buttons offscreen."""

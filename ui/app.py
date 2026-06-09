@@ -13,7 +13,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, ListView, Static
+from textual.widgets import ListView, Static
 
 from session.dashboard import ensure_dashboard, update_duration
 from ui.interrupts import (
@@ -163,8 +163,8 @@ class MiraApp(App[None]):
         self._set_status(state="ready")
         self.action_focus_prompt()
 
-    @on(Input.Submitted, "#prompt")
-    async def submit_prompt(self, event: Input.Submitted) -> None:
+    @on(PromptBox.Submitted)
+    async def submit_prompt(self, event: PromptBox.Submitted) -> None:
         """Handle submitted prompt text."""
         text = event.value.strip()
         prompt = self.query_one(PromptBox)
@@ -489,14 +489,18 @@ def read_prompt_history(path: Path) -> list[str]:
         return []
 
     entries: list[str] = []
+    current: list[str] = []
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            if current:
+                entries.append("\n".join(current).strip())
+                current = []
             continue
         if stripped.startswith("+"):
-            stripped = stripped[1:].strip()
-        if stripped:
-            entries.append(stripped)
+            current.append(stripped[1:])
+    if current:
+        entries.append("\n".join(current).strip())
     return entries
 
 
@@ -508,4 +512,6 @@ def append_prompt_history(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().isoformat(sep=" ", timespec="microseconds")
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"\n# {timestamp}\n+{entry}\n")
+        handle.write(f"\n# {timestamp}\n")
+        for line in entry.splitlines():
+            handle.write(f"+{line}\n")

@@ -2,18 +2,34 @@
 
 from __future__ import annotations
 
+from textual.message import Message
 from textual.events import Key
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 
-class PromptBox(Input):
-    """Single-line prompt entry."""
+class PromptBox(TextArea):
+    """Multiline prompt entry."""
+
+    class Submitted(Message):
+        def __init__(self, prompt: "PromptBox", value: str) -> None:
+            super().__init__()
+            self.prompt = prompt
+            self.value = value
 
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(placeholder="prompt", id="prompt", **kwargs)
+        super().__init__("", placeholder="prompt", show_line_numbers=False, id="prompt", **kwargs)
         self._history: list[str] = []
         self._history_index: int | None = None
         self._history_draft = ""
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, text: str) -> None:
+        self.text = text
+        self._move_cursor_to_end()
 
     def set_history(self, entries: list[str]) -> None:
         """Replace the prompt history used by Up/Down navigation."""
@@ -32,13 +48,23 @@ class PromptBox(Input):
         self._history_draft = ""
 
     def on_key(self, event: Key) -> None:
-        """Navigate prompt history with Up and Down."""
-        if event.key == "up":
+        """Submit prompts and navigate history."""
+        if event.key == "enter":
+            event.stop()
+            self.post_message(self.Submitted(self, self.value))
+            return
+
+        if event.key in {"shift+enter", "ctrl+enter"}:
+            event.stop()
+            self.insert("\n")
+            return
+
+        if event.key == "up" and (self.document.line_count <= 1 or self.cursor_at_start_of_text):
             event.stop()
             self._previous_history()
             return
 
-        if event.key == "down":
+        if event.key == "down" and (self.document.line_count <= 1 or self.cursor_at_end_of_text):
             event.stop()
             self._next_history()
 
@@ -67,11 +93,12 @@ class PromptBox(Input):
 
         self._history_index = len(self._history)
         self.value = self._history_draft
-        self.cursor_position = len(self.value)
 
     def _show_history_value(self) -> None:
         """Render the current history entry in the prompt."""
         if self._history_index is None or self._history_index >= len(self._history):
             return
         self.value = self._history[self._history_index]
-        self.cursor_position = len(self.value)
+
+    def _move_cursor_to_end(self) -> None:
+        self.cursor_location = self.document.end

@@ -80,7 +80,7 @@ Screen {
 }
 
 #prompt {
-    height: 3;
+    height: 5;
     border: tall #5bb8b1;
     padding: 0 1;
     background: #101516;
