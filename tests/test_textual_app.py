@@ -177,6 +177,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
+    async def test_compaction_status_animates_in_chat_log(self) -> None:
+        """Context compaction status should show a live spinner while running."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.compaction_started()
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+            first = renderable_plain(block)
+
+            app.query_one(ChatLog).tick_compaction()
+            await pilot.pause()
+            second = renderable_plain(block)
+
+            app.compaction_finished()
+            await pilot.pause()
+            done = renderable_plain(block)
+
+        self.assertIn("compacting context...", first)
+        self.assertIn("compacting context...", second)
+        self.assertNotEqual(first, second)
+        self.assertIn("context compacted", done)
+
     async def test_ctrl_c_action_cancels_running_turn(self) -> None:
         """The VS Code-friendly interrupt binding should confirm before cancelling."""
         app = make_app()

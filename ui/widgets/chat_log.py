@@ -31,6 +31,8 @@ class ChatLog(VerticalScroll):
         self._subagent_labels: dict[int, str] = {}
         self._subagent_blocks: dict[str, dict[str, str]] = {}
         self._subagent_widgets: dict[str, Static] = {}
+        self._compaction_block: Static | None = None
+        self._compaction_running = False
         self._fallback_suffixes = count(1)
         self._spinner_index = 0
         self._faker: Any | None = None
@@ -127,6 +129,34 @@ class ChatLog(VerticalScroll):
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
         self._add_block("output", renderable, "message command")
+
+    def compaction_started(self) -> None:
+        """Show that DeepAgents is compacting conversation context."""
+        self.finish_main()
+        self._compaction_running = True
+        text = self._render_compaction()
+        if self._compaction_block is None:
+            self._compaction_block = self._add_block("mira", text, "message status")
+        else:
+            self._compaction_block.update(text)
+            self._scroll_to_end()
+
+    def compaction_finished(self) -> None:
+        """Mark the compaction status as complete."""
+        if self._compaction_block is None:
+            return
+        self._compaction_running = False
+        self._compaction_block.update(Text("context compacted", style="bold green"))
+        self._compaction_block = None
+        self._scroll_to_end()
+
+    def tick_compaction(self) -> None:
+        """Advance the spinner while context compaction is running."""
+        if not self._compaction_running or self._compaction_block is None:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._compaction_block.update(self._render_compaction())
+        self._scroll_to_end()
 
     def tool_call(self, name: str, args: Any) -> None:
         """Append a coordinator-level tool call in transcript order."""
@@ -235,6 +265,8 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         self._subagent_blocks = {}
         self._subagent_widgets = {}
+        self._compaction_block = None
+        self._compaction_running = False
         for child in list(self.children):
             child.remove()
 
@@ -316,6 +348,13 @@ class ChatLog(VerticalScroll):
             text.append("\noutput: ", style="bold cyan")
             text.append(self.truncate(block["output"]))
 
+        return text
+
+    def _render_compaction(self) -> Text:
+        """Render the live context compaction status."""
+        text = Text()
+        text.append(f"{SPINNER_FRAMES[self._spinner_index]} ", style="bold yellow")
+        text.append("compacting context...", style="bold yellow")
         return text
 
     def _update_subagent(self, label: str) -> None:

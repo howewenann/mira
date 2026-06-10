@@ -287,6 +287,16 @@ class MiraApp(App[None]):
         """Write command output to the chat log."""
         self.query_one(ChatLog).command_output(renderable)
 
+    def compaction_started(self) -> None:
+        """Show that DeepAgents is compacting conversation context."""
+        self.query_one(ChatLog).compaction_started()
+        self._set_status(state="running", detail="compacting context...")
+
+    def compaction_finished(self) -> None:
+        """Show that DeepAgents has finished compacting context."""
+        self.query_one(ChatLog).compaction_finished()
+        self._set_status(state="running")
+
     def clear_log(self) -> None:
         """Clear chat output."""
         self.query_one(ChatLog).clear_log()
@@ -555,6 +565,7 @@ class MiraApp(App[None]):
         """Refresh the clock and dashboard line."""
         if not self.ready:
             return
+        self.query_one(ChatLog).tick_compaction()
         update_duration(self.session)
         self._set_status(state=self.status_state)
 

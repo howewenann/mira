@@ -12,6 +12,8 @@ from session import context
 from session.dashboard import apply_turn_usage
 from session.recorder import SessionRecorder
 from session.store import SessionStore
+from runtime import runner
+from tests.test_runner import COMPACTION_SUMMARY, FakeAgent, FakeStream, OutputMessage, RunTurnRenderer
 
 
 class Snapshot:
@@ -195,6 +197,21 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         messages = context.normalize_messages(record["events"])
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "hello")
+
+    async def test_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "action")
+        result = await runner.run_turn(
+            FakeAgent([FakeStream(output={"messages": [OutputMessage(COMPACTION_SUMMARY)]})]),
+            "hello",
+            RunTurnRenderer(),
+            "thread-1",
+        )
+
+        recorder.ensure_assistant(result.final_text)
+
+        self.assertEqual(context.normalize_messages(record["events"]), [])
 
     def test_resume_context_injects_once(self) -> None:
         record = {

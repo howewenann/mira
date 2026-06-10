@@ -95,7 +95,11 @@ def usage_from_output(output: Any) -> dict[str, Any]:
     if isinstance(output, dict):
         messages = output.get("messages")
         if isinstance(messages, list):
-            return merge_usage(*(usage_from_message(message) for message in messages))
+            for message in reversed(messages):
+                usage = usage_from_message(message)
+                if has_usage(usage):
+                    return usage
+            return empty_usage()
 
     return usage_from_message(output)
 

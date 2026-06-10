@@ -7,8 +7,9 @@ from typing import Any
 
 from runtime import runner
 from runtime.message_events import consume_messages
+from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
-from runtime.usage import usage_from_message
+from runtime.usage import usage_from_message, usage_from_output
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
 
 
@@ -23,11 +24,36 @@ class AsyncItems:
             yield item
 
 
+COMPACTION_SUMMARY = """## SESSION INTENT
+User requested a story.
+
+## SUMMARY
+The conversation was summarized.
+
+## ARTIFACTS
+None.
+
+## NEXT STEPS
+Await further instructions.
+"""
+
+SUMMARY_THEN_ANSWER = f"{COMPACTION_SUMMARY}\nThe rain tapped against the window."
+
+
 class Message:
     """Fake streamed message containing optional tool calls."""
 
-    def __init__(self, tool_calls: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        tool_calls: list[Any] | None = None,
+        reasoning: Any | None = None,
+        text: Any | None = None,
+        additional_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self.tool_calls = tool_calls or []
+        self.reasoning = reasoning
+        self.text = text
+        self.additional_kwargs = additional_kwargs or {}
 
 
 class OutputMessage:
@@ -81,6 +107,12 @@ class RecordingRenderer:
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.events.append(("delegation_started", calls))
+
+    def compaction_started(self) -> None:
+        self.events.append(("compaction_started",))
+
+    def compaction_finished(self) -> None:
+        self.events.append(("compaction_finished",))
 
     def subagent_label(self, subagent: Any) -> str:
         return subagent.name
@@ -232,6 +264,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_text, "final plan")
 
+    def test_final_text_skips_trailing_compaction_summary(self) -> None:
+        """Internal compaction summaries should not become the visible final reply."""
+        self.assertEqual(
+            final_text({"messages": [OutputMessage("real reply"), OutputMessage(COMPACTION_SUMMARY)]}),
+            "real reply",
+        )
+
+    def test_final_text_returns_empty_for_only_compaction_summary(self) -> None:
+        """A compaction-only output should not create an assistant reply."""
+        self.assertEqual(final_text({"messages": [OutputMessage(COMPACTION_SUMMARY)]}), "")
+
+    def test_final_text_strips_summary_prefix_and_keeps_answer_tail(self) -> None:
+        """If a provider combines summary and answer, only the answer should show."""
+        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), "The rain tapped against the window.")
+
+    def test_final_text_skips_langchain_summarization_message(self) -> None:
+        """DeepAgents summary metadata should hide a summary regardless of text shape."""
+        summary = Message(text="internal summary", additional_kwargs={"lc_source": "summarization"})
+
+        self.assertEqual(final_text({"messages": [OutputMessage("real reply"), summary]}), "real reply")
+
+    def test_final_text_keeps_normal_markdown_headings(self) -> None:
+        """Ordinary assistant markdown should render unless it matches compaction shape."""
+        text = "## SUMMARY\nThis is a normal project summary, not a compacted session."
+
+        self.assertEqual(final_text({"messages": [OutputMessage(text)]}), text)
+
     async def test_run_turn_records_final_message_usage(self) -> None:
         agent = FakeAgent(
             [
@@ -254,6 +313,64 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["context_tokens"], 5512)
+
+    def test_final_output_uses_latest_usage_message_only(self) -> None:
+        """DeepAgents final state may contain older messages with stale usage."""
+        usage = usage_from_output(
+            {
+                "messages": [
+                    OutputMessage("first", {"input_tokens": 8000, "output_tokens": 100}),
+                    {"role": "user", "content": "next request"},
+                    OutputMessage("latest", {"input_tokens": 9200, "output_tokens": 200}),
+                ]
+            }
+        )
+
+        self.assertEqual(usage["input_tokens"], 9200)
+        self.assertEqual(usage["output_tokens"], 200)
+        self.assertEqual(usage["context_tokens"], 9200)
+
+    async def test_run_turn_does_not_sum_historical_final_message_usage(self) -> None:
+        """Cumulative usage should add one current call per turn, not all state messages."""
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage("first", {"input_tokens": 8000, "output_tokens": 100}),
+                        ]
+                    }
+                ),
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage("first", {"input_tokens": 8000, "output_tokens": 100}),
+                            {"role": "user", "content": "second request"},
+                            OutputMessage("second", {"input_tokens": 9000, "output_tokens": 200}),
+                        ]
+                    }
+                ),
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage("first", {"input_tokens": 8000, "output_tokens": 100}),
+                            OutputMessage("second", {"input_tokens": 9000, "output_tokens": 200}),
+                            {"role": "user", "content": "third request"},
+                            OutputMessage("third", {"input_tokens": 10000, "output_tokens": 300}),
+                        ]
+                    }
+                ),
+            ]
+        )
+        result = runner.TurnResult()
+
+        for _ in range(3):
+            stream = await agent.astream_events({"messages": []}, config={}, version="v3")
+            result.commit_loop_usage(await stream.output())
+
+        self.assertEqual(result.usage["input_tokens"], 27000)
+        self.assertEqual(result.usage["output_tokens"], 600)
+        self.assertEqual(result.usage["context_tokens"], 10000)
 
     async def test_run_turn_uses_counter_only_for_context_when_metadata_is_missing(self) -> None:
         agent = FakeAgent(
@@ -283,7 +400,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["context_tokens"], 5)
         self.assertEqual(result.usage["source"], "langchain_approx.count_tokens")
 
-    async def test_run_turn_uses_langchain_totals_and_estimated_context_separately(self) -> None:
+    async def test_run_turn_does_not_lower_provider_context_with_visible_text_estimate(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(
@@ -312,7 +429,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["total_tokens"], 5603)
-        self.assertEqual(result.usage["context_tokens"], 5)
+        self.assertEqual(result.usage["context_tokens"], 5512)
 
     async def test_run_turn_records_tool_calls_and_results(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
@@ -349,6 +466,101 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 ("tool_call", "read_file", {"path": "README.md"}),
             ],
+        )
+
+    async def test_compaction_reasoning_is_hidden_behind_status(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n1. **Analyze the Request:**\n",
+                            "* **Role:** Context Extraction Assistant\n",
+                            "* **Primary Objective:** Extract the highest quality/most relevant context ",
+                            "from the conversation history to replace it due to token limits.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_streamed_compaction_summary_text_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [])
+
+    async def test_streamed_summary_prefix_keeps_following_answer_text(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    text=AsyncItems(
+                        [
+                            COMPACTION_SUMMARY[:40],
+                            COMPACTION_SUMMARY[40:],
+                            "\nThe rain tapped against the window.",
+                            " More story followed.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("text", "The rain tapped against the window."),
+                ("text", " More story followed."),
+            ],
+        )
+
+    async def test_streamed_summarization_metadata_text_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(text="internal summary", additional_kwargs={"lc_source": "summarization"})])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [])
+
+    async def test_streamed_normal_markdown_heading_text_still_renders(self) -> None:
+        renderer = RecordingRenderer()
+        text = "## SUMMARY\nThis is a normal answer."
+        messages = AsyncItems([Message(text=text)])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("text", text)])
+
+    async def test_normal_thinking_process_reasoning_still_renders(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n",
+                            "The user asked for a greeting, so I can answer briefly.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [("reasoning", "Thinking Process:\n\nThe user asked for a greeting, so I can answer briefly.")],
         )
 
     async def test_two_task_calls_produce_one_delegation_event(self) -> None:

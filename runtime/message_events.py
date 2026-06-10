@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
+from runtime.output_events import (
+    is_summarization_metadata_message,
+    strip_compaction_summary_prefix,
+    text_has_compaction_summary_shape,
+)
 from runtime.usage import has_usage, usage_from_message
+
+COMPACTION_REASONING_MARKERS = (
+    "context extraction assistant",
+    "primary objective",
+    "extract the highest quality/most relevant context",
+    "conversation history to replace it",
+)
 
 
 async def consume_messages(messages: Any, renderer: Any, result: Any | None = None) -> None:
@@ -40,18 +52,106 @@ async def _consume_reasoning(message: Any, renderer: Any) -> None:
     if reasoning is None:
         return
 
+    pending = ""
+    compacting = False
     async for delta in _text_deltas(reasoning):
-        renderer.reasoning_delta(delta)
+        text = str(delta)
+        if compacting:
+            continue
+
+        pending += text
+        if is_compaction_reasoning(pending):
+            compacting = True
+            pending = ""
+            _call_renderer(renderer, "compaction_started")
+            continue
+
+        if should_flush_reasoning_probe(pending):
+            renderer.reasoning_delta(pending)
+            pending = ""
+
+    if compacting:
+        _call_renderer(renderer, "compaction_finished")
+    elif pending:
+        renderer.reasoning_delta(pending)
+
+
+def is_compaction_reasoning(text: str) -> bool:
+    """Return whether streamed reasoning belongs to DeepAgents compaction."""
+    lowered = text.lower()
+    return all(marker in lowered for marker in COMPACTION_REASONING_MARKERS)
+
+
+def should_flush_reasoning_probe(text: str) -> bool:
+    """Return whether buffered reasoning is unlikely to be compaction metadata."""
+    lowered = text.lower()
+    if "thinking process" in lowered and len(text) < 600:
+        return False
+    if len(text) >= 600:
+        return True
+    if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_MARKERS):
+        return True
+    return False
+
+
+def _call_renderer(renderer: Any, method: str) -> None:
+    """Call an optional renderer method."""
+    callback: Callable[[], None] | None = getattr(renderer, method, None)
+    if callback is not None:
+        callback()
 
 
 async def _consume_text(message: Any, renderer: Any) -> None:
     """Render assistant text deltas from a streamed message."""
+    if is_summarization_metadata_message(message):
+        return
+
     msg_text = getattr(message, "text", None)
     if msg_text is None:
         return
 
-    async for delta in _text_deltas(msg_text):
-        renderer.text_delta(delta)
+    if hasattr(msg_text, "__aiter__"):
+        await _consume_streamed_text(msg_text, renderer)
+        return
+
+    text = await msg_text if hasattr(msg_text, "__await__") else msg_text
+    visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
+    if visible or (text and not had_summary):
+        renderer.text_delta(visible)
+
+
+async def _consume_streamed_text(value: Any, renderer: Any) -> None:
+    """Render streamed text while stripping a leading compaction summary."""
+    pending = ""
+    probing = True
+    async for delta in _text_deltas(value):
+        if not probing:
+            renderer.text_delta(delta)
+            continue
+
+        pending += delta
+        visible, had_summary = strip_compaction_summary_prefix(pending)
+        if had_summary:
+            if visible:
+                renderer.text_delta(visible)
+                pending = ""
+                probing = False
+            continue
+
+        if should_flush_text_probe(pending):
+            renderer.text_delta(pending)
+            pending = ""
+            probing = False
+
+    if probing and pending and not text_has_compaction_summary_shape(pending):
+        renderer.text_delta(pending)
+
+
+def should_flush_text_probe(text: str) -> bool:
+    """Return whether buffered assistant text is not a compaction summary."""
+    if len(text) >= 600:
+        return True
+    return "\n\n" in text and "## session intent" not in text.lower()
 
 
 async def _text_deltas(value: Any) -> AsyncIterator[str]:

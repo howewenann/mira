@@ -76,6 +76,14 @@ class Renderer:
             lines.extend(f"request: {self.truncate(description)}" for description in descriptions)
             self._block("task", "\n".join(lines))
 
+    def compaction_started(self) -> None:
+        """Print a context compaction status."""
+        self._block("mira", "compacting context...")
+
+    def compaction_finished(self) -> None:
+        """Print a context compaction completion status."""
+        self._line("context compacted")
+
     def start_subagent_live(self) -> None:
         """Runtime compatibility hook."""
         return None

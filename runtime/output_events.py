@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+COMPACTION_SUMMARY_HEADINGS = (
+    "## session intent",
+    "## summary",
+    "## artifacts",
+    "## next steps",
+)
 
 
 async def capture_output(output_stream: Any, output: dict[str, Any]) -> None:
@@ -28,16 +36,89 @@ def final_text(output: Any) -> str:
     if not messages:
         return ""
 
-    return message_text(messages[-1])
+    for message in reversed(messages):
+        text = visible_message_text(message)
+        if text:
+            return text
+    return ""
+
+
+def is_compaction_summary_message(message: Any) -> bool:
+    """Return whether a message is an internal DeepAgents compaction summary."""
+    if is_summarization_metadata_message(message):
+        return True
+
+    text = message_text(message)
+    visible, had_summary = strip_compaction_summary_prefix(text)
+    return had_summary and not visible.strip()
+
+
+def is_summarization_metadata_message(message: Any) -> bool:
+    """Return whether message metadata marks a DeepAgents summary."""
+    kwargs = field(message, "additional_kwargs")
+    return isinstance(kwargs, dict) and kwargs.get("lc_source") == "summarization"
+
+
+def visible_message_text(message: Any) -> str:
+    """Return message text with any leading compaction summary removed."""
+    if is_summarization_metadata_message(message):
+        return ""
+    text = message_text(message)
+    visible, _ = strip_compaction_summary_prefix(text)
+    return visible
+
+
+def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:
+    """Remove a leading structured compaction summary from text."""
+    if not text:
+        return "", False
+
+    lowered = text.lower()
+    first_heading = lowered.find(COMPACTION_SUMMARY_HEADINGS[0])
+    if first_heading < 0 or first_heading > 80:
+        return text, False
+
+    if not headings_in_order(lowered):
+        return text, False
+
+    match = re.search(r"(?im)^##\s*next steps\b.*$", text)
+    if match is None:
+        return "", True
+
+    after_heading = text[match.end() :]
+    paragraph_break = after_heading.find("\n\n")
+    if paragraph_break < 0:
+        return "", True
+
+    return after_heading[paragraph_break:].lstrip(), True
+
+
+def headings_in_order(text: str) -> bool:
+    """Return whether compaction headings appear in the expected order."""
+    position = -1
+    for heading in COMPACTION_SUMMARY_HEADINGS:
+        next_position = text.find(heading, position + 1)
+        if next_position < 0:
+            return False
+        position = next_position
+    return True
+
+
+def text_has_compaction_summary_shape(text: str) -> bool:
+    """Return whether text starts with the structured compaction summary shape."""
+    text = text.strip().lower()
+    if not text:
+        return False
+    return headings_in_order(text) and text.find(COMPACTION_SUMMARY_HEADINGS[0]) <= 80
 
 
 def message_text(message: Any) -> str:
     """Extract plain text from common LangChain message content shapes."""
-    text = getattr(message, "text", None)
+    text = field(message, "text")
     if text is not None:
         return str(text)
 
-    content = getattr(message, "content", None)
+    content = field(message, "content")
     if isinstance(content, str):
         return content
 
@@ -49,6 +130,13 @@ def message_text(message: Any) -> str:
         return "".join(parts)
 
     return ""
+
+
+def field(value: Any, name: str) -> Any:
+    """Return a dict key or object attribute."""
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
 
 
 def find_interrupts(value: Any) -> list[Any]:

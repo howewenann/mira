@@ -19,6 +19,7 @@ from runtime.usage import (
     has_context_usage,
     has_usage,
     merge_usage,
+    positive_int,
     usage_from_output,
 )
 
@@ -50,12 +51,19 @@ class TurnResult:
 
     def add_usage(self, usage: dict[str, Any]) -> None:
         """Add one usage object to the persisted turn totals."""
-        merged = merge_usage(self.usage, usage)
-        self.input_tokens = int(merged["input_tokens"])
-        self.output_tokens = int(merged["output_tokens"])
-        self.total_tokens = int(merged["total_tokens"])
-        self.context_tokens = int(merged["context_tokens"])
-        self.usage_source = str(merged["source"])
+        input_tokens = positive_int(usage.get("input_tokens"))
+        output_tokens = positive_int(usage.get("output_tokens"))
+        total_tokens = positive_int(usage.get("total_tokens")) or input_tokens + output_tokens
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.total_tokens += total_tokens
+        self.context_tokens = max(
+            self.context_tokens,
+            positive_int(usage.get("context_tokens")),
+            input_tokens,
+        )
+        if self.usage_source == "unknown" and usage.get("source"):
+            self.usage_source = str(usage["source"])
 
     def add_stream_usage(self, usage: dict[str, Any]) -> None:
         """Capture streamed usage as a fallback for providers that omit final usage."""
@@ -65,7 +73,7 @@ class TurnResult:
         """Set current context usage without changing cumulative In/Out totals."""
         if not has_context_usage(usage):
             return
-        self.context_tokens = int(usage["context_tokens"])
+        self.context_tokens = max(self.context_tokens, int(usage["context_tokens"]))
         if self.usage_source == "unknown" and usage.get("source"):
             self.usage_source = str(usage["source"])
 
