@@ -20,7 +20,7 @@ from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, load_llm_config
 from config.loader import load_config
-from session.dashboard import context_limit_for_model, token_counter_for_model
+from session.dashboard import context_limit_for_config, context_limit_for_model, token_counter_for_model
 
 
 class ProfileModel:
@@ -53,6 +53,7 @@ class LLMConfigTests(unittest.TestCase):
                 "MIRA_LLM_TEMPERATURE": "0.2",
                 "MIRA_LLM_MAX_TOKENS": "1024",
                 "MIRA_LLM_TOP_P": "0.9",
+                "MIRA_LLM_CONTEXT_TOKENS": "8192",
             }
         )
 
@@ -63,6 +64,7 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_temperature"], 0.2)
         self.assertEqual(config["llm_max_tokens"], 1024)
         self.assertEqual(config["llm_top_p"], 0.9)
+        self.assertEqual(config["llm_context_tokens"], 8192)
 
     def test_non_default_provider_requires_model(self) -> None:
         """Cloud providers should not silently inherit the local model name."""
@@ -186,6 +188,13 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(
             context_limit_for_model(ProfileModel({"max_input_tokens": 8192})),
             (8192, "model_profile.max_input_tokens"),
+        )
+
+    def test_context_limit_prefers_explicit_config(self) -> None:
+        """Local models can provide the real context window when profiles are absent."""
+        self.assertEqual(
+            context_limit_for_config({"llm_context_tokens": 4096}, ProfileModel({"max_input_tokens": 8192})),
+            (4096, "MIRA_LLM_CONTEXT_TOKENS"),
         )
 
     def test_context_limit_falls_back_to_deepagents_trigger(self) -> None:

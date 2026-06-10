@@ -134,7 +134,7 @@ def _bootstrap(
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
     from session.context import mark_resume_context_pending
-    from session.dashboard import context_limit_for_model, ensure_dashboard, token_counter_for_model
+    from session.dashboard import context_limit_for_config, ensure_dashboard, token_counter_for_config
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -151,8 +151,8 @@ def _bootstrap(
     plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer)
     session_model = get_llm(config)
     model_name = get_model_name(config)
-    context_limit_tokens, context_limit_source = context_limit_for_model(session_model)
-    token_counter = token_counter_for_model(session_model)
+    context_limit_tokens, context_limit_source = context_limit_for_config(config, session_model)
+    token_counter = token_counter_for_config(config, session_model)
     ensure_dashboard(
         record,
         model_name=model_name,

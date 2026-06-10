@@ -20,6 +20,8 @@ class SessionRecorder:
         self.mode = mode
         self._assistant_id: int | None = None
         self._assistant_text = ""
+        self._assistant_seen = False
+        self._last_assistant_id: int | None = None
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
 
@@ -35,7 +37,9 @@ class SessionRecorder:
         if self._assistant_id is None:
             event = append_event(self.record, {"type": "assistant", "mode": self.mode, "text": ""})
             self._assistant_id = int(event["id"])
+            self._last_assistant_id = self._assistant_id
             self._assistant_text = ""
+            self._assistant_seen = True
         self._assistant_text += str(delta)
         update_event_text(self.record, self._assistant_id, self._assistant_text)
         self.save()
@@ -90,13 +94,19 @@ class SessionRecorder:
         self.save()
 
     def ensure_assistant(self, text: str) -> None:
-        if text.strip() and not self._assistant_text.strip():
-            append_event(self.record, {"type": "assistant", "mode": self.mode, "text": text.strip()})
+        text = text.strip()
+        if not text:
+            return
+        if self._last_assistant_id is not None and len(text) > len(self._assistant_text.strip()):
+            update_event_text(self.record, self._last_assistant_id, text)
+            self.save()
+            return
+        if not self._assistant_seen:
+            append_event(self.record, {"type": "assistant", "mode": self.mode, "text": text})
             self.save()
 
     def finish_main(self) -> None:
         self._assistant_id = None
-        self._assistant_text = ""
         self._reasoning_id = None
         self._reasoning_text = ""
 

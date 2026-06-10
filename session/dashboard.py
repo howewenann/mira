@@ -156,6 +156,14 @@ def context_limit_for_model(model: Any) -> tuple[int | None, str]:
     return None, "unknown"
 
 
+def context_limit_for_config(config: dict[str, Any], model: Any) -> tuple[int | None, str]:
+    """Return the configured or inferred model context limit for display."""
+    configured_limit = positive_int(config.get("llm_context_tokens"))
+    if configured_limit:
+        return configured_limit, "MIRA_LLM_CONTEXT_TOKENS"
+    return context_limit_for_model(model)
+
+
 def model_profile_limit(model: Any) -> int | None:
     """Return `model.profile.max_input_tokens` when a LangChain model exposes it."""
     try:
@@ -198,6 +206,11 @@ def token_counter_for_model(model: Any | None = None) -> Callable[[str], int]:
         )
 
     return count_tokens
+
+
+def token_counter_for_config(config: dict[str, Any], model: Any | None = None) -> Callable[[str], int]:
+    """Return the token counter for a configured model."""
+    return token_counter_for_model(model)
 
 
 def result_usage(result: Any) -> dict[str, Any]:

@@ -10,6 +10,7 @@ from typing import Any
 
 from session import context
 from session.dashboard import apply_turn_usage
+from session.recorder import SessionRecorder
 from session.store import SessionStore
 
 
@@ -26,6 +27,14 @@ class AgentWithState:
     async def aget_state(self, config: dict[str, Any]) -> Snapshot:
         self.configs.append(config)
         return Snapshot(self.values)
+
+
+class Store:
+    def __init__(self) -> None:
+        self.saved: list[dict[str, Any]] = []
+
+    def save(self, record: dict[str, Any]) -> None:
+        self.saved.append(record)
 
 
 class Message:
@@ -145,6 +154,47 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compactions[0]["cutoff_index"], 12)
         self.assertEqual(compactions[0]["file_path"], "/.mira/conversation_history/thread-1.md")
         self.assertEqual(compactions[0]["summary"], "Debugged Qwen helper latency.")
+
+    async def test_compaction_summary_string_is_copied(self) -> None:
+        record = {"events": []}
+        agent = AgentWithState(
+            {
+                "_summarization_event": {
+                    "cutoff_index": 4,
+                    "file_path": "/.mira/conversation_history/thread-1.md",
+                    "summary": "Earlier messages were summarized.",
+                }
+            }
+        )
+
+        await context.sync_deepagents_compaction(record, agent, "thread-1")
+
+        compactions = context.normalize_compactions(record["events"])
+        self.assertEqual(compactions[0]["summary"], "Earlier messages were summarized.")
+
+    def test_recorder_does_not_duplicate_streamed_assistant_final_text(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.text_delta("hello")
+        recorder.finish_main()
+        recorder.ensure_assistant("hello")
+
+        messages = context.normalize_messages(record["events"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "hello")
+
+    def test_recorder_updates_streamed_assistant_with_full_final_text(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.text_delta("hel")
+        recorder.finish_main()
+        recorder.ensure_assistant("hello")
+
+        messages = context.normalize_messages(record["events"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "hello")
 
     def test_resume_context_injects_once(self) -> None:
         record = {

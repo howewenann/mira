@@ -18,6 +18,7 @@ CANONICAL_BASE_URL = "MIRA_LLM_BASE_URL"
 CANONICAL_TEMPERATURE = "MIRA_LLM_TEMPERATURE"
 CANONICAL_MAX_TOKENS = "MIRA_LLM_MAX_TOKENS"
 CANONICAL_TOP_P = "MIRA_LLM_TOP_P"
+CANONICAL_CONTEXT_TOKENS = "MIRA_LLM_CONTEXT_TOKENS"
 
 
 class ConfigError(ValueError):
@@ -68,6 +69,7 @@ def _config_for_provider(
         "llm_temperature": _float_value(env, CANONICAL_TEMPERATURE),
         "llm_max_tokens": _int_value(env, CANONICAL_MAX_TOKENS),
         "llm_top_p": _float_value(env, CANONICAL_TOP_P),
+        "llm_context_tokens": _int_value(env, CANONICAL_CONTEXT_TOKENS),
     }
 
 

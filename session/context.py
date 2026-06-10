@@ -302,7 +302,11 @@ async def agent_state(agent: Any, thread_id: str) -> dict[str, Any]:
 def compaction_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
     cutoff_index = int(event.get("cutoff_index") or 0)
     file_path = compact_line(event.get("file_path"))
-    summary = summary_text(event.get("summary_message"))
+    summary = first_summary_text(
+        event.get("summary_message"),
+        event.get("summary"),
+        event.get("summary_text"),
+    )
     if not summary and not file_path and cutoff_index <= 0:
         return None
     return {
@@ -311,6 +315,14 @@ def compaction_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
         "summary": summary,
         "created_at": now_iso(),
     }
+
+
+def first_summary_text(*values: Any) -> str:
+    for value in values:
+        summary = summary_text(value)
+        if summary:
+            return summary
+    return ""
 
 
 def summary_text(message: Any) -> str:
