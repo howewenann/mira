@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict, deque
 from itertools import count
 from typing import Any
 
+from rich.markup import escape
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
+from runtime.output_events import normalize_response_delta
 from session.context import normalize_events
 from ui.splash import splash_text
 
@@ -28,13 +31,21 @@ class ChatLog(VerticalScroll):
         self._assistant_block: Static | None = None
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
+        self._waiting_block: Static | None = None
         self._subagent_labels: dict[int, str] = {}
         self._subagent_blocks: dict[str, dict[str, str]] = {}
         self._subagent_widgets: dict[str, Static] = {}
         self._compaction_block: Static | None = None
         self._compaction_running = False
         self._fallback_suffixes = count(1)
-        self._spinner_index = 0
+        self._waiting_spinner_index = 0
+        self._subagent_spinner_index = 0
+        self._tool_sequence = count(1)
+        self._tool_blocks: dict[str, dict[str, Any]] = {}
+        self._tool_name_queues: dict[str, deque[str]] = defaultdict(deque)
+        self._pending_tool_results_by_id: dict[str, str] = {}
+        self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
+        self._subagent_aliases: dict[str, str] = {}
         self._faker: Any | None = None
         try:
             from faker import Faker
@@ -72,9 +83,9 @@ class ChatLog(VerticalScroll):
             elif event_type == "reasoning":
                 self._add_block("thinking", Text(event["text"]), "message reasoning")
             elif event_type == "tool_call":
-                self.tool_call(event["name"], event.get("args", {}))
+                self.tool_call(event["name"], event.get("args", {}), call_id=str(event.get("call_id") or ""))
             elif event_type == "tool_result":
-                self.tool_result(event["name"], event["output"])
+                self.tool_result(event["name"], event["output"], call_id=str(event.get("call_id") or ""))
             elif event_type == "delegation":
                 self.delegation_started(event["calls"])
             elif event_type == "subagent":
@@ -92,6 +103,7 @@ class ChatLog(VerticalScroll):
         cleaned = re.sub(r"</?[^>]+>", "", delta)
         if not cleaned:
             return
+        self.hide_waiting()
 
         if self._reasoning_block is None:
             self._reasoning_text = ""
@@ -103,8 +115,10 @@ class ChatLog(VerticalScroll):
 
     def text_delta(self, delta: str) -> None:
         """Append streamed assistant text to the current response block."""
+        delta = normalize_response_delta(self._assistant_text, delta)
         if not delta:
             return
+        self.hide_waiting()
 
         if self._assistant_block is None:
             self._assistant_text = ""
@@ -132,9 +146,10 @@ class ChatLog(VerticalScroll):
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
+        self.hide_waiting()
         self.finish_main()
         self._compaction_running = True
-        text = self._render_compaction()
+        text = Text("compacting context...", style="bold yellow")
         if self._compaction_block is None:
             self._compaction_block = self._add_block("mira", text, "message status")
         else:
@@ -151,30 +166,42 @@ class ChatLog(VerticalScroll):
         self._scroll_to_end()
 
     def tick_compaction(self) -> None:
-        """Advance the spinner while context compaction is running."""
-        if not self._compaction_running or self._compaction_block is None:
-            return
-        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
-        self._compaction_block.update(self._render_compaction())
-        self._scroll_to_end()
+        """Compatibility hook for the old compaction animation."""
+        return
 
-    def tool_call(self, name: str, args: Any) -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Append a coordinator-level tool call in transcript order."""
+        self.hide_waiting()
         self.finish_main()
-        text = Text()
-        text.append("args: ", style="bold cyan")
-        text.append(self.truncate(args))
-        self._add_block(f"tool - {name}", text, "message tool-call")
+        key = self._tool_key(name, call_id)
+        block = self._tool_blocks.get(key)
+        if block is None:
+            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
+            block = {"name": name, "args": args, "result": "", "widget": widget}
+            self._tool_blocks[key] = block
+            self._tool_name_queues[name].append(key)
+        else:
+            block["name"] = name
+            block["args"] = args
 
-    def tool_result(self, name: str, result: str) -> None:
+        pending = self._take_pending_tool_result(name, call_id)
+        if pending:
+            block["result"] = pending
+        self._update_tool_block(key)
+
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Append a coordinator-level tool result in transcript order."""
         if not result:
             return
+        self.hide_waiting()
         self.finish_main()
-        text = Text()
-        text.append("output: ", style="dim")
-        text.append(self.truncate(result), style="dim")
-        self._add_block(f"{name} result", text, "message tool-result")
+        key = self._resolve_tool_key(name, call_id)
+        if key is None:
+            self._queue_pending_tool_result(name, result, call_id)
+            return
+        block = self._tool_blocks[key]
+        block["result"] = result
+        self._update_tool_block(key)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Append a compact task delegation summary."""
@@ -182,6 +209,7 @@ class ChatLog(VerticalScroll):
         if not descriptions and not errors:
             return
 
+        self.hide_waiting()
         self.finish_main()
         text = Text()
         label = "subagent" if len(descriptions) == 1 else "subagents"
@@ -198,7 +226,6 @@ class ChatLog(VerticalScroll):
         """Reset subagent state for a new delegation group."""
         self._subagent_blocks = {}
         self._subagent_widgets = {}
-        self._spinner_index = 0
 
     def stop_subagent_live(self) -> None:
         """Finalize subagent display."""
@@ -210,7 +237,7 @@ class ChatLog(VerticalScroll):
         if not self.has_running_subagents():
             return
 
-        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._subagent_spinner_index = (self._subagent_spinner_index + 1) % len(SPINNER_FRAMES)
         for label, block in self._subagent_blocks.items():
             if block.get("status") == "RUNNING":
                 self._update_subagent(label)
@@ -229,7 +256,9 @@ class ChatLog(VerticalScroll):
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         """Create or replace the block for a running subagent."""
+        self.hide_waiting()
         self.finish_main()
+        subagent = self._subagent_display_label(subagent)
         self._subagent_blocks[subagent] = {
             "request": task_input,
             "status": "RUNNING",
@@ -240,6 +269,8 @@ class ChatLog(VerticalScroll):
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Mark a subagent block as done and attach its final output."""
+        self.hide_waiting()
+        subagent = self._subagent_display_label(subagent)
         block = self._subagent_blocks.setdefault(
             subagent,
             {
@@ -263,24 +294,62 @@ class ChatLog(VerticalScroll):
     def clear_log(self) -> None:
         """Remove all chat messages."""
         self.finish_main()
+        self._waiting_block = None
+        self._subagent_labels = {}
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._compaction_block = None
         self._compaction_running = False
+        self._tool_blocks = {}
+        self._tool_name_queues = defaultdict(deque)
+        self._pending_tool_results_by_id = {}
+        self._pending_tool_results_by_name = defaultdict(deque)
+        self._subagent_aliases = {}
         for child in list(self.children):
             child.remove()
 
+    def show_waiting(self) -> None:
+        """Show the transient thinking status while MIRA is idle."""
+        text = self._render_waiting()
+        if self._waiting_block is None:
+            self._waiting_block = self._add_block("mira", text, "message status")
+            return
+        self._waiting_block.update(text)
+        self._scroll_to_end()
+
+    def hide_waiting(self) -> None:
+        """Remove the transient thinking status block."""
+        if self._waiting_block is None:
+            return
+        self._waiting_block.remove()
+        self._waiting_block = None
+
+    def tick_waiting(self) -> None:
+        """Advance the spinner on the transient thinking block."""
+        if self._waiting_block is None:
+            return
+        self._waiting_spinner_index = (self._waiting_spinner_index + 1) % len(SPINNER_FRAMES)
+        self._waiting_block.update(self._render_waiting())
+        self._scroll_to_end()
+
     def truncate(self, value: Any) -> str:
         """Return a compact one-line display string."""
-        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        text = re.sub(r"\s+", " ", str("" if value is None else value)).strip()
         if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
             return text
         return text[: self.tool_output_chars].rstrip() + " ... truncated ..."
 
+    def truncate_multiline(self, value: Any) -> str:
+        """Return text shortened to the configured display size, preserving line breaks."""
+        text = str("" if value is None else value).strip()
+        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
+            return text
+        return text[: self.tool_output_chars].rstrip() + "\n... truncated ..."
+
     def _add_block(self, title: str, renderable: Any, classes: str) -> Static:
         """Mount one bordered transcript block."""
         block = Static(renderable, classes=classes)
-        block.border_title = title
+        block.border_title = escape(title)
         self.mount(block)
         self._scroll_to_end()
         return block
@@ -340,21 +409,14 @@ class ChatLog(VerticalScroll):
 
         text.append("status: ", style="bold cyan")
         if status == "RUNNING":
-            text.append(f"{SPINNER_FRAMES[self._spinner_index]} RUNNING", style="bold yellow")
+            text.append(f"{SPINNER_FRAMES[self._subagent_spinner_index]} RUNNING", style="bold yellow")
         else:
             text.append("DONE", style="bold green")
 
         if block.get("output"):
-            text.append("\noutput: ", style="bold cyan")
-            text.append(self.truncate(block["output"]))
+            text.append("\n\noutput:\n", style="bold cyan")
+            text.append(self.truncate_multiline(block["output"]), style="dim")
 
-        return text
-
-    def _render_compaction(self) -> Text:
-        """Render the live context compaction status."""
-        text = Text()
-        text.append(f"{SPINNER_FRAMES[self._spinner_index]} ", style="bold yellow")
-        text.append("compacting context...", style="bold yellow")
         return text
 
     def _update_subagent(self, label: str) -> None:
@@ -377,3 +439,75 @@ class ChatLog(VerticalScroll):
             if word:
                 return word
         return str(next(self._fallback_suffixes))
+
+    def _subagent_display_label(self, label: str) -> str:
+        """Return a stable label, adding a nickname if the caller omitted one."""
+        if "[" in label and "]" in label:
+            return label
+        if label not in self._subagent_aliases:
+            self._subagent_aliases[label] = f"{label} [{self._next_suffix()}]"
+        return self._subagent_aliases[label]
+
+    def _render_waiting(self) -> Text:
+        text = Text()
+        text.append(f"{SPINNER_FRAMES[self._waiting_spinner_index]} ", style="bold yellow")
+        text.append("thinking...", style="bold yellow")
+        return text
+
+    def _tool_key(self, name: str, call_id: str = "") -> str:
+        if call_id:
+            return f"id:{call_id}"
+        return f"name:{name}:{next(self._tool_sequence)}"
+
+    def _resolve_tool_key(self, name: str, call_id: str = "") -> str | None:
+        if call_id:
+            key = f"id:{call_id}"
+            if key in self._tool_blocks:
+                self._remove_tool_queue_key(name, key)
+                return key
+            return None
+
+        queue = self._tool_name_queues.get(name)
+        if not queue:
+            return None
+        while queue:
+            key = queue.popleft()
+            block = self._tool_blocks.get(key)
+            if block is not None and not block.get("result"):
+                return key
+        return None
+
+    def _queue_pending_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        if call_id:
+            self._pending_tool_results_by_id[call_id] = result
+            return
+        self._pending_tool_results_by_name[name].append(result)
+
+    def _take_pending_tool_result(self, name: str, call_id: str = "") -> str:
+        if call_id:
+            result = self._pending_tool_results_by_id.pop(call_id, "")
+            if result:
+                return result
+        queue = self._pending_tool_results_by_name.get(name)
+        if not queue:
+            return ""
+        return queue.popleft()
+
+    def _remove_tool_queue_key(self, name: str, key: str) -> None:
+        queue = self._tool_name_queues.get(name)
+        if not queue:
+            return
+        self._tool_name_queues[name] = deque(item for item in queue if item != key)
+
+    def _update_tool_block(self, key: str) -> None:
+        block = self._tool_blocks[key]
+        text = Text()
+        text.append("call: ", style="bold cyan")
+        text.append(self.truncate(block["args"]))
+        if block.get("result"):
+            text.append("\n")
+            text.append("-" * 12, style="dim")
+            text.append("\noutput:\n", style="bold cyan")
+            text.append(self.truncate_multiline(block["result"]), style="dim")
+        block["widget"].update(text)
+        self._scroll_to_end()

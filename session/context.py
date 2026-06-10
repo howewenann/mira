@@ -125,12 +125,18 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
             event["args"] = item.get("args", {})
+            call_id = compact_line(item.get("call_id"))
+            if call_id:
+                event["call_id"] = call_id
         elif event_type == "tool_result":
             output = str(item.get("output") or "").strip()
             if not output:
                 continue
             event["name"] = compact_line(item.get("name") or "tool")
             event["output"] = output
+            call_id = compact_line(item.get("call_id"))
+            if call_id:
+                event["call_id"] = call_id
         elif event_type == "delegation":
             calls = item.get("calls")
             if not isinstance(calls, list) or not calls:

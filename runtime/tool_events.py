@@ -12,7 +12,7 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
     async for call in tool_calls:
         name = getattr(call, "tool_name", None) or getattr(call, "name", "tool")
         if result is not None:
-            result.tool_calls.append(str(name))
+            result.record_tool_call(str(name), tool_call_id(call))
 
         output = await tool_call_output(call)
         if isinstance(output, Command):
@@ -22,7 +22,7 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
             text = tool_output_text(output)
             if result is not None:
                 result.tool_results.append(text)
-            renderer.tool_result(str(name), text)
+            renderer.tool_result(str(name), text, call_id=tool_call_id(call))
 
 
 async def tool_call_output(call: Any) -> Any:
@@ -63,3 +63,10 @@ def tool_output_text(output: Any) -> str:
         return str(content)
 
     return str(output)
+
+
+def tool_call_id(call: Any) -> str:
+    """Return a stable id for a streamed tool call when exposed by the provider."""
+    if isinstance(call, dict):
+        return str(call.get("id") or "")
+    return str(getattr(call, "id", "") or "")

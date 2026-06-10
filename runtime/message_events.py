@@ -7,6 +7,7 @@ from typing import Any
 
 from runtime.output_events import (
     is_summarization_metadata_message,
+    normalize_response_delta,
     strip_compaction_summary_prefix,
     text_has_compaction_summary_shape,
 )
@@ -38,6 +39,7 @@ async def consume_messages(messages: Any, renderer: Any, result: Any | None = No
     event order reported by the stream.
     """
     async for message in messages:
+        _call_renderer(renderer, "waiting_started")
         if is_raw_message_stream(message):
             await _consume_ordered_message_stream(message, renderer)
         else:
@@ -153,12 +155,14 @@ class TextFilter:
         self.pending = ""
         self.probing = True
         self.compacting = False
+        self.has_output = False
 
     def push(self, delta: str) -> None:
+        delta = normalize_response_delta("visible" if self.has_output else self.pending, delta)
         if not delta:
             return
         if not self.probing:
-            self.renderer.text_delta(delta)
+            self._emit(delta)
             return
 
         self.pending += delta
@@ -171,13 +175,13 @@ class TextFilter:
                 if self.compacting:
                     _call_renderer(self.renderer, "compaction_finished")
                     self.compacting = False
-                self.renderer.text_delta(visible)
+                self._emit(visible)
                 self.pending = ""
                 self.probing = False
             return
 
         if not could_be_compaction_summary_start(self.pending):
-            self.renderer.text_delta(self.pending)
+            self._emit(self.pending)
             self.pending = ""
             self.probing = False
 
@@ -186,7 +190,12 @@ class TextFilter:
             _call_renderer(self.renderer, "compaction_finished")
             self.compacting = False
         if self.probing and self.pending and not text_has_compaction_summary_shape(self.pending):
-            self.renderer.text_delta(self.pending)
+            self._emit(self.pending)
+
+    def _emit(self, text: str) -> None:
+        self.renderer.text_delta(text)
+        if text:
+            self.has_output = True
 
 
 def event_delta(event: Any) -> dict[str, Any]:
@@ -267,6 +276,7 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
         return
 
     text = await msg_text if hasattr(msg_text, "__await__") else msg_text
+    text = normalize_response_delta("", text)
     visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
     if had_summary:
         if not allow_compaction_summary:
@@ -339,10 +349,10 @@ def _render_tool_calls(call_list: list[Any], renderer: Any, result: Any | None) 
     for call in call_list:
         name = _call_name(call)
         if result is not None:
-            result.tool_calls.append(str(name))
+            result.record_tool_call(str(name), _call_id(call))
 
         if name != "task":
-            renderer.tool_call(str(name), _call_args(call))
+            renderer.tool_call(str(name), _call_args(call), call_id=_call_id(call))
 
 
 def _call_name(call: Any) -> str:
@@ -359,3 +369,11 @@ def _call_args(call: Any) -> Any:
         return call.get("args", {})
 
     return getattr(call, "args", {})
+
+
+def _call_id(call: Any) -> str:
+    """Extract a tool-call id from a dict or object."""
+    if isinstance(call, dict):
+        return str(call.get("id") or "")
+
+    return str(getattr(call, "id", "") or "")

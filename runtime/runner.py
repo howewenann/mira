@@ -37,6 +37,7 @@ class TurnResult:
     context_tokens: int = 0
     usage_source: str = "unknown"
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
+    _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
 
     @property
     def usage(self) -> dict[str, Any]:
@@ -88,6 +89,14 @@ class TurnResult:
         self.set_context_usage(context_from_output(output, token_counter))
         self._stream_usage = empty_usage()
 
+    def record_tool_call(self, name: str, call_id: str = "") -> None:
+        """Record one tool call while avoiding duplicate id-based reports."""
+        if call_id:
+            if call_id in self._seen_tool_call_ids:
+                return
+            self._seen_tool_call_ids.add(call_id)
+        self.tool_calls.append(name)
+
 
 async def run_turn(
     agent: Any,
@@ -111,6 +120,9 @@ async def run_turn(
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
         output: dict[str, Any] = {}
+        waiting_started = getattr(renderer, "waiting_started", None)
+        if callable(waiting_started):
+            waiting_started()
 
         await asyncio.gather(
             consume_messages(stream.messages, renderer, result),
@@ -121,6 +133,9 @@ async def run_turn(
 
         result.final_text = final_text(output.get("value")) or result.final_text
         result.commit_loop_usage(output.get("value"), token_counter=token_counter)
+        waiting_finished = getattr(renderer, "waiting_finished", None)
+        if callable(waiting_finished):
+            waiting_finished()
         renderer.finish_main()
         interrupts = await collect_interrupts(stream, output.get("value"))
 

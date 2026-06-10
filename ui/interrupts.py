@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
 ACTION_TEXT_LIMIT = 220
+ACTION_PREVIEW_VALUE_LIMIT = 68
+ACTION_PREVIEW_KEY_WIDTH = 10
 DEFAULT_APPROVAL_DECISIONS = ["approve", "edit", "reject"]
 DECISION_LABELS = {
-    "approve": ("a", "a approve"),
-    "edit": ("e", "e edit"),
-    "reject": ("r", "r reject"),
-    "respond": ("s", "s respond"),
+    "approve": ("a", "Approve (a)"),
+    "edit": ("e", "Edit (e)"),
+    "reject": ("r", "Reject (r)"),
+    "respond": ("s", "Respond (s)"),
 }
 
 
@@ -116,6 +119,39 @@ def action_text(action: Any) -> str:
     return "\n".join(lines)
 
 
+def action_title(action: Any) -> str:
+    """Return the approval drawer title for one action."""
+    if not isinstance(action, dict):
+        return "Approval"
+    return f"Approval: {str(action.get('name') or 'tool')}"
+
+
+def action_preview(action: Any) -> str:
+    """Return a scan-friendly preview for the approval drawer."""
+    if not isinstance(action, dict):
+        return _preview_text(action)
+
+    args = action.get("args", {})
+    rows: list[tuple[str, str]] = []
+    if isinstance(args, dict):
+        target = _target_arg(args)
+        if target:
+            rows.append(("target", target))
+        for key, value in args.items():
+            rows.append((str(key), _preview_inline(value)))
+    else:
+        rows.append(("args", _preview_inline(args)))
+
+    if not rows:
+        rows.append(("args", "{}"))
+
+    key_width = max(len(key) for key, _ in rows)
+    key_width = max(ACTION_PREVIEW_KEY_WIDTH, min(key_width, 18))
+    lines = [f"{key.ljust(key_width)} {_preview_text(value, limit=ACTION_PREVIEW_VALUE_LIMIT)}" for key, value in rows]
+    lines.extend(["", "Press e to inspect or edit full args"])
+    return "\n".join(lines)
+
+
 def response_message(message: Any, action: Any) -> str:
     """Return the synthetic successful tool result for a respond decision."""
     text = str(message or "").strip()
@@ -147,6 +183,17 @@ def _preview_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_preview_value(item) for item in value[:20]]
     return value
+
+
+def _preview_inline(value: Any) -> str:
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value).strip()
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(_preview_value(value), ensure_ascii=True)
+        except TypeError:
+            return _preview_text(value)
+    return re.sub(r"\s+", " ", str(value)).strip()
 
 
 def _preview_text(value: Any, *, limit: int = ACTION_TEXT_LIMIT) -> str:

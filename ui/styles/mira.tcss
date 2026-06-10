@@ -88,8 +88,8 @@ Screen {
 
 #prompt-panel {
     height: auto;
-    max-height: 70%;
-    padding: 1;
+    max-height: 14;
+    padding: 1 1 0 1;
     background: #11181b;
     border: solid #d2a957;
 }
@@ -102,11 +102,13 @@ Screen {
 }
 
 #prompt-panel-body {
-    height: 7;
+    height: auto;
+    min-height: 3;
+    max-height: 6;
     padding: 0 1;
     border: solid #3c4a50;
     overflow-x: hidden;
-    overflow-y: hidden;
+    overflow-y: auto;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
@@ -131,11 +133,11 @@ Screen {
 
 #prompt-panel-buttons {
     height: auto;
-    margin-top: 1;
+    margin-top: 0;
 }
 
 .prompt-panel-button {
-    min-width: 10;
+    min-width: 12;
     width: auto;
     margin-right: 1;
 }

@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import Any
 
+from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 
 COMPACTION_POLL_SECONDS = 10.0
@@ -32,6 +33,7 @@ class SessionRecorder:
         append_event(self.record, {"type": "user", "mode": self.mode, "text": text})
 
     def text_delta(self, delta: str) -> None:
+        delta = normalize_response_delta(self._assistant_text, delta)
         if not delta:
             return
         if self._assistant_id is None:
@@ -55,14 +57,20 @@ class SessionRecorder:
         update_event_text(self.record, self._reasoning_id, self._reasoning_text)
         self.save()
 
-    def tool_call(self, name: str, args: Any) -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.finish_main()
-        append_event(self.record, {"type": "tool_call", "mode": self.mode, "name": name, "args": json_value(args)})
+        event = {"type": "tool_call", "mode": self.mode, "name": name, "args": json_value(args)}
+        if call_id:
+            event["call_id"] = call_id
+        append_event(self.record, event)
         self.save()
 
-    def tool_result(self, name: str, output: Any) -> None:
+    def tool_result(self, name: str, output: Any, call_id: str = "") -> None:
         self.finish_main()
-        append_event(self.record, {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)})
+        event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
+        if call_id:
+            event["call_id"] = call_id
+        append_event(self.record, event)
         self.save()
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
@@ -133,13 +141,13 @@ class RecordingRenderer:
         self.renderer.text_delta(delta)
         self.recorder.text_delta(delta)
 
-    def tool_call(self, name: str, args: Any) -> None:
-        self.renderer.tool_call(name, args)
-        self.recorder.tool_call(name, args)
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+        self.renderer.tool_call(name, args, call_id=call_id)
+        self.recorder.tool_call(name, args, call_id=call_id)
 
-    def tool_result(self, name: str, result: str) -> None:
-        self.renderer.tool_result(name, result)
-        self.recorder.tool_result(name, result)
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        self.renderer.tool_result(name, result, call_id=call_id)
+        self.recorder.tool_result(name, result, call_id=call_id)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.renderer.delegation_started(calls)

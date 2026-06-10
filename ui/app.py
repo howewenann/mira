@@ -13,14 +13,16 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
 
 from session.dashboard import ensure_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
+    action_preview,
     action_requests,
-    action_text,
+    action_title,
     ask_user_options,
     ask_user_question,
     ask_user_request,
@@ -85,6 +87,9 @@ class MiraApp(App[None]):
         self.status_state = "starting"
         self.turn_worker: Any | None = None
         self.confirming_interrupt = False
+        self._waiting_task: Any | None = None
+        self._waiting_generation = 0
+        self._waiting_delay_seconds = 0.3
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -101,6 +106,7 @@ class MiraApp(App[None]):
     def on_mount(self) -> None:
         """Start app initialization."""
         self.set_interval(1.0, self._tick_status)
+        self.set_interval(0.12, self._tick_animations)
         self._set_status(state="starting")
         self.query_one(PromptBox).disabled = True
         if self.prebuilt is not None:
@@ -274,21 +280,28 @@ class MiraApp(App[None]):
 
     def action_focus_prompt(self) -> None:
         """Focus the prompt input."""
-        if self.is_mounted:
+        if not self.is_mounted:
+            return
+        try:
             self.query_one(PromptBox).focus()
+        except NoMatches:
+            return
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Write a command or status message to the chat log."""
+        self.waiting_finished()
         self.query_one(ChatLog).system_message(text, kind=kind)
         detail = text if kind in {"status", "warning"} else ""
         self._set_status(state="ready" if not self.busy else "running", detail=detail)
 
     def command_output(self, renderable: Any) -> None:
         """Write command output to the chat log."""
+        self.waiting_finished()
         self.query_one(ChatLog).command_output(renderable)
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
+        self.waiting_finished()
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
 
@@ -296,6 +309,7 @@ class MiraApp(App[None]):
         """Show that DeepAgents has finished compacting context."""
         self.query_one(ChatLog).compaction_finished()
         self._set_status(state="running")
+        self._rearm_waiting_if_busy()
 
     def clear_log(self) -> None:
         """Clear chat output."""
@@ -311,23 +325,33 @@ class MiraApp(App[None]):
 
     def reasoning_delta(self, delta: str) -> None:
         """Render streamed reasoning text."""
+        self.waiting_finished()
         self.query_one(ChatLog).reasoning_delta(delta)
+        self._rearm_waiting_if_busy()
 
     def text_delta(self, delta: str) -> None:
         """Render streamed assistant text."""
+        self.waiting_finished()
         self.query_one(ChatLog).text_delta(delta)
+        self._rearm_waiting_if_busy()
 
-    def tool_call(self, name: str, args: Any) -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Render a tool call in transcript order."""
-        self.query_one(ChatLog).tool_call(name, args)
+        self.waiting_finished()
+        self.query_one(ChatLog).tool_call(name, args, call_id=call_id)
+        self._rearm_waiting_if_busy()
 
-    def tool_result(self, name: str, result: str) -> None:
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render a tool result in transcript order."""
-        self.query_one(ChatLog).tool_result(name, result)
+        self.waiting_finished()
+        self.query_one(ChatLog).tool_result(name, result, call_id=call_id)
+        self._rearm_waiting_if_busy()
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Render task delegation summary."""
+        self.waiting_finished()
         self.query_one(ChatLog).delegation_started(calls)
+        self._rearm_waiting_if_busy()
 
     def start_subagent_live(self) -> None:
         """Prepare subagent display."""
@@ -347,24 +371,30 @@ class MiraApp(App[None]):
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         """Render a subagent start."""
+        self.waiting_finished()
         self.query_one(ChatLog).subagent_started(subagent, task_input)
+        self._rearm_waiting_if_busy()
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Render a subagent finish."""
+        self.waiting_finished()
         self.query_one(ChatLog).subagent_finished(subagent, result)
+        self._rearm_waiting_if_busy()
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
+        self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, reject, or respond to interrupted actions."""
+        self.waiting_finished()
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
             for index, action in enumerate(action_requests(interrupt)):
                 answer = await self._prompt_choice(
-                    "Approval",
-                    action_text(action),
+                    action_title(action),
+                    action_preview(action),
                     action_choices(interrupt, action, index),
                 )
                 if answer == "e":
@@ -379,6 +409,7 @@ class MiraApp(App[None]):
 
     async def ask_user(self, interrupt: Any) -> str:
         """Ask the user for a concrete next-step choice from an ask_user interrupt."""
+        self.waiting_finished()
         request = ask_user_request(interrupt)
         question = ask_user_question(request)
         options = ask_user_options(request)
@@ -456,6 +487,53 @@ class MiraApp(App[None]):
             prompt.disabled = was_disabled
             if self.is_mounted and self.ready and not self.busy and not prompt.disabled:
                 self.action_focus_prompt()
+
+    def waiting_started(self) -> None:
+        """Arm the transient thinking indicator while the turn is silent."""
+        self._waiting_generation += 1
+        self._cancel_waiting_task()
+        if not self.is_mounted or not self.busy:
+            return
+        try:
+            if self.query_one(PromptPanel).active:
+                return
+        except NoMatches:
+            return
+        generation = self._waiting_generation
+        self._waiting_task = self.run_worker(
+            self._show_waiting_after_delay(generation),
+            name=f"waiting-{generation}",
+            exclusive=False,
+        )
+
+    def waiting_finished(self) -> None:
+        """Hide the transient thinking indicator and cancel pending timers."""
+        self._cancel_waiting_task()
+        if self.is_mounted:
+            self.query_one(ChatLog).hide_waiting()
+
+    async def _show_waiting_after_delay(self, generation: int) -> None:
+        """Show thinking only if the current wait survives the grace period."""
+        try:
+            await asyncio.sleep(self._waiting_delay_seconds)
+        except asyncio.CancelledError:
+            return
+        if generation != self._waiting_generation or not self.busy or not self.is_mounted:
+            return
+        self.query_one(ChatLog).show_waiting()
+
+    def _cancel_waiting_task(self) -> None:
+        """Cancel the pending delayed thinking task if one exists."""
+        task = self._waiting_task
+        if task is None:
+            return
+        task.cancel()
+        self._waiting_task = None
+
+    def _rearm_waiting_if_busy(self) -> None:
+        """Start the silent-wait timer again after a visible runtime event."""
+        if self.busy:
+            self.waiting_started()
 
     def _set_status(self, *, state: str, detail: str = "") -> None:
         """Update the status bar if it has been mounted."""
@@ -568,6 +646,17 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).tick_compaction()
         update_duration(self.session)
         self._set_status(state=self.status_state)
+
+    def _tick_animations(self) -> None:
+        """Advance lightweight chat animations."""
+        if not self.is_mounted:
+            return
+        try:
+            chat = self.query_one(ChatLog)
+        except NoMatches:
+            return
+        chat.tick_waiting()
+        chat.tick_subagents()
 
     def _mode_label(self) -> str:
         """Return the compact mode label shown in the status line."""

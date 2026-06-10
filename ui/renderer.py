@@ -49,14 +49,22 @@ class Renderer:
         if delta:
             self._stream("mira", delta)
 
-    def tool_call(self, name: str, args: Any) -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Print a compact tool call."""
         self._block(name, f"args: {self.truncate(args)}")
 
-    def tool_result(self, name: str, result: str) -> None:
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Print a compact tool result."""
         if result:
             self._line(f"{name} output: {self.truncate(result)}")
+
+    def waiting_started(self) -> None:
+        """Compatibility hook for the Textual waiting indicator."""
+        return None
+
+    def waiting_finished(self) -> None:
+        """Compatibility hook for the Textual waiting indicator."""
+        return None
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Print a compact task delegation summary."""

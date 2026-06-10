@@ -69,11 +69,11 @@ class RecordingRenderer:
         """Record streamed reasoning text."""
         self.console.print(value)
 
-    def tool_call(self, name: str, args: Any) -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Record a visible tool call."""
         self.console.print(f"{name}: {args}")
 
-    def tool_result(self, name: str, result: str) -> None:
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Record a visible tool result."""
         self.console.print(f"{name}: {result}")
 

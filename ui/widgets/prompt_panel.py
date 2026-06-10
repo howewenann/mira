@@ -8,6 +8,7 @@ from typing import Any
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widgets import Button, Input, Static, TextArea
 
@@ -111,13 +112,17 @@ class PromptPanel(Vertical):
         if not self.is_mounted:
             self._future = None
             return
-        self.query_one("#prompt-panel-title", Static).update("")
-        self.query_one("#prompt-panel-message", Static).update("")
-        self.query_one("#prompt-panel-input", Input).value = ""
-        self.query_one("#prompt-panel-editor", TextArea).text = ""
-        self.query_one("#prompt-panel-body", VerticalScroll).display = True
-        self.query_one("#prompt-panel-input", Input).display = False
-        self.query_one("#prompt-panel-editor", TextArea).display = False
+        try:
+            self.query_one("#prompt-panel-title", Static).update("")
+            self.query_one("#prompt-panel-message", Static).update("")
+            self.query_one("#prompt-panel-input", Input).value = ""
+            self.query_one("#prompt-panel-editor", TextArea).text = ""
+            self.query_one("#prompt-panel-body", VerticalScroll).display = True
+            self.query_one("#prompt-panel-input", Input).display = False
+            self.query_one("#prompt-panel-editor", TextArea).display = False
+        except NoMatches:
+            self._future = None
+            return
         await self._clear_buttons()
         self._future = None
 

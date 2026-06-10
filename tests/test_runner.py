@@ -81,10 +81,11 @@ class OutputMessage:
 class ToolCall:
     """Fake tool call event with name, args, and output."""
 
-    def __init__(self, name: str, args: dict[str, Any], output: Any) -> None:
+    def __init__(self, name: str, args: dict[str, Any], output: Any, call_id: str = "") -> None:
         self.name = name
         self.args = args
         self.output = output
+        self.id = call_id
 
 
 class Subagent:
@@ -113,11 +114,11 @@ class RecordingRenderer:
     def text_delta(self, value: str) -> None:
         self.events.append(("text", value))
 
-    def tool_call(self, name: str, args: Any) -> None:
-        self.events.append(("tool_call", name, args))
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+        self.events.append(("tool_call", name, args, call_id))
 
-    def tool_result(self, name: str, result: str) -> None:
-        self.events.append(("tool_result", name, result))
+    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        self.events.append(("tool_result", name, result, call_id))
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.events.append(("delegation_started", calls))
@@ -461,14 +462,22 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_turn_records_tool_calls_and_results(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
-        agent.streams[0].messages = AsyncItems([Message([{"name": "write_file", "args": {}}])])
-        agent.streams[0].tool_calls = AsyncItems([ToolCall("write_file", {}, "permission denied for write on /x")])
+        agent.streams[0].messages = AsyncItems([Message([{"id": "call-1", "name": "write_file", "args": {}}])])
+        agent.streams[0].tool_calls = AsyncItems([ToolCall("write_file", {}, "permission denied for write on /x", "call-1")])
         renderer = RunTurnRenderer()
 
         result = await runner.run_turn(agent, "write", renderer, "thread-1")
 
-        self.assertIn("write_file", result.tool_calls)
+        self.assertEqual(result.tool_calls, ["write_file"])
         self.assertIn("permission denied for write on /x", result.tool_results)
+
+    async def test_run_turn_strips_blank_leading_reply_gap(self) -> None:
+        agent = FakeAgent([FakeStream(output={"messages": [OutputMessage("\n\nHello")]} )])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "hello", renderer, "thread-1")
+
+        self.assertEqual(result.final_text, "Hello")
 
     async def test_task_tool_calls_are_hidden(self) -> None:
         renderer = RecordingRenderer()
@@ -492,7 +501,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     "delegation_started",
                     [{"name": "task", "args": {"description": "delegate"}}],
                 ),
-                ("tool_call", "read_file", {"path": "README.md"}),
+                ("tool_call", "read_file", {"path": "README.md"}, ""),
             ],
         )
 
@@ -726,6 +735,14 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await consume_messages(messages, renderer)
 
         self.assertEqual(renderer.events, [("text", "## SUMMARY\n"), ("text", "This is a normal answer.")])
+
+    async def test_streamed_markdown_keeps_blank_line_after_first_delta(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(text=AsyncItems(["## Summary", "\n\nBody text."]))])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("text", "## Summary"), ("text", "\n\nBody text.")])
 
     async def test_long_streamed_summary_prefix_hides_summary_and_renders_tail(self) -> None:
         renderer = RecordingRenderer()

@@ -11,6 +11,7 @@ COMPACTION_SUMMARY_HEADINGS = (
     "## artifacts",
     "## next steps",
 )
+LEADING_REPLY_GAP_RE = re.compile(r"^\s*\n+\s*")
 
 
 async def capture_output(output_stream: Any, output: dict[str, Any]) -> None:
@@ -60,7 +61,19 @@ def visible_message_text(message: Any) -> str:
         return ""
     text = message_text(message)
     visible, had_summary = strip_compaction_summary_prefix(text)
-    return visible if had_summary else text
+    return normalize_response_delta("", visible if had_summary else text)
+
+
+def normalize_response_delta(existing_text: str, delta: Any) -> str:
+    """Normalize streamed assistant text, hiding blank leading gaps."""
+    text = str(delta or "")
+    if not text:
+        return ""
+    if not existing_text:
+        text = LEADING_REPLY_GAP_RE.sub("", text)
+        if not text.strip():
+            return ""
+    return text
 
 
 def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:

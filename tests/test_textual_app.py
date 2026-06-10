@@ -15,7 +15,7 @@ from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
 from config.metadata import ModelMetadata
-from ui.interrupts import ASK_USER_OPEN_OPTION, action_text
+from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
 from ui.app import MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory
@@ -177,8 +177,73 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
-    async def test_compaction_status_animates_in_chat_log(self) -> None:
-        """Context compaction status should show a live spinner while running."""
+    async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
+        """The transient thinking block should appear only during visible silence."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.busy = True
+            app.waiting_started()
+            await pilot.pause(0.35)
+            first = renderable_plain(app.query_one(ChatLog).children[-1])
+            self.assertIn("thinking...", first)
+
+            app.query_one(ChatLog).tick_waiting()
+            await pilot.pause()
+            second = renderable_plain(app.query_one(ChatLog).children[-1])
+            self.assertIn("thinking...", second)
+            self.assertNotEqual(first, second)
+
+            app.text_delta("hello")
+            await pilot.pause()
+            blocks = list(app.query_one(ChatLog).children)
+            self.assertEqual(renderable_plain(blocks[-1]), "hello")
+            self.assertFalse(any("thinking..." in renderable_plain(block) for block in blocks))
+
+            app.waiting_started()
+            await pilot.pause(0.35)
+            self.assertIn("thinking...", renderable_plain(app.query_one(ChatLog).children[-1]))
+
+            app.waiting_finished()
+            await pilot.pause()
+            self.assertFalse(any("thinking..." in renderable_plain(block) for block in app.query_one(ChatLog).children))
+            app.busy = False
+
+    async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
+        """Leading blank assistant deltas should be ignored until real text arrives."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            base_count = len(app.query_one(ChatLog).children)
+            app.text_delta("\n\n")
+            await pilot.pause()
+            self.assertEqual(len(app.query_one(ChatLog).children), base_count)
+
+            app.text_delta("\n\n## Summary")
+            await pilot.pause()
+            text = renderable_plain(app.query_one(ChatLog).children[-1])
+            self.assertEqual(text, "## Summary")
+
+    async def test_assistant_text_preserves_internal_markdown_newlines(self) -> None:
+        """Assistant text should keep markdown paragraph breaks after visible text starts."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.text_delta("## Summary")
+            app.text_delta("\n\nThe eval tool passed.")
+            await pilot.pause()
+
+            text = renderable_plain(app.query_one(ChatLog).children[-1])
+            self.assertEqual(text, "## Summary\n\nThe eval tool passed.")
+
+    async def test_compaction_status_renders_and_completes(self) -> None:
+        """Context compaction status should render and then mark completion."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -199,8 +264,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("compacting context...", first)
         self.assertIn("compacting context...", second)
-        self.assertNotEqual(first, second)
+        self.assertEqual(first, second)
         self.assertIn("context compacted", done)
+
+    async def test_waiting_indicator_reappears_after_compaction_if_still_busy(self) -> None:
+        """After compaction, MIRA should show thinking again while waiting silently."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+
+            app.compaction_started()
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+
+            app.compaction_finished()
+            await pilot.pause(0.35)
+
+            blocks = list(app.query_one(ChatLog).children)
+            self.assertIn("context compacted", renderable_plain(block))
+            self.assertIn("thinking...", renderable_plain(blocks[-1]))
+            app.busy = False
 
     async def test_ctrl_c_action_cancels_running_turn(self) -> None:
         """The VS Code-friendly interrupt binding should confirm before cancelling."""
@@ -474,7 +559,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             buttons = list(app.query_one(PromptPanel).query(Button))
-            self.assertEqual([button.label.plain for button in buttons], ["a approve", "e edit", "r reject", "s respond"])
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Approve (a)", "Edit (e)", "Reject (r)", "Respond (s)"],
+            )
+            self.assertTrue(all(button.variant == "default" for button in buttons))
 
             await pilot.press("s")
             await pilot.pause()
@@ -524,9 +613,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt\nwith paste"])
 
-    def test_action_text_previews_large_json_args(self) -> None:
-        """Approval text should show useful compact JSON, not full raw payloads."""
-        text = action_text(
+    def test_action_preview_shows_key_value_rows(self) -> None:
+        """Approval previews should show scan-friendly rows with truncated values."""
+        text = action_preview(
             {
                 "name": "edit_file",
                 "args": {
@@ -538,14 +627,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertIn("edit_file", text)
-        self.assertIn("target: /.mira/memories/AGENTS.md", text)
-        self.assertIn('"old_string"', text)
-        self.assertIn('"new_string"', text)
-        self.assertIn('"replace_all": false', text)
+        self.assertIn("target", text)
+        self.assertIn("/.mira/memories/AGENTS.md", text)
+        self.assertIn("old_string", text)
+        self.assertIn("new_string", text)
+        self.assertIn("replace_all", text)
         self.assertIn("truncated", text)
-        self.assertIn("Full args available with e edit.", text)
-        self.assertLess(len(text), 900)
+        self.assertIn("Press e to inspect or edit full args", text)
+        self.assertLess(len(text), 700)
 
     async def test_long_approval_text_keeps_buttons_above_prompt_box(self) -> None:
         """Large approval bodies should not push the action buttons offscreen."""
@@ -573,10 +662,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             prompt_y = app.query_one(PromptBox).region.y
             panel_bottom = panel.region.y + panel.region.height
-            self.assertEqual(body.styles.overflow_y, "hidden")
-            self.assertIn("target: ui/dialogs.py", message)
+            self.assertEqual(body.styles.overflow_y, "auto")
+            self.assertIn("target", message)
+            self.assertIn("ui/dialogs.py", message)
             self.assertIn("truncated", message)
-            self.assertLess(len(message), 900)
+            self.assertIn("Press e to inspect or edit full args", message)
+            self.assertLess(len(message), 700)
             for button in panel.query(Button):
                 self.assertLess(button.region.y, prompt_y)
                 self.assertLessEqual(button.region.y + button.region.height, panel_bottom)
@@ -616,6 +707,95 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#prompt-panel-editor", TextArea).text = "{bad json"
             app.query_one("#prompt-save", Button).press()
             self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject"})
+
+    async def test_tool_result_attaches_to_existing_tool_call(self) -> None:
+        """Tool results should update the existing tool block instead of adding a new panel."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.tool_call("eval", {"code": "1 + 1"}, call_id="call-1")
+            app.tool_result("eval", "<result>2</result>", call_id="call-1")
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            self.assertEqual(len(blocks), 2)
+            text = renderable_plain(blocks[-1])
+            self.assertIn("call:", text)
+            self.assertIn("output:", text)
+
+    async def test_tool_result_waits_for_call_and_then_attaches(self) -> None:
+        """Out-of-order tool results should attach once the tool call is rendered."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.tool_result("eval", "<result>5</result>\nsecond line", call_id="call-2")
+            await pilot.pause()
+            self.assertEqual(len(app.query_one(ChatLog).children), 1)
+
+            app.tool_call("eval", {"code": "2 + 3"}, call_id="call-2")
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            self.assertEqual(len(blocks), 2)
+            text = renderable_plain(blocks[-1])
+            self.assertIn("call:", text)
+            self.assertIn("output:", text)
+            self.assertIn("second line", text)
+
+    async def test_tool_results_without_ids_attach_by_name_order(self) -> None:
+        """Tool results without ids should attach to the oldest unresolved matching call."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.tool_call("eval", {}, call_id="call-empty")
+            app.tool_call("eval", {"code": "2 + 2"}, call_id="call-code")
+            app.tool_result("eval", "missing code")
+            app.tool_result("eval", "<result>4</result>")
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            first = renderable_plain(blocks[-2])
+            second = renderable_plain(blocks[-1])
+            self.assertIn("call: {}", first)
+            self.assertIn("output:", first)
+            self.assertIn("missing code", first)
+            self.assertIn("call:", second)
+            self.assertIn("2 + 2", second)
+            self.assertIn("<result>4</result>", second)
+
+    async def test_subagent_labels_keep_cute_suffix_and_running_animation(self) -> None:
+        """Subagent display should keep readable nicknames and animate running status."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.subagent_started("general-purpose", "look for README")
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+            title = str(getattr(block, "border_title", "")).replace("\\", "")
+            first = renderable_plain(block)
+
+            self.assertIn("general-purpose [", title)
+            self.assertIn("RUNNING", first)
+
+            app.query_one(ChatLog).tick_subagents()
+            await pilot.pause()
+            second = renderable_plain(block)
+
+            self.assertNotEqual(first, second)
+            app.subagent_finished("general-purpose", "README.md\nDone.")
+            await pilot.pause()
+            done = renderable_plain(block)
+            self.assertIn("DONE", done)
+            self.assertIn("output:", done)
+            self.assertIn("README.md", done)
 
     async def test_ask_user_choice_and_open_text_flow(self) -> None:
         """ask_user should support both concrete choices and open-ended text."""
