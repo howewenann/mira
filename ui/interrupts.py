@@ -6,6 +6,14 @@ import json
 from typing import Any
 
 ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
+ACTION_TEXT_LIMIT = 220
+DEFAULT_APPROVAL_DECISIONS = ["approve", "edit", "reject"]
+DECISION_LABELS = {
+    "approve": ("a", "a approve"),
+    "edit": ("e", "e edit"),
+    "reject": ("r", "r reject"),
+    "respond": ("s", "s respond"),
+}
 
 
 def ask_user_request(interrupt: Any) -> dict[str, Any]:
@@ -47,10 +55,102 @@ def action_requests(interrupt: Any) -> list[Any]:
     return [value]
 
 
+def action_choices(interrupt: Any, action: Any, index: int) -> list[tuple[str, str]]:
+    """Return prompt choices allowed for one interrupted action."""
+    choices = []
+    for decision in allowed_decisions(interrupt, action, index):
+        label = DECISION_LABELS.get(decision)
+        if label is not None:
+            choices.append(label)
+    return choices or [DECISION_LABELS["approve"], DECISION_LABELS["reject"]]
+
+
+def allowed_decisions(interrupt: Any, action: Any, index: int) -> list[str]:
+    """Return DeepAgents review decisions allowed for one action."""
+    config = review_config(interrupt, action, index)
+    raw_decisions = config.get("allowed_decisions") if isinstance(config, dict) else None
+    if not isinstance(raw_decisions, list):
+        raw_decisions = DEFAULT_APPROVAL_DECISIONS
+
+    allowed = []
+    for decision in raw_decisions:
+        text = str(decision)
+        if text in DECISION_LABELS and text not in allowed:
+            allowed.append(text)
+    return allowed
+
+
+def review_config(interrupt: Any, action: Any, index: int) -> dict[str, Any]:
+    """Return the matching review config for an interrupted action."""
+    value = getattr(interrupt, "value", interrupt)
+    configs = value.get("review_configs") if isinstance(value, dict) else None
+    if not isinstance(configs, list):
+        return {}
+
+    action_name = action.get("name") if isinstance(action, dict) else None
+    for config in configs:
+        if isinstance(config, dict) and config.get("action_name") == action_name:
+            return config
+    if index < len(configs) and isinstance(configs[index], dict):
+        return configs[index]
+    return {}
+
+
 def action_text(action: Any) -> str:
     """Format an approval action as readable text."""
-    if isinstance(action, dict):
-        name = action.get("name", "tool")
-        args = action.get("args", {})
-        return f"{name}\n\n{json.dumps(args, indent=2)}"
-    return str(action)
+    if not isinstance(action, dict):
+        return str(action)
+
+    name = str(action.get("name") or "tool")
+    args = action.get("args", {})
+    if not isinstance(args, dict):
+        return f"{name}\n\n{_preview_text(args)}"
+
+    lines = [
+        _action_header(name, args),
+        "",
+        json.dumps(_preview_value(args), indent=2),
+        "",
+        "Full args available with e edit.",
+    ]
+    return "\n".join(lines)
+
+
+def response_message(message: Any, action: Any) -> str:
+    """Return the synthetic successful tool result for a respond decision."""
+    text = str(message or "").strip()
+    if text:
+        return text
+
+    name = action.get("name") if isinstance(action, dict) else "tool"
+    return f"User responded to `{name}` without running the tool."
+
+
+def _action_header(name: str, args: dict[str, Any]) -> str:
+    target = _target_arg(args)
+    return f"{name}\ntarget: {target}" if target else name
+
+
+def _target_arg(args: dict[str, Any]) -> str:
+    for key in ("file_path", "path", "filename", "command"):
+        value = args.get(key)
+        if value:
+            return _preview_text(value, limit=120)
+    return ""
+
+
+def _preview_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _preview_text(value)
+    if isinstance(value, dict):
+        return {str(key): _preview_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_preview_value(item) for item in value[:20]]
+    return value
+
+
+def _preview_text(value: Any, *, limit: int = ACTION_TEXT_LIMIT) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit].rstrip()} ... truncated ..."

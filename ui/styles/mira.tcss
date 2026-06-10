@@ -80,7 +80,7 @@ Screen {
 }
 
 #prompt {
-    height: 3;
+    height: 5;
     border: tall #5bb8b1;
     padding: 0 1;
     background: #101516;
@@ -88,7 +88,7 @@ Screen {
 
 #prompt-panel {
     height: auto;
-    max-height: 60%;
+    max-height: 70%;
     padding: 1;
     background: #11181b;
     border: solid #d2a957;
@@ -102,9 +102,11 @@ Screen {
 }
 
 #prompt-panel-body {
-    height: 5;
+    height: 7;
     padding: 0 1;
     border: solid #3c4a50;
+    overflow-x: hidden;
+    overflow-y: hidden;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
@@ -133,6 +135,8 @@ Screen {
 }
 
 .prompt-panel-button {
+    min-width: 10;
+    width: auto;
     margin-right: 1;
 }
 
@@ -210,50 +214,4 @@ Screen {
 
 .message.subagent {
     border: solid #92b66b;
-}
-
-.dialog {
-    width: 54;
-    height: auto;
-    max-width: 80%;
-    max-height: 55%;
-    margin: 3 2;
-    padding: 1;
-    background: #11181b;
-    border: solid #5bb8b1;
-}
-
-.json-dialog {
-    width: 72;
-    height: 52%;
-}
-
-.dialog-title {
-    text-style: bold;
-    color: #eef7f8;
-    margin-bottom: 1;
-}
-
-.dialog-message {
-    margin-bottom: 1;
-    color: #e8edef;
-}
-
-.dialog-detail {
-    color: #b8c1c7;
-    margin-bottom: 1;
-}
-
-.dialog-buttons {
-    height: auto;
-    margin-top: 1;
-}
-
-.dialog-buttons Button {
-    margin-right: 1;
-}
-
-#json-editor {
-    height: 1fr;
-    border: solid #4a5360;
 }

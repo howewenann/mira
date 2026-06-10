@@ -14,7 +14,7 @@ from pyfiglet import Figlet
 from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
-from ui.interrupts import ASK_USER_OPEN_OPTION
+from ui.interrupts import ASK_USER_OPEN_OPTION, action_text
 from ui.app import MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory
@@ -27,6 +27,16 @@ class FakeStore:
     def save(self, record: dict[str, Any]) -> None:
         """Ignore session saves."""
         return None
+
+
+class FakeWorker:
+    """Worker double for cancel binding tests."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 def renderable_plain(widget: Any) -> str:
@@ -68,7 +78,6 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
         "store": FakeStore(),
         "session": session_record,
         "model_name": "test-model",
-        "session_model": None,
         "context_limit_tokens": 8192,
         "context_limit_source": "test",
     }
@@ -154,14 +163,88 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 prompt = app.query_one(PromptBox)
                 prompt.focus()
 
-                await app.submit_prompt(Input.Submitted(prompt, "hello"))
+                await app.submit_prompt(PromptBox.Submitted(prompt, "hello\nsecond line"))
                 await pilot.pause()
 
-                self.assertEqual(calls, ["hello"])
+                self.assertEqual(calls, ["hello\nsecond line"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
-    async def test_loading_past_session_replays_summary_and_messages(self) -> None:
+    async def test_ctrl_c_action_cancels_running_turn(self) -> None:
+        """The VS Code-friendly interrupt binding should confirm before cancelling."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+
+            app.action_interrupt_or_quit()
+            await pilot.pause()
+            self.assertFalse(worker.cancelled)
+            self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Cancel Turn?")
+
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertFalse(worker.cancelled)
+
+            app.action_interrupt_or_quit()
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
+
+            self.assertTrue(worker.cancelled)
+            self.assertEqual(app.status_state, "cancelling")
+
+    async def test_ctrl_c_action_confirms_idle_exit(self) -> None:
+        """Ctrl+C should not quit an idle app without confirmation."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "exit") as exit_app:
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Exit MIRA?")
+
+                await pilot.press("n")
+                await pilot.pause()
+                exit_app.assert_not_called()
+
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                await pilot.press("y")
+                await pilot.pause()
+                exit_app.assert_called_once()
+
+    async def test_ctrl_c_action_cancels_running_turn_during_prompt(self) -> None:
+        """Ctrl+C should still cancel when another in-window prompt is active."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt_task = asyncio.create_task(
+                app._prompt_choice("Approval", "Run this tool?", [("y", "y yes"), ("n", "n no")])
+            )
+            await pilot.pause()
+
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+
+            with patch.object(app, "exit") as exit_app:
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+
+                self.assertTrue(worker.cancelled)
+                self.assertEqual(app.status_state, "cancelling")
+                exit_app.assert_not_called()
+
+            await pilot.press("n")
+            self.assertEqual(await prompt_task, "n")
+
+    async def test_loading_past_session_replays_ordered_events(self) -> None:
         """Selecting an older session should rebuild its visible transcript."""
         workspace = Path(".")
         past_session = {
@@ -169,34 +252,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "workspace": str(workspace),
             "created_at": "2026-01-01T00:00:00+00:00",
             "turns": 2,
-            "summary": {
-                "version": 1,
-                "kind": "llm_compaction",
-                "through_message": 2,
-                "updated_at": "2026-01-01T00:01:00+00:00",
-                "state": {
-                    "objective": "Test session replay",
-                    "current_status": "Older turns compacted",
-                    "important_decisions": ["Keep summary visible"],
-                    "user_preferences": [],
-                    "relevant_files": ["README.md"],
-                    "next_steps": ["Continue the selected session"],
-                },
-            },
-            "messages": [
+            "events": [
                 {
-                    "id": 3,
-                    "role": "user",
+                    "id": 1,
+                    "type": "compaction",
+                    "cutoff_index": 2,
+                    "file_path": "/.mira/conversation_history/past-1.md",
+                    "summary": "Older turns compacted for replay testing.",
+                    "created_at": "2026-01-01T00:01:00+00:00",
+                },
+                {
+                    "id": 2,
+                    "type": "user",
                     "mode": "planning",
                     "created_at": "2026-01-01T00:02:00+00:00",
-                    "content": "make a plan",
+                    "text": "make a plan",
                 },
                 {
-                    "id": 4,
-                    "role": "assistant",
+                    "id": 3,
+                    "type": "assistant",
                     "mode": "planning",
                     "created_at": "2026-01-01T00:02:01+00:00",
-                    "content": "plan saved",
+                    "text": "plan saved",
                 },
             ],
         }
@@ -208,7 +285,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 "store": FakeStore(),
                 "session": past_session,
                 "model_name": "test-model",
-                "session_model": None,
                 "context_limit_tokens": 8192,
                 "context_limit_source": "test",
             }
@@ -226,11 +302,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = "\n".join(renderable_plain(block) for block in blocks)
             titles = [str(getattr(block, "border_title", "")) for block in blocks]
 
-            self.assertIn("session summary", titles)
+            self.assertIn("session compacted", titles)
             self.assertIn("you (plan)", titles)
             self.assertIn("mira", titles)
-            self.assertIn("Test session replay", rendered)
-            self.assertIn("README.md", rendered)
+            self.assertIn("Older turns compacted", rendered)
+            self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)
 
@@ -242,7 +318,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             prompt = app.query_one(PromptBox)
 
-            await app.submit_prompt(Input.Submitted(prompt, "/help"))
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/help"))
             await pilot.pause()
 
             command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
@@ -293,6 +369,45 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(decisions, [{"type": "reject"}])
                 self.assertFalse(panel.display)
 
+    async def test_approval_prompt_supports_respond_decision(self) -> None:
+        """Respond decisions should return a synthetic successful tool result."""
+        app = make_app()
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "edit_file",
+                    "args": {"file_path": "loop.txt", "old_string": "a", "new_string": "b"},
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": "edit_file",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.ask_approvals([interrupt]))
+            await pilot.pause()
+
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual([button.label.plain for button in buttons], ["a approve", "e edit", "r reject", "s respond"])
+
+            await pilot.press("s")
+            await pilot.pause()
+            answer = app.query_one("#prompt-panel-input", Input)
+            self.assertTrue(answer.has_focus)
+            answer.value = "Stop retrying; the file change is not needed."
+            await pilot.press("enter")
+
+            self.assertEqual(
+                await asyncio.wait_for(task, timeout=2),
+                [{"type": "respond", "message": "Stop retrying; the file change is not needed."}],
+            )
+
     async def test_prompt_box_uses_up_down_history_from_workspace_file(self) -> None:
         """The main prompt should navigate workspace history with Up and Down."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -325,9 +440,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             history_path = Path(directory) / ".mira" / "history.txt"
             append_prompt_history(history_path, "first prompt")
-            append_prompt_history(history_path, "second prompt")
+            append_prompt_history(history_path, "second prompt\nwith paste")
 
-            self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt"])
+            self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt\nwith paste"])
+
+    def test_action_text_previews_large_json_args(self) -> None:
+        """Approval text should show useful compact JSON, not full raw payloads."""
+        text = action_text(
+            {
+                "name": "edit_file",
+                "args": {
+                    "file_path": "/.mira/memories/AGENTS.md",
+                    "old_string": "old " * 100,
+                    "new_string": "new " * 100,
+                    "replace_all": False,
+                },
+            }
+        )
+
+        self.assertIn("edit_file", text)
+        self.assertIn("target: /.mira/memories/AGENTS.md", text)
+        self.assertIn('"old_string"', text)
+        self.assertIn('"new_string"', text)
+        self.assertIn('"replace_all": false', text)
+        self.assertIn("truncated", text)
+        self.assertIn("Full args available with e edit.", text)
+        self.assertLess(len(text), 900)
 
     async def test_long_approval_text_keeps_buttons_above_prompt_box(self) -> None:
         """Large approval bodies should not push the action buttons offscreen."""
@@ -351,8 +489,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(PromptPanel)
+            body = app.query_one("#prompt-panel-body")
+            message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             prompt_y = app.query_one(PromptBox).region.y
             panel_bottom = panel.region.y + panel.region.height
+            self.assertEqual(body.styles.overflow_y, "hidden")
+            self.assertIn("target: ui/dialogs.py", message)
+            self.assertIn("truncated", message)
+            self.assertLess(len(message), 900)
             for button in panel.query(Button):
                 self.assertLess(button.region.y, prompt_y)
                 self.assertLessEqual(button.region.y + button.region.height, panel_bottom)

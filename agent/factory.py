@@ -129,8 +129,8 @@ def _plan_permissions() -> list[FilesystemPermission]:
 def _write_interrupts() -> dict[str, dict[str, list[str]]]:
     """Require human approval before the action agent writes project files."""
     return {
-        "write_file": {"allowed_decisions": ["approve", "edit", "reject"]},
-        "edit_file": {"allowed_decisions": ["approve", "edit", "reject"]},
+        "write_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
+        "edit_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
     }
 
 

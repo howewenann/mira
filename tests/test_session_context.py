@@ -1,4 +1,4 @@
-"""Tests for durable session context helpers."""
+"""Tests for durable session transcript helpers."""
 
 from __future__ import annotations
 
@@ -6,37 +6,40 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from session import context
 from session.dashboard import apply_turn_usage
 from session.store import SessionStore
 
 
-class FakeModel:
-    """Simple async model double for title and summary generation."""
+class Snapshot:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = values
 
-    def __init__(self, outputs: list[str]) -> None:
-        """Store scripted model outputs."""
-        self.outputs = list(outputs)
-        self.prompts: list[str] = []
 
-    async def ainvoke(self, prompt: str) -> str:
-        """Record the prompt and return the next scripted output."""
-        self.prompts.append(prompt)
-        return self.outputs.pop(0)
+class AgentWithState:
+    def __init__(self, values: dict[str, Any]) -> None:
+        self.values = values
+        self.configs: list[dict[str, Any]] = []
+
+    async def aget_state(self, config: dict[str, Any]) -> Snapshot:
+        self.configs.append(config)
+        return Snapshot(self.values)
+
+
+class Message:
+    def __init__(self, content: str) -> None:
+        self.content = content
 
 
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for one-file session resume data."""
-
     def test_new_session_id_is_timestamped(self) -> None:
-        """Default session ids should sort alphabetically by creation time."""
         record = SessionStore(Path(".")).new(session_id=None, workspace=Path("workspace"))
 
         self.assertRegex(record["id"], r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$")
 
     def test_explicit_session_ids_load_exactly(self) -> None:
-        """Explicit session ids should load the matching JSON file."""
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
 
@@ -48,9 +51,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "updated_at": "2026-01-01T00:00:00+00:00",
                 "turns": 0,
-                "context_policy": context.context_policy(),
-                "summary": None,
-                "messages": [],
+                "dashboard": {},
+                "events": [],
             }
             store.save(custom)
             loaded = store.load("custom-session", resume=False, workspace=Path("workspace"))
@@ -59,33 +61,27 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded["id"], "custom-session")
         self.assertFalse(re.match(r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$", loaded["id"]))
 
-    def test_new_session_has_v1_context_fields(self) -> None:
-        """New records should include readable V1 session fields."""
-        record = SessionStore(Path(".")).new(
-            session_id="thread-1",
-            workspace=Path("workspace"),
-            policy={"max_chars": 40, "recent_messages": 2, "summary_max_chars": 500},
-        )
+    def test_new_session_shape_is_readable(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
 
-        self.assertEqual(list(record.keys()), [
-            "id",
-            "title",
-            "workspace",
-            "created_at",
-            "updated_at",
-            "turns",
-            "dashboard",
-            "context_policy",
-            "summary",
-            "messages",
-        ])
+        self.assertEqual(
+            list(record.keys()),
+            [
+                "id",
+                "title",
+                "workspace",
+                "created_at",
+                "updated_at",
+                "turns",
+                "dashboard",
+                "events",
+            ],
+        )
         self.assertEqual(record["title"], "Untitled session")
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
-        self.assertEqual(record["messages"], [])
-        self.assertIsNone(record["summary"])
+        self.assertEqual(record["events"], [])
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
-        """Turn usage should become the compact dashboard object saved to JSON."""
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
         result = type(
             "Result",
@@ -107,132 +103,68 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["dashboard"]["tokens"], {"in": 5512, "out": 91})
         self.assertEqual(normalized["dashboard"]["context"]["percent"], 67.3)
 
-    async def test_title_generation_refreshes_after_early_turns(self) -> None:
-        """The title should mature after the first real follow-up turn."""
-        record = {
-            "id": "thread-1",
-            "title": "Untitled session",
-            "messages": [],
-            "context_policy": context.context_policy(),
-            "turns": 1,
-        }
-        context.append_turn(record, "add resume", "done", "action")
-        model = FakeModel(["MIRA Session Kickoff", "Durable Resume Work"])
+    def test_title_uses_recent_topic(self) -> None:
+        record = {"title": "Untitled session", "events": []}
+        context.append_message(record, "user", "hello", "action")
+        context.append_message(record, "assistant", "Hello", "action")
+        context.update_title(record)
+        self.assertEqual(record["title"], "Untitled session")
 
-        await context.update_title(record, model)
-        self.assertEqual(record["title"], "MIRA Session Kickoff")
+        context.append_message(record, "user", "help me debug qwen reasoning_content", "action")
+        context.append_message(record, "assistant", "done", "action")
+        context.update_title(record)
+        self.assertEqual(record["title"], "Debug Qwen reasoning_content")
 
-        record["turns"] = 2
-        context.append_turn(record, "make resume durable", "updated session code", "action")
-        await context.update_title(record, model)
+        context.append_message(record, "user", "now check deepagents compact_conversation history", "action")
+        context.append_message(record, "assistant", "done", "action")
+        context.update_title(record)
+        title = record["title"].lower()
+        self.assertIn("deepagents", title)
+        self.assertIn("compact_conversation", title)
 
-        self.assertEqual(record["title"], "Durable Resume Work")
-        self.assertEqual(len(model.prompts), 2)
-
-    async def test_title_generation_skips_between_periodic_updates(self) -> None:
-        """The LLM should not be called on every completed turn."""
-        record = {
-            "id": "thread-1",
-            "title": "Durable Resume Work",
-            "messages": [],
-            "context_policy": context.context_policy(),
-            "turns": 3,
-        }
-        context.append_turn(record, "next task", "done", "action")
-        model = FakeModel(["Unexpected Title"])
-
-        await context.update_title(record, model)
-
-        self.assertEqual(record["title"], "Durable Resume Work")
-        self.assertEqual(len(model.prompts), 0)
-
-    async def test_title_generation_runs_on_periodic_turns(self) -> None:
-        """Longer sessions should occasionally refresh their title."""
-        record = {
-            "id": "thread-1",
-            "title": "Durable Resume Work",
-            "messages": [],
-            "context_policy": context.context_policy(),
-            "turns": 5,
-        }
-        context.append_turn(record, "add local session filenames", "done", "action")
-        model = FakeModel(["Local Session Filenames"])
-
-        await context.update_title(record, model)
-
-        self.assertEqual(record["title"], "Local Session Filenames")
-        self.assertEqual(len(model.prompts), 1)
-
-    async def test_compaction_keeps_recent_messages_and_structured_summary(self) -> None:
-        """Long sessions should compact older messages into continuation state."""
-        record = {
-            "id": "thread-1",
-            "title": "Title",
-            "messages": [],
-            "context_policy": {"max_chars": 10, "recent_messages": 2, "summary_max_chars": 1000},
-        }
-        context.append_turn(record, "first request", "first response", "action")
-        context.append_turn(record, "second request", "second response", "action")
-        model = FakeModel(
-            [
-                """
-                {
-                  "objective": "Resume sessions",
-                  "current_status": "Compacting older context",
-                  "important_decisions": ["Use one JSON file"],
-                  "user_preferences": ["Readable session files"],
-                  "relevant_files": ["session/context.py"],
-                  "next_steps": ["Inject context on resume"]
+    async def test_deepagents_compaction_event_is_copied_once(self) -> None:
+        record = {"events": []}
+        agent = AgentWithState(
+            {
+                "_summarization_event": {
+                    "cutoff_index": 12,
+                    "file_path": "/.mira/conversation_history/thread-1.md",
+                    "summary_message": Message(
+                        "A condensed summary follows:\n\n<summary>\nDebugged Qwen helper latency.\n</summary>"
+                    ),
                 }
-                """
-            ]
+            }
         )
 
-        await context.compact_if_needed(record, model)
+        await context.sync_deepagents_compaction(record, agent, "thread-1")
+        await context.sync_deepagents_compaction(record, agent, "thread-1")
 
-        self.assertEqual([message["content"] for message in record["messages"]], ["second request", "second response"])
-        self.assertEqual(record["summary"]["through_message"], 2)
-        self.assertEqual(record["summary"]["state"]["objective"], "Resume sessions")
-        self.assertEqual(record["summary"]["state"]["next_steps"], ["Inject context on resume"])
-
-    def test_will_compact_detects_long_sessions_with_older_messages(self) -> None:
-        """The compaction predicate should be true only when older messages exist."""
-        record = {
-            "messages": [],
-            "context_policy": {"max_chars": 10, "recent_messages": 2, "summary_max_chars": 1000},
-        }
-        context.append_turn(record, "short", "ok", "action")
-        self.assertFalse(context.will_compact(record))
-
-        context.append_turn(record, "a much longer request", "a much longer response", "action")
-        self.assertTrue(context.will_compact(record))
+        self.assertEqual(agent.configs[0], {"configurable": {"thread_id": "thread-1"}})
+        compactions = context.normalize_compactions(record["events"])
+        self.assertEqual(len(compactions), 1)
+        self.assertEqual(compactions[0]["cutoff_index"], 12)
+        self.assertEqual(compactions[0]["file_path"], "/.mira/conversation_history/thread-1.md")
+        self.assertEqual(compactions[0]["summary"], "Debugged Qwen helper latency.")
 
     def test_resume_context_injects_once(self) -> None:
-        """Resumed session context should be added to only one request."""
         record = {
             "resume_context_pending": True,
-            "summary": {
-                "version": 1,
-                "kind": "llm_compaction",
-                "through_message": 2,
-                "updated_at": "now",
-                "state": {
-                    "objective": "Resume sessions",
-                    "current_status": "Testing",
-                    "important_decisions": [],
-                    "user_preferences": [],
-                    "relevant_files": [],
-                    "next_steps": ["Continue"],
-                },
-            },
-            "messages": [
+            "events": [
                 {
-                    "id": 3,
-                    "role": "user",
+                    "id": 1,
+                    "type": "compaction",
+                    "cutoff_index": 8,
+                    "file_path": "/.mira/conversation_history/thread-1.md",
+                    "summary": "Earlier work debugged session latency.",
+                    "created_at": "now",
+                },
+                {
+                    "id": 2,
+                    "type": "user",
                     "mode": "action",
                     "created_at": "now",
-                    "content": "recent request",
-                }
+                    "text": "recent request",
+                },
             ],
         }
 
@@ -240,7 +172,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         second = context.with_resume_context(record, "another request")
 
         self.assertIn("Previous MIRA session context:", first)
-        self.assertIn("Resume sessions", first)
+        self.assertIn("Earlier work debugged session latency.", first)
+        self.assertIn("/.mira/conversation_history/thread-1.md", first)
         self.assertIn("recent request", first)
         self.assertEqual(second, "another request")
 

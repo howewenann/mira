@@ -13,16 +13,18 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Input, ListView, Static
+from textual.widgets import ListView, Static
 
 from session.dashboard import ensure_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
+    action_choices,
     action_requests,
     action_text,
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    response_message,
 )
 from ui.repl import handle_command, initial_mode, run_user_turn
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, StatusBar
@@ -38,6 +40,7 @@ class MiraApp(App[None]):
 
     CSS_PATH = "styles/mira.tcss"
     BINDINGS = [
+        Binding("ctrl+c", "interrupt_or_quit", "Cancel/Quit", priority=True),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("ctrl+l", "clear_log", "Clear"),
         Binding("escape", "focus_prompt", "Prompt"),
@@ -71,7 +74,6 @@ class MiraApp(App[None]):
         self.plan_agent: Any = None
         self.store: Any = None
         self.session: dict[str, Any] = {"id": "", "workspace": str(self.workspace), "turns": 0}
-        self.session_model: Any = None
         self.model_name = ""
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
@@ -80,6 +82,8 @@ class MiraApp(App[None]):
         self.ready = False
         self.busy = False
         self.status_state = "starting"
+        self.turn_worker: Any | None = None
+        self.confirming_interrupt = False
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -135,7 +139,6 @@ class MiraApp(App[None]):
         self.plan_agent = state["plan_agent"]
         self.store = state["store"]
         self.session = state["session"]
-        self.session_model = state.get("session_model")
         self.model_name = str(state.get("model_name") or "")
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
@@ -165,8 +168,8 @@ class MiraApp(App[None]):
         self._set_status(state="ready")
         self.action_focus_prompt()
 
-    @on(Input.Submitted, "#prompt")
-    async def submit_prompt(self, event: Input.Submitted) -> None:
+    @on(PromptBox.Submitted)
+    async def submit_prompt(self, event: PromptBox.Submitted) -> None:
         """Handle submitted prompt text."""
         text = event.value.strip()
         prompt = self.query_one(PromptBox)
@@ -188,7 +191,7 @@ class MiraApp(App[None]):
         self.busy = True
         self._set_status(state="running")
         prompt.disabled = True
-        self.run_worker(self._run_turn(text), name="turn", exclusive=True)
+        self.turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=True)
 
     async def _run_turn(self, text: str) -> None:
         """Run one agent turn and restore prompt focus when done."""
@@ -199,7 +202,6 @@ class MiraApp(App[None]):
                 renderer=self,
                 store=self.store,
                 session=self.session,
-                session_model=self.session_model,
                 mode=self.mode,
                 text=text,
                 model_name=self.model_name,
@@ -209,14 +211,58 @@ class MiraApp(App[None]):
             )
             self._refresh_sessions()
             self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.system_message("turn cancelled", kind="warning")
+            self._set_status(state="ready")
+            raise
         except Exception as exc:
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
+            self.turn_worker = None
             self.busy = False
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
+
+    def action_interrupt_or_quit(self) -> None:
+        """Confirm before cancelling a turn or quitting the app."""
+        if self.confirming_interrupt:
+            return
+        if self.query_one(PromptPanel).active:
+            self._cancel_turn()
+            return
+        self.run_worker(self._confirm_interrupt_or_quit(), name="confirm-interrupt", exclusive=False)
+
+    async def _confirm_interrupt_or_quit(self) -> None:
+        """Ask for confirmation before handling Ctrl+C."""
+        self.confirming_interrupt = True
+        try:
+            if self.busy and self.turn_worker is not None:
+                answer = await self._prompt_choice(
+                    "Cancel Turn?",
+                    "MIRA is still working. Cancel this turn?",
+                    [("y", "y yes"), ("n", "n no")],
+                )
+                if answer == "y" and self.busy and self.turn_worker is not None:
+                    self._cancel_turn()
+                return
+
+            answer = await self._prompt_choice(
+                "Exit MIRA?",
+                "No cancellable turn is running. Exit MIRA?",
+                [("y", "y yes"), ("n", "n no")],
+            )
+            if answer == "y":
+                self.exit()
+        finally:
+            self.confirming_interrupt = False
+
+    def _cancel_turn(self) -> None:
+        """Cancel the active turn worker."""
+        if self.busy and self.turn_worker is not None:
+            self.turn_worker.cancel()
+            self._set_status(state="cancelling")
 
     def action_clear_log(self) -> None:
         """Clear chat and tool output."""
@@ -298,28 +344,22 @@ class MiraApp(App[None]):
         """Close streamed chat blocks after a top-level turn."""
         self.query_one(ChatLog).finish_main()
 
-    def context_compaction_started(self) -> None:
-        """Show context compaction status."""
-        self._set_status(state="compacting")
-
-    def context_compaction_finished(self) -> None:
-        """Restore status after context compaction."""
-        self._set_status(state="running" if self.busy else "ready")
-
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
-        """Ask the user to approve, edit, or reject interrupted tool actions."""
+        """Ask the user to approve, edit, reject, or respond to interrupted actions."""
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
-            for action in action_requests(interrupt):
+            for index, action in enumerate(action_requests(interrupt)):
                 answer = await self._prompt_choice(
                     "Approval",
                     action_text(action),
-                    [("a", "a approve"), ("e", "e edit"), ("r", "r reject")],
+                    action_choices(interrupt, action, index),
                 )
                 if answer == "e":
                     decisions.append(await self.edit_decision(action))
                 elif answer == "r":
                     decisions.append({"type": "reject"})
+                elif answer == "s":
+                    decisions.append(await self.respond_decision(action))
                 else:
                     decisions.append({"type": "approve"})
         return decisions
@@ -374,6 +414,11 @@ class MiraApp(App[None]):
                 "args": edited_args,
             },
         }
+
+    async def respond_decision(self, action: Any) -> dict[str, Any]:
+        """Prompt for a synthetic successful tool response."""
+        message = await self._prompt_text("Respond", "Type the tool result to return without running it.")
+        return {"type": "respond", "message": response_message(message, action)}
 
     async def _prompt_choice(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
         """Show a choice prompt in the main window."""
@@ -500,14 +545,18 @@ def read_prompt_history(path: Path) -> list[str]:
         return []
 
     entries: list[str] = []
+    current: list[str] = []
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            if current:
+                entries.append("\n".join(current).strip())
+                current = []
             continue
         if stripped.startswith("+"):
-            stripped = stripped[1:].strip()
-        if stripped:
-            entries.append(stripped)
+            current.append(stripped[1:])
+    if current:
+        entries.append("\n".join(current).strip())
     return entries
 
 
@@ -519,4 +568,6 @@ def append_prompt_history(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().isoformat(sep=" ", timespec="microseconds")
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"\n# {timestamp}\n+{entry}\n")
+        handle.write(f"\n# {timestamp}\n")
+        for line in entry.splitlines():
+            handle.write(f"+{line}\n")

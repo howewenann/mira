@@ -86,29 +86,31 @@ async def _run(
 
 
 async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
-    """Run one prompt, persist the turn, and compact session context if needed."""
+    """Run one prompt and persist the visible transcript."""
     from runtime.runner import run_turn
     from session.dashboard import apply_turn_usage
-    from session.context import append_turn, compact_if_needed, update_title, will_compact, with_resume_context
+    from session.context import sync_deepagents_compaction, update_title, with_resume_context
+    from session.recorder import RecordingRenderer, SessionRecorder
 
     request_text = with_resume_context(app["session"], prompt)
     run_kwargs = {"token_counter": app["token_counter"]} if app.get("token_counter") is not None else {}
+    recorder = SessionRecorder(app["session"], app["store"], "action")
+    recorder.user_message(prompt)
+    update_title(app["session"])
+    recorder.save()
+    renderer = RecordingRenderer(app["renderer"], recorder)
     result = await run_turn(
         agent=app["agent"],
         text=request_text,
-        renderer=app["renderer"],
+        renderer=renderer,
         thread_id=app["session"]["id"],
         **run_kwargs,
     )
-    append_turn(app["session"], prompt, getattr(result, "final_text", ""), "action")
+    recorder.ensure_assistant(getattr(result, "final_text", ""))
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
-    await update_title(app["session"], app.get("session_model"))
-    if will_compact(app["session"]):
-        app["renderer"].context_compaction_started()
-        try:
-            await compact_if_needed(app["session"], app.get("session_model"))
-        finally:
-            app["renderer"].context_compaction_finished()
+    update_title(app["session"])
+    if await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"]):
+        recorder.save()
     apply_turn_usage(
         app["session"],
         result,
@@ -131,7 +133,7 @@ def _bootstrap(
     from agent.llm import get_llm, get_model_name
     from config.loader import load_config
     from session.checkpoint import make_checkpointer
-    from session.context import context_policy, mark_resume_context_pending
+    from session.context import mark_resume_context_pending
     from session.dashboard import context_limit_for_model, ensure_dashboard, token_counter_for_model
     from session.store import SessionStore
     from ui.renderer import Renderer
@@ -142,7 +144,7 @@ def _bootstrap(
     if renderer is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     store = SessionStore(Path(config["session_dir"]))
-    record = store.load(session, resume=resume, workspace=workspace, policy=context_policy(config))
+    record = store.load(session, resume=resume, workspace=workspace)
     mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
@@ -168,6 +170,5 @@ def _bootstrap(
         "token_counter": token_counter,
         "renderer": renderer,
         "session": record,
-        "session_model": session_model,
         "store": store,
     }

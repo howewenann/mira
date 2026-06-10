@@ -14,7 +14,7 @@ MIRA_LABEL = "bold #d2a957"
 MIRA_VALUE = "#e8edef"
 MIRA_HINT = "#b8c1c7"
 VERSION = "Minimal Iterative Reasoning Agent v1.0.0"
-HINTS = "Hints: /help commands | /plan plan safely | /act action mode | Ctrl+Q quit"
+HINTS = "Hints: /help commands | /plan plan safely | /act action mode | Ctrl+C confirm cancel/quit"
 
 
 def blocky_wordmark() -> str:

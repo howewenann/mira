@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from session.context import context_policy, normalize_session
+from session.context import normalize_session
 from session.dashboard import normalize_dashboard
 
 
@@ -32,24 +32,23 @@ class SessionStore:
         session_id: str | None,
         resume: bool,
         workspace: Path,
-        policy: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Load an explicit session, resume the latest, or create a new one."""
         if session_id:
             path = self.path(session_id)
             if path.exists():
-                return self.read(path, policy=policy)
+                return self.read(path)
 
-            record = self.new(session_id=session_id, workspace=workspace, policy=policy)
+            record = self.new(session_id=session_id, workspace=workspace)
             self.save(record)
             return record
 
         if resume:
             latest = self.latest()
             if latest:
-                return self.read(latest, policy=policy)
+                return self.read(latest)
 
-        record = self.new(session_id=None, workspace=workspace, policy=policy)
+        record = self.new(session_id=None, workspace=workspace)
         self.save(record)
         return record
 
@@ -57,7 +56,6 @@ class SessionStore:
         self,
         session_id: str | None,
         workspace: Path,
-        policy: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Build a new session record without writing it to disk."""
         now = datetime.now(timezone.utc).isoformat()
@@ -70,23 +68,21 @@ class SessionStore:
             "updated_at": now,
             "turns": 0,
             "dashboard": normalize_dashboard(None),
-            "context_policy": policy or context_policy(),
-            "summary": None,
-            "messages": [],
+            "events": [],
         }
 
     def save(self, record: dict[str, Any]) -> None:
         """Update the timestamp and write the session JSON file."""
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
-        normalized = normalize_session(record, policy=record.get("context_policy"))
+        normalized = normalize_session(record)
         self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         record.clear()
         record.update(normalized)
 
-    def read(self, path: Path, policy: dict[str, int] | None = None) -> dict[str, Any]:
+    def read(self, path: Path) -> dict[str, Any]:
         """Read a session record from a JSON file."""
         record = json.loads(path.read_text(encoding="utf-8"))
-        return normalize_session(record, policy=policy or record.get("context_policy"))
+        return normalize_session(record)
 
     def latest(self) -> Path | None:
         """Return the most recently modified session file, if any exist."""
