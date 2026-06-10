@@ -299,9 +299,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "",
         )
 
-    def test_final_text_keeps_unmarked_structured_headings(self) -> None:
-        """Structured headings alone are not enough to hide assistant text."""
-        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), SUMMARY_THEN_ANSWER)
+    def test_final_text_strips_unmarked_compaction_summary_prefix(self) -> None:
+        """Structured compaction summaries should be hidden even without metadata."""
+        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), "The rain tapped against the window.")
+
+    def test_final_text_returns_empty_for_unmarked_compaction_summary(self) -> None:
+        """A compaction-only output should not become an assistant reply without metadata."""
+        self.assertEqual(final_text({"messages": [OutputMessage(COMPACTION_SUMMARY)]}), "")
 
     def test_final_text_skips_langchain_summarization_message(self) -> None:
         """DeepAgents summary metadata should hide a summary regardless of text shape."""
@@ -513,13 +517,35 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_structured_summary_text_renders_without_compaction_signal(self) -> None:
+    async def test_leaked_compaction_reasoning_shape_is_hidden_behind_status(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n",
+                            "1. **Analyze the Request:**\n",
+                            "   * **Role:** Context Extraction Assistant.\n",
+                            "   * **Objective:** Extract the highest quality/most relevant context ",
+                            "from the conversation history to replace it due to nearing token limits.\n",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_streamed_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(renderer.events, [("text", COMPACTION_SUMMARY)])
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
     async def test_streamed_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
@@ -636,7 +662,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_raw_structured_summary_text_renders_without_compaction_signal(self) -> None:
+    async def test_raw_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
@@ -651,7 +677,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(renderer.events, [("text", COMPACTION_SUMMARY[:120]), ("text", COMPACTION_SUMMARY[120:])])
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
     async def test_raw_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
@@ -701,7 +727,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("text", "## SUMMARY\n"), ("text", "This is a normal answer.")])
 
-    async def test_long_streamed_summary_prefix_renders_without_compaction_signal(self) -> None:
+    async def test_long_streamed_summary_prefix_hides_summary_and_renders_tail(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
@@ -722,9 +748,9 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             renderer.events,
             [
-                ("text", COMPACTION_SUMMARY[:120]),
-                ("text", COMPACTION_SUMMARY[120:]),
-                ("text", "\nVisible answer."),
+                ("compaction_started",),
+                ("compaction_finished",),
+                ("text", "Visible answer."),
             ],
         )
 

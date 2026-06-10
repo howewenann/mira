@@ -226,6 +226,21 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.normalize_messages(record["events"]), [])
 
+    async def test_unmarked_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "action")
+        result = await runner.run_turn(
+            FakeAgent([FakeStream(output={"messages": [StreamMessage(text=COMPACTION_SUMMARY)]})]),
+            "hello",
+            RunTurnRenderer(),
+            "thread-1",
+        )
+
+        recorder.ensure_assistant(result.final_text)
+
+        self.assertEqual(context.normalize_messages(record["events"]), [])
+
     def test_resume_context_injects_once(self) -> None:
         record = {
             "resume_context_pending": True,

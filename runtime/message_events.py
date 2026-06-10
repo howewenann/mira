@@ -18,6 +18,15 @@ COMPACTION_REASONING_MARKERS = (
     "extract the highest quality/most relevant context",
     "conversation history to replace it",
 )
+COMPACTION_REASONING_HINTS = (
+    "context extraction assistant",
+    "extract the highest quality/most relevant context",
+    "conversation history to replace",
+    "conversation history will be replaced",
+    "due to nearing token limits",
+    "due to token limits",
+    "output format",
+)
 COMPACTION_REASONING_START = "thinking process"
 
 
@@ -143,12 +152,10 @@ class TextFilter:
         self.allow_compaction_summary = allow_compaction_summary
         self.pending = ""
         self.probing = True
+        self.compacting = False
 
     def push(self, delta: str) -> None:
         if not delta:
-            return
-        if not self.allow_compaction_summary():
-            self.renderer.text_delta(delta)
             return
         if not self.probing:
             self.renderer.text_delta(delta)
@@ -157,7 +164,13 @@ class TextFilter:
         self.pending += delta
         visible, had_summary = strip_compaction_summary_prefix(self.pending)
         if had_summary:
+            if not self.compacting and not self.allow_compaction_summary():
+                self.compacting = True
+                _call_renderer(self.renderer, "compaction_started")
             if visible:
+                if self.compacting:
+                    _call_renderer(self.renderer, "compaction_finished")
+                    self.compacting = False
                 self.renderer.text_delta(visible)
                 self.pending = ""
                 self.probing = False
@@ -169,6 +182,9 @@ class TextFilter:
             self.probing = False
 
     def finish(self) -> None:
+        if self.compacting:
+            _call_renderer(self.renderer, "compaction_finished")
+            self.compacting = False
         if self.probing and self.pending and not text_has_compaction_summary_shape(self.pending):
             self.renderer.text_delta(self.pending)
 
@@ -193,7 +209,17 @@ def event_delta(event: Any) -> dict[str, Any]:
 def is_compaction_reasoning(text: str) -> bool:
     """Return whether streamed reasoning belongs to DeepAgents compaction."""
     lowered = text.lower()
-    return all(marker in lowered for marker in COMPACTION_REASONING_MARKERS)
+    if all(marker in lowered for marker in COMPACTION_REASONING_MARKERS):
+        return True
+    if "context extraction assistant" in lowered and (
+        "conversation history" in lowered or "replace it" in lowered or "token limit" in lowered
+    ):
+        return True
+    if "primary objective" in lowered and "conversation history" in lowered and "replace" in lowered:
+        return True
+    if "output format" in lowered and "session intent" in lowered and "next steps" in lowered:
+        return True
+    return False
 
 
 def should_flush_reasoning_probe(text: str) -> bool:
@@ -203,7 +229,7 @@ def should_flush_reasoning_probe(text: str) -> bool:
         return False
     if len(text) >= 600:
         return True
-    if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_MARKERS):
+    if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
         return True
     return False
 
@@ -213,7 +239,11 @@ def could_be_compaction_reasoning_start(text: str) -> bool:
     stripped = text.lstrip().lower()
     if not stripped:
         return True
-    return COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START)
+    if COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START):
+        return True
+    if any(hint in stripped for hint in COMPACTION_REASONING_HINTS):
+        return True
+    return False
 
 
 def _call_renderer(renderer: Any, method: str) -> None:
@@ -237,9 +267,12 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
         return
 
     text = await msg_text if hasattr(msg_text, "__await__") else msg_text
-    if allow_compaction_summary:
-        visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
-        if visible or (text and not had_summary):
+    visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
+    if had_summary:
+        if not allow_compaction_summary:
+            _call_renderer(renderer, "compaction_started")
+            _call_renderer(renderer, "compaction_finished")
+        if visible:
             renderer.text_delta(visible)
         return
 
@@ -249,34 +282,10 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
 
 async def _consume_streamed_text(value: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
     """Render streamed text while stripping a leading compaction summary."""
-    if not allow_compaction_summary:
-        async for delta in _text_deltas(value):
-            renderer.text_delta(delta)
-        return
-
-    pending = ""
-    probing = True
+    text_filter = TextFilter(renderer, allow_compaction_summary=lambda: allow_compaction_summary)
     async for delta in _text_deltas(value):
-        if not probing:
-            renderer.text_delta(delta)
-            continue
-
-        pending += delta
-        visible, had_summary = strip_compaction_summary_prefix(pending)
-        if had_summary:
-            if visible:
-                renderer.text_delta(visible)
-                pending = ""
-                probing = False
-            continue
-
-        if not could_be_compaction_summary_start(pending):
-            renderer.text_delta(pending)
-            pending = ""
-            probing = False
-
-    if probing and pending and not text_has_compaction_summary_shape(pending):
-        renderer.text_delta(pending)
+        text_filter.push(delta)
+    text_filter.finish()
 
 
 def could_be_compaction_summary_start(text: str) -> bool:
