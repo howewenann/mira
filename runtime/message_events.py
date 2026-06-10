@@ -18,6 +18,7 @@ COMPACTION_REASONING_MARKERS = (
     "extract the highest quality/most relevant context",
     "conversation history to replace it",
 )
+COMPACTION_REASONING_START = "thinking process"
 
 
 async def consume_messages(messages: Any, renderer: Any, result: Any | None = None) -> None:
@@ -28,14 +29,12 @@ async def consume_messages(messages: Any, renderer: Any, result: Any | None = No
     event order reported by the stream.
     """
     async for message in messages:
-        # Reasoning and response text are independent stream fields. Render
-        # both before tool calls so the terminal follows the provider event
-        # order as closely as possible.
-        await _consume_reasoning(message, renderer)
-        await _consume_text(message, renderer)
+        if is_raw_message_stream(message):
+            await _consume_ordered_message_stream(message, renderer)
+        else:
+            compacting = await _consume_reasoning(message, renderer)
+            await _consume_text(message, renderer, allow_compaction_summary=compacting)
 
-        # Tool-call chunks may need to be drained before their finalized call
-        # list is available.
         call_list = await _finalized_tool_calls(message)
         if call_list:
             _render_tool_calls(call_list, renderer, result)
@@ -46,11 +45,11 @@ async def consume_messages(messages: Any, renderer: Any, result: Any | None = No
                 result.add_stream_usage(usage)
 
 
-async def _consume_reasoning(message: Any, renderer: Any) -> None:
+async def _consume_reasoning(message: Any, renderer: Any) -> bool:
     """Render reasoning deltas from a streamed message."""
     reasoning = getattr(message, "reasoning", None)
     if reasoning is None:
-        return
+        return False
 
     pending = ""
     compacting = False
@@ -74,6 +73,121 @@ async def _consume_reasoning(message: Any, renderer: Any) -> None:
         _call_renderer(renderer, "compaction_finished")
     elif pending:
         renderer.reasoning_delta(pending)
+    return compacting
+
+
+def is_raw_message_stream(message: Any) -> bool:
+    """Return whether a message can be consumed as ordered protocol events."""
+    return hasattr(message, "__aiter__") and all(
+        hasattr(message, name) for name in ("text", "reasoning", "tool_calls")
+    )
+
+
+async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
+    """Render raw ChatModelStream events in provider order."""
+    reasoning_filter = ReasoningFilter(renderer)
+    text_filter = TextFilter(renderer, allow_compaction_summary=lambda: reasoning_filter.compacting)
+
+    async for event in message:
+        delta = event_delta(event)
+        delta_type = str(delta.get("type") or "")
+        if delta_type == "reasoning-delta":
+            reasoning_filter.push(str(delta.get("reasoning") or delta.get("text") or ""))
+        elif delta_type == "text-delta":
+            text_filter.push(str(delta.get("text") or ""))
+
+    reasoning_filter.finish()
+    text_filter.finish()
+
+
+class ReasoningFilter:
+    """Render reasoning while suppressing DeepAgents compaction internals."""
+
+    def __init__(self, renderer: Any) -> None:
+        self.renderer = renderer
+        self.pending = ""
+        self.probing = True
+        self.compacting = False
+
+    def push(self, delta: str) -> None:
+        if not delta or self.compacting:
+            return
+        if not self.probing:
+            self.renderer.reasoning_delta(delta)
+            return
+
+        self.pending += delta
+        if is_compaction_reasoning(self.pending):
+            self.compacting = True
+            self.pending = ""
+            _call_renderer(self.renderer, "compaction_started")
+            return
+
+        if not could_be_compaction_reasoning_start(self.pending):
+            self.renderer.reasoning_delta(self.pending)
+            self.pending = ""
+            self.probing = False
+
+    def finish(self) -> None:
+        if self.compacting:
+            _call_renderer(self.renderer, "compaction_finished")
+        elif self.pending:
+            self.renderer.reasoning_delta(self.pending)
+
+
+class TextFilter:
+    """Render assistant text while stripping a leading compaction summary."""
+
+    def __init__(self, renderer: Any, allow_compaction_summary: Callable[[], bool]) -> None:
+        self.renderer = renderer
+        self.allow_compaction_summary = allow_compaction_summary
+        self.pending = ""
+        self.probing = True
+
+    def push(self, delta: str) -> None:
+        if not delta:
+            return
+        if not self.allow_compaction_summary():
+            self.renderer.text_delta(delta)
+            return
+        if not self.probing:
+            self.renderer.text_delta(delta)
+            return
+
+        self.pending += delta
+        visible, had_summary = strip_compaction_summary_prefix(self.pending)
+        if had_summary:
+            if visible:
+                self.renderer.text_delta(visible)
+                self.pending = ""
+                self.probing = False
+            return
+
+        if not could_be_compaction_summary_start(self.pending):
+            self.renderer.text_delta(self.pending)
+            self.pending = ""
+            self.probing = False
+
+    def finish(self) -> None:
+        if self.probing and self.pending and not text_has_compaction_summary_shape(self.pending):
+            self.renderer.text_delta(self.pending)
+
+
+def event_delta(event: Any) -> dict[str, Any]:
+    """Extract a content delta from LangChain protocol event shapes."""
+    if not isinstance(event, dict):
+        return {}
+    delta = event.get("delta")
+    if isinstance(delta, dict):
+        return delta
+    block = event.get("content_block")
+    if isinstance(block, dict):
+        block_type = block.get("type")
+        if block_type == "text":
+            return {"type": "text-delta", "text": block.get("text", "")}
+        if block_type == "reasoning":
+            return {"type": "reasoning-delta", "reasoning": block.get("reasoning", "")}
+    return {}
 
 
 def is_compaction_reasoning(text: str) -> bool:
@@ -94,6 +208,14 @@ def should_flush_reasoning_probe(text: str) -> bool:
     return False
 
 
+def could_be_compaction_reasoning_start(text: str) -> bool:
+    """Return whether reasoning may still be DeepAgents compaction setup."""
+    stripped = text.lstrip().lower()
+    if not stripped:
+        return True
+    return COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START)
+
+
 def _call_renderer(renderer: Any, method: str) -> None:
     """Call an optional renderer method."""
     callback: Callable[[], None] | None = getattr(renderer, method, None)
@@ -101,7 +223,7 @@ def _call_renderer(renderer: Any, method: str) -> None:
         callback()
 
 
-async def _consume_text(message: Any, renderer: Any) -> None:
+async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
     """Render assistant text deltas from a streamed message."""
     if is_summarization_metadata_message(message):
         return
@@ -111,17 +233,27 @@ async def _consume_text(message: Any, renderer: Any) -> None:
         return
 
     if hasattr(msg_text, "__aiter__"):
-        await _consume_streamed_text(msg_text, renderer)
+        await _consume_streamed_text(msg_text, renderer, allow_compaction_summary=allow_compaction_summary)
         return
 
     text = await msg_text if hasattr(msg_text, "__await__") else msg_text
-    visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
-    if visible or (text and not had_summary):
-        renderer.text_delta(visible)
+    if allow_compaction_summary:
+        visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
+        if visible or (text and not had_summary):
+            renderer.text_delta(visible)
+        return
+
+    if text:
+        renderer.text_delta(str(text))
 
 
-async def _consume_streamed_text(value: Any, renderer: Any) -> None:
+async def _consume_streamed_text(value: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
     """Render streamed text while stripping a leading compaction summary."""
+    if not allow_compaction_summary:
+        async for delta in _text_deltas(value):
+            renderer.text_delta(delta)
+        return
+
     pending = ""
     probing = True
     async for delta in _text_deltas(value):
@@ -138,7 +270,7 @@ async def _consume_streamed_text(value: Any, renderer: Any) -> None:
                 probing = False
             continue
 
-        if should_flush_text_probe(pending):
+        if not could_be_compaction_summary_start(pending):
             renderer.text_delta(pending)
             pending = ""
             probing = False
@@ -147,11 +279,14 @@ async def _consume_streamed_text(value: Any, renderer: Any) -> None:
         renderer.text_delta(pending)
 
 
-def should_flush_text_probe(text: str) -> bool:
-    """Return whether buffered assistant text is not a compaction summary."""
-    if len(text) >= 600:
+def could_be_compaction_summary_start(text: str) -> bool:
+    """Return whether text may still begin a DeepAgents compaction summary."""
+    stripped = text.lstrip().lower()
+    if not stripped:
         return True
-    return "\n\n" in text and "## session intent" not in text.lower()
+
+    marker = "## session intent"
+    return marker.startswith(stripped) or stripped.startswith(marker)
 
 
 async def _text_deltas(value: Any) -> AsyncIterator[str]:

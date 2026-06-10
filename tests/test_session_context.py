@@ -13,7 +13,7 @@ from session.dashboard import apply_turn_usage
 from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
-from tests.test_runner import COMPACTION_SUMMARY, FakeAgent, FakeStream, OutputMessage, RunTurnRenderer
+from tests.test_runner import COMPACTION_SUMMARY, FakeAgent, FakeStream, Message as StreamMessage, RunTurnRenderer
 
 
 class Snapshot:
@@ -203,7 +203,20 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         store = Store()
         recorder = SessionRecorder(record, store, "action")
         result = await runner.run_turn(
-            FakeAgent([FakeStream(output={"messages": [OutputMessage(COMPACTION_SUMMARY)]})]),
+            FakeAgent(
+                [
+                    FakeStream(
+                        output={
+                            "messages": [
+                                StreamMessage(
+                                    text=COMPACTION_SUMMARY,
+                                    additional_kwargs={"lc_source": "summarization"},
+                                )
+                            ]
+                        }
+                    )
+                ]
+            ),
             "hello",
             RunTurnRenderer(),
             "thread-1",

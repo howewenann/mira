@@ -45,12 +45,7 @@ def final_text(output: Any) -> str:
 
 def is_compaction_summary_message(message: Any) -> bool:
     """Return whether a message is an internal DeepAgents compaction summary."""
-    if is_summarization_metadata_message(message):
-        return True
-
-    text = message_text(message)
-    visible, had_summary = strip_compaction_summary_prefix(text)
-    return had_summary and not visible.strip()
+    return is_summarization_metadata_message(message)
 
 
 def is_summarization_metadata_message(message: Any) -> bool:
@@ -60,12 +55,10 @@ def is_summarization_metadata_message(message: Any) -> bool:
 
 
 def visible_message_text(message: Any) -> str:
-    """Return message text with any leading compaction summary removed."""
+    """Return visible assistant text, hiding metadata-marked summaries."""
     if is_summarization_metadata_message(message):
         return ""
-    text = message_text(message)
-    visible, _ = strip_compaction_summary_prefix(text)
-    return visible
+    return message_text(message)
 
 
 def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:

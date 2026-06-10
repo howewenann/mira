@@ -56,6 +56,20 @@ class Message:
         self.additional_kwargs = additional_kwargs or {}
 
 
+class RawMessageStream:
+    """Fake ChatModelStream exposing ordered raw protocol events."""
+
+    def __init__(self, events: list[dict[str, Any]], tool_calls: Any | None = None) -> None:
+        self.events = events
+        self.text = AsyncItems([])
+        self.reasoning = AsyncItems([])
+        self.tool_calls = tool_calls or []
+
+    async def __aiter__(self) -> Any:
+        for event in self.events:
+            yield event
+
+
 class OutputMessage:
     """Fake final message object that exposes a text attribute."""
 
@@ -265,19 +279,29 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_text, "final plan")
 
     def test_final_text_skips_trailing_compaction_summary(self) -> None:
-        """Internal compaction summaries should not become the visible final reply."""
+        """Metadata-marked compaction summaries should not become the visible final reply."""
         self.assertEqual(
-            final_text({"messages": [OutputMessage("real reply"), OutputMessage(COMPACTION_SUMMARY)]}),
+            final_text(
+                {
+                    "messages": [
+                        OutputMessage("real reply"),
+                        Message(text=COMPACTION_SUMMARY, additional_kwargs={"lc_source": "summarization"}),
+                    ]
+                }
+            ),
             "real reply",
         )
 
     def test_final_text_returns_empty_for_only_compaction_summary(self) -> None:
-        """A compaction-only output should not create an assistant reply."""
-        self.assertEqual(final_text({"messages": [OutputMessage(COMPACTION_SUMMARY)]}), "")
+        """A metadata-marked compaction-only output should not create an assistant reply."""
+        self.assertEqual(
+            final_text({"messages": [Message(text=COMPACTION_SUMMARY, additional_kwargs={"lc_source": "summarization"})]}),
+            "",
+        )
 
-    def test_final_text_strips_summary_prefix_and_keeps_answer_tail(self) -> None:
-        """If a provider combines summary and answer, only the answer should show."""
-        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), "The rain tapped against the window.")
+    def test_final_text_keeps_unmarked_structured_headings(self) -> None:
+        """Structured headings alone are not enough to hide assistant text."""
+        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), SUMMARY_THEN_ANSWER)
 
     def test_final_text_skips_langchain_summarization_message(self) -> None:
         """DeepAgents summary metadata should hide a summary regardless of text shape."""
@@ -489,19 +513,49 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_compaction_summary_text_is_hidden(self) -> None:
+    async def test_streamed_structured_summary_text_renders_without_compaction_signal(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(renderer.events, [])
+        self.assertEqual(renderer.events, [("text", COMPACTION_SUMMARY)])
 
-    async def test_streamed_summary_prefix_keeps_following_answer_text(self) -> None:
+    async def test_streamed_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
                 Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n",
+                            "* **Role:** Context Extraction Assistant\n",
+                            "* **Primary Objective:** Extract the highest quality/most relevant context ",
+                            "from the conversation history to replace it.",
+                        ]
+                    ),
+                    text=COMPACTION_SUMMARY,
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_streamed_compaction_summary_prefix_keeps_following_answer_text_after_signal(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n",
+                            "* **Role:** Context Extraction Assistant\n",
+                            "* **Primary Objective:** Extract the highest quality/most relevant context ",
+                            "from the conversation history to replace it.",
+                        ]
+                    ),
                     text=AsyncItems(
                         [
                             COMPACTION_SUMMARY[:40],
@@ -519,8 +573,158 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             renderer.events,
             [
+                ("compaction_started",),
+                ("compaction_finished",),
                 ("text", "The rain tapped against the window."),
                 ("text", " More story followed."),
+            ],
+        )
+
+    async def test_raw_message_stream_preserves_provider_order(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"delta": {"type": "reasoning-delta", "reasoning": "User sent a greeting. "}},
+                        {"delta": {"type": "text-delta", "text": "Hello"}},
+                        {"delta": {"type": "reasoning-delta", "reasoning": "Respond briefly."}},
+                        {"delta": {"type": "text-delta", "text": " there"}},
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("reasoning", "User sent a greeting. "),
+                ("text", "Hello"),
+                ("reasoning", "Respond briefly."),
+                ("text", " there"),
+            ],
+        )
+
+    async def test_raw_compaction_reasoning_is_hidden_behind_status(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"delta": {"type": "reasoning-delta", "reasoning": "Thinking Process:\n\n"}},
+                        {
+                            "delta": {
+                                "type": "reasoning-delta",
+                                "reasoning": "1. **Analyze the Request:**\n* **Role:** Context Extraction Assistant\n",
+                            }
+                        },
+                        {
+                            "delta": {
+                                "type": "reasoning-delta",
+                                "reasoning": "* **Primary Objective:** Extract the highest quality/most relevant context "
+                                "from the conversation history to replace it.",
+                            }
+                        },
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_raw_structured_summary_text_renders_without_compaction_signal(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[:120]}},
+                        {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[120:]}},
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("text", COMPACTION_SUMMARY[:120]), ("text", COMPACTION_SUMMARY[120:])])
+
+    async def test_raw_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"delta": {"type": "reasoning-delta", "reasoning": "Thinking Process:\n\n"}},
+                        {
+                            "delta": {
+                                "type": "reasoning-delta",
+                                "reasoning": "* **Role:** Context Extraction Assistant\n"
+                                "* **Primary Objective:** Extract the highest quality/most relevant context "
+                                "from the conversation history to replace it.",
+                            }
+                        },
+                        {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[:120]}},
+                        {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[120:]}},
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_streamed_normal_text_renders_first_delta_without_probe_delay(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(text=AsyncItems(["The rain ", "tapped against the window."]))])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("text", "The rain "),
+                ("text", "tapped against the window."),
+            ],
+        )
+
+    async def test_streamed_normal_markdown_heading_renders_first_delta(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(text=AsyncItems(["## SUMMARY\n", "This is a normal answer."]))])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("text", "## SUMMARY\n"), ("text", "This is a normal answer.")])
+
+    async def test_long_streamed_summary_prefix_renders_without_compaction_signal(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    text=AsyncItems(
+                        [
+                            COMPACTION_SUMMARY[:120],
+                            COMPACTION_SUMMARY[120:],
+                            "\nVisible answer.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("text", COMPACTION_SUMMARY[:120]),
+                ("text", COMPACTION_SUMMARY[120:]),
+                ("text", "\nVisible answer."),
             ],
         )
 
