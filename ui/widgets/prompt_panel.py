@@ -23,6 +23,11 @@ class PromptPanel(Vertical):
         self._shortcuts: dict[str, str] = {}
         self._button_values: dict[str, str] = {}
 
+    @property
+    def active(self) -> bool:
+        """Return whether the panel is waiting for an answer."""
+        return self._future is not None and not self._future.done()
+
     def compose(self) -> ComposeResult:
         """Compose the reusable prompt shell."""
         yield Static("", id="prompt-panel-title")

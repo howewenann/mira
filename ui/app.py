@@ -83,6 +83,7 @@ class MiraApp(App[None]):
         self.busy = False
         self.status_state = "starting"
         self.turn_worker: Any | None = None
+        self.confirming_interrupt = False
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -225,12 +226,43 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
 
     def action_interrupt_or_quit(self) -> None:
-        """Cancel a running turn, otherwise quit the app."""
+        """Confirm before cancelling a turn or quitting the app."""
+        if self.confirming_interrupt:
+            return
+        if self.query_one(PromptPanel).active:
+            self._cancel_turn()
+            return
+        self.run_worker(self._confirm_interrupt_or_quit(), name="confirm-interrupt", exclusive=False)
+
+    async def _confirm_interrupt_or_quit(self) -> None:
+        """Ask for confirmation before handling Ctrl+C."""
+        self.confirming_interrupt = True
+        try:
+            if self.busy and self.turn_worker is not None:
+                answer = await self._prompt_choice(
+                    "Cancel Turn?",
+                    "MIRA is still working. Cancel this turn?",
+                    [("y", "y yes"), ("n", "n no")],
+                )
+                if answer == "y" and self.busy and self.turn_worker is not None:
+                    self._cancel_turn()
+                return
+
+            answer = await self._prompt_choice(
+                "Exit MIRA?",
+                "No cancellable turn is running. Exit MIRA?",
+                [("y", "y yes"), ("n", "n no")],
+            )
+            if answer == "y":
+                self.exit()
+        finally:
+            self.confirming_interrupt = False
+
+    def _cancel_turn(self) -> None:
+        """Cancel the active turn worker."""
         if self.busy and self.turn_worker is not None:
             self.turn_worker.cancel()
             self._set_status(state="cancelling")
-            return
-        self.exit()
 
     def action_clear_log(self) -> None:
         """Clear chat and tool output."""

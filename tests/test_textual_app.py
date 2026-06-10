@@ -171,7 +171,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(prompt.has_focus)
 
     async def test_ctrl_c_action_cancels_running_turn(self) -> None:
-        """The VS Code-friendly interrupt binding should cancel an active turn."""
+        """The VS Code-friendly interrupt binding should confirm before cancelling."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -182,9 +182,67 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.action_interrupt_or_quit()
             await pilot.pause()
+            self.assertFalse(worker.cancelled)
+            self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Cancel Turn?")
+
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertFalse(worker.cancelled)
+
+            app.action_interrupt_or_quit()
+            await pilot.pause()
+            await pilot.press("y")
+            await pilot.pause()
 
             self.assertTrue(worker.cancelled)
             self.assertEqual(app.status_state, "cancelling")
+
+    async def test_ctrl_c_action_confirms_idle_exit(self) -> None:
+        """Ctrl+C should not quit an idle app without confirmation."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "exit") as exit_app:
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Exit MIRA?")
+
+                await pilot.press("n")
+                await pilot.pause()
+                exit_app.assert_not_called()
+
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+                await pilot.press("y")
+                await pilot.pause()
+                exit_app.assert_called_once()
+
+    async def test_ctrl_c_action_cancels_running_turn_during_prompt(self) -> None:
+        """Ctrl+C should still cancel when another in-window prompt is active."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt_task = asyncio.create_task(
+                app._prompt_choice("Approval", "Run this tool?", [("y", "y yes"), ("n", "n no")])
+            )
+            await pilot.pause()
+
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+
+            with patch.object(app, "exit") as exit_app:
+                app.action_interrupt_or_quit()
+                await pilot.pause()
+
+                self.assertTrue(worker.cancelled)
+                self.assertEqual(app.status_state, "cancelling")
+                exit_app.assert_not_called()
+
+            await pilot.press("n")
+            self.assertEqual(await prompt_task, "n")
 
     async def test_loading_past_session_replays_ordered_events(self) -> None:
         """Selecting an older session should rebuild its visible transcript."""
