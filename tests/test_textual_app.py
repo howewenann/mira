@@ -14,6 +14,7 @@ from pyfiglet import Figlet
 from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
+from config.metadata import ModelMetadata
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_text
 from ui.app import MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
@@ -24,8 +25,12 @@ from ui.widgets.session_history import session_label
 class FakeStore:
     """Store double used by app smoke tests."""
 
+    def __init__(self) -> None:
+        self.saves: list[dict[str, Any]] = []
+
     def save(self, record: dict[str, Any]) -> None:
         """Ignore session saves."""
+        self.saves.append(record)
         return None
 
 
@@ -75,11 +80,13 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
     state = {
         "agent": "agent",
         "plan_agent": "plan-agent",
+        "config": {},
         "store": FakeStore(),
         "session": session_record,
         "model_name": "test-model",
         "context_limit_tokens": 8192,
         "context_limit_source": "test",
+        "checkpointer": "checkpointer",
     }
     state.update(state_overrides)
     return MiraApp(
@@ -278,15 +285,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
             return {
                 "agent": "agent",
                 "plan_agent": "plan-agent",
+                "config": {},
                 "store": FakeStore(),
                 "session": past_session,
                 "model_name": "test-model",
                 "context_limit_tokens": 8192,
                 "context_limit_source": "test",
+                "checkpointer": "checkpointer",
             }
 
         app = make_app(workspace=workspace)
@@ -309,6 +318,52 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)
+
+    async def test_unchanged_context_metadata_does_not_rebuild_agents(self) -> None:
+        """A matching refreshed context window should avoid rebuilding both agents."""
+        app = make_app()
+
+        async def infer_metadata(config: dict[str, Any]) -> ModelMetadata:
+            return ModelMetadata(8192, "lmstudio.api.v1.loaded_instance")
+
+        with (
+            patch("config.metadata.infer_model_metadata", infer_metadata),
+            patch("agent.factory.build_agent") as build_agent,
+            patch("agent.factory.build_plan_agent") as build_plan_agent,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await app._refresh_model_metadata()
+
+        build_agent.assert_not_called()
+        build_plan_agent.assert_not_called()
+
+    async def test_changed_context_metadata_rebuilds_agents_once(self) -> None:
+        """A changed context window should rebuild action and planning agents once."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async def infer_metadata(config: dict[str, Any]) -> ModelMetadata:
+            return ModelMetadata(10000, "lmstudio.api.v1.loaded_instance")
+
+        with (
+            patch("config.metadata.infer_model_metadata", infer_metadata),
+            patch("agent.factory.build_agent", return_value="new-agent") as build_agent,
+            patch("agent.factory.build_plan_agent", return_value="new-plan-agent") as build_plan_agent,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await app._refresh_model_metadata()
+
+        self.assertEqual(app.agent, "new-agent")
+        self.assertEqual(app.plan_agent, "new-plan-agent")
+        self.assertEqual(app.context_limit_tokens, 10000)
+        self.assertEqual(app.context_limit_source, "lmstudio.api.v1.loaded_instance")
+        self.assertEqual(app.config["llm_inferred_context_tokens"], 10000)
+        self.assertNotIn("llm_context_tokens", app.config)
+        self.assertEqual(build_agent.call_count, 1)
+        self.assertEqual(build_plan_agent.call_count, 1)
+        self.assertEqual(len(store.saves), 1)
 
     async def test_help_command_renders_as_one_command_panel(self) -> None:
         """The help command should not create one chat block per command."""

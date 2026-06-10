@@ -1,4 +1,4 @@
-"""Session dashboard stats and context-limit helpers."""
+"""Session dashboard stats and display helpers."""
 
 from __future__ import annotations
 
@@ -138,61 +138,7 @@ def update_duration(record: dict[str, Any], now: datetime | None = None) -> int:
     return duration
 
 
-def context_limit_for_model(model: Any) -> tuple[int | None, str]:
-    """Return the model context limit MIRA should display."""
-    profile_limit = model_profile_limit(model)
-    if profile_limit:
-        return profile_limit, "model_profile.max_input_tokens"
-
-    trigger = deepagents_compaction_trigger(model)
-    if trigger is None:
-        return None, "unknown"
-
-    kind, value = trigger
-    if kind == "tokens":
-        limit = positive_int(value)
-        return (limit, "deepagents.compaction_trigger") if limit else (None, "unknown")
-
-    return None, "unknown"
-
-
-def context_limit_for_config(config: dict[str, Any], model: Any) -> tuple[int | None, str]:
-    """Return the configured or inferred model context limit for display."""
-    configured_limit = positive_int(config.get("llm_context_tokens"))
-    if configured_limit:
-        return configured_limit, "MIRA_LLM_CONTEXT_TOKENS"
-    return context_limit_for_model(model)
-
-
-def model_profile_limit(model: Any) -> int | None:
-    """Return `model.profile.max_input_tokens` when a LangChain model exposes it."""
-    try:
-        profile = model.profile
-    except AttributeError:
-        return None
-
-    if not isinstance(profile, dict):
-        return None
-
-    limit = positive_int(profile.get("max_input_tokens"))
-    return limit or None
-
-
-def deepagents_compaction_trigger(model: Any) -> tuple[str, Any] | None:
-    """Return DeepAgents' auto-compaction trigger for a model."""
-    try:
-        from deepagents.middleware.summarization import compute_summarization_defaults
-
-        trigger = compute_summarization_defaults(model)["trigger"]
-    except Exception:
-        return None
-
-    if isinstance(trigger, tuple) and len(trigger) == 2:
-        return trigger
-    return None
-
-
-def token_counter_for_model(model: Any | None = None) -> Callable[[str], int]:
+def token_counter_for_model() -> Callable[[str], int]:
     """Return a model-independent LangChain approximate token counter."""
 
     def count_tokens(text: str) -> int:
@@ -206,11 +152,6 @@ def token_counter_for_model(model: Any | None = None) -> Callable[[str], int]:
         )
 
     return count_tokens
-
-
-def token_counter_for_config(config: dict[str, Any], model: Any | None = None) -> Callable[[str], int]:
-    """Return the token counter for a configured model."""
-    return token_counter_for_model(model)
 
 
 def result_usage(result: Any) -> dict[str, Any]:

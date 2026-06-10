@@ -6,10 +6,12 @@ from typing import Any
 
 from langchain_anyllm import ChatAnyLLM
 
+from config.metadata import ModelMetadata, apply_model_metadata
+
 STREAM_USAGE_PROVIDERS = {"lmstudio"}
 
 
-def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
+def get_llm(config: dict[str, Any], metadata: ModelMetadata | None = None) -> ChatAnyLLM:
     """Create the LangChain chat model from MIRA's config dictionary."""
     kwargs: dict[str, Any] = {
         "model": config["llm_model"],
@@ -34,7 +36,11 @@ def get_llm(config: dict[str, Any]) -> ChatAnyLLM:
                 "http_client": httpx.AsyncClient(trust_env=False, verify=False),
             }
         }
-    return ChatAnyLLM(**kwargs)
+    model = ChatAnyLLM(**kwargs)
+    fallback_metadata = ModelMetadata(
+        context_tokens=config.get("llm_inferred_context_tokens") or config.get("llm_context_tokens")
+    )
+    return apply_model_metadata(model, metadata or fallback_metadata)
 
 
 def get_model_name(config: dict[str, Any]) -> str:

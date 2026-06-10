@@ -14,16 +14,23 @@ from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs, tool_name
+from config.metadata import ModelMetadata
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
 
-def build_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
+def build_agent(
+    config: dict[str, Any],
+    workspace: Path,
+    checkpointer: Any,
+    metadata: ModelMetadata | None = None,
+) -> Any:
     """Build the normal action agent with read/write filesystem access."""
     agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
+        metadata=metadata,
         permissions=_action_permissions(),
         interrupt_on=_write_interrupts(),
         excluded_tools=(),
@@ -31,12 +38,18 @@ def build_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> A
     return agent
 
 
-def build_plan_agent(config: dict[str, Any], workspace: Path, checkpointer: Any) -> Any:
+def build_plan_agent(
+    config: dict[str, Any],
+    workspace: Path,
+    checkpointer: Any,
+    metadata: ModelMetadata | None = None,
+) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
     agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
+        metadata=metadata,
         permissions=_plan_permissions(),
         system_prompt=PLAN_SYSTEM_PROMPT,
         extra_middleware=[PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)],
@@ -50,6 +63,7 @@ def _build_agent(
     config: dict[str, Any],
     workspace: Path,
     checkpointer: Any,
+    metadata: ModelMetadata | None,
     permissions: list[FilesystemPermission],
     system_prompt: str | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
@@ -62,7 +76,7 @@ def _build_agent(
     DeepAgents. Keeping that wiring here separates agent construction from REPL
     control flow.
     """
-    model = get_llm(config)
+    model = get_llm(config, metadata=metadata)
     resources = build_resources(Path(workspace))
     backend = resources.backend
 

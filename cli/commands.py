@@ -81,7 +81,7 @@ async def _run(
     if not await ensure_git_repository(workspace, renderer):
         raise typer.Exit(code=1)
 
-    app = _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
+    app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
     await _run_one_shot(app, prompt)
 
 
@@ -121,7 +121,7 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     app["store"].save(app["session"])
 
 
-def _bootstrap(
+async def _bootstrap(
     workspace: Path,
     session: str | None,
     resume: bool,
@@ -130,11 +130,12 @@ def _bootstrap(
 ) -> dict[str, Any]:
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
-    from agent.llm import get_llm, get_model_name
+    from agent.llm import get_model_name
     from config.loader import load_config
+    from config.metadata import infer_model_metadata
     from session.checkpoint import make_checkpointer
     from session.context import mark_resume_context_pending
-    from session.dashboard import context_limit_for_config, ensure_dashboard, token_counter_for_config
+    from session.dashboard import ensure_dashboard, token_counter_for_model
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -147,12 +148,15 @@ def _bootstrap(
     record = store.load(session, resume=resume, workspace=workspace)
     mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
-    agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer)
-    plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer)
-    session_model = get_llm(config)
+    metadata = await infer_model_metadata(config)
+    config["llm_inferred_context_tokens"] = metadata.context_tokens
+    config["llm_context_source"] = metadata.context_source
+    agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
+    plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
     model_name = get_model_name(config)
-    context_limit_tokens, context_limit_source = context_limit_for_config(config, session_model)
-    token_counter = token_counter_for_config(config, session_model)
+    context_limit_tokens = metadata.context_tokens
+    context_limit_source = metadata.context_source
+    token_counter = token_counter_for_model()
     ensure_dashboard(
         record,
         model_name=model_name,
@@ -171,4 +175,6 @@ def _bootstrap(
         "renderer": renderer,
         "session": record,
         "store": store,
+        "workspace": workspace,
+        "checkpointer": checkpointer,
     }

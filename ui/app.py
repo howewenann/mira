@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,12 +26,12 @@ from ui.interrupts import (
     ask_user_request,
     response_message,
 )
-from ui.repl import handle_command, initial_mode, run_user_turn
+from ui.repl import handle_command, initial_mode, refresh_agent_specs, run_user_turn
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 
-Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], dict[str, Any]]
+Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
 
 
@@ -78,6 +78,7 @@ class MiraApp(App[None]):
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
         self.token_counter: Any | None = None
+        self.checkpointer: Any = None
         self.mode: dict[str, Any] = {"planning": False}
         self.ready = False
         self.busy = False
@@ -120,8 +121,7 @@ class MiraApp(App[None]):
                 raise RuntimeError("MIRA bootstrap function was not provided")
 
             self._set_status(state="loading")
-            state = await asyncio.to_thread(
-                self.bootstrap,
+            state = await self.bootstrap(
                 self.workspace,
                 self.session_id,
                 self.resume,
@@ -137,12 +137,14 @@ class MiraApp(App[None]):
         """Install bootstrapped agents and session state into the app."""
         self.agent = state["agent"]
         self.plan_agent = state["plan_agent"]
+        self.config = state["config"]
         self.store = state["store"]
         self.session = state["session"]
         self.model_name = str(state.get("model_name") or "")
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
         self.token_counter = state.get("token_counter")
+        self.checkpointer = state.get("checkpointer")
         self.mode = initial_mode(self.agent, self.plan_agent)
         self.ready = True
         self.busy = False
@@ -196,6 +198,7 @@ class MiraApp(App[None]):
     async def _run_turn(self, text: str) -> None:
         """Run one agent turn and restore prompt focus when done."""
         try:
+            await self._refresh_model_metadata()
             await run_user_turn(
                 agent=self.agent,
                 plan_agent=self.plan_agent,
@@ -488,8 +491,7 @@ class MiraApp(App[None]):
         self.busy = True
         self._set_status(state="loading")
         try:
-            state = await asyncio.to_thread(
-                self.bootstrap,
+            state = await self.bootstrap(
                 self.workspace,
                 session_id,
                 True,
@@ -504,6 +506,44 @@ class MiraApp(App[None]):
             self.busy = False
             prompt.disabled = False
             self.action_focus_prompt()
+
+    async def _refresh_model_metadata(self) -> None:
+        """Refresh model metadata and rebuild agents when context changes."""
+        if self.config is None or self.checkpointer is None:
+            return
+
+        from agent.factory import build_agent, build_plan_agent
+        from config.metadata import infer_model_metadata
+
+        metadata = await infer_model_metadata(self.config)
+        if not metadata.context_tokens or metadata.context_tokens == self.context_limit_tokens:
+            return
+
+        self.config["llm_inferred_context_tokens"] = metadata.context_tokens
+        self.config["llm_context_source"] = metadata.context_source
+        self.context_limit_tokens = metadata.context_tokens
+        self.context_limit_source = metadata.context_source
+        self.agent = build_agent(
+            config=self.config,
+            workspace=self.workspace,
+            checkpointer=self.checkpointer,
+            metadata=metadata,
+        )
+        self.plan_agent = build_plan_agent(
+            config=self.config,
+            workspace=self.workspace,
+            checkpointer=self.checkpointer,
+            metadata=metadata,
+        )
+        refresh_agent_specs(self.mode, self.agent, self.plan_agent)
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        self.store.save(self.session)
+        self._set_status(state=self.status_state, detail=f"context window: {metadata.context_tokens}")
 
     def _refresh_sessions(self) -> None:
         """Reload the session list if the store is available."""

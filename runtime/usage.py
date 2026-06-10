@@ -238,7 +238,7 @@ def count_text_tokens(token_counter: TokenCounter, text: str) -> int:
 
 
 def object_mapping(value: Any) -> dict[str, Any] | None:
-    """Return a loose mapping for dicts, SDK structs, and metadata objects."""
+    """Return a loose mapping for dicts, provider structs, and metadata objects."""
     if isinstance(value, dict):
         return value
 

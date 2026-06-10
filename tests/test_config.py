@@ -20,14 +20,7 @@ from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, load_llm_config
 from config.loader import load_config
-from session.dashboard import context_limit_for_config, context_limit_for_model, token_counter_for_model
-
-
-class ProfileModel:
-    """Tiny model double exposing the LangChain profile field MIRA reads."""
-
-    def __init__(self, profile: dict[str, object] | None = None) -> None:
-        self.profile = profile
+from session.dashboard import token_counter_for_model
 
 
 class LLMConfigTests(unittest.TestCase):
@@ -183,30 +176,9 @@ class LLMConfigTests(unittest.TestCase):
             "anthropic:claude-sonnet",
         )
 
-    def test_context_limit_prefers_langchain_model_profile(self) -> None:
-        """Dashboard limits should use the same profile field DeepAgents reads."""
-        self.assertEqual(
-            context_limit_for_model(ProfileModel({"max_input_tokens": 8192})),
-            (8192, "model_profile.max_input_tokens"),
-        )
-
-    def test_context_limit_prefers_explicit_config(self) -> None:
-        """Local models can provide the real context window when profiles are absent."""
-        self.assertEqual(
-            context_limit_for_config({"llm_context_tokens": 4096}, ProfileModel({"max_input_tokens": 8192})),
-            (4096, "MIRA_LLM_CONTEXT_TOKENS"),
-        )
-
-    def test_context_limit_falls_back_to_deepagents_trigger(self) -> None:
-        """Profile-less models should still show the effective compaction limit."""
-        self.assertEqual(
-            context_limit_for_model(ProfileModel(None)),
-            (170000, "deepagents.compaction_trigger"),
-        )
-
     def test_token_counter_uses_langchain_approximation(self) -> None:
-        """Context estimates should not depend on the LM Studio SDK."""
-        counter = token_counter_for_model(ProfileModel(None))
+        """Context estimates should use LangChain's local approximation."""
+        counter = token_counter_for_model()
 
         self.assertGreater(counter("hello world"), 0)
 
@@ -280,7 +252,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(guard_renderer, renderer)
             return True
 
-        def bootstrap(
+        async def bootstrap(
             workspace: Path,
             session: str | None,
             resume: bool,
@@ -335,7 +307,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
             return True
 
-        def bootstrap(
+        async def bootstrap(
             workspace: Path,
             session: str | None,
             resume: bool,

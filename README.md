@@ -73,9 +73,11 @@ MIRA_TOOL_OUTPUT_CHARS=240
 include `lmstudio`, `ollama`, `openai`, `anthropic`, `gemini`, `groq`, and
 `openrouter`; use `anthropic` for Claude models. MIRA also accepts optional
 generation values: `MIRA_LLM_TEMPERATURE`, `MIRA_LLM_MAX_TOKENS`, and
-`MIRA_LLM_TOP_P`. For local or custom providers that do not expose a LangChain
-model profile, set `MIRA_LLM_CONTEXT_TOKENS` to the model's actual context
-window so the dashboard context bar is accurate.
+`MIRA_LLM_TOP_P`. For LM Studio, MIRA reads the loaded model context window
+from `/api/v1/models` before each user turn and rebuilds agents only when that
+value changes. For other local or custom providers that do not expose a
+LangChain model profile, set `MIRA_LLM_CONTEXT_TOKENS` to the model's actual
+context window.
 
 MIRA does not create or overwrite `.env`. If you already have one, use
 `.env.example` as a reference and update your own file by hand.
@@ -85,8 +87,8 @@ before being passed to `ChatAnyLLM` in `agent/llm.py`.
 `MIRA_TOOL_OUTPUT_CHARS` controls how many characters of each tool result are
 shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
-MIRA uses `MIRA_LLM_CONTEXT_TOKENS` or the model profile to show context
-pressure as a colored bar.
+MIRA uses the resolved model metadata to set DeepAgents' context profile and to
+show context pressure as a colored bar.
 
 Session titles are generated deterministically from recent user messages. MIRA
 stores its own replayable user/assistant transcript for session history.
@@ -101,7 +103,6 @@ MIRA_LLM_PROVIDER=lmstudio
 MIRA_LLM_MODEL=local-model
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
-MIRA_LLM_CONTEXT_TOKENS=8192
 MIRA_TOOL_OUTPUT_CHARS=240
 ```
 
@@ -111,6 +112,7 @@ MIRA is split into a few small pieces:
 
 - `cli/` starts the app, loads a session, and chooses one-shot or TUI mode.
 - `config/` reads `.env` and normalizes LLM settings.
+- `config/metadata.py` resolves model metadata such as context window size.
 - `agent/factory.py` builds the action agent and the planning agent.
 - `agent/resources/` gathers default and project memories, skills, subagents, and tools.
 - `runtime/runner.py` streams one agent turn and handles HITL approvals.

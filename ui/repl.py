@@ -77,6 +77,13 @@ def initial_mode(agent: Any, plan_agent: Any) -> dict[str, Any]:
     }
 
 
+def refresh_agent_specs(mode: dict[str, Any], agent: Any, plan_agent: Any) -> None:
+    """Refresh tool/resource metadata after agents are rebuilt."""
+    mode["action_tools"] = tool_specs(agent)
+    mode["planning_tools"] = tool_specs(plan_agent)
+    mode["resources"] = resource_specs(agent)
+
+
 async def run_user_turn(
     *,
     agent: Any,

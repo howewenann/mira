@@ -12,6 +12,7 @@ from rich.console import Console
 
 from agent import factory
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
+from config.metadata import ModelMetadata
 from runtime import runner
 from ui import repl
 
@@ -191,6 +192,24 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["permissions"][1].operations, ["read", "write"])
         self.assertEqual(kwargs["permissions"][1].mode, "allow")
         self.assertTrue(any(factory._tool_name(tool) == "grep" for tool in kwargs["tools"]))
+
+    def test_agent_build_passes_metadata_before_summarization_middleware(self) -> None:
+        """Model metadata should be applied before DeepAgents summarization middleware is created."""
+        metadata = ModelMetadata(10000, "test")
+        model = type("Model", (), {"profile": {"max_input_tokens": 10000}})()
+
+        with (
+            patch("agent.factory.get_llm", return_value=model) as get_llm,
+            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_tool_middleware", return_value="summary") as summary,
+            patch("agent.factory.create_deep_agent", return_value="agent"),
+        ):
+            factory.build_agent({}, ".", "checkpointer", metadata=metadata)
+
+        get_llm.assert_called_once_with({}, metadata=metadata)
+        summary.assert_called_once()
+        self.assertIs(summary.call_args.kwargs["model"], model)
+        self.assertEqual(summary.call_args.kwargs["model"].profile["max_input_tokens"], 10000)
 
     def test_agent_build_attaches_tool_metadata(self) -> None:
         """Built agents should expose tool metadata for the UI."""
