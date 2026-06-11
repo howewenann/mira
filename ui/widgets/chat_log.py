@@ -435,7 +435,7 @@ class ChatLog(VerticalScroll):
             return str(next(self._fallback_suffixes))
 
         for _ in range(8):
-            word = re.sub(r"[^a-z0-9-]", "", str(self._faker.unique.first_name()).lower())
+            word = re.sub(r"[^a-z0-9-]", "", str(self._faker.word()).lower())
             if word:
                 return word
         return str(next(self._fallback_suffixes))

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from types import SimpleNamespace
 from typing import Any
 
 from rich.table import Table
 
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
-from session.dashboard import apply_turn_usage
+from runtime.usage import context_from_message_texts
+from session.dashboard import apply_context_usage, apply_turn_usage
 from session.context import sync_deepagents_compaction, update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, poll_compactions
 
@@ -100,6 +102,43 @@ async def run_user_turn(
 ) -> TurnResult:
     """Route one submitted user prompt through planning or action mode."""
     run_kwargs = {"token_counter": token_counter} if token_counter is not None else {}
+    live_usage_applied = False
+
+    def apply_live_usage(usage: dict[str, Any]) -> None:
+        nonlocal live_usage_applied
+        apply_turn_usage(
+            session,
+            SimpleNamespace(usage=usage),
+            model_name=model_name,
+            context_limit_tokens=context_limit_tokens,
+            context_limit_source=context_limit_source,
+        )
+        store.save(session)
+        live_usage_applied = True
+        usage_updated = getattr(renderer, "usage_updated", None)
+        if callable(usage_updated):
+            usage_updated()
+
+    def refresh_context_estimate() -> None:
+        if token_counter is None:
+            return
+        usage = context_from_message_texts([{"role": "user", "content": request_text}], token_counter)
+        context_tokens = int(usage.get("context_tokens") or 0)
+        if not context_tokens:
+            return
+        apply_context_usage(
+            session,
+            context_tokens,
+            model_name=model_name,
+            context_limit_tokens=context_limit_tokens,
+            context_limit_source=context_limit_source,
+            source=str(usage.get("source") or "unknown"),
+        )
+        store.save(session)
+        usage_updated = getattr(renderer, "usage_updated", None)
+        if callable(usage_updated):
+            usage_updated()
+
     if mode["planning"]:
         active_agent = plan_agent
         thread_id = mode["plan_thread_id"]
@@ -112,6 +151,7 @@ async def run_user_turn(
         action_text = action_request_text(mode, text)
         request_text = with_resume_context(session, action_text)
 
+    refresh_context_estimate()
     recorder = SessionRecorder(session, store, mode_name)
     recorder.user_message(text)
     update_title(session)
@@ -125,6 +165,7 @@ async def run_user_turn(
             text=request_text,
             renderer=wrapped_renderer,
             thread_id=thread_id,
+            usage_callback=apply_live_usage,
             **run_kwargs,
         )
     except asyncio.CancelledError:
@@ -148,13 +189,14 @@ async def run_user_turn(
     update_title(session)
     if await sync_deepagents_compaction(session, active_agent, thread_id):
         recorder.save()
-    apply_turn_usage(
-        session,
-        result,
-        model_name=model_name,
-        context_limit_tokens=context_limit_tokens,
-        context_limit_source=context_limit_source,
-    )
+    if not live_usage_applied:
+        apply_turn_usage(
+            session,
+            result,
+            model_name=model_name,
+            context_limit_tokens=context_limit_tokens,
+            context_limit_source=context_limit_source,
+        )
     store.save(session)
     return result
 

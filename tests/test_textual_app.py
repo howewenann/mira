@@ -177,6 +177,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
 
+    async def test_prompt_submission_refreshes_status_after_live_usage(self) -> None:
+        """Live usage updates should redraw the mounted status bar immediately."""
+        app = make_app()
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            kwargs["session"]["dashboard"]["tokens"]["in"] += 100
+            kwargs["session"]["dashboard"]["tokens"]["out"] += 20
+            kwargs["renderer"].usage_updated()
+
+        with patch("ui.app.run_user_turn", fake_run_user_turn):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
+                await pilot.pause()
+
+                status = renderable_plain(app.query_one("#status", Static))
+                self.assertIn("In 45.3k Out 13.0k", status)
+
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
         """The transient thinking block should appear only during visible silence."""
         app = make_app()

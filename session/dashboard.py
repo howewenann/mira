@@ -95,6 +95,35 @@ def apply_turn_usage(
     return record["dashboard"]
 
 
+def apply_context_usage(
+    record: dict[str, Any],
+    context_tokens: int,
+    *,
+    model_name: str = "",
+    context_limit_tokens: int | None = None,
+    context_limit_source: str = "unknown",
+    source: str = "unknown",
+) -> dict[str, Any]:
+    """Update current context usage without changing cumulative In/Out totals."""
+    dashboard = ensure_dashboard(
+        record,
+        model_name=model_name,
+        context_limit_tokens=context_limit_tokens,
+        context_limit_source=context_limit_source,
+    )
+    used_tokens = positive_int(context_tokens)
+    if used_tokens:
+        dashboard["context"]["used_tokens"] = used_tokens
+        if source and source != "unknown":
+            dashboard["context"]["source"] = source
+    dashboard["context"]["percent"] = context_percent(
+        dashboard["context"]["used_tokens"],
+        dashboard["context"]["limit_tokens"],
+    )
+    update_duration(record)
+    return record["dashboard"]
+
+
 def ensure_dashboard(
     record: dict[str, Any],
     *,

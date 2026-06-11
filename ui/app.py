@@ -386,6 +386,10 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
+    def usage_updated(self) -> None:
+        """Refresh the status bar after token usage is committed."""
+        self._set_status(state=self.status_state)
+
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, reject, or respond to interrupted actions."""
         self.waiting_finished()

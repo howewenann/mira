@@ -341,7 +341,24 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
-        self.assertEqual(result.usage["context_tokens"], 5512)
+        self.assertEqual(result.usage["context_tokens"], 5603)
+
+    def test_commit_loop_usage_returns_per_loop_delta(self) -> None:
+        result = runner.TurnResult()
+
+        first = result.commit_loop_usage(
+            {"messages": [OutputMessage("first", {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110})]}
+        )
+        second = result.commit_loop_usage(
+            {"messages": [OutputMessage("second", {"input_tokens": 200, "output_tokens": 20, "total_tokens": 220})]}
+        )
+
+        self.assertEqual(first["input_tokens"], 100)
+        self.assertEqual(first["output_tokens"], 10)
+        self.assertEqual(second["input_tokens"], 200)
+        self.assertEqual(second["output_tokens"], 20)
+        self.assertEqual(result.usage["input_tokens"], 300)
+        self.assertEqual(result.usage["output_tokens"], 30)
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""
@@ -357,7 +374,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(usage["input_tokens"], 9200)
         self.assertEqual(usage["output_tokens"], 200)
-        self.assertEqual(usage["context_tokens"], 9200)
+        self.assertEqual(usage["context_tokens"], 9400)
 
     async def test_run_turn_does_not_sum_historical_final_message_usage(self) -> None:
         """Cumulative usage should add one current call per turn, not all state messages."""
@@ -399,7 +416,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.usage["input_tokens"], 27000)
         self.assertEqual(result.usage["output_tokens"], 600)
-        self.assertEqual(result.usage["context_tokens"], 10000)
+        self.assertEqual(result.usage["context_tokens"], 10300)
 
     async def test_run_turn_uses_counter_only_for_context_when_metadata_is_missing(self) -> None:
         agent = FakeAgent(
@@ -458,7 +475,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["total_tokens"], 5603)
-        self.assertEqual(result.usage["context_tokens"], 5512)
+        self.assertEqual(result.usage["context_tokens"], 5603)
 
     async def test_run_turn_records_tool_calls_and_results(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
@@ -885,34 +902,36 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "Stats",
             (),
             {
-                "prompt_tokens_count": 21,
-                "predicted_tokens_count": 2,
-                "total_tokens_count": 23,
+                "prompt_tokens_count": 8200,
+                "predicted_tokens_count": 1424,
+                "total_tokens_count": 9624,
             },
         )()
         message = type("Message", (), {"response_metadata": {"stats": stats}})()
 
         usage = usage_from_message(message)
 
-        self.assertEqual(usage["input_tokens"], 21)
-        self.assertEqual(usage["output_tokens"], 2)
-        self.assertEqual(usage["total_tokens"], 23)
+        self.assertEqual(usage["input_tokens"], 8200)
+        self.assertEqual(usage["output_tokens"], 1424)
+        self.assertEqual(usage["total_tokens"], 9624)
+        self.assertEqual(usage["context_tokens"], 9624)
         self.assertEqual(usage["source"], "response_metadata.stats")
 
     def test_usage_parser_accepts_lmstudio_native_stats_dict(self) -> None:
         usage = usage_from_message(
             {
                 "stats": {
-                    "promptTokensCount": 21,
-                    "predictedTokensCount": 2,
-                    "totalTokensCount": 23,
+                    "promptTokensCount": 8200,
+                    "predictedTokensCount": 1424,
+                    "totalTokensCount": 9624,
                 }
             }
         )
 
-        self.assertEqual(usage["input_tokens"], 21)
-        self.assertEqual(usage["output_tokens"], 2)
-        self.assertEqual(usage["total_tokens"], 23)
+        self.assertEqual(usage["input_tokens"], 8200)
+        self.assertEqual(usage["output_tokens"], 1424)
+        self.assertEqual(usage["total_tokens"], 9624)
+        self.assertEqual(usage["context_tokens"], 9624)
 
 
 if __name__ == "__main__":

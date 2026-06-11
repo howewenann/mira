@@ -44,6 +44,7 @@ class RecordingRenderer:
         self.console = RecordingConsole()
         self.plan_panels: list[tuple[int, str]] = []
         self.no_plans_called = False
+        self.usage_updates = 0
 
     def splash(self, model_name: str, session_id: str, workspace: str) -> None:
         """Record splash metadata."""
@@ -92,6 +93,10 @@ class RecordingRenderer:
     def finish_main(self) -> None:
         """Record stream finalization."""
         return None
+
+    def usage_updated(self) -> None:
+        """Record a live dashboard refresh."""
+        self.usage_updates += 1
 
 
 class FakeModelRequest:
@@ -506,7 +511,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         mode = repl.initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
 
-        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
             """Record agent invocations from interactive routing."""
             calls.append((agent, text, thread_id))
             return runner.TurnResult()
@@ -554,7 +565,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             runner.TurnResult(final_text="done again"),
         ]
 
-        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
             """Record agent invocations and return scripted results."""
             calls.append((agent, text, thread_id))
             return results.pop(0)
@@ -601,6 +618,58 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("User request:\ndo it", calls[1][1])
         self.assertEqual(calls[2], ("action-agent", "do another thing", "thread-1"))
 
+    async def test_run_user_turn_applies_live_usage_once(self) -> None:
+        """Interactive usage callbacks should refresh dashboard without final double-counting."""
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
+        store = CapturingStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
+        pre_generation_state: dict[str, Any] = {}
+
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            usage_callback: Any | None = None,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
+            pre_generation_state.update(deepcopy(session["dashboard"]))
+            usage = {
+                "input_tokens": 8200,
+                "output_tokens": 1424,
+                "total_tokens": 9624,
+                "context_tokens": 9624,
+                "source": "usage_metadata",
+            }
+            if usage_callback is not None:
+                usage_callback(usage)
+            result = runner.TurnResult()
+            result.add_usage(usage)
+            return result
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=mode,
+                text="use tokens",
+                model_name="lmstudio:test",
+                context_limit_tokens=1000,
+                token_counter=lambda text: 900,
+            )
+
+        self.assertEqual(pre_generation_state["tokens"], {"in": 0, "out": 0})
+        self.assertEqual(pre_generation_state["context"]["used_tokens"], 900)
+        self.assertEqual(session["dashboard"]["tokens"], {"in": 8200, "out": 1424})
+        self.assertEqual(session["dashboard"]["context"]["used_tokens"], 9624)
+        self.assertEqual(session["turns"], 1)
+        self.assertEqual(renderer.usage_updates, 2)
+        self.assertEqual(store.saves[-1]["turns"], 1)
+
     async def test_run_user_turn_does_not_save_blocked_plan(self) -> None:
         """A plan that tried to write should not be reused in action mode."""
         renderer = RecordingRenderer()
@@ -617,7 +686,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             runner.TurnResult(final_text="done"),
         ]
 
-        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
             """Record agent invocations and return scripted results."""
             calls.append((agent, text, thread_id))
             return results.pop(0)
@@ -654,7 +729,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         store = CapturingStore()
         mode = repl.initial_mode("action-agent", "plan-agent")
 
-        async def fake_run_turn(agent: Any, text: str, renderer: Any, thread_id: str) -> runner.TurnResult:
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
             renderer.text_delta("working")
             renderer.tool_call("read_file", {"path": "README.md"})
             raise RuntimeError("model stopped")
