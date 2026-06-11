@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from textwrap import wrap
 from typing import Any
 
 from textual.widgets import ListItem, ListView, Static
@@ -58,10 +59,35 @@ def session_records(store: Any) -> list[dict[str, Any]]:
 
 
 def session_label(record: dict[str, Any]) -> str:
-    """Return a compact two-line session row."""
-    title = truncate(str(record.get("title") or "Untitled session"), 24)
+    """Return a compact session row with a prompt preview."""
+    preview = preview_lines(latest_user_prompt(record) or str(record.get("title") or "Untitled session"))
     timestamp = timestamp_text(record.get("updated_at") or record.get("created_at"))
-    return f"{title}\n{timestamp}"
+    return "\n".join([*preview, timestamp])
+
+
+def latest_user_prompt(record: dict[str, Any]) -> str:
+    """Return the newest visible user prompt from a session record."""
+    events = record.get("events")
+    if not isinstance(events, list):
+        return ""
+
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "user":
+            continue
+        text = compact_line(event.get("text"))
+        if text:
+            return text
+    return ""
+
+
+def preview_lines(value: str, *, width: int = 34, max_lines: int = 2) -> list[str]:
+    """Return one or two ordered preview lines for the sidebar."""
+    text = compact_line(value).strip("\"'` ")
+    if not text:
+        return ["Untitled session"]
+
+    lines = wrap(text, width=width, max_lines=max_lines, placeholder="...")
+    return lines or ["Untitled session"]
 
 
 def timestamp_text(value: Any) -> str:
@@ -78,7 +104,11 @@ def timestamp_text(value: Any) -> str:
 
 def truncate(value: str, limit: int) -> str:
     """Hard truncate long sidebar labels."""
-    text = " ".join(str(value or "").split())
+    text = compact_line(value)
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def compact_line(value: Any) -> str:
+    return " ".join(str(value or "").split())
