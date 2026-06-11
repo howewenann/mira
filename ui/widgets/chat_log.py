@@ -36,7 +36,6 @@ class ChatLog(VerticalScroll):
         self._subagent_blocks: dict[str, dict[str, str]] = {}
         self._subagent_widgets: dict[str, Static] = {}
         self._compaction_block: Static | None = None
-        self._compaction_running = False
         self._fallback_suffixes = count(1)
         self._waiting_spinner_index = 0
         self._subagent_spinner_index = 0
@@ -148,7 +147,6 @@ class ChatLog(VerticalScroll):
         """Show that DeepAgents is compacting conversation context."""
         self.hide_waiting()
         self.finish_main()
-        self._compaction_running = True
         text = Text("compacting context...", style="bold yellow")
         if self._compaction_block is None:
             self._compaction_block = self._add_block("mira", text, "message status")
@@ -160,14 +158,9 @@ class ChatLog(VerticalScroll):
         """Mark the compaction status as complete."""
         if self._compaction_block is None:
             return
-        self._compaction_running = False
         self._compaction_block.update(Text("context compacted", style="bold green"))
         self._compaction_block = None
         self._scroll_to_end()
-
-    def tick_compaction(self) -> None:
-        """Compatibility hook for the old compaction animation."""
-        return
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Append a coordinator-level tool call in transcript order."""
@@ -299,7 +292,6 @@ class ChatLog(VerticalScroll):
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._compaction_block = None
-        self._compaction_running = False
         self._tool_blocks = {}
         self._tool_name_queues = defaultdict(deque)
         self._pending_tool_results_by_id = {}

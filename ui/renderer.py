@@ -58,14 +58,6 @@ class Renderer:
         if result:
             self._line(f"{name} output: {self.truncate(result)}")
 
-    def waiting_started(self) -> None:
-        """Compatibility hook for the Textual waiting indicator."""
-        return None
-
-    def waiting_finished(self) -> None:
-        """Compatibility hook for the Textual waiting indicator."""
-        return None
-
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Print a compact task delegation summary."""
         descriptions = []
@@ -91,18 +83,6 @@ class Renderer:
     def compaction_finished(self) -> None:
         """Print a context compaction completion status."""
         self._line("context compacted")
-
-    def start_subagent_live(self) -> None:
-        """Runtime compatibility hook."""
-        return None
-
-    def stop_subagent_live(self) -> None:
-        """Runtime compatibility hook."""
-        return None
-
-    def tick_subagents(self) -> None:
-        """Runtime compatibility hook."""
-        return None
 
     def subagent_label(self, subagent: Any) -> str:
         """Return a stable readable label for a subagent object."""

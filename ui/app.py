@@ -647,7 +647,6 @@ class MiraApp(App[None]):
         """Refresh the clock and dashboard line."""
         if not self.ready:
             return
-        self.query_one(ChatLog).tick_compaction()
         update_duration(self.session)
         self._set_status(state=self.status_state)
 

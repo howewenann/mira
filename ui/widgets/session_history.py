@@ -102,13 +102,5 @@ def timestamp_text(value: Any) -> str:
     return parsed.astimezone().strftime("%b %d %H:%M")
 
 
-def truncate(value: str, limit: int) -> str:
-    """Hard truncate long sidebar labels."""
-    text = compact_line(value)
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
-
-
 def compact_line(value: Any) -> str:
     return " ".join(str(value or "").split())
