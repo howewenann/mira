@@ -18,6 +18,7 @@ from ui.interrupts import (
     ask_user_request,
     response_message,
 )
+from ui.names import generate_slug
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -30,13 +31,6 @@ class Renderer:
         self._section = ""
         self._subagent_ids = count(1)
         self._subagent_labels: dict[int, str] = {}
-        self._faker: Any | None = None
-        try:
-            from faker import Faker
-
-            self._faker = Faker()
-        except Exception:
-            self._faker = None
 
     def reasoning_delta(self, delta: str) -> None:
         """Print streamed reasoning text."""
@@ -227,11 +221,4 @@ class Renderer:
 
     def _next_suffix(self) -> str:
         """Return a readable subagent suffix."""
-        if self._faker is None:
-            return str(next(self._subagent_ids))
-
-        for _ in range(8):
-            word = re.sub(r"[^a-z0-9-]", "", str(self._faker.word()).lower())
-            if word:
-                return word
-        return str(next(self._subagent_ids))
+        return generate_slug(fallback=self._subagent_ids)

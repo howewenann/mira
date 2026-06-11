@@ -15,6 +15,7 @@ from textual.widgets import Static
 
 from runtime.output_events import normalize_response_delta
 from session.context import normalize_events
+from ui.names import generate_slug
 from ui.splash import splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -45,13 +46,6 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_id: dict[str, str] = {}
         self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
         self._subagent_aliases: dict[str, str] = {}
-        self._faker: Any | None = None
-        try:
-            from faker import Faker
-
-            self._faker = Faker()
-        except Exception:
-            self._faker = None
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""
@@ -423,14 +417,7 @@ class ChatLog(VerticalScroll):
 
     def _next_suffix(self) -> str:
         """Return a short cute suffix for delegated workers."""
-        if self._faker is None:
-            return str(next(self._fallback_suffixes))
-
-        for _ in range(8):
-            word = re.sub(r"[^a-z0-9-]", "", str(self._faker.word()).lower())
-            if word:
-                return word
-        return str(next(self._fallback_suffixes))
+        return generate_slug(fallback=self._fallback_suffixes)
 
     def _subagent_display_label(self, label: str) -> str:
         """Return a stable label, adding a nickname if the caller omitted one."""
