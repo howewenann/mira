@@ -90,6 +90,8 @@ class LLMConfigTests(unittest.TestCase):
                         "MIRA_LLM_MODEL=from-dotenv",
                         "MIRA_TOOL_OUTPUT_CHARS=321",
                         "MIRA_LMSTUDIO_METADATA_TIMEOUT=0.5",
+                        "MIRA_CONTEXT_PRESSURE_COMPACTION=false",
+                        "MIRA_CONTEXT_PRESSURE_FRACTION=0.97",
                     ]
                 ),
                 encoding="utf-8",
@@ -101,6 +103,8 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_model"], "from-dotenv")
         self.assertEqual(config["tool_output_chars"], 321)
         self.assertEqual(config["lmstudio_metadata_timeout"], 0.5)
+        self.assertFalse(config["context_pressure_compaction"])
+        self.assertEqual(config["context_pressure_fraction"], 0.97)
         self.assertEqual(config["session_dir"], str(workspace / ".mira" / "_sessions"))
 
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:

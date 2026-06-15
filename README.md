@@ -89,6 +89,12 @@ shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
 MIRA uses the resolved model metadata to set DeepAgents' context profile and to
 show context pressure as a colored bar.
+When the provider reports that the prompt is already at the configured context
+ceiling, MIRA raises a DeepAgents-compatible overflow signal so DeepAgents can
+compact before retrying. This fallback is controlled by
+`MIRA_CONTEXT_PRESSURE_COMPACTION` and defaults to on; adjust the high-water
+mark with `MIRA_CONTEXT_PRESSURE_FRACTION` if your local runtime reports limits
+too early or too late.
 
 Session titles are generated deterministically from recent user messages. MIRA
 stores its own replayable user/assistant transcript for session history.

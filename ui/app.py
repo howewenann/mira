@@ -688,6 +688,7 @@ class MiraApp(App[None]):
         chat.tick_waiting()
         chat.tick_startup()
         chat.tick_subagents()
+        chat.tick_compaction()
 
     def _mode_label(self) -> str:
         """Return the compact mode label shown in the status line."""

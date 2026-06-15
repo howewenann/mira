@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.context_overflow import ContextPressureMiddleware
 from agent import factory
 from agent.resources import build_resources
 from ui import repl
@@ -258,6 +259,7 @@ TOOLS = [project_grep, project_status]
         self.assertEqual(code_middleware.call_args.kwargs["ptc"], ["task"])
         self.assertIsNotNone(code_middleware.call_args.kwargs["skills_backend"])
         kwargs = create_deep_agent.call_args.kwargs
+        self.assertIsInstance(kwargs["middleware"][0], ContextPressureMiddleware)
         self.assertIn("/mira-defaults/skills", kwargs["skills"])
         self.assertIn("/.mira/skills", kwargs["skills"])
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")

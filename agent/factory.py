@@ -10,6 +10,7 @@ from deepagents.middleware.summarization import create_summarization_tool_middle
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
+from agent.context_overflow import ContextPressureMiddleware
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
 from agent.resources import build_resources
@@ -81,6 +82,11 @@ def _build_agent(
     backend = resources.backend
 
     middleware: list[Any] = [
+        ContextPressureMiddleware(
+            context_limit_tokens=context_limit_tokens(config, metadata),
+            threshold_fraction=config.get("context_pressure_fraction", 0.98),
+            enabled=bool(config.get("context_pressure_compaction", True)),
+        ),
         CodeInterpreterMiddleware(ptc=["task"], skills_backend=backend),
         create_summarization_tool_middleware(model=model, backend=backend),
     ]
@@ -146,6 +152,13 @@ def _write_interrupts() -> dict[str, dict[str, list[str]]]:
         "write_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
         "edit_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
     }
+
+
+def context_limit_tokens(config: dict[str, Any], metadata: ModelMetadata | None) -> int | None:
+    """Return the context limit used by DeepAgents and pressure detection."""
+    if metadata is not None and metadata.context_tokens:
+        return metadata.context_tokens
+    return config.get("llm_inferred_context_tokens") or config.get("llm_context_tokens")
 
 
 class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):

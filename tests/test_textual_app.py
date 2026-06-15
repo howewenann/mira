@@ -304,11 +304,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             block = app.query_one(ChatLog).children[-1]
             first = renderable_plain(block)
 
+            app.query_one(ChatLog).tick_compaction()
+            await pilot.pause()
+            animated = renderable_plain(block)
+
             app.compaction_finished()
             await pilot.pause()
             done = renderable_plain(block)
 
             self.assertIn("compacting context...", first)
+            self.assertIn("compacting context...", animated)
+            self.assertNotEqual(first, animated)
             self.assertIn("context compacted", done)
 
     async def test_waiting_indicator_reappears_after_compaction_if_still_busy(self) -> None:
