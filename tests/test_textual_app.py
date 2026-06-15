@@ -178,37 +178,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(prompt.has_focus)
 
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
-        """The transient thinking block should appear only during visible silence."""
+        """The transient working block should appear only during phase silence."""
         app = make_app()
+        app._waiting_delay_seconds = 0.05
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
             app.busy = True
             app.waiting_started()
-            await pilot.pause(0.35)
+            await pilot.pause(0.08)
             first = renderable_plain(app.query_one(ChatLog).children[-1])
-            self.assertIn("thinking...", first)
+            self.assertIn("working...", first)
 
             app.query_one(ChatLog).tick_waiting()
             await pilot.pause()
             second = renderable_plain(app.query_one(ChatLog).children[-1])
-            self.assertIn("thinking...", second)
+            self.assertIn("working...", second)
             self.assertNotEqual(first, second)
 
             app.text_delta("hello")
             await pilot.pause()
             blocks = list(app.query_one(ChatLog).children)
             self.assertEqual(renderable_plain(blocks[-1]), "hello")
-            self.assertFalse(any("thinking..." in renderable_plain(block) for block in blocks))
+            self.assertFalse(any("working..." in renderable_plain(block) for block in blocks))
 
             app.waiting_started()
-            await pilot.pause(0.35)
-            self.assertIn("thinking...", renderable_plain(app.query_one(ChatLog).children[-1]))
+            await pilot.pause(0.08)
+            self.assertFalse(any("working..." in renderable_plain(block) for block in app.query_one(ChatLog).children))
 
             app.waiting_finished()
             await pilot.pause()
-            self.assertFalse(any("thinking..." in renderable_plain(block) for block in app.query_one(ChatLog).children))
+            self.assertFalse(any("working..." in renderable_plain(block) for block in app.query_one(ChatLog).children))
+            app.busy = False
+
+    async def test_slow_token_generation_does_not_show_working_between_chunks(self) -> None:
+        """Once text is streaming, slow token gaps should not re-add working status."""
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+
+            app.waiting_started()
+            await pilot.pause(0.08)
+            self.assertIn("working...", renderable_plain(app.query_one(ChatLog).children[-1]))
+
+            app.text_delta("h")
+            await pilot.pause(0.12)
+            app.text_delta("i")
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("hi", rendered)
+            self.assertNotIn("working...", rendered)
             app.busy = False
 
     async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
@@ -268,8 +292,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("context compacted", done)
 
     async def test_waiting_indicator_reappears_after_compaction_if_still_busy(self) -> None:
-        """After compaction, MIRA should show thinking again while waiting silently."""
+        """After compaction, MIRA should show working again while waiting silently."""
         app = make_app()
+        app._waiting_delay_seconds = 0.05
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
@@ -280,12 +305,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             block = app.query_one(ChatLog).children[-1]
 
             app.compaction_finished()
-            await pilot.pause(0.35)
+            await pilot.pause(0.08)
 
             blocks = list(app.query_one(ChatLog).children)
             self.assertIn("context compacted", renderable_plain(block))
-            self.assertIn("thinking...", renderable_plain(blocks[-1]))
+            self.assertIn("working...", renderable_plain(blocks[-1]))
             app.busy = False
+
+    async def test_startup_loading_splash_renders_before_bootstrap_finishes(self) -> None:
+        """Startup should show branded progress before async bootstrap completes."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            started.set()
+            await release.wait()
+            return {
+                "agent": "agent",
+                "plan_agent": "plan-agent",
+                "config": {},
+                "store": FakeStore(),
+                "session": {
+                    "id": "thread-startup",
+                    "workspace": ".",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "turns": 0,
+                },
+                "model_name": "test-model",
+                "context_limit_tokens": 8192,
+                "context_limit_source": "test",
+                "checkpointer": "checkpointer",
+            }
+
+        async def ensure_git_repository(*args: Any, **kwargs: Any) -> bool:
+            return True
+
+        app = MiraApp(
+            workspace=Path("."),
+            config={},
+            bootstrap=bootstrap,
+            ensure_git_repository=ensure_git_repository,
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            await pilot.pause()
+
+            self.assertFalse(app.ready)
+            loading_text = renderable_plain(app.query_one(ChatLog).children[0])
+            self.assertIn(VERSION, loading_text)
+            self.assertIn("loading", loading_text)
+            self.assertIn("loading model metadata", loading_text)
+
+            release.set()
+            await pilot.pause()
+            self.assertTrue(app.ready)
 
     async def test_ctrl_c_action_cancels_running_turn(self) -> None:
         """The VS Code-friendly interrupt binding should confirm before cancelling."""

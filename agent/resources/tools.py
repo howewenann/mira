@@ -23,7 +23,7 @@ BUILT_IN_TOOL_NAMES = {
     "edit_file",
     "glob",
     "grep",
-    "execute",
+    "eval",
     "task",
 }
 

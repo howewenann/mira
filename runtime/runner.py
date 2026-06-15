@@ -89,13 +89,14 @@ class TurnResult:
         self.set_context_usage(context_from_output(output, token_counter))
         self._stream_usage = empty_usage()
 
-    def record_tool_call(self, name: str, call_id: str = "") -> None:
+    def record_tool_call(self, name: str, call_id: str = "") -> bool:
         """Record one tool call while avoiding duplicate id-based reports."""
         if call_id:
             if call_id in self._seen_tool_call_ids:
-                return
+                return False
             self._seen_tool_call_ids.add(call_id)
         self.tool_calls.append(name)
+        return True
 
 
 async def run_turn(

@@ -83,8 +83,15 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata, ModelMetadata(10000, "lmstudio.api.v1.loaded_instance"))
         self.assertEqual(FakeAsyncClient.calls[0]["trust_env"], False)
         self.assertEqual(FakeAsyncClient.calls[0]["verify"], False)
-        self.assertIsNone(FakeAsyncClient.calls[0]["timeout"])
+        self.assertEqual(FakeAsyncClient.calls[0]["timeout"], 2.0)
         self.assertEqual(FakeAsyncClient.calls[1]["url"], "http://localhost:1234/api/v1/models")
+
+    async def test_lmstudio_metadata_timeout_can_be_configured(self) -> None:
+        """LM Studio metadata probing should use a finite configurable timeout."""
+        with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
+            await infer_model_metadata({**lmstudio_config(), "lmstudio_metadata_timeout": 0.75})
+
+        self.assertEqual(FakeAsyncClient.calls[0]["timeout"], 0.75)
 
     async def test_lmstudio_metadata_selects_configured_model(self) -> None:
         """The configured model name should choose the matching LM Studio entry."""

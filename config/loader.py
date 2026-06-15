@@ -23,6 +23,18 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    """Read a float environment variable, falling back on invalid input."""
+    value = os.getenv(name)
+    if not value:
+        return default
+
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 def load_config(workspace: Path) -> dict[str, Any]:
     """Load all runtime configuration from the environment and defaults."""
     dotenv_path = workspace / ".env"
@@ -35,5 +47,6 @@ def load_config(workspace: Path) -> dict[str, Any]:
         "workspace": str(workspace),
         **load_llm_config(os.environ),
         "tool_output_chars": _int_env("MIRA_TOOL_OUTPUT_CHARS", 240),
+        "lmstudio_metadata_timeout": _float_env("MIRA_LMSTUDIO_METADATA_TIMEOUT", 2.0),
         "session_dir": os.getenv("MIRA_SESSION_DIR", str(workspace / ".mira" / "_sessions")),
     }

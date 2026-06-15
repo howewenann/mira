@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from runtime.output_events import (
+    could_be_compaction_summary_start,
     is_summarization_metadata_message,
     normalize_response_delta,
     strip_compaction_summary_prefix,
@@ -24,8 +25,16 @@ COMPACTION_REASONING_HINTS = (
     "extract the highest quality/most relevant context",
     "conversation history to replace",
     "conversation history will be replaced",
+    "conversation history",
     "due to nearing token limits",
     "due to token limits",
+    "compact",
+    "compaction",
+    "summarization",
+    "summarize",
+    "session intent",
+    "artifacts",
+    "next steps",
     "output format",
 )
 COMPACTION_REASONING_START = "thinking process"
@@ -228,15 +237,21 @@ def is_compaction_reasoning(text: str) -> bool:
         return True
     if "output format" in lowered and "session intent" in lowered and "next steps" in lowered:
         return True
+    if "session intent" in lowered and "summary" in lowered and "artifacts" in lowered and "next steps" in lowered:
+        return True
+    if "compact" in lowered and "conversation" in lowered and ("summary" in lowered or "token" in lowered):
+        return True
+    if "summarization" in lowered and "conversation" in lowered:
+        return True
     return False
 
 
 def should_flush_reasoning_probe(text: str) -> bool:
     """Return whether buffered reasoning is unlikely to be compaction metadata."""
     lowered = text.lower()
-    if "thinking process" in lowered and len(text) < 600:
+    if could_be_compaction_reasoning_start(text):
         return False
-    if len(text) >= 600:
+    if len(text) >= 1200:
         return True
     if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
         return True
@@ -296,16 +311,6 @@ async def _consume_streamed_text(value: Any, renderer: Any, *, allow_compaction_
     async for delta in _text_deltas(value):
         text_filter.push(delta)
     text_filter.finish()
-
-
-def could_be_compaction_summary_start(text: str) -> bool:
-    """Return whether text may still begin a DeepAgents compaction summary."""
-    stripped = text.lstrip().lower()
-    if not stripped:
-        return True
-
-    marker = "## session intent"
-    return marker.startswith(stripped) or stripped.startswith(marker)
 
 
 async def _text_deltas(value: Any) -> AsyncIterator[str]:

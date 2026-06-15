@@ -89,7 +89,8 @@ class MiraApp(App[None]):
         self.confirming_interrupt = False
         self._waiting_task: Any | None = None
         self._waiting_generation = 0
-        self._waiting_delay_seconds = 0.3
+        self._waiting_delay_seconds = 0.8
+        self._main_stream_active = False
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -112,12 +113,18 @@ class MiraApp(App[None]):
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
             return
+        self.query_one(ChatLog).startup_loading(workspace=str(self.workspace), state="starting...")
+        self.call_after_refresh(self._start_startup_worker)
+
+    def _start_startup_worker(self) -> None:
+        """Start bootstrap after the first visible frame has rendered."""
         self.run_worker(self._startup(), name="startup", exclusive=True)
 
     async def _startup(self) -> None:
         """Run Git safety checks and build agents inside the TUI."""
         try:
             if self.ensure_git_repository is not None:
+                self.startup_progress("checking workspace...")
                 self._set_status(state="checking workspace")
                 if not await self.ensure_git_repository(self.workspace, self):
                     self.exit()
@@ -126,6 +133,7 @@ class MiraApp(App[None]):
             if self.bootstrap is None:
                 raise RuntimeError("MIRA bootstrap function was not provided")
 
+            self.startup_progress("loading model metadata...")
             self._set_status(state="loading")
             state = await self.bootstrap(
                 self.workspace,
@@ -154,6 +162,7 @@ class MiraApp(App[None]):
         self.mode = initial_mode(self.agent, self.plan_agent)
         self.ready = True
         self.busy = False
+        self._main_stream_active = False
         prompt = self.query_one(PromptBox)
         prompt.disabled = False
         prompt.set_history(read_prompt_history(self.history_path))
@@ -197,6 +206,7 @@ class MiraApp(App[None]):
 
         self.query_one(ChatLog).user_message(text, planning=bool(self.mode.get("planning")))
         self.busy = True
+        self._main_stream_active = False
         self._set_status(state="running")
         prompt.disabled = True
         self.turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=True)
@@ -301,6 +311,7 @@ class MiraApp(App[None]):
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
@@ -326,29 +337,32 @@ class MiraApp(App[None]):
     def reasoning_delta(self, delta: str) -> None:
         """Render streamed reasoning text."""
         self.waiting_finished()
+        self._main_stream_active = True
         self.query_one(ChatLog).reasoning_delta(delta)
-        self._rearm_waiting_if_busy()
 
     def text_delta(self, delta: str) -> None:
         """Render streamed assistant text."""
         self.waiting_finished()
+        self._main_stream_active = True
         self.query_one(ChatLog).text_delta(delta)
-        self._rearm_waiting_if_busy()
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Render a tool call in transcript order."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).tool_call(name, args, call_id=call_id)
         self._rearm_waiting_if_busy()
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render a tool result in transcript order."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).tool_result(name, result, call_id=call_id)
         self._rearm_waiting_if_busy()
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Render task delegation summary."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).delegation_started(calls)
         self._rearm_waiting_if_busy()
@@ -371,18 +385,21 @@ class MiraApp(App[None]):
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         """Render a subagent start."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).subagent_started(subagent, task_input)
         self._rearm_waiting_if_busy()
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Render a subagent finish."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).subagent_finished(subagent, result)
         self._rearm_waiting_if_busy()
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
+        self._main_stream_active = False
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
@@ -489,10 +506,10 @@ class MiraApp(App[None]):
                 self.action_focus_prompt()
 
     def waiting_started(self) -> None:
-        """Arm the transient thinking indicator while the turn is silent."""
+        """Arm the transient working indicator while the turn is silent."""
         self._waiting_generation += 1
         self._cancel_waiting_task()
-        if not self.is_mounted or not self.busy:
+        if not self.is_mounted or not self.busy or self._main_stream_active:
             return
         try:
             if self.query_one(PromptPanel).active:
@@ -507,18 +524,18 @@ class MiraApp(App[None]):
         )
 
     def waiting_finished(self) -> None:
-        """Hide the transient thinking indicator and cancel pending timers."""
+        """Hide the transient working indicator and cancel pending timers."""
         self._cancel_waiting_task()
         if self.is_mounted:
             self.query_one(ChatLog).hide_waiting()
 
     async def _show_waiting_after_delay(self, generation: int) -> None:
-        """Show thinking only if the current wait survives the grace period."""
+        """Show working only if the current wait survives the grace period."""
         try:
             await asyncio.sleep(self._waiting_delay_seconds)
         except asyncio.CancelledError:
             return
-        if generation != self._waiting_generation or not self.busy or not self.is_mounted:
+        if generation != self._waiting_generation or not self.busy or not self.is_mounted or self._main_stream_active:
             return
         self.query_one(ChatLog).show_waiting()
 
@@ -532,8 +549,18 @@ class MiraApp(App[None]):
 
     def _rearm_waiting_if_busy(self) -> None:
         """Start the silent-wait timer again after a visible runtime event."""
-        if self.busy:
+        if self.busy and not self._main_stream_active:
             self.waiting_started()
+
+    def startup_progress(self, state: str) -> None:
+        """Update startup splash and status while bootstrap is running."""
+        if not self.is_mounted:
+            return
+        try:
+            self.query_one(ChatLog).startup_progress(state)
+        except NoMatches:
+            return
+        self._set_status(state="loading", detail=state)
 
     def _set_status(self, *, state: str, detail: str = "") -> None:
         """Update the status bar if it has been mounted."""
@@ -656,6 +683,7 @@ class MiraApp(App[None]):
         except NoMatches:
             return
         chat.tick_waiting()
+        chat.tick_startup()
         chat.tick_subagents()
 
     def _mode_label(self) -> str:

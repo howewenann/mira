@@ -42,6 +42,14 @@ def splash_text(*, model_name: str, session_id: str, workspace: str | Path) -> T
     return text
 
 
+def loading_splash_text(*, workspace: str | Path, state: str, frame: str = "-") -> Text:
+    """Build the startup splash shown while agents are still loading."""
+    text = splash_text(model_name="loading", session_id="starting", workspace=workspace)
+    text.append("\n\n")
+    text.append(f"{frame} {state}", style="bold #d2a957")
+    return text
+
+
 def append_label(text: Text, label: str, value: Any) -> None:
     """Append one aligned metadata label."""
     text.append(f"{label:<10}", style=MIRA_LABEL)

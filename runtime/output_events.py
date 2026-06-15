@@ -6,11 +6,12 @@ import re
 from typing import Any
 
 COMPACTION_SUMMARY_HEADINGS = (
-    "## session intent",
-    "## summary",
-    "## artifacts",
-    "## next steps",
+    "session intent",
+    "summary",
+    "artifacts",
+    "next steps",
 )
+COMPACTION_HEADING_RE_TEMPLATE = r"(?im)^\s{{0,3}}(?:#{{1,6}}\s*)?(?:\*\*)?{heading}(?:\*\*)?\s*:?\b"
 LEADING_REPLY_GAP_RE = re.compile(r"^\s*\n+\s*")
 
 
@@ -81,15 +82,15 @@ def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:
     if not text:
         return "", False
 
-    lowered = text.lower()
-    first_heading = lowered.find(COMPACTION_SUMMARY_HEADINGS[0])
-    if first_heading < 0 or first_heading > 80:
+    positions = compaction_heading_positions(text)
+    first_heading = positions[0] if positions else -1
+    if first_heading < 0 or first_heading > 240:
         return text, False
 
-    if not headings_in_order(lowered):
+    if len(positions) != len(COMPACTION_SUMMARY_HEADINGS):
         return text, False
 
-    match = re.search(r"(?im)^##\s*next steps\b.*$", text)
+    match = compaction_heading_match(text, COMPACTION_SUMMARY_HEADINGS[-1])
     if match is None:
         return "", True
 
@@ -103,21 +104,50 @@ def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:
 
 def headings_in_order(text: str) -> bool:
     """Return whether compaction headings appear in the expected order."""
+    return len(compaction_heading_positions(text)) == len(COMPACTION_SUMMARY_HEADINGS)
+
+
+def compaction_heading_positions(text: str) -> list[int]:
+    """Return compaction heading positions when all headings appear in order."""
     position = -1
+    positions = []
     for heading in COMPACTION_SUMMARY_HEADINGS:
-        next_position = text.find(heading, position + 1)
-        if next_position < 0:
-            return False
-        position = next_position
-    return True
+        match = compaction_heading_match(text, heading, position + 1)
+        if match is None:
+            return []
+        position = match.start()
+        positions.append(position)
+    return positions
+
+
+def compaction_heading_match(text: str, heading: str, pos: int = 0) -> re.Match[str] | None:
+    """Return the next heading match for one compaction section."""
+    pattern = COMPACTION_HEADING_RE_TEMPLATE.format(heading=re.escape(heading).replace(r"\ ", r"\s+"))
+    return re.compile(pattern).search(text, pos)
 
 
 def text_has_compaction_summary_shape(text: str) -> bool:
     """Return whether text starts with the structured compaction summary shape."""
-    text = text.strip().lower()
+    text = text.strip()
     if not text:
         return False
-    return headings_in_order(text) and text.find(COMPACTION_SUMMARY_HEADINGS[0]) <= 80
+    positions = compaction_heading_positions(text)
+    return bool(positions) and positions[0] <= 240
+
+
+def could_be_compaction_summary_start(text: str) -> bool:
+    """Return whether streamed text may still become a compaction summary."""
+    stripped = text.lstrip().lower()
+    if not stripped:
+        return True
+
+    candidate = re.sub(r"^#{1,6}\s*", "", stripped).strip()
+    candidate = candidate.strip("* ")
+    if not candidate:
+        return stripped.startswith("#")
+
+    marker = "session intent"
+    return marker.startswith(candidate) or candidate.startswith(marker)
 
 
 def message_text(message: Any) -> str:

@@ -9,6 +9,7 @@ from runtime import runner
 from runtime.message_events import consume_messages
 from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
+from runtime.tool_events import consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
 
@@ -85,6 +86,28 @@ class ToolCall:
         self.name = name
         self.args = args
         self.output = output
+        self.id = call_id
+
+
+class DocumentedToolCall:
+    """Fake DeepAgents tool-call stream item using documented field names."""
+
+    def __init__(
+        self,
+        tool_name: str,
+        input: dict[str, Any],
+        *,
+        output_deltas: Any | None = None,
+        output: Any | None = None,
+        error: Any | None = None,
+        call_id: str = "",
+    ) -> None:
+        self.tool_name = tool_name
+        self.input = input
+        self.output_deltas = output_deltas
+        self.output = output
+        self.error = error
+        self.completed = True
         self.id = call_id
 
 
@@ -471,6 +494,57 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tool_calls, ["write_file"])
         self.assertIn("permission denied for write on /x", result.tool_results)
 
+    async def test_tool_call_stream_accepts_documented_fields(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        calls = AsyncItems(
+            [
+                DocumentedToolCall(
+                    "eval",
+                    {"code": "1 + 1"},
+                    output_deltas=AsyncItems(["<stdout>ok</stdout>", "<result>2</result>"]),
+                    call_id="call-doc",
+                )
+            ]
+        )
+
+        await consume_tool_calls(calls, renderer, result)
+
+        self.assertEqual(result.tool_calls, ["eval"])
+        self.assertEqual(result.tool_results, ["<stdout>ok</stdout><result>2</result>"])
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "eval", {"code": "1 + 1"}, "call-doc"),
+                ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-doc"),
+            ],
+        )
+
+    async def test_tool_call_stream_prefers_documented_error_field(self) -> None:
+        renderer = RecordingRenderer()
+        calls = AsyncItems(
+            [
+                {
+                    "id": "call-error",
+                    "tool_name": "eval",
+                    "input": {"code": "bad()"},
+                    "completed": True,
+                    "output_deltas": ["partial output"],
+                    "error": "boom",
+                }
+            ]
+        )
+
+        await consume_tool_calls(calls, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "eval", {"code": "bad()"}, "call-error"),
+                ("tool_result", "eval", "boom", "call-error"),
+            ],
+        )
+
     async def test_run_turn_strips_blank_leading_reply_gap(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": [OutputMessage("\n\nHello")]} )])
         renderer = RunTurnRenderer()
@@ -548,9 +622,50 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
+    async def test_long_compaction_reasoning_preamble_is_buffered_until_classified(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "Thinking Process:\n\n" + ("Review the existing conversation. " * 60),
+                            "\n* **Role:** Context Extraction Assistant\n",
+                            "* **Primary Objective:** Extract context from the conversation history ",
+                            "to replace it due to token limits.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
     async def test_streamed_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_streamed_summary_heading_variants_are_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        summary = """### Session Intent
+User requested a story.
+
+### Summary:
+The conversation was summarized.
+
+### Artifacts
+None.
+
+### Next Steps
+Await further instructions.
+"""
+        messages = AsyncItems([Message(text=summary)])
 
         await consume_messages(messages, renderer)
 

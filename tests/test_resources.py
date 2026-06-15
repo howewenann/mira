@@ -247,13 +247,16 @@ TOOLS = [project_grep, project_status]
             agent = type("Agent", (), {})()
             with (
                 patch("agent.factory.get_llm", return_value="model"),
-                patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.factory.CodeInterpreterMiddleware", return_value="code") as code_middleware,
                 patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
                 built = factory.build_agent({}, Path(directory), "checkpointer")
 
         self.assertIs(built, agent)
+        code_middleware.assert_called_once()
+        self.assertEqual(code_middleware.call_args.kwargs["ptc"], ["task"])
+        self.assertIsNotNone(code_middleware.call_args.kwargs["skills_backend"])
         kwargs = create_deep_agent.call_args.kwargs
         self.assertIn("/mira-defaults/skills", kwargs["skills"])
         self.assertIn("/.mira/skills", kwargs["skills"])
@@ -264,6 +267,13 @@ TOOLS = [project_grep, project_status]
         self.assertTrue(any(tool.name == "project_note" for tool in kwargs["tools"]))
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
+
+    def test_default_tool_specs_use_current_eval_name(self) -> None:
+        """Fallback UI metadata should use the current interpreter tool name."""
+        names = [tool["name"] for tool in repl.DEFAULT_TOOL_SPECS]
+
+        self.assertIn("eval", names)
+        self.assertNotIn("execute", names)
 
     def test_resource_specs_normalize_agent_metadata(self) -> None:
         """UI resource specs should come from attached agent metadata."""

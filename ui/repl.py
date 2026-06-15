@@ -58,7 +58,7 @@ DEFAULT_TOOL_SPECS = [
     {"name": "edit_file", "description": ""},
     {"name": "glob", "description": ""},
     {"name": "grep", "description": ""},
-    {"name": "execute", "description": ""},
+    {"name": "eval", "description": ""},
     {"name": "task", "description": ""},
 ]
 

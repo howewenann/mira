@@ -144,13 +144,16 @@ async def _bootstrap(
         config = load_config(workspace)
     if renderer is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
+    startup_progress(renderer, "loading session...")
     store = SessionStore(Path(config["session_dir"]))
     record = store.load(session, resume=resume, workspace=workspace)
     mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
+    startup_progress(renderer, "loading model metadata...")
     metadata = await infer_model_metadata(config)
     config["llm_inferred_context_tokens"] = metadata.context_tokens
     config["llm_context_source"] = metadata.context_source
+    startup_progress(renderer, "building agents...")
     agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
     plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
     model_name = get_model_name(config)
@@ -178,3 +181,10 @@ async def _bootstrap(
         "workspace": workspace,
         "checkpointer": checkpointer,
     }
+
+
+def startup_progress(renderer: Any, state: str) -> None:
+    """Notify renderers that expose startup progress."""
+    callback = getattr(renderer, "startup_progress", None)
+    if callable(callback):
+        callback(state)

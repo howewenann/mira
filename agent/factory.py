@@ -81,7 +81,7 @@ def _build_agent(
     backend = resources.backend
 
     middleware: list[Any] = [
-        CodeInterpreterMiddleware(),
+        CodeInterpreterMiddleware(ptc=["task"], skills_backend=backend),
         create_summarization_tool_middleware(model=model, backend=backend),
     ]
     middleware.extend(extra_middleware or [])

@@ -57,7 +57,8 @@ async def infer_lmstudio_metadata(config: dict[str, Any]) -> ModelMetadata:
     url = f"{root_url}/api/v1/models"
     headers = {"Authorization": f"Bearer {config.get('llm_api_key') or 'lm-studio'}"}
     try:
-        async with httpx.AsyncClient(trust_env=False, verify=False, timeout=None) as client:
+        timeout = positive_float(config.get("lmstudio_metadata_timeout"), 2.0)
+        async with httpx.AsyncClient(trust_env=False, verify=False, timeout=timeout) as client:
             response = await client.get(url, headers=headers)
             response.raise_for_status()
             payload = response.json()
@@ -141,3 +142,12 @@ def positive_int(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return parsed if parsed > 0 else 0
+
+
+def positive_float(value: Any, default: float) -> float:
+    """Return a positive float, falling back on a default."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
