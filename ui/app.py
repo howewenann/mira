@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from langchain_core.exceptions import ContextOverflowError
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -16,6 +17,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
 
+from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from session.dashboard import ensure_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -234,6 +236,10 @@ class MiraApp(App[None]):
             self.system_message("turn cancelled", kind="warning")
             self._set_status(state="ready")
             raise
+        except ContextOverflowError as exc:
+            if not context_notice_rendered(exc):
+                self.system_message(pop_context_overflow_notice(exc), kind="info")
+            self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
@@ -301,7 +307,7 @@ class MiraApp(App[None]):
         """Write a command or status message to the chat log."""
         self.waiting_finished()
         self.query_one(ChatLog).system_message(text, kind=kind)
-        detail = text if kind in {"status", "warning"} else ""
+        detail = text if kind in {"status", "info", "warning"} else ""
         self._set_status(state="ready" if not self.busy else "running", detail=detail)
 
     def command_output(self, renderable: Any) -> None:
@@ -313,6 +319,9 @@ class MiraApp(App[None]):
         """Show that DeepAgents is compacting conversation context."""
         self._main_stream_active = False
         self.waiting_finished()
+        notice = pop_context_overflow_notice()
+        if notice:
+            self.query_one(ChatLog).system_message(notice, kind="info")
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
 

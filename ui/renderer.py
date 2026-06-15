@@ -8,6 +8,7 @@ import re
 from itertools import count
 from typing import Any
 
+from agent.context_overflow import pop_context_overflow_notice
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -70,8 +71,15 @@ class Renderer:
             lines.extend(f"request: {self.truncate(description)}" for description in descriptions)
             self._block("task", "\n".join(lines))
 
+    def system_message(self, text: str, *, kind: str = "system") -> None:
+        """Print one system-style block."""
+        self._block(kind, text)
+
     def compaction_started(self) -> None:
         """Print a context compaction status."""
+        notice = pop_context_overflow_notice()
+        if notice:
+            self.system_message(notice, kind="info")
         self._block("mira", "compacting context...")
 
     def compaction_finished(self) -> None:

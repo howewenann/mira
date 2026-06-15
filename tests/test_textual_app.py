@@ -14,6 +14,7 @@ from pyfiglet import Figlet
 from rich.console import Console
 from textual.widgets import Button, Input, Static, TextArea
 
+from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
 from ui.app import MiraApp, append_prompt_history, read_prompt_history
@@ -317,6 +318,67 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(first, animated)
             self.assertIn("context compacted", done)
 
+    async def test_info_message_renders_as_dedicated_block(self) -> None:
+        """Info messages should use the first-class info box."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.system_message("context notice", kind="info")
+            await pilot.pause()
+
+            block = app.query_one(ChatLog).children[-1]
+            self.assertEqual(str(getattr(block, "border_title", "")), "info")
+            self.assertIn("info", block.classes)
+            self.assertIn("context notice", renderable_plain(block))
+
+    async def test_context_pressure_notice_stays_separate_from_compaction_block(self) -> None:
+        """Context-pressure copy should render as info, not inside compacting status."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            set_context_overflow_notice(
+                "Configured context threshold reached: 10.6k tokens reported, "
+                "threshold 9.8k, limit 10.0k. Compacting before the provider rejects the request."
+            )
+            app.compaction_started()
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            info = blocks[-2]
+            compaction = blocks[-1]
+            self.assertEqual(str(getattr(info, "border_title", "")), "info")
+            self.assertIn("Configured context threshold reached", renderable_plain(info))
+            self.assertEqual(str(getattr(compaction, "border_title", "")), "mira")
+            self.assertIn("compacting context...", renderable_plain(compaction))
+            self.assertNotIn("Configured context threshold", renderable_plain(compaction))
+
+    async def test_escaped_context_overflow_renders_info_and_ready_state(self) -> None:
+        """An escaped context overflow should not become a red error block."""
+        app = make_app()
+        notice = "Context limit pressure detected. Compacting older context and retrying."
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            raise context_overflow_error("configured context threshold reached", notice)
+
+        with patch("ui.app.run_user_turn", fake_run_user_turn):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn(notice, rendered)
+                self.assertNotIn("MIRA simulated a context overflow", rendered)
+                self.assertFalse(any("error" in block.classes for block in app.query_one(ChatLog).children))
+                self.assertEqual(app.status_state, "ready")
+                self.assertFalse(prompt.disabled)
+
     async def test_waiting_indicator_reappears_after_compaction_if_still_busy(self) -> None:
         """After compaction, MIRA should show working again while waiting silently."""
         app = make_app()
@@ -480,13 +542,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "id": 2,
+                    "type": "info",
+                    "mode": "action",
+                    "created_at": "2026-01-01T00:01:30+00:00",
+                    "text": "Configured context threshold reached.",
+                },
+                {
+                    "id": 3,
                     "type": "user",
                     "mode": "planning",
                     "created_at": "2026-01-01T00:02:00+00:00",
                     "text": "make a plan",
                 },
                 {
-                    "id": 3,
+                    "id": 4,
                     "type": "assistant",
                     "mode": "planning",
                     "created_at": "2026-01-01T00:02:01+00:00",
@@ -522,9 +591,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             titles = [str(getattr(block, "border_title", "")) for block in blocks]
 
             self.assertIn("session compacted", titles)
+            self.assertIn("info", titles)
             self.assertIn("you (plan)", titles)
             self.assertIn("mira", titles)
             self.assertIn("Older turns compacted", rendered)
+            self.assertIn("Configured context threshold reached.", rendered)
             self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)

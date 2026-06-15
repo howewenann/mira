@@ -8,8 +8,10 @@ from io import StringIO
 from typing import Any
 from unittest.mock import patch
 
+from langchain_core.exceptions import ContextOverflowError
 from rich.console import Console
 
+from agent.context_overflow import context_overflow_error
 from agent import factory
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
 from config.metadata import ModelMetadata
@@ -760,6 +762,40 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.saves[-1]["events"][1]["text"], "working")
         self.assertEqual(store.saves[-1]["events"][2]["name"], "read_file")
         self.assertIn("model stopped", store.saves[-1]["events"][3]["text"])
+
+    async def test_run_user_turn_records_context_overflow_as_info(self) -> None:
+        """Escaped context pressure should persist as info instead of system_error."""
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
+        store = CapturingStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
+        notice = "Context limit pressure detected. Compacting older context and retrying."
+
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
+            raise context_overflow_error("configured context threshold reached", notice)
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            with self.assertRaises(ContextOverflowError):
+                await repl.run_user_turn(
+                    agent="action-agent",
+                    plan_agent="plan-agent",
+                    renderer=renderer,
+                    store=store,
+                    session=session,
+                    mode=mode,
+                    text="inspect the repo",
+                )
+
+        event_types = [event["type"] for event in store.saves[-1]["events"]]
+        self.assertEqual(event_types, ["user", "info"])
+        self.assertEqual(store.saves[-1]["events"][1]["text"], notice)
+        self.assertNotIn("MIRA simulated a context overflow", "\n".join(renderer.console.lines))
 
     async def test_session_command_shows_current_mode(self) -> None:
         """The session command should print mode and saved-plan count."""

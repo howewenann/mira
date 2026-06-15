@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+from runtime.usage import positive_int
+
 
 @dataclass(frozen=True)
 class ModelMetadata:
@@ -133,15 +135,6 @@ def profile_context_tokens(model: Any | None) -> int | None:
     if not isinstance(profile, dict):
         return None
     return positive_int(profile.get("max_input_tokens")) or None
-
-
-def positive_int(value: Any) -> int:
-    """Return a non-negative integer from loose provider metadata."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
 
 
 def positive_float(value: Any, default: float) -> float:

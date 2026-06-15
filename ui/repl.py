@@ -7,8 +7,10 @@ from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
 
+from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 
+from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
 from runtime.usage import context_from_message_texts
@@ -171,6 +173,13 @@ async def run_user_turn(
     except asyncio.CancelledError:
         await recorder.sync_compaction(active_agent, thread_id)
         recorder.interrupted("turn interrupted before completion")
+        raise
+    except ContextOverflowError as exc:
+        await recorder.sync_compaction(active_agent, thread_id)
+        notice = pop_context_overflow_notice(exc)
+        recorder.info(notice)
+        write_line(renderer, notice, kind="info")
+        mark_context_notice_rendered(exc)
         raise
     except Exception as exc:
         await recorder.sync_compaction(active_agent, thread_id)

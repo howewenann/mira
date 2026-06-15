@@ -150,36 +150,42 @@ Screen {
 }
 
 .message.user {
-    border: solid #d2a957;
+    border: solid #D6B35A;
 }
 
-.message.assistant {
-    border: solid #5bb8b1;
+.message.assistant,
+.message.startup {
+    border: solid #5BB8B1;
 }
 
 .message.reasoning {
-    border: solid #7d8b95;
-    color: #b8c1c7;
+    border: solid #82909A;
+    color: #B8C2C9;
 }
 
 .message.status {
-    border: solid #4f75b5;
-    color: #d8e4ff;
+    border: solid #7D9BD1;
+    color: #DCE6FA;
+}
+
+.message.info {
+    border: solid #6CB6FF;
+    color: #DCEEFF;
 }
 
 .message.warning {
-    border: solid #d2a957;
-    color: #f0dfb5;
+    border: solid #E0A84F;
+    color: #F2DFB8;
 }
 
 .message.error {
-    border: solid #cf665f;
-    color: #ffd7d4;
+    border: solid #D96B66;
+    color: #FFD9D6;
 }
 
 .message.muted {
-    border: solid #4d555b;
-    color: #a5adb2;
+    border: solid #7A858C;
+    color: #AEB8BE;
 }
 
 .message.heading {
@@ -187,33 +193,37 @@ Screen {
     color: #eef7f8;
 }
 
-.message.startup {
-    border: solid #5bb8b1;
-    color: #e8edef;
-}
-
 .message.plan {
-    border: solid #92b66b;
-    color: #ecf6df;
+    border: solid #A0B86B;
+    color: #EEF5D8;
 }
 
 .message.command {
-    border: solid #6f7782;
+    border: solid #6F7782;
+    color: #CBD1D5;
 }
 
 .message.tool-call {
-    border: solid #5bb8b1;
+    border: solid #8FA3B8;
 }
 
 .message.tool-result {
-    border: solid #6f7782;
-    color: #cbd1d5;
+    border: solid #6F7782;
+    color: #CBD1D5;
 }
 
 .message.delegation {
-    border: solid #d2a957;
+    border: solid #C7A86B;
+    color: #F0E1BD;
 }
 
 .message.subagent {
-    border: solid #92b66b;
+    border: solid #B7A4E8;
+    color: #ECE7FF;
+}
+
+.message.success,
+.message.summary {
+    border: solid #7FBE72;
+    color: #DDF2D7;
 }

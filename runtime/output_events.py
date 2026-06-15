@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from runtime.usage import field
+
 COMPACTION_SUMMARY_HEADINGS = (
     "session intent",
     "summary",
@@ -168,13 +170,6 @@ def message_text(message: Any) -> str:
         return "".join(parts)
 
     return ""
-
-
-def field(value: Any, name: str) -> Any:
-    """Return a dict key or object attribute."""
-    if isinstance(value, dict):
-        return value.get(name)
-    return getattr(value, name, None)
 
 
 def find_interrupts(value: Any) -> list[Any]:

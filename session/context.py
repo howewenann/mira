@@ -117,7 +117,7 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
         if mode:
             event["mode"] = mode
 
-        if event_type in {"user", "assistant", "reasoning", "system_error", "interrupted"}:
+        if event_type in {"user", "assistant", "reasoning", "info", "system_error", "interrupted"}:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue

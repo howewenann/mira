@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import Any
 
+from agent.context_overflow import pop_context_overflow_notice
 from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 
@@ -97,6 +98,10 @@ class SessionRecorder:
         append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
         self.save()
 
+    def info(self, text: str) -> None:
+        append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
+        self.save()
+
     def interrupted(self, text: str) -> None:
         append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
         self.save()
@@ -160,6 +165,24 @@ class RecordingRenderer:
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         self.renderer.subagent_finished(subagent, result)
         self.recorder.subagent_finished(subagent, result)
+
+    def system_message(self, text: str, *, kind: str = "system") -> None:
+        callback = getattr(self.renderer, "system_message", None)
+        if callable(callback):
+            callback(text, kind=kind)
+        elif hasattr(self.renderer, "console"):
+            self.renderer.console.print(text)
+        if kind == "info":
+            self.recorder.info(text)
+
+    def compaction_started(self) -> None:
+        notice = pop_context_overflow_notice()
+        if notice:
+            self.system_message(notice, kind="info")
+        self.renderer.compaction_started()
+
+    def compaction_finished(self) -> None:
+        self.renderer.compaction_finished()
 
     def finish_main(self) -> None:
         self.renderer.finish_main()

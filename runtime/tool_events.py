@@ -6,6 +6,8 @@ from typing import Any
 
 from langgraph.types import Command
 
+from runtime.usage import field
+
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
     """Consume completed tool-call events and render their output."""
@@ -121,10 +123,3 @@ def tool_call_input(call: Any) -> Any:
         return args
     args = field(call, "args")
     return args if args is not None else {}
-
-
-def field(value: Any, name: str) -> Any:
-    """Return a dict key or object attribute."""
-    if isinstance(value, dict):
-        return value.get(name)
-    return getattr(value, name, None)

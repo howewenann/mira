@@ -9,6 +9,8 @@ from typing import Any
 
 from langchain_core.messages.utils import count_tokens_approximately
 
+from runtime.usage import positive_int
+
 DEFAULT_DASHBOARD = {
     "model": "",
     "context": {
@@ -202,15 +204,6 @@ def context_percent(used_tokens: int, limit_tokens: int) -> float:
     if limit_tokens <= 0:
         return 0.0
     return round(min(999.9, (used_tokens / limit_tokens) * 100), 1)
-
-
-def positive_int(value: Any) -> int:
-    """Return a non-negative integer from loose provider metadata."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed > 0 else 0
 
 
 def parse_datetime(value: Any) -> datetime | None:

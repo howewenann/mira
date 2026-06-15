@@ -118,8 +118,9 @@ class ChatLog(VerticalScroll):
                     self.subagent_started(event["name"], event.get("task_input", ""))
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary")
-            elif event_type in {"system_error", "interrupted"}:
-                self.system_message(event["text"], kind="error" if event_type == "system_error" else "warning")
+            elif event_type in {"info", "system_error", "interrupted"}:
+                kind = {"info": "info", "system_error": "error", "interrupted": "warning"}[event_type]
+                self.system_message(event["text"], kind=kind)
 
     def reasoning_delta(self, delta: str) -> None:
         """Append streamed reasoning text to the current reasoning block."""
@@ -159,7 +160,7 @@ class ChatLog(VerticalScroll):
         self._reasoning_text = ""
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
-        """Append a system, status, warning, or error message."""
+        """Append a system, info, status, warning, or error message."""
         title = "mira" if kind == "startup" else kind
         self._add_block(title, Text(text), f"message {kind}")
 
