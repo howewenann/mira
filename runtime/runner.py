@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -78,16 +79,29 @@ class TurnResult:
         if self.usage_source == "unknown" and usage.get("source"):
             self.usage_source = str(usage["source"])
 
-    def commit_loop_usage(self, output: Any, token_counter: TokenCounter | None = None) -> None:
-        """Commit LangChain token usage and estimated context usage."""
+    def commit_loop_usage(self, output: Any, token_counter: TokenCounter | None = None) -> dict[str, Any]:
+        """Commit LangChain token usage and return the per-loop usage delta."""
+        committed = empty_usage()
         output_usage = usage_from_output(output)
         if has_usage(output_usage):
             self.add_usage(output_usage)
+            committed = dict(output_usage)
         elif has_usage(self._stream_usage):
             self.add_usage(self._stream_usage)
+            committed = dict(self._stream_usage)
 
-        self.set_context_usage(context_from_output(output, token_counter))
+        context_usage = context_from_output(output, token_counter)
+        if not has_context_usage(committed):
+            self.set_context_usage(context_usage)
+        if not has_context_usage(committed) and has_context_usage(context_usage):
+            committed["context_tokens"] = max(
+                positive_int(committed.get("context_tokens")),
+                positive_int(context_usage.get("context_tokens")),
+            )
+            if committed.get("source") == "unknown" and context_usage.get("source"):
+                committed["source"] = str(context_usage["source"])
         self._stream_usage = empty_usage()
+        return committed
 
     def record_tool_call(self, name: str, call_id: str = "") -> bool:
         """Record one tool call while avoiding duplicate id-based reports."""
@@ -105,6 +119,7 @@ async def run_turn(
     renderer: Any,
     thread_id: str,
     token_counter: TokenCounter | None = None,
+    usage_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -133,7 +148,9 @@ async def run_turn(
         )
 
         result.final_text = final_text(output.get("value")) or result.final_text
-        result.commit_loop_usage(output.get("value"), token_counter=token_counter)
+        usage_delta = result.commit_loop_usage(output.get("value"), token_counter=token_counter)
+        if usage_callback is not None and (has_usage(usage_delta) or has_context_usage(usage_delta)):
+            usage_callback(usage_delta)
         waiting_finished = getattr(renderer, "waiting_finished", None)
         if callable(waiting_finished):
             waiting_finished()

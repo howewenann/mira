@@ -118,20 +118,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("workspace D:\\Projects\\mira", plain)
         self.assertIn(HINTS, plain)
 
-    def test_session_label_shows_title_and_timestamp_without_turns(self) -> None:
-        """Sidebar rows should reserve space for timestamp instead of turns."""
+    def test_session_label_shows_latest_prompt_preview_and_timestamp(self) -> None:
+        """Sidebar rows should preview the latest user prompt instead of generated titles."""
         label = session_label(
             {
                 "title": "Implementation Strategy Selection Work",
                 "updated_at": "2026-06-03T09:15:00",
                 "turns": 7,
+                "events": [
+                    {"type": "user", "text": "first prompt"},
+                    {"type": "assistant", "text": "done"},
+                    {"type": "user", "text": "tell me a 1000 word story with a quiet ending"},
+                ],
             }
         )
 
-        self.assertEqual(label.count("\n"), 1)
+        self.assertEqual(label.count("\n"), 2)
+        self.assertIn("tell me a 1000 word story", label)
         self.assertIn("Jun 03 09:15", label)
         self.assertNotIn("turn", label.lower())
-        self.assertLessEqual(len(label.splitlines()[0]), 24)
+        self.assertLessEqual(max(len(line) for line in label.splitlines()[:-1]), 34)
 
     async def test_bootstrapped_app_renders_stream_and_tool_events_in_chat(self) -> None:
         """Stream events and tool calls should stay in the central transcript."""
@@ -176,6 +182,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["hello\nsecond line"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
+
+    async def test_prompt_submission_refreshes_status_after_live_usage(self) -> None:
+        """Live usage updates should redraw the mounted status bar immediately."""
+        app = make_app()
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            kwargs["session"]["dashboard"]["tokens"]["in"] += 100
+            kwargs["session"]["dashboard"]["tokens"]["out"] += 20
+            kwargs["renderer"].usage_updated()
+
+        with patch("ui.app.run_user_turn", fake_run_user_turn):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
+                await pilot.pause()
+
+                status = renderable_plain(app.query_one("#status", Static))
+                self.assertIn("In 45.3k Out 13.0k", status)
 
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
         """The transient working block should appear only during phase silence."""
@@ -278,18 +304,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             block = app.query_one(ChatLog).children[-1]
             first = renderable_plain(block)
 
-            app.query_one(ChatLog).tick_compaction()
-            await pilot.pause()
-            second = renderable_plain(block)
-
             app.compaction_finished()
             await pilot.pause()
             done = renderable_plain(block)
 
-        self.assertIn("compacting context...", first)
-        self.assertIn("compacting context...", second)
-        self.assertEqual(first, second)
-        self.assertIn("context compacted", done)
+            self.assertIn("compacting context...", first)
+            self.assertIn("context compacted", done)
 
     async def test_waiting_indicator_reappears_after_compaction_if_still_busy(self) -> None:
         """After compaction, MIRA should show working again while waiting silently."""

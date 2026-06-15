@@ -114,6 +114,29 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["dashboard"]["tokens"], {"in": 5512, "out": 91})
         self.assertEqual(normalized["dashboard"]["context"]["percent"], 67.3)
 
+    def test_dashboard_context_uses_total_tokens_without_changing_token_totals(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+        result = type(
+            "Result",
+            (),
+            {
+                "usage": {
+                    "input_tokens": 8200,
+                    "output_tokens": 1424,
+                    "total_tokens": 9624,
+                    "context_tokens": 9624,
+                    "source": "response_metadata.stats",
+                }
+            },
+        )()
+
+        apply_turn_usage(record, result, model_name="lmstudio:qwen3.5-9b", context_limit_tokens=10000)
+        normalized = context.normalize_session(record)
+
+        self.assertEqual(normalized["dashboard"]["tokens"], {"in": 8200, "out": 1424})
+        self.assertEqual(normalized["dashboard"]["context"]["used_tokens"], 9624)
+        self.assertEqual(normalized["dashboard"]["context"]["percent"], 96.2)
+
     def test_title_uses_recent_topic(self) -> None:
         record = {"title": "Untitled session", "events": []}
         context.append_message(record, "user", "hello", "action")

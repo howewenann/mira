@@ -39,7 +39,7 @@ def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
         merged["context_tokens"] = max(
             merged["context_tokens"],
             positive_int(item.get("context_tokens")),
-            positive_int(item.get("input_tokens")),
+            context_tokens_from_counts(item),
         )
         if merged["source"] == "unknown" and item.get("source"):
             merged["source"] = str(item["source"])
@@ -159,13 +159,33 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
     if total_tokens and output_tokens and not input_tokens:
         input_tokens = max(0, total_tokens - output_tokens)
 
-    return {
+    usage = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens or input_tokens + output_tokens,
-        "context_tokens": input_tokens,
+        "context_tokens": context_tokens_from_counts(
+            {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+        ),
         "source": source if input_tokens or output_tokens or total_tokens else "unknown",
     }
+    return usage
+
+
+def context_tokens_from_counts(value: dict[str, Any]) -> int:
+    """Return current context occupancy from normalized provider counts."""
+    total_tokens = positive_int(value.get("total_tokens"))
+    if total_tokens:
+        return total_tokens
+
+    input_tokens = positive_int(value.get("input_tokens"))
+    output_tokens = positive_int(value.get("output_tokens"))
+    if input_tokens and output_tokens:
+        return input_tokens + output_tokens
+    return input_tokens
 
 
 def context_from_message_texts(messages: list[Any], token_counter: TokenCounter | None) -> dict[str, Any]:
