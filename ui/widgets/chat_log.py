@@ -114,6 +114,8 @@ class ChatLog(VerticalScroll):
             elif event_type == "subagent":
                 if event.get("status") == "DONE":
                     self.subagent_finished(event["name"], event.get("output", ""))
+                elif event.get("status") == "CANCELLED":
+                    self.subagent_cancelled(event["name"], event.get("output", ""))
                 else:
                     self.subagent_started(event["name"], event.get("task_input", ""))
             elif event_type == "compaction":
@@ -260,6 +262,13 @@ class ChatLog(VerticalScroll):
         for label in list(self._subagent_blocks):
             self._update_subagent(label)
 
+    def subagents_cancelled(self) -> None:
+        """Mark all running subagents as cancelled."""
+        for label, block in list(self._subagent_blocks.items()):
+            if block.get("status") == "RUNNING":
+                block["status"] = "CANCELLED"
+                self._update_subagent(label)
+
     def tick_subagents(self) -> None:
         """Advance the spinner on running subagents."""
         if not self.has_running_subagents():
@@ -308,6 +317,22 @@ class ChatLog(VerticalScroll):
             },
         )
         block["status"] = "DONE"
+        block["output"] = result
+        self._update_subagent(subagent)
+
+    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+        """Mark a subagent block as cancelled."""
+        self.hide_waiting()
+        subagent = self._subagent_display_label(subagent)
+        block = self._subagent_blocks.setdefault(
+            subagent,
+            {
+                "request": "",
+                "status": "RUNNING",
+                "output": "",
+            },
+        )
+        block["status"] = "CANCELLED"
         block["output"] = result
         self._update_subagent(subagent)
 
@@ -457,6 +482,8 @@ class ChatLog(VerticalScroll):
         text.append("status: ", style="bold cyan")
         if status == "RUNNING":
             text.append(f"{SPINNER_FRAMES[self._subagent_spinner_index]} RUNNING", style="bold yellow")
+        elif status == "CANCELLED":
+            text.append("CANCELLED", style="bold yellow")
         else:
             text.append("DONE", style="bold green")
 

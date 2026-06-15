@@ -26,6 +26,7 @@ class SessionRecorder:
         self._last_assistant_id: int | None = None
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
+        self._running_subagents: set[str] = set()
 
     def save(self) -> None:
         self.store.save(self.record)
@@ -81,6 +82,7 @@ class SessionRecorder:
 
     def subagent_started(self, name: str, task_input: str = "") -> None:
         self.finish_main()
+        self._running_subagents.add(name)
         append_event(
             self.record,
             {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input},
@@ -88,11 +90,24 @@ class SessionRecorder:
         self.save()
 
     def subagent_finished(self, name: str, output: str = "") -> None:
+        self._running_subagents.discard(name)
         append_event(
             self.record,
             {"type": "subagent", "mode": self.mode, "name": name, "status": "DONE", "output": output},
         )
         self.save()
+
+    def subagent_cancelled(self, name: str, output: str = "") -> None:
+        self._running_subagents.discard(name)
+        append_event(
+            self.record,
+            {"type": "subagent", "mode": self.mode, "name": name, "status": "CANCELLED", "output": output},
+        )
+        self.save()
+
+    def subagents_cancelled(self) -> None:
+        for name in list(self._running_subagents):
+            self.subagent_cancelled(name)
 
     def system_error(self, text: str) -> None:
         append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
@@ -166,6 +181,18 @@ class RecordingRenderer:
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         self.renderer.subagent_finished(subagent, result)
         self.recorder.subagent_finished(subagent, result)
+
+    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+        callback = getattr(self.renderer, "subagent_cancelled", None)
+        if callable(callback):
+            callback(subagent, result)
+        self.recorder.subagent_cancelled(subagent, result)
+
+    def subagents_cancelled(self) -> None:
+        callback = getattr(self.renderer, "subagents_cancelled", None)
+        if callable(callback):
+            callback()
+        self.recorder.subagents_cancelled()
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         callback = getattr(self.renderer, "system_message", None)

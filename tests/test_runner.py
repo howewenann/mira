@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from typing import Any
 
@@ -111,6 +112,37 @@ class DocumentedToolCall:
         self.id = call_id
 
 
+class SingleSubscriptionDeltas:
+    """Async deltas stream that fails if subscribed more than once."""
+
+    def __init__(self, items: list[Any]) -> None:
+        self.items = items
+        self.subscribers = 0
+
+    async def __aiter__(self) -> Any:
+        self.subscribers += 1
+        if self.subscribers > 1:
+            raise RuntimeError("StreamChannel already has a subscriber; use .atee(n) for fan-out.")
+        for item in self.items:
+            yield item
+
+
+class DoubleSubscribeToolCall:
+    """Tool call shaped like DeepAgents ToolCallStream."""
+
+    def __init__(self) -> None:
+        self.tool_name = "eval"
+        self.input = {"code": "1 + 1"}
+        self.output_deltas = SingleSubscriptionDeltas(["<stdout>ok</stdout>", "<result>2</result>"])
+        self.output = None
+        self.error = None
+        self.completed = True
+        self.id = "call-single"
+
+    def __aiter__(self) -> Any:
+        return self.output_deltas.__aiter__()
+
+
 class Subagent:
     """Fake subagent with a final message shaped like DeepAgents output."""
 
@@ -123,6 +155,39 @@ class Subagent:
                 type("Message", (), {"text": tool_calls[-1].output if tool_calls else ""})()
             ]
         }
+
+
+class HangingSubagent:
+    """Subagent whose output runs until cancelled."""
+
+    def __init__(self) -> None:
+        self.name = "general-purpose [one]"
+        self.task_input = "keep working"
+        self.cancelled = False
+
+    @property
+    def output(self) -> Any:
+        return self._wait()
+
+    async def _wait(self) -> str:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return ""
+
+
+class RaisingSubagents:
+    """Subagent stream that fails after starting one child."""
+
+    def __init__(self, subagent: HangingSubagent) -> None:
+        self.subagent = subagent
+
+    async def __aiter__(self) -> Any:
+        yield self.subagent
+        await asyncio.sleep(0)
+        raise RuntimeError("subagent stream failed")
 
 
 class RecordingRenderer:
@@ -160,6 +225,9 @@ class RecordingRenderer:
 
     def subagent_finished(self, name: str, result: str = "") -> None:
         self.events.append(("subagent_finished", name, result))
+
+    def subagents_cancelled(self) -> None:
+        self.events.append(("subagents_cancelled",))
 
 
 class RunTurnRenderer(RecordingRenderer):
@@ -511,6 +579,18 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tool_calls, ["write_file"])
         self.assertIn("permission denied for write on /x", result.tool_results)
 
+    async def test_run_turn_uses_tool_stream_as_canonical_normal_tool_display(self) -> None:
+        agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
+        agent.streams[0].messages = AsyncItems([Message([{"name": "read_file", "args": {"path": "README.md"}}])])
+        agent.streams[0].tool_calls = AsyncItems([ToolCall("read_file", {"path": "README.md"}, "contents")])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "read", renderer, "thread-1")
+
+        tool_blocks = [event for event in renderer.events if event[0] == "tool_call" and event[1] == "read_file"]
+        self.assertEqual(len(tool_blocks), 1)
+        self.assertEqual(result.tool_calls, ["read_file"])
+
     async def test_tool_call_stream_accepts_documented_fields(self) -> None:
         renderer = RecordingRenderer()
         result = runner.TurnResult()
@@ -534,6 +614,23 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("tool_call", "eval", {"code": "1 + 1"}, "call-doc"),
                 ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-doc"),
+            ],
+        )
+
+    async def test_tool_call_stream_does_not_double_subscribe_output_deltas(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        call = DoubleSubscribeToolCall()
+
+        await consume_tool_calls(AsyncItems([call]), renderer, result)
+
+        self.assertEqual(call.output_deltas.subscribers, 1)
+        self.assertEqual(result.tool_results, ["<stdout>ok</stdout><result>2</result>"])
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "eval", {"code": "1 + 1"}, "call-single"),
+                ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-single"),
             ],
         )
 
@@ -996,6 +1093,17 @@ Await further instructions.
 
         headers = [event for event in renderer.events if event[0] == "subagent_started"]
         self.assertEqual(len(headers), 2)
+
+    async def test_subagent_stream_error_cancels_running_children(self) -> None:
+        renderer = RecordingRenderer()
+        subagent = HangingSubagent()
+
+        with self.assertRaisesRegex(RuntimeError, "subagent stream failed"):
+            await consume_subagents(RaisingSubagents(subagent), renderer)
+
+        self.assertTrue(subagent.cancelled)
+        self.assertIn(("subagents_cancelled",), renderer.events)
+        self.assertFalse(any(event[0] == "subagent_finished" for event in renderer.events))
 
     def test_ask_user_options_keeps_open_ended_option_last(self) -> None:
         options = ask_user_options(

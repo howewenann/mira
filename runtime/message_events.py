@@ -40,7 +40,13 @@ COMPACTION_REASONING_HINTS = (
 COMPACTION_REASONING_START = "thinking process"
 
 
-async def consume_messages(messages: Any, renderer: Any, result: Any | None = None) -> None:
+async def consume_messages(
+    messages: Any,
+    renderer: Any,
+    result: Any | None = None,
+    *,
+    render_normal_tools: bool = True,
+) -> None:
     """Consume streamed model messages and render reasoning, text, and tools.
 
     Provider integrations expose message fields in different shapes. This
@@ -57,7 +63,7 @@ async def consume_messages(messages: Any, renderer: Any, result: Any | None = No
 
         call_list = await _finalized_tool_calls(message)
         if call_list:
-            _render_tool_calls(call_list, renderer, result)
+            _render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
 
         if result is not None:
             usage = usage_from_message(message)
@@ -345,7 +351,13 @@ async def _finalized_tool_calls(message: Any) -> list[Any]:
     return list(finalized or [])
 
 
-def _render_tool_calls(call_list: list[Any], renderer: Any, result: Any | None) -> None:
+def _render_tool_calls(
+    call_list: list[Any],
+    renderer: Any,
+    result: Any | None,
+    *,
+    render_normal_tools: bool = True,
+) -> None:
     """Render task delegations and normal tool calls from a message."""
     task_calls = [call for call in call_list if _call_name(call) == "task"]
     if task_calls:
@@ -353,11 +365,18 @@ def _render_tool_calls(call_list: list[Any], renderer: Any, result: Any | None) 
 
     for call in call_list:
         name = _call_name(call)
+        if name == "task":
+            if result is not None and render_normal_tools:
+                result.record_tool_call(str(name), _call_id(call))
+            continue
+
+        if not render_normal_tools:
+            continue
+
         if result is not None:
             result.record_tool_call(str(name), _call_id(call))
 
-        if name != "task":
-            renderer.tool_call(str(name), _call_args(call), call_id=_call_id(call))
+        renderer.tool_call(str(name), _call_args(call), call_id=_call_id(call))
 
 
 def _call_name(call: Any) -> str:

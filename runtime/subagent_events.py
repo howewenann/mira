@@ -15,6 +15,7 @@ async def consume_subagents(subagents: Any, renderer: Any) -> None:
         renderer.start_subagent_live()
     animation = asyncio.create_task(animate_subagents(renderer))
     tasks: list[asyncio.Task[None]] = []
+    cancelled = False
 
     try:
         async for subagent in subagents:
@@ -24,12 +25,38 @@ async def consume_subagents(subagents: Any, renderer: Any) -> None:
 
         if tasks:
             await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        cancelled = True
+        await cancel_subagent_tasks(tasks)
+        call_renderer(renderer, "subagents_cancelled")
+        raise
+    except Exception:
+        cancelled = True
+        await cancel_subagent_tasks(tasks)
+        call_renderer(renderer, "subagents_cancelled")
+        raise
     finally:
         animation.cancel()
         with suppress(asyncio.CancelledError):
             await animation
-        if hasattr(renderer, "stop_subagent_live"):
+        if not cancelled and hasattr(renderer, "stop_subagent_live"):
             renderer.stop_subagent_live()
+
+
+async def cancel_subagent_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    """Cancel all child subagent consumers and wait for them to settle."""
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def call_renderer(renderer: Any, method: str) -> None:
+    """Call an optional renderer lifecycle hook."""
+    callback = getattr(renderer, method, None)
+    if callable(callback):
+        callback()
 
 
 async def animate_subagents(renderer: Any) -> None:

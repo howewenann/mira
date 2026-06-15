@@ -141,7 +141,7 @@ async def run_turn(
             waiting_started()
 
         await asyncio.gather(
-            consume_messages(stream.messages, renderer, result),
+            consume_messages(stream.messages, renderer, result, render_normal_tools=False),
             consume_tool_calls(stream.tool_calls, renderer, result),
             consume_subagents(stream.subagents, renderer),
             capture_output(stream.output(), output),

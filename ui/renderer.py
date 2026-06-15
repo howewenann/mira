@@ -106,6 +106,17 @@ class Renderer:
             details += f"\noutput: {self.truncate(result)}"
         self._block(f"subagent - {subagent}", details)
 
+    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+        """Print a subagent cancellation."""
+        details = "cancelled"
+        if result:
+            details += f"\noutput: {self.truncate(result)}"
+        self._block(f"subagent - {subagent}", details)
+
+    def subagents_cancelled(self) -> None:
+        """No-op for non-live terminal output."""
+        return None
+
     def finish_main(self) -> None:
         """Finish the current streamed section."""
         if self._section:

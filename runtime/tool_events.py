@@ -36,15 +36,14 @@ async def tool_call_output(call: Any) -> Any:
     """Return a tool call's final output, collecting streamed deltas if needed."""
     deltas: list[str] = []
 
-    if hasattr(call, "__aiter__"):
-        async for delta in call:
-            text = tool_output_text(delta)
-            if text:
-                deltas.append(text)
-
     output_deltas = field(call, "output_deltas")
     if output_deltas is not None:
         async for delta in async_items(output_deltas):
+            text = tool_output_text(delta)
+            if text:
+                deltas.append(text)
+    elif hasattr(call, "__aiter__"):
+        async for delta in call:
             text = tool_output_text(delta)
             if text:
                 deltas.append(text)

@@ -968,6 +968,34 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("output:", done)
             self.assertIn("README.md", done)
 
+    async def test_cancelled_subagent_blocks_stop_animating(self) -> None:
+        """Cancelling a turn should leave active subagents in a terminal state."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.subagent_started("general-purpose", "look for dead code")
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+            running = renderable_plain(block)
+            self.assertIn("RUNNING", running)
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            cancelled = renderable_plain(block)
+            self.assertIn("CANCELLED", cancelled)
+            self.assertNotIn("RUNNING", cancelled)
+            self.assertFalse(app.query_one(ChatLog).has_running_subagents())
+
+            app.query_one(ChatLog).tick_subagents()
+            await pilot.pause()
+            self.assertEqual(renderable_plain(block), cancelled)
+            self.assertEqual(app.status_state, "cancelling")
+
     async def test_ask_user_choice_and_open_text_flow(self) -> None:
         """ask_user should support both concrete choices and open-ended text."""
         app = make_app()

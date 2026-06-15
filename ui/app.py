@@ -233,19 +233,27 @@ class MiraApp(App[None]):
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
+            self.subagents_cancelled()
+            self.waiting_finished()
             self.system_message("turn cancelled", kind="warning")
             self._set_status(state="ready")
             raise
         except ContextOverflowError as exc:
+            self.subagents_cancelled()
+            self.waiting_finished()
             if not context_notice_rendered(exc):
                 self.system_message(pop_context_overflow_notice(exc), kind="info")
             self._set_status(state="ready")
         except Exception as exc:
+            self.subagents_cancelled()
+            self.waiting_finished()
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
             self.busy = False
+            self.subagents_cancelled()
+            self.waiting_finished()
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -286,6 +294,8 @@ class MiraApp(App[None]):
     def _cancel_turn(self) -> None:
         """Cancel the active turn worker."""
         if self.busy and self.turn_worker is not None:
+            self.subagents_cancelled()
+            self.waiting_finished()
             self.turn_worker.cancel()
             self._set_status(state="cancelling")
 
@@ -384,6 +394,10 @@ class MiraApp(App[None]):
         """Finalize subagent display."""
         self.query_one(ChatLog).stop_subagent_live()
 
+    def subagents_cancelled(self) -> None:
+        """Mark active subagent display as cancelled."""
+        self.query_one(ChatLog).subagents_cancelled()
+
     def tick_subagents(self) -> None:
         """Advance subagent status animation."""
         self.query_one(ChatLog).tick_subagents()
@@ -405,6 +419,12 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).subagent_finished(subagent, result)
         self._rearm_waiting_if_busy()
+
+    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+        """Render a subagent cancellation."""
+        self._main_stream_active = False
+        self.waiting_finished()
+        self.query_one(ChatLog).subagent_cancelled(subagent, result)
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
