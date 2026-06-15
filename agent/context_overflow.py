@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any
@@ -18,6 +20,7 @@ CONTEXT_NOTICE_ATTR = "_mira_context_notice"
 CONTEXT_NOTICE_RENDERED_ATTR = "_mira_context_notice_rendered"
 PROVIDER_CONTEXT_NOTICE = "Provider context limit reached. Compacting older context and retrying."
 GENERIC_CONTEXT_NOTICE = "Context limit pressure detected. Compacting older context and retrying."
+COMPACTION_SUMMARY_HEADINGS = ("session intent", "summary", "artifacts", "next steps")
 
 _context_notice: ContextVar[str | None] = ContextVar("mira_context_notice", default=None)
 _fallback_context_notice: str | None = None
@@ -129,17 +132,82 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
 
 def reported_context_pressure(messages: list[Any], threshold: int, thread: str) -> tuple[str, int, str] | None:
     """Return provider-reported pressure from the newest usage-bearing message."""
-    for index in range(len(messages) - 1, -1, -1):
+    summary_index = newest_compaction_summary_index(messages)
+    for index in range(len(messages) - 1, summary_index, -1):
         message = messages[index]
         usage = usage_from_message(message)
         tokens = positive_int(usage.get("context_tokens"))
         if tokens < threshold:
             continue
         source = str(usage.get("source") or "reported")
-        message_id = str(getattr(message, "id", "") or "")
-        fingerprint = message_id or f"{type(message).__name__}:{index}:{tokens}"
+        fingerprint = message_fingerprint(message, tokens)
         return (source, tokens, f"{thread}:reported:{fingerprint}:{tokens}")
     return None
+
+
+def newest_compaction_summary_index(messages: list[Any]) -> int:
+    """Return the newest message index that marks summarized history."""
+    for index in range(len(messages) - 1, -1, -1):
+        if is_compaction_summary_message(messages[index]):
+            return index
+    return -1
+
+
+def is_compaction_summary_message(message: Any) -> bool:
+    """Return whether a message represents DeepAgents summarized context."""
+    kwargs = message_field(message, "additional_kwargs")
+    if isinstance(kwargs, dict) and kwargs.get("lc_source") == "summarization":
+        return True
+
+    text = compact_lower_text(message_text(message))
+    if not text:
+        return False
+    return all(heading in text for heading in COMPACTION_SUMMARY_HEADINGS)
+
+
+def message_fingerprint(message: Any, tokens: int) -> str:
+    """Return a stable signature for usage-bearing messages."""
+    message_id = str(message_field(message, "id") or "").strip()
+    if message_id:
+        return message_id
+
+    text = message_text(message)
+    if text:
+        digest = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return f"{type(message).__name__}:{digest}"
+    return f"{type(message).__name__}:usage:{positive_int(tokens)}"
+
+
+def message_text(message: Any) -> str:
+    """Extract a plain-text message body from common dict/object shapes."""
+    text = message_field(message, "text")
+    if text is not None:
+        return str(text)
+
+    content = message_field(message, "content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+            else:
+                parts.append(str(item))
+        return "".join(parts)
+    return ""
+
+
+def message_field(message: Any, name: str) -> Any:
+    """Return a dict key or object attribute."""
+    if isinstance(message, dict):
+        return message.get(name)
+    return getattr(message, name, None)
+
+
+def compact_lower_text(text: str) -> str:
+    """Normalize text for summary marker checks."""
+    return re.sub(r"\s+", " ", str(text or "").lower()).strip()
 
 
 def raise_context_overflow_if_detected(exc: Exception) -> None:

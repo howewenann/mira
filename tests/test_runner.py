@@ -757,6 +757,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
+    async def test_summary_extraction_reasoning_after_compaction_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user wants me to extract context from a conversation history that has already been summarized. ",
+                            "The conversation history has been saved to a file and a condensed summary is provided. ",
+                            "My task is to extract the most relevant context to replace this conversation history. ",
+                            "I should structure this according to the required format (SESSION INTENT, SUMMARY, ARTIFACTS, NEXT STEPS).",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
     async def test_streamed_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])

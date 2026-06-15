@@ -245,6 +245,12 @@ def is_compaction_reasoning(text: str) -> bool:
         return True
     if "session intent" in lowered and "summary" in lowered and "artifacts" in lowered and "next steps" in lowered:
         return True
+    if (
+        "extract context from a conversation history" in lowered
+        or "extract the most relevant context" in lowered
+        or "conversation history has been saved to a file" in lowered
+    ) and ("session intent" in lowered or "condensed summary" in lowered or "next steps" in lowered):
+        return True
     if "compact" in lowered and "conversation" in lowered and ("summary" in lowered or "token" in lowered):
         return True
     if "summarization" in lowered and "conversation" in lowered:

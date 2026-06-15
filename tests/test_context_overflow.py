@@ -56,6 +56,31 @@ class UsageMessage:
         self.usage_metadata = {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens}
 
 
+class NoIdUsageMessage:
+    """Usage-bearing message without a provider id."""
+
+    def __init__(self, text: str, tokens: int) -> None:
+        self.content = text
+        self.usage_metadata = {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens}
+
+
+class SummaryMessage:
+    """DeepAgents-style summary marker."""
+
+    content = """## SESSION INTENT
+Continue a story.
+
+## SUMMARY
+Earlier context was summarized.
+
+## ARTIFACTS
+None.
+
+## NEXT STEPS
+Continue from the summary.
+"""
+
+
 class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
     """Context overflow middleware behavior."""
 
@@ -100,6 +125,45 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ContextOverflowError):
             await middleware.awrap_model_call(Request([UsageMessage("ai-2", 1030)]), handler)
         self.assertEqual(calls, 1)
+
+    async def test_reported_context_pressure_ignores_usage_before_summary_marker(self) -> None:
+        middleware = ContextPressureMiddleware(
+            context_limit_tokens=1000,
+            threshold_fraction=0.98,
+            token_counter=lambda messages, tools=None: 0,
+        )
+        calls = 0
+
+        async def handler(request: Any) -> str:
+            nonlocal calls
+            calls += 1
+            return "ok"
+
+        messages = [
+            UsageMessage("old-ai", 1030),
+            SummaryMessage(),
+            {"role": "user", "content": "please finish it"},
+        ]
+
+        self.assertEqual(await middleware.awrap_model_call(Request(messages), handler), "ok")
+        self.assertEqual(calls, 1)
+
+    async def test_reported_context_pressure_uses_stable_signature_without_message_id(self) -> None:
+        middleware = ContextPressureMiddleware(
+            context_limit_tokens=1000,
+            threshold_fraction=0.98,
+            token_counter=lambda messages, tools=None: 0,
+        )
+        usage = NoIdUsageMessage("same assistant response", 1030)
+
+        async def handler(request: Any) -> str:
+            return "ok"
+
+        with self.assertRaises(ContextOverflowError):
+            await middleware.awrap_model_call(Request([usage]), handler)
+
+        self.assertEqual(await middleware.awrap_model_call(Request([{"role": "user", "content": "retry"}, usage]), handler), "ok")
+        self.assertEqual(await middleware.awrap_model_call(Request([{"role": "user", "content": "later"}, usage]), handler), "ok")
 
     async def test_estimated_context_pressure_raises(self) -> None:
         middleware = ContextPressureMiddleware(
