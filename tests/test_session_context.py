@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from session import context
-from session.dashboard import apply_turn_usage
+from session.dashboard import apply_context_usage, apply_turn_usage
 from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
@@ -136,6 +136,48 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["dashboard"]["tokens"], {"in": 8200, "out": 1424})
         self.assertEqual(normalized["dashboard"]["context"]["used_tokens"], 9624)
         self.assertEqual(normalized["dashboard"]["context"]["percent"], 96.2)
+
+    def test_dashboard_estimate_does_not_lower_provider_context_usage(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+        provider_result = type(
+            "Result",
+            (),
+            {
+                "usage": {
+                    "input_tokens": 8400,
+                    "output_tokens": 1400,
+                    "total_tokens": 9800,
+                    "context_tokens": 9800,
+                    "source": "usage_metadata",
+                }
+            },
+        )()
+        compacted_result = type(
+            "Result",
+            (),
+            {
+                "usage": {
+                    "input_tokens": 8200,
+                    "output_tokens": 100,
+                    "total_tokens": 8300,
+                    "context_tokens": 8300,
+                    "source": "usage_metadata",
+                }
+            },
+        )()
+
+        apply_turn_usage(record, provider_result, model_name="lmstudio:qwen", context_limit_tokens=10000)
+        apply_context_usage(
+            record,
+            7,
+            model_name="lmstudio:qwen",
+            context_limit_tokens=10000,
+            source="langchain_approx.count_tokens",
+        )
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 9800)
+
+        apply_turn_usage(record, compacted_result, model_name="lmstudio:qwen", context_limit_tokens=10000)
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 8300)
 
     def test_title_uses_recent_topic(self) -> None:
         record = {"title": "Untitled session", "events": []}

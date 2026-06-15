@@ -134,6 +134,7 @@ class RecordingRenderer:
     def __init__(self, renderer: Any, recorder: SessionRecorder) -> None:
         self.renderer = renderer
         self.recorder = recorder
+        self._context_notice_rendered = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
@@ -177,8 +178,7 @@ class RecordingRenderer:
 
     def compaction_started(self) -> None:
         notice = pop_context_overflow_notice()
-        if notice:
-            self.system_message(notice, kind="info")
+        self._render_context_notice(notice)
         self.renderer.compaction_started()
 
     def compaction_finished(self) -> None:
@@ -187,6 +187,22 @@ class RecordingRenderer:
     def finish_main(self) -> None:
         self.renderer.finish_main()
         self.recorder.finish_main()
+
+    def context_notice_rendered(self) -> bool:
+        """Return whether this turn already rendered a context-pressure notice."""
+        return self._context_notice_rendered
+
+    def mark_context_notice_rendered(self) -> None:
+        """Remember that this turn already rendered a context-pressure notice."""
+        self._context_notice_rendered = True
+
+    def _render_context_notice(self, notice: str) -> bool:
+        """Render one context-pressure notice at most once per turn."""
+        if not notice or self._context_notice_rendered:
+            return False
+        self._context_notice_rendered = True
+        self.system_message(notice, kind="info")
+        return True
 
 
 async def poll_compactions(recorder: SessionRecorder, agent: Any, thread_id: str) -> None:

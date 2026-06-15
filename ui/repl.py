@@ -177,8 +177,10 @@ async def run_user_turn(
     except ContextOverflowError as exc:
         await recorder.sync_compaction(active_agent, thread_id)
         notice = pop_context_overflow_notice(exc)
-        recorder.info(notice)
-        write_line(renderer, notice, kind="info")
+        if notice and not wrapped_renderer.context_notice_rendered():
+            recorder.info(notice)
+            write_line(renderer, notice, kind="info")
+            wrapped_renderer.mark_context_notice_rendered()
         mark_context_notice_rendered(exc)
         raise
     except Exception as exc:

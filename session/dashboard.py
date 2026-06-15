@@ -115,9 +115,11 @@ def apply_context_usage(
     )
     used_tokens = positive_int(context_tokens)
     if used_tokens:
-        dashboard["context"]["used_tokens"] = used_tokens
-        if source and source != "unknown":
-            dashboard["context"]["source"] = source
+        current_tokens = positive_int(dashboard["context"].get("used_tokens"))
+        if should_apply_context_usage(current_tokens, used_tokens, source):
+            dashboard["context"]["used_tokens"] = used_tokens
+            if source and source != "unknown":
+                dashboard["context"]["source"] = source
     dashboard["context"]["percent"] = context_percent(
         dashboard["context"]["used_tokens"],
         dashboard["context"]["limit_tokens"],
@@ -204,6 +206,20 @@ def context_percent(used_tokens: int, limit_tokens: int) -> float:
     if limit_tokens <= 0:
         return 0.0
     return round(min(999.9, (used_tokens / limit_tokens) * 100), 1)
+
+
+def should_apply_context_usage(current_tokens: int, new_tokens: int, source: str) -> bool:
+    """Return whether a context-only update should replace the displayed value."""
+    if new_tokens <= 0:
+        return False
+    if not is_estimated_context_source(source):
+        return True
+    return new_tokens >= positive_int(current_tokens)
+
+
+def is_estimated_context_source(source: str) -> bool:
+    """Return whether a context source is a local estimate rather than provider usage."""
+    return str(source or "").startswith("langchain_approx")
 
 
 def parse_datetime(value: Any) -> datetime | None:

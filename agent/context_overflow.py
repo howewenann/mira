@@ -24,7 +24,7 @@ _fallback_context_notice: str | None = None
 
 
 class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
-    """Raise DeepAgents-compatible overflow errors when context is already full."""
+    """Trigger DeepAgents-compatible compaction when context pressure is high."""
 
     def __init__(
         self,
@@ -38,7 +38,8 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
         self.threshold_fraction = valid_fraction(threshold_fraction, DEFAULT_CONTEXT_PRESSURE_FRACTION)
         self.enabled = bool(enabled)
         self.token_counter = token_counter
-        self._raised_signatures: set[str] = set()
+        self._triggered_signatures: set[str] = set()
+        self._skip_next_threads: set[str] = set()
 
     def wrap_model_call(self, request: Any, handler: Any) -> Any:
         """Normalize provider context errors for sync model calls."""
@@ -68,8 +69,12 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
         if not self.enabled or not self.context_limit_tokens:
             return
 
+        thread = thread_id(request)
+        if self._consume_retry_skip(thread):
+            return
+
         threshold = max(1, int(self.context_limit_tokens * self.threshold_fraction))
-        pressure = self._request_pressure(request, threshold)
+        pressure = self._request_pressure(request, threshold, thread)
         if pressure is None:
             return
 
@@ -77,12 +82,14 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
         if not self._remember_signature(signature):
             return
         notice = configured_threshold_notice(source, tokens, threshold, self.context_limit_tokens)
-        set_context_overflow_notice(notice)
+        self._skip_next_threads.add(thread)
+        # DeepAgents' summarization middleware compacts by catching this
+        # internal exception, then immediately retries with summarized context.
         raise context_overflow_error("configured context threshold reached", notice)
 
-    def _request_pressure(self, request: Any, threshold: int) -> tuple[str, int, str] | None:
+    def _request_pressure(self, request: Any, threshold: int, thread: str) -> tuple[str, int, str] | None:
         messages = list(getattr(request, "messages", []) or [])
-        reported = reported_context_pressure(messages, threshold, thread_id(request))
+        reported = reported_context_pressure(messages, threshold, thread)
         if reported is not None:
             return reported
 
@@ -91,7 +98,7 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
             return (
                 "estimated",
                 estimated,
-                f"{thread_id(request)}:estimated:{len(messages)}:{estimated}",
+                f"{thread}:estimated:{len(messages)}:{estimated}",
             )
         return None
 
@@ -106,11 +113,17 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
             return positive_int(self.token_counter(counted_messages))
 
     def _remember_signature(self, signature: str) -> bool:
-        if signature in self._raised_signatures:
+        if signature in self._triggered_signatures:
             return False
-        if len(self._raised_signatures) >= MAX_SIGNATURES:
-            self._raised_signatures.clear()
-        self._raised_signatures.add(signature)
+        if len(self._triggered_signatures) >= MAX_SIGNATURES:
+            self._triggered_signatures.clear()
+        self._triggered_signatures.add(signature)
+        return True
+
+    def _consume_retry_skip(self, thread: str) -> bool:
+        if thread not in self._skip_next_threads:
+            return False
+        self._skip_next_threads.remove(thread)
         return True
 
 

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from langchain_core.exceptions import ContextOverflowError
 from rich.console import Console
 
-from agent.context_overflow import context_overflow_error
+from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
 from config.metadata import ModelMetadata
@@ -91,6 +91,14 @@ class RecordingRenderer:
     def subagent_finished(self, name: str, result: str = "") -> None:
         """Record subagent finish."""
         self.console.print(f"{name}: {result}")
+
+    def compaction_started(self) -> None:
+        """Record compaction start."""
+        self.console.print("compacting context...")
+
+    def compaction_finished(self) -> None:
+        """Record compaction completion."""
+        self.console.print("context compacted")
 
     def finish_main(self) -> None:
         """Record stream finalization."""
@@ -796,6 +804,55 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_types, ["user", "info"])
         self.assertEqual(store.saves[-1]["events"][1]["text"], notice)
         self.assertNotIn("MIRA simulated a context overflow", "\n".join(renderer.console.lines))
+
+    async def test_run_user_turn_continues_after_compaction_notice(self) -> None:
+        """A successful DeepAgents compaction should not stop the visible answer."""
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
+        store = CapturingStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
+        notice = "Configured context threshold reached: 9.8k tokens reported, threshold 9.8k, limit 10.0k."
+
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
+            set_context_overflow_notice(notice)
+            renderer.compaction_started()
+            renderer.compaction_finished()
+            renderer.text_delta("The story continued.")
+            return runner.TurnResult(
+                final_text="The story continued.",
+                input_tokens=8200,
+                output_tokens=50,
+                total_tokens=8250,
+                context_tokens=8250,
+                usage_source="usage_metadata",
+            )
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            result = await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=mode,
+                text="hello",
+            )
+
+        self.assertEqual(result.final_text, "The story continued.")
+        event_types = [event["type"] for event in session["events"]]
+        self.assertEqual(event_types, ["user", "info", "assistant"])
+        self.assertEqual(sum(1 for event in session["events"] if event["type"] == "info"), 1)
+        self.assertEqual(session["events"][-1]["text"], "The story continued.")
+        self.assertEqual(session["turns"], 1)
+        rendered = "\n".join(renderer.console.lines)
+        self.assertEqual(rendered.count("Configured context threshold reached"), 1)
+        self.assertIn("context compacted", rendered)
 
     async def test_session_command_shows_current_mode(self) -> None:
         """The session command should print mode and saved-plan count."""

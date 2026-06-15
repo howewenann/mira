@@ -34,17 +34,26 @@ class Message:
 class Runtime:
     """Small runtime double exposing LangGraph config."""
 
-    config = {"configurable": {"thread_id": "thread-1"}}
+    def __init__(self, thread_id: str = "thread-1") -> None:
+        self.config = {"configurable": {"thread_id": thread_id}}
 
 
 class Request:
     """Small model request double."""
 
-    def __init__(self, messages: list[Any] | None = None) -> None:
+    def __init__(self, messages: list[Any] | None = None, thread_id: str = "thread-1") -> None:
         self.messages = messages if messages is not None else [Message()]
         self.system_message = None
         self.tools: list[Any] = []
-        self.runtime = Runtime()
+        self.runtime = Runtime(thread_id)
+
+
+class UsageMessage:
+    """Message with direct LangChain usage metadata."""
+
+    def __init__(self, message_id: str, tokens: int) -> None:
+        self.id = message_id
+        self.usage_metadata = {"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens}
 
 
 class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
@@ -73,6 +82,23 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("limit 1.0k", notice)
 
         self.assertEqual(await middleware.awrap_model_call(Request(), handler), "ok")
+        self.assertEqual(calls, 1)
+
+    async def test_reported_context_pressure_allows_one_immediate_retry(self) -> None:
+        middleware = ContextPressureMiddleware(context_limit_tokens=1000, threshold_fraction=0.98)
+        calls = 0
+
+        async def handler(request: Any) -> str:
+            nonlocal calls
+            calls += 1
+            return "ok"
+
+        with self.assertRaises(ContextOverflowError):
+            await middleware.awrap_model_call(Request([UsageMessage("ai-1", 1020)]), handler)
+
+        self.assertEqual(await middleware.awrap_model_call(Request([UsageMessage("ai-2", 1030)]), handler), "ok")
+        with self.assertRaises(ContextOverflowError):
+            await middleware.awrap_model_call(Request([UsageMessage("ai-2", 1030)]), handler)
         self.assertEqual(calls, 1)
 
     async def test_estimated_context_pressure_raises(self) -> None:
