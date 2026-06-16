@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -113,6 +115,25 @@ class TurnResult:
         return True
 
 
+class SubagentRequestRenderer:
+    """Fill empty subagent request text from preceding task delegations."""
+
+    def __init__(self, renderer: Any) -> None:
+        self.renderer = renderer
+        self._pending_requests: deque[str] = deque()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.renderer, name)
+
+    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+        self._pending_requests.extend(task_descriptions(calls))
+        self.renderer.delegation_started(calls)
+
+    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+        queued_request = self._pending_requests.popleft() if self._pending_requests else ""
+        self.renderer.subagent_started(subagent, task_input or queued_request)
+
+
 async def run_turn(
     agent: Any,
     text: str,
@@ -135,15 +156,16 @@ async def run_turn(
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
+        event_renderer = SubagentRequestRenderer(renderer)
         output: dict[str, Any] = {}
         waiting_started = getattr(renderer, "waiting_started", None)
         if callable(waiting_started):
             waiting_started()
 
         await asyncio.gather(
-            consume_messages(stream.messages, renderer, result, render_normal_tools=False),
-            consume_tool_calls(stream.tool_calls, renderer, result),
-            consume_subagents(stream.subagents, renderer),
+            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False),
+            consume_tool_calls(stream.tool_calls, event_renderer, result),
+            consume_subagents(stream.subagents, event_renderer),
             capture_output(stream.output(), output),
         )
 
@@ -180,3 +202,25 @@ def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:
 def interrupt_value(interrupt: Any) -> Any:
     """Extract the LangGraph interrupt value from common payload shapes."""
     return getattr(interrupt, "value", interrupt)
+
+
+def task_descriptions(calls: list[Any]) -> list[str]:
+    """Extract request descriptions from task tool-call payloads."""
+    descriptions = []
+    for call in calls:
+        args = call_args(call)
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (TypeError, json.JSONDecodeError):
+                args = {}
+        if isinstance(args, dict) and args.get("description"):
+            descriptions.append(str(args["description"]))
+    return descriptions
+
+
+def call_args(call: Any) -> Any:
+    """Extract tool-call args from a dict or object."""
+    if isinstance(call, dict):
+        return call.get("args", {})
+    return getattr(call, "args", {})

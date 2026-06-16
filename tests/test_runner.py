@@ -146,9 +146,9 @@ class DoubleSubscribeToolCall:
 class Subagent:
     """Fake subagent with a final message shaped like DeepAgents output."""
 
-    def __init__(self, name: str, tool_calls: list[ToolCall]) -> None:
+    def __init__(self, name: str, tool_calls: list[ToolCall], task_input: str = "look around") -> None:
         self.name = name
-        self.task_input = "look around"
+        self.task_input = task_input
         self.tool_calls = AsyncItems(tool_calls)
         self.output = {
             "messages": [
@@ -342,6 +342,98 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(len(agent.payloads), 1)
+
+    async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.messages = AsyncItems(
+            [
+                Message(
+                    [
+                        {
+                            "id": "task-1",
+                            "name": "task",
+                            "args": {"description": "find the README"},
+                        }
+                    ]
+                )
+            ]
+        )
+        stream.subagents = AsyncItems(
+            [
+                Subagent(
+                    "general-purpose [one]",
+                    [ToolCall("read_file", {"path": "README.md"}, "done")],
+                    task_input="",
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        self.assertIn(("subagent_started", "general-purpose [one]", "find the README"), renderer.events)
+
+    async def test_run_turn_maps_multiple_task_requests_to_subagents_in_order(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.messages = AsyncItems(
+            [
+                Message(
+                    [
+                        {"id": "task-1", "name": "task", "args": {"description": "write sacred story"}},
+                        {"id": "task-2", "name": "task", "args": {"description": "write funny story"}},
+                    ]
+                )
+            ]
+        )
+        stream.subagents = AsyncItems(
+            [
+                Subagent("general-purpose [one]", [ToolCall("noop", {}, "one")], task_input=""),
+                Subagent("general-purpose [two]", [ToolCall("noop", {}, "two")], task_input=""),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        starts = [event for event in renderer.events if event[0] == "subagent_started"]
+        self.assertEqual(
+            starts,
+            [
+                ("subagent_started", "general-purpose [one]", "write sacred story"),
+                ("subagent_started", "general-purpose [two]", "write funny story"),
+            ],
+        )
+
+    async def test_run_turn_preserves_explicit_subagent_request_and_consumes_queue(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.messages = AsyncItems(
+            [
+                Message(
+                    [
+                        {"id": "task-1", "name": "task", "args": {"description": "queued one"}},
+                        {"id": "task-2", "name": "task", "args": {"description": "queued two"}},
+                    ]
+                )
+            ]
+        )
+        stream.subagents = AsyncItems(
+            [
+                Subagent("general-purpose [one]", [ToolCall("noop", {}, "one")], task_input="provided request"),
+                Subagent("general-purpose [two]", [ToolCall("noop", {}, "two")], task_input=""),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        starts = [event for event in renderer.events if event[0] == "subagent_started"]
+        self.assertEqual(
+            starts,
+            [
+                ("subagent_started", "general-purpose [one]", "provided request"),
+                ("subagent_started", "general-purpose [two]", "queued two"),
+            ],
+        )
 
     async def test_run_turn_supports_output_interrupt_fallback(self) -> None:
         interrupt = {

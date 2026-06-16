@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import warnings
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -109,8 +110,9 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     recorder.ensure_assistant(getattr(result, "final_text", ""))
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
     update_title(app["session"])
-    if await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"]):
-        recorder.save()
+    with suppress(Exception):
+        if await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"]):
+            recorder.save()
     apply_turn_usage(
         app["session"],
         result,

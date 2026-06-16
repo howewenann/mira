@@ -14,7 +14,7 @@ from agent.context_overflow import mark_context_notice_rendered, pop_context_ove
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_turn_usage, ensure_dashboard
-from session.context import sync_deepagents_compaction, update_title, with_resume_context
+from session.context import update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, poll_compactions
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
@@ -155,11 +155,11 @@ async def run_user_turn(
             **run_kwargs,
         )
     except asyncio.CancelledError:
-        await recorder.sync_compaction(active_agent, thread_id)
+        await sync_compaction_safely(recorder, active_agent, thread_id)
         recorder.interrupted("turn interrupted before completion")
         raise
     except ContextOverflowError as exc:
-        await recorder.sync_compaction(active_agent, thread_id)
+        await sync_compaction_safely(recorder, active_agent, thread_id)
         notice = pop_context_overflow_notice(exc)
         if notice and not wrapped_renderer.context_notice_rendered():
             recorder.info(notice)
@@ -168,7 +168,7 @@ async def run_user_turn(
         mark_context_notice_rendered(exc)
         raise
     except Exception as exc:
-        await recorder.sync_compaction(active_agent, thread_id)
+        await sync_compaction_safely(recorder, active_agent, thread_id)
         recorder.system_error(f"turn error: {exc}")
         raise
     finally:
@@ -182,8 +182,7 @@ async def run_user_turn(
 
     session["turns"] = int(session.get("turns") or 0) + 1
     update_title(session)
-    if await sync_deepagents_compaction(session, active_agent, thread_id):
-        recorder.save()
+    await sync_compaction_safely(recorder, active_agent, thread_id)
     if not live_usage_applied:
         apply_turn_usage(
             session,
@@ -194,6 +193,12 @@ async def run_user_turn(
         )
     store.save(session)
     return result
+
+
+async def sync_compaction_safely(recorder: SessionRecorder, agent: Any, thread_id: str) -> None:
+    """Best-effort compaction sync for exception cleanup paths."""
+    with suppress(Exception):
+        await recorder.sync_compaction(agent, thread_id)
 
 
 async def handle_command(
