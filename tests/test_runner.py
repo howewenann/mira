@@ -377,16 +377,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
         stream = FakeStream(output={"messages": []})
-        stream.messages = AsyncItems(
+        stream.tool_calls = AsyncItems(
             [
-                Message(
-                    [
-                        {
-                            "id": "task-1",
-                            "name": "task",
-                            "args": {"description": "find the README"},
-                        }
-                    ]
+                DocumentedToolCall(
+                    "task",
+                    {"description": "find the README"},
+                    call_id="task-1",
                 )
             ]
         )
@@ -407,14 +403,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_turn_maps_multiple_task_requests_to_subagents_in_order(self) -> None:
         stream = FakeStream(output={"messages": []})
-        stream.messages = AsyncItems(
+        stream.tool_calls = AsyncItems(
             [
-                Message(
-                    [
-                        {"id": "task-1", "name": "task", "args": {"description": "write sacred story"}},
-                        {"id": "task-2", "name": "task", "args": {"description": "write funny story"}},
-                    ]
-                )
+                DocumentedToolCall("task", {"description": "write sacred story"}, call_id="task-1"),
+                DocumentedToolCall("task", {"description": "write funny story"}, call_id="task-2"),
             ]
         )
         stream.subagents = AsyncItems(
@@ -438,14 +430,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_turn_preserves_explicit_subagent_request_and_consumes_queue(self) -> None:
         stream = FakeStream(output={"messages": []})
-        stream.messages = AsyncItems(
+        stream.tool_calls = AsyncItems(
             [
-                Message(
-                    [
-                        {"id": "task-1", "name": "task", "args": {"description": "queued one"}},
-                        {"id": "task-2", "name": "task", "args": {"description": "queued two"}},
-                    ]
-                )
+                DocumentedToolCall("task", {"description": "queued one"}, call_id="task-1"),
+                DocumentedToolCall("task", {"description": "queued two"}, call_id="task-2"),
             ]
         )
         stream.subagents = AsyncItems(

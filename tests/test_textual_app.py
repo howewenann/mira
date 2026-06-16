@@ -262,10 +262,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("working...", rendered)
             app.busy = False
 
-    async def test_waiting_reappears_after_reasoning_stream_goes_quiet(self) -> None:
-        """After reasoning goes idle, silent tool-call preparation should show working."""
+    async def test_reasoning_stream_silence_does_not_show_working(self) -> None:
+        """Slow reasoning token gaps should not re-add the working status."""
         app = make_app()
-        app._stream_idle_delay_seconds = 0.05
+        app._waiting_delay_seconds = 0.05
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
@@ -276,7 +276,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertIn("I should delegate this.", rendered)
-            self.assertIn("working...", rendered)
+            self.assertNotIn("working...", rendered)
             app.busy = False
 
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:

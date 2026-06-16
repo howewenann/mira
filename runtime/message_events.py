@@ -1,60 +1,26 @@
-"""Message-stream consumption for reasoning, text, and tool-call events."""
+"""Coordinator message-stream consumption for reasoning and text."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 
+from runtime.compaction_filter import (
+    ReasoningFilter,
+    TextFilter,
+    call_renderer,
+    is_compaction_reasoning,
+    should_flush_reasoning_probe,
+)
 from runtime.output_events import (
-    could_be_compaction_summary_start,
     is_summarization_metadata_message,
     normalize_response_delta,
     strip_compaction_summary_prefix,
-    text_has_compaction_summary_shape,
 )
+from runtime.protocol_events import event_delta, is_raw_message_stream, is_tool_call_delta
+from runtime.tool_call_args import ToolCallDrafts, normalized_call, tool_call_args, tool_call_id, tool_call_name
 from runtime.usage import has_usage, usage_from_message
-
-COMPACTION_REASONING_MARKERS = (
-    "context extraction assistant",
-    "primary objective",
-    "extract the highest quality/most relevant context",
-    "conversation history to replace it",
-)
-COMPACTION_REASONING_HINTS = (
-    "context extraction assistant",
-    "extract the highest quality/most relevant context",
-    "conversation history to replace",
-    "conversation history will be replaced",
-    "conversation history",
-    "due to nearing token limits",
-    "due to token limits",
-    "compact",
-    "compaction",
-    "summarization",
-    "summarize",
-    "session intent",
-    "artifacts",
-    "next steps",
-    "output format",
-)
-COMPACTION_REASONING_START = "thinking process"
-TOOL_CALL_DELTA_TYPES = {
-    "tool_call",
-    "tool_call_chunk",
-    "tool-call",
-    "tool-call-chunk",
-    "tool-call-delta",
-    "tool_call_delta",
-    "function_call",
-    "function_call_chunk",
-    "function_call_delta",
-    "function-call",
-    "function-call-chunk",
-    "function-call-delta",
-}
 
 
 async def consume_messages(
@@ -64,27 +30,26 @@ async def consume_messages(
     *,
     render_normal_tools: bool = True,
 ) -> None:
-    """Consume streamed model messages and render reasoning, text, and tools.
+    """Consume coordinator messages and fallback provider tool-call chunks.
 
-    Provider integrations expose message fields in different shapes. This
-    module normalizes those fields into renderer calls while preserving the
-    event order reported by the stream.
+    DeepAgents' documented ``stream.tool_calls`` projection owns normal
+    tool/task rendering in the runner. Message-level tool-call chunks are kept
+    as a provider fallback for live draft UI when exposed by a chat model.
     """
     async for message in messages:
-        _call_renderer(renderer, "waiting_started")
         if is_raw_message_stream(message):
             await _consume_ordered_message_stream(message, renderer)
-            _call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished")
             call_list = await _finalized_tool_calls(message, renderer)
         else:
             call_task = asyncio.create_task(_finalized_tool_calls(message, renderer))
             compacting = await _consume_reasoning(message, renderer)
             await _consume_text(message, renderer, allow_compaction_summary=compacting)
-            _call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished")
             call_list = await call_task
 
         if call_list:
-            _render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
+            render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
 
         if result is not None:
             usage = usage_from_message(message)
@@ -109,7 +74,7 @@ async def _consume_reasoning(message: Any, renderer: Any) -> bool:
         if is_compaction_reasoning(pending):
             compacting = True
             pending = ""
-            _call_renderer(renderer, "compaction_started")
+            call_renderer(renderer, "compaction_started")
             continue
 
         if should_flush_reasoning_probe(pending):
@@ -117,17 +82,10 @@ async def _consume_reasoning(message: Any, renderer: Any) -> bool:
             pending = ""
 
     if compacting:
-        _call_renderer(renderer, "compaction_finished")
+        call_renderer(renderer, "compaction_finished")
     elif pending:
         renderer.reasoning_delta(pending)
     return compacting
-
-
-def is_raw_message_stream(message: Any) -> bool:
-    """Return whether a message can be consumed as ordered protocol events."""
-    return hasattr(message, "__aiter__") and all(
-        hasattr(message, name) for name in ("text", "reasoning", "tool_calls")
-    )
 
 
 async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
@@ -150,322 +108,6 @@ async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
     text_filter.finish()
 
 
-class ReasoningFilter:
-    """Render reasoning while suppressing DeepAgents compaction internals."""
-
-    def __init__(self, renderer: Any) -> None:
-        self.renderer = renderer
-        self.pending = ""
-        self.probing = True
-        self.compacting = False
-
-    def push(self, delta: str) -> None:
-        if not delta or self.compacting:
-            return
-        if not self.probing:
-            self.renderer.reasoning_delta(delta)
-            return
-
-        self.pending += delta
-        if is_compaction_reasoning(self.pending):
-            self.compacting = True
-            self.pending = ""
-            _call_renderer(self.renderer, "compaction_started")
-            return
-
-        if not could_be_compaction_reasoning_start(self.pending):
-            self.renderer.reasoning_delta(self.pending)
-            self.pending = ""
-            self.probing = False
-
-    def finish(self) -> None:
-        if self.compacting:
-            _call_renderer(self.renderer, "compaction_finished")
-        elif self.pending:
-            self.renderer.reasoning_delta(self.pending)
-
-
-class TextFilter:
-    """Render assistant text while stripping a leading compaction summary."""
-
-    def __init__(self, renderer: Any, allow_compaction_summary: Callable[[], bool]) -> None:
-        self.renderer = renderer
-        self.allow_compaction_summary = allow_compaction_summary
-        self.pending = ""
-        self.probing = True
-        self.compacting = False
-        self.has_output = False
-
-    def push(self, delta: str) -> None:
-        delta = normalize_response_delta("visible" if self.has_output else self.pending, delta)
-        if not delta:
-            return
-        if not self.probing:
-            self._emit(delta)
-            return
-
-        self.pending += delta
-        visible, had_summary = strip_compaction_summary_prefix(self.pending)
-        if had_summary:
-            if not self.compacting and not self.allow_compaction_summary():
-                self.compacting = True
-                _call_renderer(self.renderer, "compaction_started")
-            if visible:
-                if self.compacting:
-                    _call_renderer(self.renderer, "compaction_finished")
-                    self.compacting = False
-                self._emit(visible)
-                self.pending = ""
-                self.probing = False
-            return
-
-        if not could_be_compaction_summary_start(self.pending):
-            self._emit(self.pending)
-            self.pending = ""
-            self.probing = False
-
-    def finish(self) -> None:
-        if self.compacting:
-            _call_renderer(self.renderer, "compaction_finished")
-            self.compacting = False
-        if self.probing and self.pending and not text_has_compaction_summary_shape(self.pending):
-            self._emit(self.pending)
-
-    def _emit(self, text: str) -> None:
-        self.renderer.text_delta(text)
-        if text:
-            self.has_output = True
-
-
-class ToolCallDrafts:
-    """Accumulate streamed tool-call argument chunks for live draft rendering."""
-
-    def __init__(self, renderer: Any) -> None:
-        self.renderer = renderer
-        self._calls: dict[str, dict[str, Any]] = {}
-
-    def push(self, chunk: Any) -> None:
-        data = tool_call_chunk_data(chunk)
-        if data is None:
-            _call_renderer(self.renderer, "model_activity")
-            return
-
-        key = data["key"]
-        call = self._calls.setdefault(key, {"id": data["id"], "name": "", "args_raw": ""})
-        if data["id"]:
-            call["id"] = data["id"]
-        if data["name"]:
-            call["name"] = data["name"]
-        if data["replace_args"]:
-            call["args_raw"] = data["args"]
-        elif data["args"]:
-            call["args_raw"] = f"{call.get('args_raw') or ''}{data['args']}"
-
-        name = str(call.get("name") or "")
-        if not name:
-            _call_renderer(self.renderer, "model_activity")
-            return
-
-        draft_call = self._draft_call(call)
-        if name == "task":
-            task_calls = [self._draft_call(value) for value in self._calls.values() if value.get("name") == "task"]
-            if not _call_renderer(self.renderer, "delegation_delta", task_calls):
-                _call_renderer(self.renderer, "model_activity")
-            return
-
-        if not _call_renderer(
-            self.renderer,
-            "tool_call_delta",
-            name,
-            draft_call["args"],
-            call_id=str(call.get("id") or ""),
-        ):
-            _call_renderer(self.renderer, "model_activity")
-
-    def _draft_call(self, call: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "type": "tool_call",
-            "id": str(call.get("id") or ""),
-            "name": str(call.get("name") or "tool"),
-            "args": draft_args(call.get("args_raw", "")),
-        }
-
-
-def tool_call_chunk_data(chunk: Any) -> dict[str, Any] | None:
-    """Return normalized data from a provider tool-call chunk."""
-    source = chunk
-    data = event_delta(chunk) if isinstance(chunk, dict) and ("delta" in chunk or "content_block" in chunk) else chunk
-    if not isinstance(data, dict):
-        return None
-
-    delta_type = str(data.get("type") or "")
-    if delta_type and not is_tool_call_delta(delta_type):
-        return None
-
-    function = data.get("function") if isinstance(data.get("function"), dict) else {}
-    name = data.get("name") or function.get("name") or ""
-    raw_args = first_present(data, "args", "arguments", "input")
-    if raw_args is None:
-        raw_args = first_present(function, "arguments", "args")
-    call_id = str(data.get("id") or data.get("call_id") or data.get("tool_call_id") or "")
-    index = data.get("index")
-
-    if not name and raw_args is None:
-        return None
-
-    if isinstance(raw_args, bytes):
-        args = raw_args.decode("utf-8", errors="replace")
-    elif isinstance(raw_args, str):
-        args = raw_args
-    elif raw_args is None:
-        args = ""
-    else:
-        args = json.dumps(raw_args, ensure_ascii=False)
-
-    key = call_id or (f"index:{index}" if index is not None else "index:0")
-    return {
-        "key": key,
-        "id": call_id or key,
-        "name": str(name),
-        "args": args,
-        "replace_args": isinstance(source, dict) and "content_block" in source,
-    }
-
-
-def first_present(mapping: dict[str, Any], *keys: str) -> Any:
-    """Return the first present key from a mapping, preserving falsey values."""
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return None
-
-
-def draft_args(raw: Any) -> Any:
-    """Best-effort readable args for incomplete JSON tool-call chunks."""
-    if isinstance(raw, dict):
-        return raw
-    if not isinstance(raw, str):
-        return raw
-    if not raw:
-        return {}
-
-    try:
-        return json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        pass
-
-    fields: dict[str, str] = {}
-    for key in ("description", "subagent_type"):
-        value = partial_json_string_field(raw, key)
-        if value:
-            fields[key] = value
-    if fields:
-        return fields
-    return raw
-
-
-def partial_json_string_field(raw: str, key: str) -> str:
-    """Extract a readable partial JSON string field if the value is incomplete."""
-    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)', raw)
-    if not match:
-        return ""
-    try:
-        return json.loads(f'"{match.group(1)}"')
-    except json.JSONDecodeError:
-        return match.group(1).replace('\\"', '"')
-
-
-def event_delta(event: Any) -> dict[str, Any]:
-    """Extract a content delta from LangChain protocol event shapes."""
-    if not isinstance(event, dict):
-        return {}
-    delta = event.get("delta")
-    if isinstance(delta, dict):
-        return delta
-    block = event.get("content_block")
-    if isinstance(block, dict):
-        block_type = block.get("type")
-        if block_type == "text":
-            return {"type": "text-delta", "text": block.get("text", "")}
-        if block_type == "reasoning":
-            return {"type": "reasoning-delta", "reasoning": block.get("reasoning", "")}
-        if is_tool_call_delta(str(block_type or "")):
-            return {
-                "type": "tool-call-delta",
-                "id": block.get("id") or block.get("call_id") or block.get("tool_call_id"),
-                "name": block.get("name"),
-                "arguments": block.get("arguments") if "arguments" in block else block.get("args"),
-                "index": block.get("index"),
-            }
-    return {}
-
-
-def is_tool_call_delta(delta_type: str) -> bool:
-    """Return whether a raw message delta represents tool-call JSON streaming."""
-    return delta_type in TOOL_CALL_DELTA_TYPES
-
-
-def is_compaction_reasoning(text: str) -> bool:
-    """Return whether streamed reasoning belongs to DeepAgents compaction."""
-    lowered = text.lower()
-    if all(marker in lowered for marker in COMPACTION_REASONING_MARKERS):
-        return True
-    if "context extraction assistant" in lowered and (
-        "conversation history" in lowered or "replace it" in lowered or "token limit" in lowered
-    ):
-        return True
-    if "primary objective" in lowered and "conversation history" in lowered and "replace" in lowered:
-        return True
-    if "output format" in lowered and "session intent" in lowered and "next steps" in lowered:
-        return True
-    if "session intent" in lowered and "summary" in lowered and "artifacts" in lowered and "next steps" in lowered:
-        return True
-    if (
-        "extract context from a conversation history" in lowered
-        or "extract the most relevant context" in lowered
-        or "conversation history has been saved to a file" in lowered
-    ) and ("session intent" in lowered or "condensed summary" in lowered or "next steps" in lowered):
-        return True
-    if "compact" in lowered and "conversation" in lowered and ("summary" in lowered or "token" in lowered):
-        return True
-    if "summarization" in lowered and "conversation" in lowered:
-        return True
-    return False
-
-
-def should_flush_reasoning_probe(text: str) -> bool:
-    """Return whether buffered reasoning is unlikely to be compaction metadata."""
-    lowered = text.lower()
-    if could_be_compaction_reasoning_start(text):
-        return False
-    if len(text) >= 1200:
-        return True
-    if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
-        return True
-    return False
-
-
-def could_be_compaction_reasoning_start(text: str) -> bool:
-    """Return whether reasoning may still be DeepAgents compaction setup."""
-    stripped = text.lstrip().lower()
-    if not stripped:
-        return True
-    if COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START):
-        return True
-    if any(hint in stripped for hint in COMPACTION_REASONING_HINTS):
-        return True
-    return False
-
-
-def _call_renderer(renderer: Any, method: str, *args: Any, **kwargs: Any) -> bool:
-    """Call an optional renderer method."""
-    callback: Callable[..., None] | None = getattr(renderer, method, None)
-    if callback is None:
-        return False
-    callback(*args, **kwargs)
-    return True
-
-
 async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
     """Render assistant text deltas from a streamed message."""
     if is_summarization_metadata_message(message):
@@ -484,8 +126,8 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
     visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
     if had_summary:
         if not allow_compaction_summary:
-            _call_renderer(renderer, "compaction_started")
-            _call_renderer(renderer, "compaction_finished")
+            call_renderer(renderer, "compaction_started")
+            call_renderer(renderer, "compaction_finished")
         if visible:
             renderer.text_delta(visible)
         return
@@ -522,67 +164,56 @@ async def _finalized_tool_calls(message: Any, renderer: Any) -> list[Any]:
         return []
 
     tool_drafts = ToolCallDrafts(renderer)
-    # Some providers stream tool-call chunks through this field before exposing
-    # the final parsed list through get().
     if hasattr(calls, "__aiter__"):
         async for chunk in calls:
             tool_drafts.push(chunk)
 
     finalized = calls.get() if hasattr(calls, "get") else (calls or [])
     if hasattr(finalized, "__await__"):
-        _call_renderer(renderer, "model_activity")
+        call_renderer(renderer, "model_activity")
         finalized = await finalized
 
     return list(finalized or [])
 
 
-def _render_tool_calls(
+def render_tool_calls(
     call_list: list[Any],
     renderer: Any,
     result: Any | None,
     *,
     render_normal_tools: bool = True,
 ) -> None:
-    """Render task delegations and normal tool calls from a message."""
-    task_calls = [call for call in call_list if _call_name(call) == "task"]
+    """Render fallback finalized calls from message projections."""
+    normalized = [normalized_call(call) for call in call_list]
+    task_calls = [call for call in call_list if tool_call_name(call) == "task"]
     if task_calls:
         renderer.delegation_started(task_calls)
 
-    for call in call_list:
-        name = _call_name(call)
+    for call in normalized:
+        name = str(call["name"])
+        call_id = str(call.get("id") or "")
         if name == "task":
             if result is not None and render_normal_tools:
-                result.record_tool_call(str(name), _call_id(call))
+                result.record_tool_call(name, call_id)
             continue
 
         if not render_normal_tools:
             continue
 
         if result is not None:
-            result.record_tool_call(str(name), _call_id(call))
+            result.record_tool_call(name, call_id)
 
-        renderer.tool_call(str(name), _call_args(call), call_id=_call_id(call))
-
-
-def _call_name(call: Any) -> str:
-    """Extract a tool-call name from a dict or object."""
-    if isinstance(call, dict):
-        return str(call.get("name", "tool"))
-
-    return str(getattr(call, "name", "tool"))
+        renderer.tool_call(name, call.get("args", {}), call_id=call_id)
 
 
-def _call_args(call: Any) -> Any:
-    """Extract tool-call args from a dict or object."""
-    if isinstance(call, dict):
-        return call.get("args", {})
-
-    return getattr(call, "args", {})
-
-
-def _call_id(call: Any) -> str:
-    """Extract a tool-call id from a dict or object."""
-    if isinstance(call, dict):
-        return str(call.get("id") or "")
-
-    return str(getattr(call, "id", "") or "")
+__all__ = [
+    "ToolCallDrafts",
+    "consume_messages",
+    "event_delta",
+    "is_raw_message_stream",
+    "is_tool_call_delta",
+    "render_tool_calls",
+    "tool_call_args",
+    "tool_call_id",
+    "tool_call_name",
+]

@@ -92,9 +92,6 @@ class MiraApp(App[None]):
         self._waiting_task: Any | None = None
         self._waiting_generation = 0
         self._waiting_delay_seconds = 0.8
-        self._stream_idle_task: Any | None = None
-        self._stream_idle_generation = 0
-        self._stream_idle_delay_seconds = 1.0
         self._main_stream_active = False
 
     def compose(self) -> ComposeResult:
@@ -610,46 +607,12 @@ class MiraApp(App[None]):
         self._waiting_task = None
 
     def _mark_main_stream_active(self) -> None:
-        """Track visible streaming activity and arm the idle watchdog."""
+        """Track visible streaming activity for the current model message."""
         self._main_stream_active = True
-        self._stream_idle_generation += 1
-        self._cancel_stream_idle_task()
-        generation = self._stream_idle_generation
-        self._stream_idle_task = asyncio.create_task(
-            self._show_waiting_after_stream_idle(generation),
-            name=f"stream-idle-{generation}",
-        )
 
     def _finish_main_stream_activity(self) -> None:
         """Stop suppressing waiting UI for the current model stream."""
         self._main_stream_active = False
-        self._stream_idle_generation += 1
-        self._cancel_stream_idle_task()
-
-    def _cancel_stream_idle_task(self) -> None:
-        """Cancel the pending stream-idle watchdog if one exists."""
-        task = self._stream_idle_task
-        if task is None:
-            return
-        task.cancel()
-        self._stream_idle_task = None
-
-    async def _show_waiting_after_stream_idle(self, generation: int) -> None:
-        """Show working if a still-open stream stops producing visible events."""
-        try:
-            await asyncio.sleep(self._stream_idle_delay_seconds)
-        except asyncio.CancelledError:
-            return
-        if generation != self._stream_idle_generation or not self.busy or not self.is_mounted:
-            return
-        try:
-            if self.query_one(PromptPanel).active:
-                return
-        except NoMatches:
-            return
-        self._main_stream_active = False
-        self._cancel_waiting_task()
-        self.query_one(ChatLog).show_waiting()
 
     def _rearm_waiting_if_busy(self) -> None:
         """Start the silent-wait timer again after a visible runtime event."""

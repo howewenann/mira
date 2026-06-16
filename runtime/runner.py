@@ -14,6 +14,7 @@ from langgraph.types import Command
 from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text
 from runtime.subagent_events import consume_subagents
+from runtime.tool_call_args import tool_call_args
 from runtime.tool_events import consume_tool_calls
 from runtime.usage import (
     TokenCounter,
@@ -162,13 +163,8 @@ async def run_turn(
         if callable(waiting_started):
             waiting_started()
 
-        message_task = asyncio.create_task(
-            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False)
-        )
-        await asyncio.sleep(0)
-
         await asyncio.gather(
-            message_task,
+            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False),
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),
             capture_output(stream.output(), output),
@@ -226,6 +222,4 @@ def task_descriptions(calls: list[Any]) -> list[str]:
 
 def call_args(call: Any) -> Any:
     """Extract tool-call args from a dict or object."""
-    if isinstance(call, dict):
-        return call.get("args", {})
-    return getattr(call, "args", {})
+    return tool_call_args(call)
