@@ -202,6 +202,9 @@ class RecordingRenderer:
     def text_delta(self, value: str) -> None:
         self.events.append(("text", value))
 
+    def model_activity(self) -> None:
+        self.events.append(("model_activity",))
+
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.events.append(("tool_call", name, args, call_id))
 
@@ -891,6 +894,23 @@ Await further instructions.
                 ("text", " there"),
             ],
         )
+
+    async def test_raw_tool_call_chunks_report_model_activity_without_tool_call(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"delta": {"type": "tool_call_chunk", "name": "ls", "args": "{\"path\""}},
+                        {"content_block": {"type": "function_call", "name": "ls", "arguments": "{\"path\":\"/\"}"}},
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, render_normal_tools=False)
+
+        self.assertEqual(renderer.events, [("model_activity",), ("model_activity",)])
 
     async def test_raw_compaction_reasoning_is_hidden_behind_status(self) -> None:
         renderer = RecordingRenderer()

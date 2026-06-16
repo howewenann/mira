@@ -38,6 +38,20 @@ COMPACTION_REASONING_HINTS = (
     "output format",
 )
 COMPACTION_REASONING_START = "thinking process"
+TOOL_CALL_DELTA_TYPES = {
+    "tool_call",
+    "tool_call_chunk",
+    "tool-call",
+    "tool-call-chunk",
+    "tool-call-delta",
+    "tool_call_delta",
+    "function_call",
+    "function_call_chunk",
+    "function_call_delta",
+    "function-call",
+    "function-call-chunk",
+    "function-call-delta",
+}
 
 
 async def consume_messages(
@@ -121,6 +135,8 @@ async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
             reasoning_filter.push(str(delta.get("reasoning") or delta.get("text") or ""))
         elif delta_type == "text-delta":
             text_filter.push(str(delta.get("text") or ""))
+        elif is_tool_call_delta(delta_type):
+            _call_renderer(renderer, "model_activity")
 
     reasoning_filter.finish()
     text_filter.finish()
@@ -227,7 +243,14 @@ def event_delta(event: Any) -> dict[str, Any]:
             return {"type": "text-delta", "text": block.get("text", "")}
         if block_type == "reasoning":
             return {"type": "reasoning-delta", "reasoning": block.get("reasoning", "")}
+        if is_tool_call_delta(str(block_type or "")):
+            return {"type": "tool-call-delta"}
     return {}
+
+
+def is_tool_call_delta(delta_type: str) -> bool:
+    """Return whether a raw message delta represents tool-call JSON streaming."""
+    return delta_type in TOOL_CALL_DELTA_TYPES
 
 
 def is_compaction_reasoning(text: str) -> bool:

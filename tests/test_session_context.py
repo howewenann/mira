@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from session import context
-from session.dashboard import apply_context_usage, apply_turn_usage
+from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
@@ -178,6 +178,20 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         apply_turn_usage(record, compacted_result, model_name="lmstudio:qwen", context_limit_tokens=10000)
         self.assertEqual(record["dashboard"]["context"]["used_tokens"], 8300)
+
+    def test_dashboard_limit_source_does_not_claim_context_usage(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+
+        ensure_dashboard(
+            record,
+            model_name="lmstudio:qwen",
+            context_limit_tokens=10000,
+            context_limit_source="lmstudio.api.v1.loaded_instance",
+        )
+
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 0)
+        self.assertEqual(record["dashboard"]["context"]["limit_tokens"], 10000)
+        self.assertEqual(record["dashboard"]["context"]["source"], "unknown")
 
     def test_title_uses_recent_topic(self) -> None:
         record = {"title": "Untitled session", "events": []}

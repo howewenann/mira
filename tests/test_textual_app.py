@@ -262,6 +262,56 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("working...", rendered)
             app.busy = False
 
+    async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
+        """Tool-call JSON chunks should show activity instead of silent waiting."""
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+
+            app.waiting_started()
+            await pilot.pause(0.03)
+            app.model_activity()
+            await pilot.pause(0.08)
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("preparing tool call...", rendered)
+            self.assertNotIn("working...", rendered)
+
+            app.tool_call("ls", {"path": "/"}, call_id="call-1")
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertNotIn("preparing tool call...", rendered)
+            self.assertIn("call:", rendered)
+            app.busy = False
+
+    async def test_unknown_context_usage_renders_pending(self) -> None:
+        """A context limit without provider usage should not pretend to be measured."""
+        session = {
+            "id": "thread-pending",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "events": [],
+        }
+        app = make_app(
+            session=session,
+            context_limit_tokens=10000,
+            context_limit_source="lmstudio.api.v1.loaded_instance",
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            status = renderable_plain(app.query_one("#status", Static))
+            self.assertIn("pending", status)
+            self.assertIn("?/10.0k", status)
+            self.assertNotIn("14/10.0k", status)
+
     async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
         """Leading blank assistant deltas should be ignored until real text arrives."""
         app = make_app()

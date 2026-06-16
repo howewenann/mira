@@ -365,6 +365,13 @@ class MiraApp(App[None]):
         self._main_stream_active = True
         self.query_one(ChatLog).text_delta(delta)
 
+    def model_activity(self) -> None:
+        """Render transient activity for streamed non-text model output."""
+        self.waiting_finished()
+        self._main_stream_active = True
+        self.query_one(ChatLog).model_activity()
+        self._set_status(state="running", detail="preparing tool call...")
+
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Render a tool call in transcript order."""
         self._main_stream_active = False

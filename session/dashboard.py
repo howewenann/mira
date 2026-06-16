@@ -89,8 +89,6 @@ def apply_turn_usage(
 
     if context_limit_tokens:
         context["limit_tokens"] = positive_int(context_limit_tokens)
-        if context_limit_source and context_limit_source != "unknown":
-            context["source"] = context_limit_source
 
     context["percent"] = context_percent(context["used_tokens"], context["limit_tokens"])
     update_duration(record)
@@ -146,8 +144,6 @@ def ensure_dashboard(
             dashboard["context"]["used_tokens"],
             dashboard["context"]["limit_tokens"],
         )
-        if context_limit_source and context_limit_source != "unknown":
-            dashboard["context"]["source"] = context_limit_source
 
     record["dashboard"] = dashboard
     update_duration(record)

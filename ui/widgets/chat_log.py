@@ -33,6 +33,7 @@ class ChatLog(VerticalScroll):
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
+        self._activity_block: Static | None = None
         self._startup_block: Static | None = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -130,6 +131,7 @@ class ChatLog(VerticalScroll):
         if not cleaned:
             return
         self.hide_waiting()
+        self.hide_model_activity()
 
         if self._reasoning_block is None:
             self._reasoning_text = ""
@@ -145,6 +147,7 @@ class ChatLog(VerticalScroll):
         if not delta:
             return
         self.hide_waiting()
+        self.hide_model_activity()
 
         if self._assistant_block is None:
             self._assistant_text = ""
@@ -156,6 +159,7 @@ class ChatLog(VerticalScroll):
 
     def finish_main(self) -> None:
         """Close the current streamed blocks so the next turn starts fresh."""
+        self.hide_model_activity()
         self._assistant_block = None
         self._assistant_text = ""
         self._reasoning_block = None
@@ -163,16 +167,19 @@ class ChatLog(VerticalScroll):
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Append a system, info, status, warning, or error message."""
+        self.hide_model_activity()
         title = "mira" if kind == "startup" else kind
         self._add_block(title, Text(text), f"message {kind}")
 
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
+        self.hide_model_activity()
         self._add_block("output", renderable, "message command")
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
         self.hide_waiting()
+        self.hide_model_activity()
         self.finish_main()
         self._compaction_running = True
         text = self._render_compaction()
@@ -202,6 +209,7 @@ class ChatLog(VerticalScroll):
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Append a coordinator-level tool call in transcript order."""
         self.hide_waiting()
+        self.hide_model_activity()
         self.finish_main()
         key = self._tool_key(name, call_id)
         block = self._tool_blocks.get(key)
@@ -224,6 +232,7 @@ class ChatLog(VerticalScroll):
         if not result:
             return
         self.hide_waiting()
+        self.hide_model_activity()
         self.finish_main()
         key = self._resolve_tool_key(name, call_id)
         if key is None:
@@ -240,6 +249,7 @@ class ChatLog(VerticalScroll):
             return
 
         self.hide_waiting()
+        self.hide_model_activity()
         self.finish_main()
         text = Text()
         label = "subagent" if len(descriptions) == 1 else "subagents"
@@ -294,6 +304,7 @@ class ChatLog(VerticalScroll):
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         """Create or replace the block for a running subagent."""
         self.hide_waiting()
+        self.hide_model_activity()
         self.finish_main()
         subagent = self._subagent_display_label(subagent)
         self._subagent_blocks[subagent] = {
@@ -348,6 +359,7 @@ class ChatLog(VerticalScroll):
         """Remove all chat messages."""
         self.finish_main()
         self._waiting_block = None
+        self._activity_block = None
         self._startup_block = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -368,6 +380,7 @@ class ChatLog(VerticalScroll):
 
     def show_waiting(self) -> None:
         """Show the transient thinking status while MIRA is idle."""
+        self.hide_model_activity()
         text = self._render_waiting()
         if self._waiting_block is None:
             self._waiting_block = self._add_block("mira", text, "message status")
@@ -381,6 +394,23 @@ class ChatLog(VerticalScroll):
             return
         self._waiting_block.remove()
         self._waiting_block = None
+
+    def model_activity(self, text: str = "preparing tool call...") -> None:
+        """Show transient model activity while tool-call JSON is streaming."""
+        self.hide_waiting()
+        renderable = Text(text, style="bold #DCE6FA")
+        if self._activity_block is None:
+            self._activity_block = self._add_block("mira", renderable, "message status")
+            return
+        self._activity_block.update(renderable)
+        self._scroll_to_end()
+
+    def hide_model_activity(self) -> None:
+        """Remove the transient model-activity status block."""
+        if self._activity_block is None:
+            return
+        self._activity_block.remove()
+        self._activity_block = None
 
     def tick_waiting(self) -> None:
         """Advance the spinner on the transient thinking block."""

@@ -55,6 +55,13 @@ def append_context(text: Text, context: Any) -> None:
     if len(text):
         text.append(" | ", style="#6f8389")
     text.append("Ctx ", style="#9fb0b6")
+    if not used:
+        pending_style = "bold #7D9BD1"
+        text.append(context_bar(0), style=pending_style)
+        text.append(" pending ", style=pending_style)
+        text.append(f"(?/{compact_count(limit) if limit else '?'})", style="#b8c3c7")
+        return
+
     text.append(context_bar(percent), style=style)
     text.append(f" {percent:.0f}% ", style=style)
     text.append(f"({compact_count(used)}/{compact_count(limit) if limit else '?'})", style="#b8c3c7")

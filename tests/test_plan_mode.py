@@ -673,11 +673,12 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(pre_generation_state["tokens"], {"in": 0, "out": 0})
-        self.assertEqual(pre_generation_state["context"]["used_tokens"], 900)
+        self.assertEqual(pre_generation_state["context"]["used_tokens"], 0)
+        self.assertEqual(pre_generation_state["context"]["limit_tokens"], 1000)
         self.assertEqual(session["dashboard"]["tokens"], {"in": 8200, "out": 1424})
         self.assertEqual(session["dashboard"]["context"]["used_tokens"], 9624)
         self.assertEqual(session["turns"], 1)
-        self.assertEqual(renderer.usage_updates, 2)
+        self.assertEqual(renderer.usage_updates, 1)
         self.assertEqual(store.saves[-1]["turns"], 1)
 
     async def test_run_user_turn_does_not_save_blocked_plan(self) -> None:
