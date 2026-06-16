@@ -143,6 +143,32 @@ class DoubleSubscribeToolCall:
         return self.output_deltas.__aiter__()
 
 
+class AsyncToolCallList:
+    """Tool call list that streams chunks before exposing finalized calls."""
+
+    def __init__(self, calls: list[Any], chunks: list[Any] | None = None) -> None:
+        self.calls = calls
+        self.chunks = chunks or [{}]
+
+    async def __aiter__(self) -> Any:
+        for chunk in self.chunks:
+            yield chunk
+
+    def get(self) -> list[Any]:
+        return self.calls
+
+
+class BlockingReasoning:
+    """Reasoning stream that stays open until released."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def __aiter__(self) -> Any:
+        yield "Thinking about delegation."
+        await self.release.wait()
+
+
 class Subagent:
     """Fake subagent with a final message shaped like DeepAgents output."""
 
@@ -204,6 +230,12 @@ class RecordingRenderer:
 
     def model_activity(self) -> None:
         self.events.append(("model_activity",))
+
+    def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        self.events.append(("tool_call_delta", name, args, call_id))
+
+    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
+        self.events.append(("delegation_delta", calls))
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.events.append(("tool_call", name, args, call_id))
@@ -987,7 +1019,7 @@ Await further instructions.
             ],
         )
 
-    async def test_raw_tool_call_chunks_report_model_activity_without_tool_call(self) -> None:
+    async def test_raw_tool_call_chunks_render_draft_without_final_tool_call(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
@@ -1002,7 +1034,166 @@ Await further instructions.
 
         await consume_messages(messages, renderer, render_normal_tools=False)
 
-        self.assertEqual(renderer.events, [("model_activity",), ("model_activity",)])
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call_delta", "ls", '{"path"', "index:0"),
+                ("tool_call_delta", "ls", {"path": "/"}, "index:0"),
+            ],
+        )
+
+    async def test_async_tool_call_field_renders_draft_before_final_call(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    tool_calls=AsyncToolCallList(
+                        [{"name": "read_file", "args": {"path": "README.md"}}],
+                        chunks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-read",
+                                "name": "read_file",
+                                "args": "",
+                                "index": 0,
+                            },
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-read",
+                                "args": '{"path":"README.md"}',
+                                "index": 0,
+                            },
+                        ],
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call_delta", "read_file", {}, "call-read"),
+                ("tool_call_delta", "read_file", {"path": "README.md"}, "call-read"),
+                ("tool_call", "read_file", {"path": "README.md"}, ""),
+            ],
+        )
+
+    async def test_task_tool_call_chunks_render_delegation_draft_before_final_call(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    tool_calls=AsyncToolCallList(
+                        [
+                            {
+                                "id": "call-task",
+                                "name": "task",
+                                "args": {
+                                    "description": "summarize README",
+                                    "subagent_type": "general-purpose",
+                                },
+                            }
+                        ],
+                        chunks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-task",
+                                "name": "task",
+                                "args": '{"description":"summarize',
+                                "index": 0,
+                            },
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-task",
+                                "args": ' README","subagent_type":"general-purpose"}',
+                                "index": 0,
+                            },
+                        ],
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                (
+                    "delegation_delta",
+                    [
+                        {
+                            "type": "tool_call",
+                            "id": "call-task",
+                            "name": "task",
+                            "args": {"description": "summarize"},
+                        }
+                    ],
+                ),
+                (
+                    "delegation_delta",
+                    [
+                        {
+                            "type": "tool_call",
+                            "id": "call-task",
+                            "name": "task",
+                            "args": {
+                                "description": "summarize README",
+                                "subagent_type": "general-purpose",
+                            },
+                        }
+                    ],
+                ),
+                (
+                    "delegation_started",
+                    [
+                        {
+                            "id": "call-task",
+                            "name": "task",
+                            "args": {
+                                "description": "summarize README",
+                                "subagent_type": "general-purpose",
+                            },
+                        }
+                    ],
+                ),
+            ],
+        )
+
+    async def test_tool_call_chunks_stream_while_reasoning_stream_is_open(self) -> None:
+        renderer = RecordingRenderer()
+        reasoning = BlockingReasoning()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=reasoning,
+                    tool_calls=AsyncToolCallList(
+                        [{"id": "call-read", "name": "read_file", "args": {"path": "README.md"}}],
+                        chunks=[
+                            {
+                                "type": "tool_call_chunk",
+                                "id": "call-read",
+                                "name": "read_file",
+                                "args": '{"path":"README.md"}',
+                                "index": 0,
+                            }
+                        ],
+                    ),
+                )
+            ]
+        )
+
+        task = asyncio.create_task(consume_messages(messages, renderer))
+        for _ in range(20):
+            if any(event[0] == "tool_call_delta" for event in renderer.events):
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertIn(("tool_call_delta", "read_file", {"path": "README.md"}, "call-read"), renderer.events)
+        reasoning.release.set()
+        await task
 
     async def test_raw_compaction_reasoning_is_hidden_behind_status(self) -> None:
         renderer = RecordingRenderer()

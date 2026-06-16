@@ -26,7 +26,7 @@ class SessionRecorder:
         self._last_assistant_id: int | None = None
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
-        self._running_subagents: set[str] = set()
+        self._running_subagents: dict[str, str] = {}
 
     def save(self) -> None:
         self.store.save(self.record)
@@ -82,7 +82,7 @@ class SessionRecorder:
 
     def subagent_started(self, name: str, task_input: str = "") -> None:
         self.finish_main()
-        self._running_subagents.add(name)
+        self._running_subagents[name] = task_input
         append_event(
             self.record,
             {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input},
@@ -90,18 +90,32 @@ class SessionRecorder:
         self.save()
 
     def subagent_finished(self, name: str, output: str = "") -> None:
-        self._running_subagents.discard(name)
+        task_input = self._running_subagents.pop(name, "")
         append_event(
             self.record,
-            {"type": "subagent", "mode": self.mode, "name": name, "status": "DONE", "output": output},
+            {
+                "type": "subagent",
+                "mode": self.mode,
+                "name": name,
+                "status": "DONE",
+                "task_input": task_input,
+                "output": output,
+            },
         )
         self.save()
 
     def subagent_cancelled(self, name: str, output: str = "") -> None:
-        self._running_subagents.discard(name)
+        task_input = self._running_subagents.pop(name, "")
         append_event(
             self.record,
-            {"type": "subagent", "mode": self.mode, "name": name, "status": "CANCELLED", "output": output},
+            {
+                "type": "subagent",
+                "mode": self.mode,
+                "name": name,
+                "status": "CANCELLED",
+                "task_input": task_input,
+                "output": output,
+            },
         )
         self.save()
 
@@ -173,6 +187,24 @@ class RecordingRenderer:
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.renderer.delegation_started(calls)
         self.recorder.delegation_started(calls)
+
+    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
+        callback = getattr(self.renderer, "delegation_delta", None)
+        if callable(callback):
+            callback(calls)
+            return
+        activity = getattr(self.renderer, "model_activity", None)
+        if callable(activity):
+            activity()
+
+    def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        callback = getattr(self.renderer, "tool_call_delta", None)
+        if callable(callback):
+            callback(name, args, call_id=call_id)
+            return
+        activity = getattr(self.renderer, "model_activity", None)
+        if callable(activity):
+            activity()
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         self.renderer.subagent_started(subagent, task_input)

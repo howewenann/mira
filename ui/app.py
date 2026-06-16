@@ -92,6 +92,9 @@ class MiraApp(App[None]):
         self._waiting_task: Any | None = None
         self._waiting_generation = 0
         self._waiting_delay_seconds = 0.8
+        self._stream_idle_task: Any | None = None
+        self._stream_idle_generation = 0
+        self._stream_idle_delay_seconds = 1.0
         self._main_stream_active = False
 
     def compose(self) -> ComposeResult:
@@ -356,39 +359,58 @@ class MiraApp(App[None]):
     def reasoning_delta(self, delta: str) -> None:
         """Render streamed reasoning text."""
         self.waiting_finished()
-        self._main_stream_active = True
+        self._mark_main_stream_active()
         self.query_one(ChatLog).reasoning_delta(delta)
 
     def text_delta(self, delta: str) -> None:
         """Render streamed assistant text."""
         self.waiting_finished()
-        self._main_stream_active = True
+        self._mark_main_stream_active()
         self.query_one(ChatLog).text_delta(delta)
 
     def model_activity(self) -> None:
         """Render transient activity for streamed non-text model output."""
         self.waiting_finished()
-        self._main_stream_active = True
+        self._mark_main_stream_active()
         self.query_one(ChatLog).model_activity()
         self._set_status(state="running", detail="preparing tool call...")
 
+    def model_stream_finished(self) -> None:
+        """Re-arm waiting UI after streamed model text/reasoning goes quiet."""
+        self._finish_main_stream_activity()
+        self._rearm_waiting_if_busy()
+
+    def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        """Render a live draft of streamed tool-call input."""
+        self.waiting_finished()
+        self._mark_main_stream_active()
+        self.query_one(ChatLog).tool_call_delta(name, args, call_id=call_id)
+        self._set_status(state="running", detail="preparing tool call...")
+
+    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
+        """Render a live draft of streamed task delegation input."""
+        self.waiting_finished()
+        self._mark_main_stream_active()
+        self.query_one(ChatLog).delegation_delta(calls)
+        self._set_status(state="running", detail="preparing subagent request...")
+
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Render a tool call in transcript order."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).tool_call(name, args, call_id=call_id)
         self._rearm_waiting_if_busy()
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render a tool result in transcript order."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).tool_result(name, result, call_id=call_id)
         self._rearm_waiting_if_busy()
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Render task delegation summary."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).delegation_started(calls)
         self._rearm_waiting_if_busy()
@@ -415,27 +437,27 @@ class MiraApp(App[None]):
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         """Render a subagent start."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_started(subagent, task_input)
         self._rearm_waiting_if_busy()
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Render a subagent finish."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_finished(subagent, result)
         self._rearm_waiting_if_busy()
 
     def subagent_cancelled(self, subagent: str, result: str = "") -> None:
         """Render a subagent cancellation."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_cancelled(subagent, result)
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
-        self._main_stream_active = False
+        self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
@@ -586,6 +608,48 @@ class MiraApp(App[None]):
             return
         task.cancel()
         self._waiting_task = None
+
+    def _mark_main_stream_active(self) -> None:
+        """Track visible streaming activity and arm the idle watchdog."""
+        self._main_stream_active = True
+        self._stream_idle_generation += 1
+        self._cancel_stream_idle_task()
+        generation = self._stream_idle_generation
+        self._stream_idle_task = asyncio.create_task(
+            self._show_waiting_after_stream_idle(generation),
+            name=f"stream-idle-{generation}",
+        )
+
+    def _finish_main_stream_activity(self) -> None:
+        """Stop suppressing waiting UI for the current model stream."""
+        self._main_stream_active = False
+        self._stream_idle_generation += 1
+        self._cancel_stream_idle_task()
+
+    def _cancel_stream_idle_task(self) -> None:
+        """Cancel the pending stream-idle watchdog if one exists."""
+        task = self._stream_idle_task
+        if task is None:
+            return
+        task.cancel()
+        self._stream_idle_task = None
+
+    async def _show_waiting_after_stream_idle(self, generation: int) -> None:
+        """Show working if a still-open stream stops producing visible events."""
+        try:
+            await asyncio.sleep(self._stream_idle_delay_seconds)
+        except asyncio.CancelledError:
+            return
+        if generation != self._stream_idle_generation or not self.busy or not self.is_mounted:
+            return
+        try:
+            if self.query_one(PromptPanel).active:
+                return
+        except NoMatches:
+            return
+        self._main_stream_active = False
+        self._cancel_waiting_task()
+        self.query_one(ChatLog).show_waiting()
 
     def _rearm_waiting_if_busy(self) -> None:
         """Start the silent-wait timer again after a visible runtime event."""

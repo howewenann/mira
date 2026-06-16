@@ -34,6 +34,7 @@ class ChatLog(VerticalScroll):
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
         self._activity_block: Static | None = None
+        self._delegation_draft_block: Static | None = None
         self._startup_block: Static | None = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -114,9 +115,9 @@ class ChatLog(VerticalScroll):
                 self.delegation_started(event["calls"])
             elif event_type == "subagent":
                 if event.get("status") == "DONE":
-                    self.subagent_finished(event["name"], event.get("output", ""))
+                    self.subagent_finished(event["name"], event.get("output", ""), event.get("task_input", ""))
                 elif event.get("status") == "CANCELLED":
-                    self.subagent_cancelled(event["name"], event.get("output", ""))
+                    self.subagent_cancelled(event["name"], event.get("output", ""), event.get("task_input", ""))
                 else:
                     self.subagent_started(event["name"], event.get("task_input", ""))
             elif event_type == "compaction":
@@ -211,20 +212,39 @@ class ChatLog(VerticalScroll):
         self.hide_waiting()
         self.hide_model_activity()
         self.finish_main()
-        key = self._tool_key(name, call_id)
+        key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
         if block is None:
             widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
-            block = {"name": name, "args": args, "result": "", "widget": widget}
+            block = {"name": name, "args": args, "result": "", "widget": widget, "draft": False}
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
         else:
             block["name"] = name
             block["args"] = args
+            block["draft"] = False
 
         pending = self._take_pending_tool_result(name, call_id)
         if pending:
             block["result"] = pending
+        self._update_tool_block(key)
+
+    def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        """Create or update a live draft of a streamed tool call."""
+        self.hide_waiting()
+        self.hide_model_activity()
+        self.finish_main()
+        key = self._tool_update_key(name, call_id)
+        block = self._tool_blocks.get(key)
+        if block is None:
+            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
+            block = {"name": name, "args": args, "result": "", "widget": widget, "draft": True}
+            self._tool_blocks[key] = block
+            self._tool_name_queues[name].append(key)
+        else:
+            block["name"] = name
+            block["args"] = args
+            block["draft"] = True
         self._update_tool_block(key)
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
@@ -244,23 +264,35 @@ class ChatLog(VerticalScroll):
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Append a compact task delegation summary."""
-        descriptions, errors = self._delegation_details(calls)
-        if not descriptions and not errors:
+        text = self._render_delegation(calls, draft=False)
+        if text is None:
             return
 
         self.hide_waiting()
         self.hide_model_activity()
         self.finish_main()
-        text = Text()
-        label = "subagent" if len(descriptions) == 1 else "subagents"
-        if descriptions:
-            text.append(f"delegating to {len(descriptions)} {label}\n", style="bold yellow")
-        for description in descriptions:
-            text.append("request: ", style="bold cyan")
-            text.append(self.truncate(description) + "\n")
-        for error in errors:
-            text.append(f"failed: {error}\n", style="red")
+        if self._delegation_draft_block is not None:
+            self._delegation_draft_block.update(text)
+            self._scroll_to_end()
+            self._delegation_draft_block = None
+            return
         self._add_block("task", text, "message delegation")
+
+    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
+        """Create or update a live draft of streamed task delegation input."""
+        text = self._render_delegation(calls, draft=True)
+        if text is None:
+            self.model_activity()
+            return
+
+        self.hide_waiting()
+        self.hide_model_activity()
+        self.finish_main()
+        if self._delegation_draft_block is None:
+            self._delegation_draft_block = self._add_block("task", text, "message delegation")
+            return
+        self._delegation_draft_block.update(text)
+        self._scroll_to_end()
 
     def start_subagent_live(self) -> None:
         """Reset subagent state for a new delegation group."""
@@ -315,34 +347,38 @@ class ChatLog(VerticalScroll):
         widget = self._add_block(f"subagent - {subagent}", self._render_subagent(subagent), "message subagent")
         self._subagent_widgets[subagent] = widget
 
-    def subagent_finished(self, subagent: str, result: str = "") -> None:
+    def subagent_finished(self, subagent: str, result: str = "", task_input: str = "") -> None:
         """Mark a subagent block as done and attach its final output."""
         self.hide_waiting()
         subagent = self._subagent_display_label(subagent)
         block = self._subagent_blocks.setdefault(
             subagent,
             {
-                "request": "",
+                "request": task_input,
                 "status": "RUNNING",
                 "output": "",
             },
         )
+        if task_input and not block.get("request"):
+            block["request"] = task_input
         block["status"] = "DONE"
         block["output"] = result
         self._update_subagent(subagent)
 
-    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+    def subagent_cancelled(self, subagent: str, result: str = "", task_input: str = "") -> None:
         """Mark a subagent block as cancelled."""
         self.hide_waiting()
         subagent = self._subagent_display_label(subagent)
         block = self._subagent_blocks.setdefault(
             subagent,
             {
-                "request": "",
+                "request": task_input,
                 "status": "RUNNING",
                 "output": "",
             },
         )
+        if task_input and not block.get("request"):
+            block["request"] = task_input
         block["status"] = "CANCELLED"
         block["output"] = result
         self._update_subagent(subagent)
@@ -360,6 +396,7 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         self._waiting_block = None
         self._activity_block = None
+        self._delegation_draft_block = None
         self._startup_block = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -480,6 +517,25 @@ class ChatLog(VerticalScroll):
                 errors.append(f"missing description in args: {str(args)[:60]}")
         return descriptions, errors
 
+    def _render_delegation(self, calls: list[dict[str, Any]], *, draft: bool) -> Text | None:
+        """Render a task delegation summary or live draft."""
+        descriptions, errors = self._delegation_details(calls)
+        if not descriptions and not errors:
+            return None
+
+        text = Text()
+        label = "subagent" if len(descriptions) == 1 else "subagents"
+        if descriptions:
+            verb = "preparing" if draft else "delegating to"
+            text.append(f"{verb} {len(descriptions)} {label}\n", style="bold yellow")
+        for description in descriptions:
+            text.append("request: ", style="bold cyan")
+            text.append(self.truncate(description) + "\n")
+        if not draft:
+            for error in errors:
+                text.append(f"failed: {error}\n", style="red")
+        return text
+
     def _compaction_text(self, compaction: dict[str, Any]) -> Text:
         """Render a DeepAgents compaction marker."""
         text = Text()
@@ -562,6 +618,22 @@ class ChatLog(VerticalScroll):
             return f"id:{call_id}"
         return f"name:{name}:{next(self._tool_sequence)}"
 
+    def _tool_update_key(self, name: str, call_id: str = "") -> str:
+        if call_id:
+            return f"id:{call_id}"
+        draft_key = self._oldest_draft_tool_key(name)
+        return draft_key or self._tool_key(name, call_id)
+
+    def _oldest_draft_tool_key(self, name: str) -> str | None:
+        queue = self._tool_name_queues.get(name)
+        if not queue:
+            return None
+        for key in queue:
+            block = self._tool_blocks.get(key)
+            if block is not None and block.get("draft") and not block.get("result"):
+                return key
+        return None
+
     def _resolve_tool_key(self, name: str, call_id: str = "") -> str | None:
         if call_id:
             key = f"id:{call_id}"
@@ -605,7 +677,8 @@ class ChatLog(VerticalScroll):
     def _update_tool_block(self, key: str) -> None:
         block = self._tool_blocks[key]
         text = Text()
-        text.append("call: ", style="bold cyan")
+        label = "draft" if block.get("draft") else "call"
+        text.append(f"{label}: ", style="bold cyan")
         text.append(self.truncate(block["args"]))
         if block.get("result"):
             text.append("\n")

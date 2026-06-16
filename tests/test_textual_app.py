@@ -262,6 +262,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("working...", rendered)
             app.busy = False
 
+    async def test_waiting_reappears_after_reasoning_stream_goes_quiet(self) -> None:
+        """After reasoning goes idle, silent tool-call preparation should show working."""
+        app = make_app()
+        app._stream_idle_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+
+            app.reasoning_delta("I should delegate this.")
+            await pilot.pause(0.08)
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("I should delegate this.", rendered)
+            self.assertIn("working...", rendered)
+            app.busy = False
+
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
         """Tool-call JSON chunks should show activity instead of silent waiting."""
         app = make_app()
@@ -945,6 +962,55 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             text = renderable_plain(blocks[-1])
             self.assertIn("call:", text)
             self.assertIn("output:", text)
+
+    async def test_tool_call_delta_updates_in_place_when_final_call_arrives(self) -> None:
+        """Draft tool-call args should finalize in the same transcript block."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.tool_call_delta("read_file", {"path": "REA"}, call_id="call-read")
+            await pilot.pause()
+            draft_blocks = list(app.query_one(ChatLog).children)
+            draft = renderable_plain(draft_blocks[-1])
+            self.assertIn("draft:", draft)
+            self.assertIn("REA", draft)
+
+            app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+            await pilot.pause()
+            final_blocks = list(app.query_one(ChatLog).children)
+            final = renderable_plain(final_blocks[-1])
+
+            self.assertEqual(len(final_blocks), len(draft_blocks))
+            self.assertIn("call:", final)
+            self.assertNotIn("draft:", final)
+            self.assertIn("README.md", final)
+
+    async def test_delegation_delta_updates_in_place_when_final_call_arrives(self) -> None:
+        """Draft task requests should finalize in the same transcript block."""
+        app = make_app()
+        draft_call = [{"name": "task", "args": {"description": "summarize"}}]
+        final_call = [{"name": "task", "args": {"description": "summarize README"}}]
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_delta(draft_call)
+            await pilot.pause()
+            draft_blocks = list(app.query_one(ChatLog).children)
+            draft = renderable_plain(draft_blocks[-1])
+            self.assertIn("preparing 1 subagent", draft)
+            self.assertIn("summarize", draft)
+
+            app.delegation_started(final_call)
+            await pilot.pause()
+            final_blocks = list(app.query_one(ChatLog).children)
+            final = renderable_plain(final_blocks[-1])
+
+            self.assertEqual(len(final_blocks), len(draft_blocks))
+            self.assertIn("delegating to 1 subagent", final)
+            self.assertIn("summarize README", final)
 
     async def test_tool_result_waits_for_call_and_then_attaches(self) -> None:
         """Out-of-order tool results should attach once the tool call is rendered."""

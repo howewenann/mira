@@ -277,6 +277,22 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "hello")
 
+    def test_recorder_preserves_subagent_request_on_terminal_events(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.subagent_started("general-purpose [one]", "summarize README")
+        recorder.subagent_finished("general-purpose [one]", "done")
+        recorder.subagent_started("general-purpose [two]", "find tests")
+        recorder.subagent_cancelled("general-purpose [two]", "cancelled")
+
+        subagents = [event for event in context.normalize_events(record["events"]) if event["type"] == "subagent"]
+        self.assertEqual(subagents[1]["status"], "DONE")
+        self.assertEqual(subagents[1]["task_input"], "summarize README")
+        self.assertEqual(subagents[2]["status"], "RUNNING")
+        self.assertEqual(subagents[3]["status"], "CANCELLED")
+        self.assertEqual(subagents[3]["task_input"], "find tests")
+
     async def test_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
         record = {"events": []}
         store = Store()

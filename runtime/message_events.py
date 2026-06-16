@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -71,11 +74,15 @@ async def consume_messages(
         _call_renderer(renderer, "waiting_started")
         if is_raw_message_stream(message):
             await _consume_ordered_message_stream(message, renderer)
+            _call_renderer(renderer, "model_stream_finished")
+            call_list = await _finalized_tool_calls(message, renderer)
         else:
+            call_task = asyncio.create_task(_finalized_tool_calls(message, renderer))
             compacting = await _consume_reasoning(message, renderer)
             await _consume_text(message, renderer, allow_compaction_summary=compacting)
+            _call_renderer(renderer, "model_stream_finished")
+            call_list = await call_task
 
-        call_list = await _finalized_tool_calls(message)
         if call_list:
             _render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
 
@@ -127,6 +134,7 @@ async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
     """Render raw ChatModelStream events in provider order."""
     reasoning_filter = ReasoningFilter(renderer)
     text_filter = TextFilter(renderer, allow_compaction_summary=lambda: reasoning_filter.compacting)
+    tool_drafts = ToolCallDrafts(renderer)
 
     async for event in message:
         delta = event_delta(event)
@@ -136,7 +144,7 @@ async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
         elif delta_type == "text-delta":
             text_filter.push(str(delta.get("text") or ""))
         elif is_tool_call_delta(delta_type):
-            _call_renderer(renderer, "model_activity")
+            tool_drafts.push(event)
 
     reasoning_filter.finish()
     text_filter.finish()
@@ -229,6 +237,144 @@ class TextFilter:
             self.has_output = True
 
 
+class ToolCallDrafts:
+    """Accumulate streamed tool-call argument chunks for live draft rendering."""
+
+    def __init__(self, renderer: Any) -> None:
+        self.renderer = renderer
+        self._calls: dict[str, dict[str, Any]] = {}
+
+    def push(self, chunk: Any) -> None:
+        data = tool_call_chunk_data(chunk)
+        if data is None:
+            _call_renderer(self.renderer, "model_activity")
+            return
+
+        key = data["key"]
+        call = self._calls.setdefault(key, {"id": data["id"], "name": "", "args_raw": ""})
+        if data["id"]:
+            call["id"] = data["id"]
+        if data["name"]:
+            call["name"] = data["name"]
+        if data["replace_args"]:
+            call["args_raw"] = data["args"]
+        elif data["args"]:
+            call["args_raw"] = f"{call.get('args_raw') or ''}{data['args']}"
+
+        name = str(call.get("name") or "")
+        if not name:
+            _call_renderer(self.renderer, "model_activity")
+            return
+
+        draft_call = self._draft_call(call)
+        if name == "task":
+            task_calls = [self._draft_call(value) for value in self._calls.values() if value.get("name") == "task"]
+            if not _call_renderer(self.renderer, "delegation_delta", task_calls):
+                _call_renderer(self.renderer, "model_activity")
+            return
+
+        if not _call_renderer(
+            self.renderer,
+            "tool_call_delta",
+            name,
+            draft_call["args"],
+            call_id=str(call.get("id") or ""),
+        ):
+            _call_renderer(self.renderer, "model_activity")
+
+    def _draft_call(self, call: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "tool_call",
+            "id": str(call.get("id") or ""),
+            "name": str(call.get("name") or "tool"),
+            "args": draft_args(call.get("args_raw", "")),
+        }
+
+
+def tool_call_chunk_data(chunk: Any) -> dict[str, Any] | None:
+    """Return normalized data from a provider tool-call chunk."""
+    source = chunk
+    data = event_delta(chunk) if isinstance(chunk, dict) and ("delta" in chunk or "content_block" in chunk) else chunk
+    if not isinstance(data, dict):
+        return None
+
+    delta_type = str(data.get("type") or "")
+    if delta_type and not is_tool_call_delta(delta_type):
+        return None
+
+    function = data.get("function") if isinstance(data.get("function"), dict) else {}
+    name = data.get("name") or function.get("name") or ""
+    raw_args = first_present(data, "args", "arguments", "input")
+    if raw_args is None:
+        raw_args = first_present(function, "arguments", "args")
+    call_id = str(data.get("id") or data.get("call_id") or data.get("tool_call_id") or "")
+    index = data.get("index")
+
+    if not name and raw_args is None:
+        return None
+
+    if isinstance(raw_args, bytes):
+        args = raw_args.decode("utf-8", errors="replace")
+    elif isinstance(raw_args, str):
+        args = raw_args
+    elif raw_args is None:
+        args = ""
+    else:
+        args = json.dumps(raw_args, ensure_ascii=False)
+
+    key = call_id or (f"index:{index}" if index is not None else "index:0")
+    return {
+        "key": key,
+        "id": call_id or key,
+        "name": str(name),
+        "args": args,
+        "replace_args": isinstance(source, dict) and "content_block" in source,
+    }
+
+
+def first_present(mapping: dict[str, Any], *keys: str) -> Any:
+    """Return the first present key from a mapping, preserving falsey values."""
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def draft_args(raw: Any) -> Any:
+    """Best-effort readable args for incomplete JSON tool-call chunks."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return raw
+    if not raw:
+        return {}
+
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        pass
+
+    fields: dict[str, str] = {}
+    for key in ("description", "subagent_type"):
+        value = partial_json_string_field(raw, key)
+        if value:
+            fields[key] = value
+    if fields:
+        return fields
+    return raw
+
+
+def partial_json_string_field(raw: str, key: str) -> str:
+    """Extract a readable partial JSON string field if the value is incomplete."""
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)', raw)
+    if not match:
+        return ""
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except json.JSONDecodeError:
+        return match.group(1).replace('\\"', '"')
+
+
 def event_delta(event: Any) -> dict[str, Any]:
     """Extract a content delta from LangChain protocol event shapes."""
     if not isinstance(event, dict):
@@ -244,7 +390,13 @@ def event_delta(event: Any) -> dict[str, Any]:
         if block_type == "reasoning":
             return {"type": "reasoning-delta", "reasoning": block.get("reasoning", "")}
         if is_tool_call_delta(str(block_type or "")):
-            return {"type": "tool-call-delta"}
+            return {
+                "type": "tool-call-delta",
+                "id": block.get("id") or block.get("call_id") or block.get("tool_call_id"),
+                "name": block.get("name"),
+                "arguments": block.get("arguments") if "arguments" in block else block.get("args"),
+                "index": block.get("index"),
+            }
     return {}
 
 
@@ -305,11 +457,13 @@ def could_be_compaction_reasoning_start(text: str) -> bool:
     return False
 
 
-def _call_renderer(renderer: Any, method: str) -> None:
+def _call_renderer(renderer: Any, method: str, *args: Any, **kwargs: Any) -> bool:
     """Call an optional renderer method."""
-    callback: Callable[[], None] | None = getattr(renderer, method, None)
-    if callback is not None:
-        callback()
+    callback: Callable[..., None] | None = getattr(renderer, method, None)
+    if callback is None:
+        return False
+    callback(*args, **kwargs)
+    return True
 
 
 async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
@@ -361,20 +515,22 @@ async def _text_deltas(value: Any) -> AsyncIterator[str]:
         yield str(text)
 
 
-async def _finalized_tool_calls(message: Any) -> list[Any]:
+async def _finalized_tool_calls(message: Any, renderer: Any) -> list[Any]:
     """Return the finalized tool-call list for a streamed message."""
     calls = getattr(message, "tool_calls", None)
     if calls is None:
         return []
 
+    tool_drafts = ToolCallDrafts(renderer)
     # Some providers stream tool-call chunks through this field before exposing
     # the final parsed list through get().
     if hasattr(calls, "__aiter__"):
-        async for _ in calls:
-            pass
+        async for chunk in calls:
+            tool_drafts.push(chunk)
 
     finalized = calls.get() if hasattr(calls, "get") else (calls or [])
     if hasattr(finalized, "__await__"):
+        _call_renderer(renderer, "model_activity")
         finalized = await finalized
 
     return list(finalized or [])

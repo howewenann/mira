@@ -162,8 +162,13 @@ async def run_turn(
         if callable(waiting_started):
             waiting_started()
 
+        message_task = asyncio.create_task(
+            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False)
+        )
+        await asyncio.sleep(0)
+
         await asyncio.gather(
-            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False),
+            message_task,
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),
             capture_output(stream.output(), output),
