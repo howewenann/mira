@@ -1012,6 +1012,52 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("delegating to 1 subagent", final)
             self.assertIn("summarize README", final)
 
+    async def test_empty_delegation_delta_renders_info_placeholder(self) -> None:
+        """Empty task drafts should show a live info placeholder, not an empty task box."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_delta([{"id": "task-1", "name": "task", "args": {}}])
+            await pilot.pause()
+            blocks = list(app.query_one(ChatLog).children)
+            block = blocks[-1]
+            rendered = renderable_plain(block)
+
+            self.assertEqual(str(getattr(block, "border_title", "")), "info")
+            self.assertIn("info", block.classes)
+            self.assertIn("preparing subagent tasks...", rendered)
+            self.assertNotIn("request:", rendered)
+
+    async def test_delegation_delta_promotes_info_placeholder_to_task(self) -> None:
+        """The first readable task request should replace the info placeholder in place."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_delta([{"id": "task-1", "name": "task", "args": {}}])
+            await pilot.pause()
+            info_blocks = list(app.query_one(ChatLog).children)
+
+            app.delegation_delta(
+                [
+                    {"id": "task-1", "name": "task", "args": {"description": "scary story"}},
+                    {"id": "task-2", "name": "task", "args": {}},
+                ]
+            )
+            await pilot.pause()
+            task_blocks = list(app.query_one(ChatLog).children)
+            block = task_blocks[-1]
+            rendered = renderable_plain(block)
+
+            self.assertEqual(len(task_blocks), len(info_blocks))
+            self.assertEqual(str(getattr(block, "border_title", "")), "task")
+            self.assertIn("delegation", block.classes)
+            self.assertIn("scary story", rendered)
+            self.assertIn("drafting request...", rendered)
+
     async def test_delegation_started_calls_update_one_task_block(self) -> None:
         """One-by-one task calls should coalesce into one visible task block."""
         app = make_app()

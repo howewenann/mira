@@ -295,7 +295,16 @@ class ChatLog(VerticalScroll):
         """Create or update a live draft of streamed task delegation input."""
         text = self._render_delegation(calls, draft=True)
         if text is None:
-            self.model_activity()
+            self.hide_waiting()
+            self.hide_model_activity()
+            self.finish_main()
+            placeholder = Text("preparing subagent tasks...")
+            if self._delegation_draft_block is None:
+                self._delegation_draft_block = self._add_block("info", placeholder, "message info")
+                return
+            self._style_block(self._delegation_draft_block, title="info", classes="message info")
+            self._delegation_draft_block.update(placeholder)
+            self._scroll_to_end()
             return
 
         self.hide_waiting()
@@ -304,6 +313,7 @@ class ChatLog(VerticalScroll):
         if self._delegation_draft_block is None:
             self._delegation_draft_block = self._add_block("task", text, "message delegation")
             return
+        self._style_block(self._delegation_draft_block, title="task", classes="message delegation")
         self._delegation_draft_block.update(text)
         self._scroll_to_end()
 
@@ -519,6 +529,11 @@ class ChatLog(VerticalScroll):
         self._scroll_to_end()
         return block
 
+    def _style_block(self, block: Static, *, title: str, classes: str) -> None:
+        """Update a transcript block's title and style classes in place."""
+        block.border_title = escape(title)
+        block.set_classes(classes)
+
     def _scroll_to_end(self) -> None:
         """Keep new output visible."""
         self.call_after_refresh(self.scroll_end, animate=False, force=True)
@@ -587,6 +602,8 @@ class ChatLog(VerticalScroll):
         descriptions, errors = self._delegation_details(calls)
         if not descriptions and not errors:
             return None
+        if draft and not descriptions:
+            return None
 
         text = Text()
         label = "subagent" if len(descriptions) == 1 else "subagents"
@@ -596,6 +613,10 @@ class ChatLog(VerticalScroll):
         for description in descriptions:
             text.append("request: ", style="bold cyan")
             text.append(self.truncate(description) + "\n")
+        if draft:
+            for _ in errors:
+                text.append("request: ", style="bold cyan")
+                text.append("drafting request...\n", style="dim")
         if not draft:
             for error in errors:
                 text.append(f"failed: {error}\n", style="red")
