@@ -14,6 +14,7 @@ from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
 from tests.test_runner import COMPACTION_SUMMARY, FakeAgent, FakeStream, Message as StreamMessage, RunTurnRenderer
+from ui.repl import run_user_turn
 
 
 class Snapshot:
@@ -29,6 +30,19 @@ class AgentWithState:
     async def aget_state(self, config: dict[str, Any]) -> Snapshot:
         self.configs.append(config)
         return Snapshot(self.values)
+
+
+class AgentWithFailingState(FakeAgent):
+    async def aget_state(self, config: dict[str, Any]) -> Snapshot:
+        raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
+
+
+class AgentWithFailingTurn:
+    async def astream_events(self, payload: Any, config: dict[str, Any], version: str) -> FakeStream:
+        raise RuntimeError("main turn failed")
+
+    async def aget_state(self, config: dict[str, Any]) -> Snapshot:
+        raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
 
 
 class Store:
@@ -368,6 +382,45 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recorder.ensure_assistant(result.final_text)
 
         self.assertEqual(context.normalize_messages(record["events"]), [])
+
+    async def test_post_success_state_sync_error_does_not_append_system_error(self) -> None:
+        record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        store = Store()
+        agent = AgentWithFailingState([FakeStream(output={"messages": [StreamMessage(text="done")]})])
+
+        result = await run_user_turn(
+            agent=agent,
+            plan_agent=agent,
+            renderer=RunTurnRenderer(),
+            store=store,
+            session=record,
+            mode={"planning": False},
+            text="hello",
+        )
+
+        self.assertEqual(result.final_text, "done")
+        self.assertEqual(record["turns"], 1)
+        self.assertEqual([event["type"] for event in context.normalize_events(record["events"])], ["user", "assistant"])
+
+    async def test_main_turn_failure_still_records_system_error(self) -> None:
+        record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        store = Store()
+        agent = AgentWithFailingTurn()
+
+        with self.assertRaisesRegex(RuntimeError, "main turn failed"):
+            await run_user_turn(
+                agent=agent,
+                plan_agent=agent,
+                renderer=RunTurnRenderer(),
+                store=store,
+                session=record,
+                mode={"planning": False},
+                text="hello",
+            )
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["user", "system_error"])
+        self.assertIn("main turn failed", events[-1]["text"])
 
     def test_resume_context_injects_once(self) -> None:
         record = {

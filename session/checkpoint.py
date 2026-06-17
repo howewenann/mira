@@ -10,6 +10,12 @@ from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import BaseModel
+from pydantic_core import SchemaSerializer, SchemaValidator
+
+try:
+    from pydantic._internal._mock_val_ser import MockValSer
+except Exception:  # pragma: no cover - pydantic private module availability
+    MockValSer = None  # type: ignore[assignment]
 
 
 class MiraJsonPlusSerializer(JsonPlusSerializer):
@@ -22,6 +28,10 @@ class MiraJsonPlusSerializer(JsonPlusSerializer):
             return super().dumps_typed(normalized)
         except Exception:
             return super().dumps_typed(sanitize_checkpoint_value(normalized))
+
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+        """Deserialize checkpoint values and keep risky internals plain."""
+        return normalize_checkpoint_value(super().loads_typed(data))
 
 
 class MiraMemorySaver(MemorySaver):
@@ -52,8 +62,14 @@ def normalize_checkpoint_value(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool | bytes | bytearray):
         return value
 
+    if is_pydantic_serializer_internal(value):
+        return serializer_marker(value)
+
     if isinstance(value, BaseMessage):
-        return normalize_checkpoint_value(value.model_dump())
+        try:
+            return normalize_checkpoint_value(value.model_dump())
+        except Exception:
+            return repr(value)
 
     if isinstance(value, type):
         return type_marker(value)
@@ -84,8 +100,14 @@ def sanitize_checkpoint_value(value: Any) -> Any:
     if value is None or isinstance(value, str | int | float | bool | bytes | bytearray):
         return value
 
+    if is_pydantic_serializer_internal(value):
+        return serializer_marker(value)
+
     if isinstance(value, BaseMessage):
-        return sanitize_checkpoint_value(value.model_dump())
+        try:
+            return sanitize_checkpoint_value(value.model_dump())
+        except Exception:
+            return repr(value)
 
     if isinstance(value, type):
         return type_marker(value)
@@ -112,6 +134,19 @@ def sanitize_checkpoint_value(value: Any) -> Any:
             return repr(value)
 
     return repr(value)
+
+
+def is_pydantic_serializer_internal(value: Any) -> bool:
+    """Return whether value is a Pydantic serializer/validator implementation object."""
+    internal_types = [SchemaSerializer, SchemaValidator]
+    if MockValSer is not None:
+        internal_types.append(MockValSer)
+    return isinstance(value, tuple(internal_types))
+
+
+def serializer_marker(value: Any) -> dict[str, str]:
+    """Return a stable marker for Pydantic serializer/validator internals."""
+    return {"__mira_pydantic_internal__": f"{value.__class__.__module__}.{value.__class__.__qualname__}"}
 
 
 def normalize_mapping_key(value: Any) -> Any:

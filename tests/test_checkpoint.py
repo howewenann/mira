@@ -6,6 +6,7 @@ import unittest
 
 from langchain_core.messages import AIMessage, convert_to_messages
 from pydantic import BaseModel
+from pydantic_core import SchemaSerializer, SchemaValidator
 
 from session.checkpoint import make_checkpointer
 
@@ -14,6 +15,13 @@ class Finding(BaseModel):
     """Small Pydantic model used to exercise schema-class checkpoint values."""
 
     summary: str
+
+
+class BrokenDump:
+    """Object shaped like Pydantic but failing during model_dump."""
+
+    def model_dump(self) -> dict[str, object]:
+        raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
 
 
 class CheckpointTests(unittest.TestCase):
@@ -140,8 +148,48 @@ class CheckpointTests(unittest.TestCase):
         loaded = checkpointer.get_tuple(saved_config)
         self.assertIsNotNone(loaded)
         assert loaded is not None
-        self.assertIn("MockValSer", loaded.checkpoint["channel_values"]["state"]["serializer"])
-        self.assertIn("MockValSer", loaded.pending_writes[0][2]["serializer"])
+        expected = {
+            "__mira_pydantic_internal__": "pydantic._internal._mock_val_ser.MockValSer",
+        }
+        self.assertEqual(loaded.checkpoint["channel_values"]["state"]["serializer"], expected)
+        self.assertEqual(loaded.pending_writes[0][2]["serializer"], expected)
+
+    def test_pydantic_serializer_internals_become_stable_markers(self) -> None:
+        serde = make_checkpointer().serde
+
+        kind, payload = serde.dumps_typed(
+            {
+                "mock": BaseModel.__pydantic_serializer__,
+                "serializer": SchemaSerializer({"type": "any"}),
+                "validator": SchemaValidator({"type": "any"}),
+            }
+        )
+        value = serde.loads_typed((kind, payload))
+
+        self.assertEqual(kind, "msgpack")
+        self.assertEqual(
+            value,
+            {
+                "mock": {
+                    "__mira_pydantic_internal__": "pydantic._internal._mock_val_ser.MockValSer",
+                },
+                "serializer": {
+                    "__mira_pydantic_internal__": "pydantic_core._pydantic_core.SchemaSerializer",
+                },
+                "validator": {
+                    "__mira_pydantic_internal__": "pydantic_core._pydantic_core.SchemaValidator",
+                },
+            },
+        )
+
+    def test_model_dump_schema_serializer_error_is_sanitized(self) -> None:
+        serde = make_checkpointer().serde
+
+        kind, payload = serde.dumps_typed({"broken": BrokenDump()})
+        value = serde.loads_typed((kind, payload))
+
+        self.assertEqual(kind, "msgpack")
+        self.assertIn("BrokenDump", value["broken"])
 
 
 if __name__ == "__main__":
