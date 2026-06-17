@@ -24,9 +24,27 @@ class MiraJsonPlusSerializer(JsonPlusSerializer):
             return super().dumps_typed(sanitize_checkpoint_value(normalized))
 
 
+class MiraMemorySaver(MemorySaver):
+    """MemorySaver that normalizes risky values before checkpoint storage."""
+
+    def put(self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        """Save a checkpoint after normalizing MIRA-owned boundary values."""
+        return super().put(
+            config,
+            normalize_checkpoint_value(checkpoint),
+            normalize_checkpoint_value(metadata),
+            new_versions,
+        )
+
+    def put_writes(self, config: Any, writes: Any, task_id: str, task_path: str = "") -> None:
+        """Save writes after normalizing values that may contain schema objects."""
+        normalized_writes = [(channel, normalize_checkpoint_value(value)) for channel, value in writes]
+        return super().put_writes(config, normalized_writes, task_id, task_path)
+
+
 def make_checkpointer() -> MemorySaver:
     """Create the in-memory LangGraph checkpointer used by both agents."""
-    return MemorySaver(serde=MiraJsonPlusSerializer())
+    return MiraMemorySaver(serde=MiraJsonPlusSerializer())
 
 
 def normalize_checkpoint_value(value: Any) -> Any:

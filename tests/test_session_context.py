@@ -293,6 +293,25 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subagents[3]["status"], "CANCELLED")
         self.assertEqual(subagents[3]["task_input"], "find tests")
 
+    def test_recorder_deduplicates_delegation_events(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.delegation_started(
+            [
+                {"id": "task-1", "name": "task", "args": {"description": "one"}},
+                {"id": "task-2", "name": "task", "args": {"description": "two"}},
+            ]
+        )
+        recorder.delegation_started([{"id": "task-1", "name": "task", "args": {"description": "one"}}])
+        recorder.delegation_started([{"name": "task", "args": {"description": "three", "subagent_type": "general"}}])
+        recorder.delegation_started([{"name": "task", "args": {"description": "three", "subagent_type": "general"}}])
+
+        delegations = [event for event in context.normalize_events(record["events"]) if event["type"] == "delegation"]
+        self.assertEqual(len(delegations), 2)
+        self.assertEqual(len(delegations[0]["calls"]), 2)
+        self.assertEqual(delegations[1]["calls"][0]["args"]["description"], "three")
+
     async def test_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
         record = {"events": []}
         store = Store()

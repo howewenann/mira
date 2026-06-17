@@ -27,6 +27,7 @@ class SessionRecorder:
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
         self._running_subagents: dict[str, str] = {}
+        self._delegation_keys: set[tuple[str, str]] = set()
 
     def save(self) -> None:
         self.store.save(self.record)
@@ -76,9 +77,23 @@ class SessionRecorder:
         self.save()
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+        calls = self._new_delegation_calls(calls)
+        if not calls:
+            return
         self.finish_main()
         append_event(self.record, {"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
         self.save()
+
+    def _new_delegation_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return only task calls that have not already been recorded."""
+        new_calls = []
+        for call in calls:
+            key = delegation_key(call)
+            if key in self._delegation_keys:
+                continue
+            self._delegation_keys.add(key)
+            new_calls.append(call)
+        return new_calls
 
     def subagent_started(self, name: str, task_input: str = "") -> None:
         self.finish_main()
@@ -284,3 +299,32 @@ def json_value(value: Any) -> Any:
         if isinstance(value, list | tuple):
             return [json_value(item) for item in value]
         return str(value)
+
+
+def delegation_key(call: Any) -> tuple[str, str]:
+    """Return a stable key for deduplicating task delegation events."""
+    if isinstance(call, dict):
+        call_id = str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
+        name = str(call.get("name") or call.get("tool_name") or "task")
+        args = call.get("args", call.get("input", {}))
+    else:
+        call_id = str(getattr(call, "id", "") or getattr(call, "call_id", "") or getattr(call, "tool_call_id", "") or "")
+        name = str(getattr(call, "name", "") or getattr(call, "tool_name", "") or "task")
+        args = getattr(call, "args", None)
+        if args is None:
+            args = getattr(call, "input", {})
+
+    if call_id:
+        return ("id", call_id)
+
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (TypeError, json.JSONDecodeError):
+            args = {"raw": args}
+    if not isinstance(args, dict):
+        args = {"raw": str(args)}
+
+    description = str(args.get("description") or "")
+    subagent_type = str(args.get("subagent_type") or "")
+    return ("request", json.dumps([name, description, subagent_type], sort_keys=True))

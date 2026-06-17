@@ -110,6 +110,39 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(kind, "msgpack")
         self.assertEqual(value, {"finding": {"summary": "ok"}})
 
+    def test_checkpointer_survives_pydantic_mock_serializer_values(self) -> None:
+        checkpointer = make_checkpointer()
+        config = {
+            "configurable": {
+                "thread_id": "thread-mock",
+                "checkpoint_ns": "",
+            }
+        }
+        checkpoint = {
+            "v": 4,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "id": "checkpoint-mock",
+            "channel_values": {
+                "state": {"serializer": BaseModel.__pydantic_serializer__},
+            },
+            "channel_versions": {"state": "1"},
+            "versions_seen": {},
+            "pending_sends": [],
+        }
+
+        saved_config = checkpointer.put(config, checkpoint, {}, {"state": "1"})
+        checkpointer.put_writes(
+            saved_config,
+            [("state", {"serializer": BaseModel.__pydantic_serializer__})],
+            "task-mock",
+        )
+
+        loaded = checkpointer.get_tuple(saved_config)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertIn("MockValSer", loaded.checkpoint["channel_values"]["state"]["serializer"])
+        self.assertIn("MockValSer", loaded.pending_writes[0][2]["serializer"])
+
 
 if __name__ == "__main__":
     unittest.main()

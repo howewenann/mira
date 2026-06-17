@@ -186,7 +186,7 @@ def render_tool_calls(
     """Render fallback finalized calls from message projections."""
     normalized = [normalized_call(call) for call in call_list]
     task_calls = [call for call in call_list if tool_call_name(call) == "task"]
-    if task_calls:
+    if render_normal_tools and task_calls:
         renderer.delegation_started(task_calls)
 
     for call in normalized:

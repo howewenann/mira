@@ -143,6 +143,22 @@ class DoubleSubscribeToolCall:
         return self.output_deltas.__aiter__()
 
 
+class BlockingOutput:
+    """Awaitable test double that blocks until released."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.awaited = False
+
+    def __await__(self) -> Any:
+        return self._wait().__await__()
+
+    async def _wait(self) -> str:
+        self.awaited = True
+        await self.release.wait()
+        return "blocked task output"
+
+
 class AsyncToolCallList:
     """Tool call list that streams chunks before exposing finalized calls."""
 
@@ -455,6 +471,38 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_run_turn_uses_tool_calls_as_only_final_task_source(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.messages = AsyncItems(
+            [
+                Message(
+                    [
+                        {"id": "task-1", "name": "task", "args": {"description": "scary"}},
+                        {"id": "task-2", "name": "task", "args": {"description": "funny"}},
+                    ]
+                )
+            ]
+        )
+        stream.tool_calls = AsyncItems(
+            [
+                DocumentedToolCall("task", {"description": "scary"}, call_id="task-1"),
+                DocumentedToolCall("task", {"description": "funny"}, call_id="task-2"),
+            ]
+        )
+        stream.subagents = AsyncItems(
+            [
+                Subagent("general-purpose [one]", [ToolCall("noop", {}, "one")], task_input=""),
+                Subagent("general-purpose [two]", [ToolCall("noop", {}, "two")], task_input=""),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        delegations = [event for event in renderer.events if event[0] == "delegation_started"]
+        self.assertEqual(len(delegations), 1)
+        self.assertEqual([call["id"] for call in delegations[0][1]], ["task-1", "task-2"])
+
     async def test_run_turn_supports_output_interrupt_fallback(self) -> None:
         interrupt = {
             "action_requests": [
@@ -749,6 +797,26 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_task_tool_calls_are_batched_without_waiting_for_output(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        blocked = BlockingOutput()
+        calls = AsyncItems(
+            [
+                DocumentedToolCall("task", {"description": "one"}, output=blocked, call_id="task-1"),
+                DocumentedToolCall("task", {"description": "two"}, call_id="task-2"),
+            ]
+        )
+
+        await consume_tool_calls(calls, renderer, result)
+
+        self.assertFalse(blocked.awaited)
+        self.assertEqual(result.tool_calls, ["task", "task"])
+        self.assertEqual(result.tool_results, [])
+        self.assertEqual(len(renderer.events), 1)
+        self.assertEqual(renderer.events[0][0], "delegation_started")
+        self.assertEqual([call["id"] for call in renderer.events[0][1]], ["task-1", "task-2"])
+
     async def test_tool_call_stream_prefers_documented_error_field(self) -> None:
         renderer = RecordingRenderer()
         calls = AsyncItems(
@@ -807,6 +875,14 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ("tool_call", "read_file", {"path": "README.md"}, ""),
             ],
         )
+
+    async def test_message_finalized_task_calls_are_hidden_in_runner_mode(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message([{"name": "task", "args": {"description": "delegate"}}])])
+
+        await consume_messages(messages, renderer, render_normal_tools=False)
+
+        self.assertEqual(renderer.events, [])
 
     async def test_compaction_reasoning_is_hidden_behind_status(self) -> None:
         renderer = RecordingRenderer()
