@@ -34,7 +34,10 @@ class ChatLog(VerticalScroll):
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
         self._activity_block: Static | None = None
+        self._delegation_block: Static | None = None
         self._delegation_draft_block: Static | None = None
+        self._delegation_calls: list[dict[str, Any]] = []
+        self._delegation_keys: set[tuple[str, str]] = set()
         self._startup_block: Static | None = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -89,6 +92,7 @@ class ChatLog(VerticalScroll):
 
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
+        self._reset_delegation_group()
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
@@ -264,7 +268,11 @@ class ChatLog(VerticalScroll):
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Append a compact task delegation summary."""
-        text = self._render_delegation(calls, draft=False)
+        new_calls = self._new_delegation_calls(calls)
+        if not new_calls:
+            return
+        self._delegation_calls.extend(new_calls)
+        text = self._render_delegation(self._delegation_calls, draft=False)
         if text is None:
             return
 
@@ -274,9 +282,14 @@ class ChatLog(VerticalScroll):
         if self._delegation_draft_block is not None:
             self._delegation_draft_block.update(text)
             self._scroll_to_end()
+            self._delegation_block = self._delegation_draft_block
             self._delegation_draft_block = None
             return
-        self._add_block("task", text, "message delegation")
+        if self._delegation_block is not None:
+            self._delegation_block.update(text)
+            self._scroll_to_end()
+            return
+        self._delegation_block = self._add_block("task", text, "message delegation")
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
         """Create or update a live draft of streamed task delegation input."""
@@ -347,6 +360,19 @@ class ChatLog(VerticalScroll):
         widget = self._add_block(f"subagent - {subagent}", self._render_subagent(subagent), "message subagent")
         self._subagent_widgets[subagent] = widget
 
+    def subagent_request_updated(self, subagent: str, task_input: str) -> None:
+        """Fill request text into an existing running subagent block."""
+        if not task_input:
+            return
+        subagent = self._subagent_display_label(subagent)
+        block = self._subagent_blocks.get(subagent)
+        if block is None:
+            return
+        if block.get("request"):
+            return
+        block["request"] = task_input
+        self._update_subagent(subagent)
+
     def subagent_finished(self, subagent: str, result: str = "", task_input: str = "") -> None:
         """Mark a subagent block as done and attach its final output."""
         self.hide_waiting()
@@ -396,7 +422,7 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         self._waiting_block = None
         self._activity_block = None
-        self._delegation_draft_block = None
+        self._reset_delegation_group()
         self._startup_block = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -516,6 +542,45 @@ class ChatLog(VerticalScroll):
             else:
                 errors.append(f"missing description in args: {str(args)[:60]}")
         return descriptions, errors
+
+    def _new_delegation_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        new_calls = []
+        for call in calls:
+            key = self._delegation_key(call)
+            if key in self._delegation_keys:
+                continue
+            self._delegation_keys.add(key)
+            new_calls.append(call)
+        return new_calls
+
+    def _reset_delegation_group(self) -> None:
+        self._delegation_block = None
+        self._delegation_draft_block = None
+        self._delegation_calls = []
+        self._delegation_keys = set()
+
+    def _delegation_key(self, call: dict[str, Any]) -> tuple[str, str]:
+        call_id = str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
+        if call_id:
+            return ("id", call_id)
+        raw_args = call.get("args", call.get("input", {}))
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except (TypeError, json.JSONDecodeError):
+                raw_args = {"raw": raw_args}
+        args = raw_args if isinstance(raw_args, dict) else {"raw": str(raw_args)}
+        return (
+            "request",
+            json.dumps(
+                [
+                    str(call.get("name") or call.get("tool_name") or "task"),
+                    str(args.get("description") or ""),
+                    str(args.get("subagent_type") or ""),
+                ],
+                sort_keys=True,
+            ),
+        )
 
     def _render_delegation(self, calls: list[dict[str, Any]], *, draft: bool) -> Text | None:
         """Render a task delegation summary or live draft."""

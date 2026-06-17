@@ -27,6 +27,7 @@ class SessionRecorder:
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
         self._running_subagents: dict[str, str] = {}
+        self._running_subagent_event_ids: dict[str, int] = {}
         self._delegation_keys: set[tuple[str, str]] = set()
 
     def save(self) -> None:
@@ -98,14 +99,25 @@ class SessionRecorder:
     def subagent_started(self, name: str, task_input: str = "") -> None:
         self.finish_main()
         self._running_subagents[name] = task_input
-        append_event(
+        event = append_event(
             self.record,
             {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input},
         )
+        self._running_subagent_event_ids[name] = int(event["id"])
         self.save()
+
+    def subagent_request_updated(self, name: str, task_input: str) -> None:
+        if not task_input:
+            return
+        self._running_subagents[name] = task_input
+        event_id = self._running_subagent_event_ids.get(name)
+        if event_id is not None:
+            update_event_field(self.record, event_id, "task_input", task_input)
+            self.save()
 
     def subagent_finished(self, name: str, output: str = "") -> None:
         task_input = self._running_subagents.pop(name, "")
+        self._running_subagent_event_ids.pop(name, None)
         append_event(
             self.record,
             {
@@ -121,6 +133,7 @@ class SessionRecorder:
 
     def subagent_cancelled(self, name: str, output: str = "") -> None:
         task_input = self._running_subagents.pop(name, "")
+        self._running_subagent_event_ids.pop(name, None)
         append_event(
             self.record,
             {
@@ -225,6 +238,12 @@ class RecordingRenderer:
         self.renderer.subagent_started(subagent, task_input)
         self.recorder.subagent_started(subagent, task_input)
 
+    def subagent_request_updated(self, subagent: str, task_input: str) -> None:
+        callback = getattr(self.renderer, "subagent_request_updated", None)
+        if callable(callback):
+            callback(subagent, task_input)
+        self.recorder.subagent_request_updated(subagent, task_input)
+
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         self.renderer.subagent_finished(subagent, result)
         self.recorder.subagent_finished(subagent, result)
@@ -299,6 +318,13 @@ def json_value(value: Any) -> Any:
         if isinstance(value, list | tuple):
             return [json_value(item) for item in value]
         return str(value)
+
+
+def update_event_field(record: dict[str, Any], event_id: int, key: str, value: Any) -> None:
+    for event in record.get("events", []):
+        if isinstance(event, dict) and int(event.get("id") or 0) == event_id:
+            event[key] = value
+            return
 
 
 def delegation_key(call: Any) -> tuple[str, str]:

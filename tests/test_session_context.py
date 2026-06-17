@@ -293,6 +293,20 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subagents[3]["status"], "CANCELLED")
         self.assertEqual(subagents[3]["task_input"], "find tests")
 
+    def test_recorder_updates_blank_running_subagent_request(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.subagent_started("general-purpose [one]", "")
+        recorder.subagent_request_updated("general-purpose [one]", "write scary story")
+        recorder.subagent_finished("general-purpose [one]", "done")
+
+        subagents = [event for event in context.normalize_events(record["events"]) if event["type"] == "subagent"]
+        self.assertEqual(subagents[0]["status"], "RUNNING")
+        self.assertEqual(subagents[0]["task_input"], "write scary story")
+        self.assertEqual(subagents[1]["status"], "DONE")
+        self.assertEqual(subagents[1]["task_input"], "write scary story")
+
     def test_recorder_deduplicates_delegation_events(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

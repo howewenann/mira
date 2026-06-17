@@ -1012,6 +1012,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("delegating to 1 subagent", final)
             self.assertIn("summarize README", final)
 
+    async def test_delegation_started_calls_update_one_task_block(self) -> None:
+        """One-by-one task calls should coalesce into one visible task block."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_started([{"id": "task-1", "name": "task", "args": {"description": "scary story"}}])
+            await pilot.pause()
+            first_blocks = list(app.query_one(ChatLog).children)
+
+            app.delegation_started([{"id": "task-2", "name": "task", "args": {"description": "funny story"}}])
+            await pilot.pause()
+            second_blocks = list(app.query_one(ChatLog).children)
+            final = renderable_plain(second_blocks[-1])
+
+            self.assertEqual(len(second_blocks), len(first_blocks))
+            self.assertIn("delegating to 2 subagents", final)
+            self.assertIn("scary story", final)
+            self.assertIn("funny story", final)
+
+    async def test_subagent_request_update_fills_running_block(self) -> None:
+        """A subagent block that started blank should accept late request text."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.subagent_started("general-purpose [one]", "")
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+            self.assertNotIn("request:", renderable_plain(block))
+
+            app.subagent_request_updated("general-purpose [one]", "write scary story")
+            await pilot.pause()
+
+            text = renderable_plain(block)
+            self.assertIn("request:", text)
+            self.assertIn("write scary story", text)
+
     async def test_tool_result_waits_for_call_and_then_attaches(self) -> None:
         """Out-of-order tool results should attach once the tool call is rendered."""
         app = make_app()

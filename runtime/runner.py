@@ -122,17 +122,27 @@ class SubagentRequestRenderer:
     def __init__(self, renderer: Any) -> None:
         self.renderer = renderer
         self._pending_requests: deque[str] = deque()
+        self._pending_subagents: deque[str] = deque()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
-        self._pending_requests.extend(task_descriptions(calls))
+        for description in task_descriptions(calls):
+            if self._pending_subagents:
+                callback = getattr(self.renderer, "subagent_request_updated", None)
+                if callable(callback):
+                    callback(self._pending_subagents.popleft(), description)
+            else:
+                self._pending_requests.append(description)
         self.renderer.delegation_started(calls)
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
-        self.renderer.subagent_started(subagent, task_input or queued_request)
+        request = task_input or queued_request
+        self.renderer.subagent_started(subagent, request)
+        if not request:
+            self._pending_subagents.append(subagent)
 
 
 async def run_turn(

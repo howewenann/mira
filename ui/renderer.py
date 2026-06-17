@@ -99,6 +99,11 @@ class Renderer:
         details = f"request: {self.truncate(task_input)}" if task_input else "running"
         self._block(f"subagent - {subagent}", details)
 
+    def subagent_request_updated(self, subagent: str, task_input: str) -> None:
+        """Print a late-arriving request for an already-started subagent."""
+        if task_input:
+            self._block(f"subagent - {subagent}", f"request: {self.truncate(task_input)}")
+
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Print a subagent finish."""
         details = "done"

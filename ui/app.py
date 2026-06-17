@@ -439,6 +439,11 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).subagent_started(subagent, task_input)
         self._rearm_waiting_if_busy()
 
+    def subagent_request_updated(self, subagent: str, task_input: str) -> None:
+        """Fill in a subagent request that arrived after the block started."""
+        self.waiting_finished()
+        self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
+
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Render a subagent finish."""
         self._finish_main_stream_activity()

@@ -12,8 +12,6 @@ from runtime.usage import field
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
     """Consume DeepAgents tool-call projections and render starts promptly."""
-    pending_tasks: list[dict[str, Any]] = []
-
     async for call in tool_calls:
         normalized = normalized_call(call)
         name = str(normalized["name"])
@@ -24,11 +22,10 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
 
         if name == "task":
             if is_new_call:
-                pending_tasks.append(normalized)
+                renderer.delegation_started([normalized])
             continue
 
         if is_new_call:
-            flush_task_delegations(renderer, pending_tasks)
             renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
 
         output = await tool_call_output(call)
@@ -41,16 +38,6 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
                 result.tool_results.append(text)
             if name != "task":
                 renderer.tool_result(name, text, call_id=call_id)
-
-    flush_task_delegations(renderer, pending_tasks)
-
-
-def flush_task_delegations(renderer: Any, pending_tasks: list[dict[str, Any]]) -> None:
-    """Render and clear pending task delegations as one group."""
-    if not pending_tasks:
-        return
-    renderer.delegation_started(list(pending_tasks))
-    pending_tasks.clear()
 
 
 async def tool_call_output(call: Any) -> Any:

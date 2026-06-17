@@ -26,6 +26,19 @@ class AsyncItems:
             yield item
 
 
+class DelayedAsyncItems(AsyncItems):
+    """Async iterable that yields after a short delay."""
+
+    def __init__(self, items: list[Any], delay: float = 0.01) -> None:
+        super().__init__(items)
+        self.delay = delay
+
+    async def __aiter__(self) -> Any:
+        await asyncio.sleep(self.delay)
+        async for item in super().__aiter__():
+            yield item
+
+
 COMPACTION_SUMMARY = """## SESSION INTENT
 User requested a story.
 
@@ -274,6 +287,9 @@ class RecordingRenderer:
     def subagent_started(self, name: str, task_input: str = "") -> None:
         self.events.append(("subagent_started", name, task_input))
 
+    def subagent_request_updated(self, name: str, task_input: str) -> None:
+        self.events.append(("subagent_request_updated", name, task_input))
+
     def subagent_finished(self, name: str, result: str = "") -> None:
         self.events.append(("subagent_finished", name, result))
 
@@ -500,8 +516,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
 
         delegations = [event for event in renderer.events if event[0] == "delegation_started"]
-        self.assertEqual(len(delegations), 1)
-        self.assertEqual([call["id"] for call in delegations[0][1]], ["task-1", "task-2"])
+        self.assertEqual(len(delegations), 2)
+        self.assertEqual([event[1][0]["id"] for event in delegations], ["task-1", "task-2"])
+
+    async def test_run_turn_patches_blank_subagent_request_when_task_arrives_late(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.subagents = AsyncItems(
+            [
+                Subagent("general-purpose [one]", [ToolCall("noop", {}, "one")], task_input=""),
+            ]
+        )
+        stream.tool_calls = DelayedAsyncItems(
+            [
+                DocumentedToolCall("task", {"description": "late request"}, call_id="task-1"),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        self.assertIn(("subagent_started", "general-purpose [one]", ""), renderer.events)
+        self.assertIn(("subagent_request_updated", "general-purpose [one]", "late request"), renderer.events)
 
     async def test_run_turn_supports_output_interrupt_fallback(self) -> None:
         interrupt = {
@@ -797,7 +832,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_task_tool_calls_are_batched_without_waiting_for_output(self) -> None:
+    async def test_task_tool_calls_emit_immediately_without_waiting_for_output(self) -> None:
         renderer = RecordingRenderer()
         result = runner.TurnResult()
         blocked = BlockingOutput()
@@ -813,9 +848,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(blocked.awaited)
         self.assertEqual(result.tool_calls, ["task", "task"])
         self.assertEqual(result.tool_results, [])
-        self.assertEqual(len(renderer.events), 1)
-        self.assertEqual(renderer.events[0][0], "delegation_started")
-        self.assertEqual([call["id"] for call in renderer.events[0][1]], ["task-1", "task-2"])
+        self.assertEqual(
+            [event[1][0]["id"] for event in renderer.events if event[0] == "delegation_started"],
+            ["task-1", "task-2"],
+        )
 
     async def test_tool_call_stream_prefers_documented_error_field(self) -> None:
         renderer = RecordingRenderer()
