@@ -12,6 +12,7 @@ from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
 from runtime.tool_events import consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
+from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
 
 
@@ -1141,6 +1142,226 @@ Await further instructions.
                 ("tool_call_delta", "ls", {"path": "/"}, "index:0"),
             ],
         )
+
+    async def test_langchain_block_delta_tool_call_chunk_renders_draft(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "block-delta",
+                                "fields": {
+                                    "type": "tool_call_chunk",
+                                    "id": "call-task",
+                                    "name": "task",
+                                    "args": "",
+                                    "index": 0,
+                                },
+                            },
+                        },
+                        {
+                            "event": "content-block-delta",
+                            "index": 0,
+                            "delta": {
+                                "type": "block-delta",
+                                "fields": {
+                                    "type": "tool_call_chunk",
+                                    "args": '{"description":"write scary","subagent_type":"general-purpose"}',
+                                    "index": 0,
+                                },
+                            },
+                        },
+                    ]
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, render_normal_tools=False)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                (
+                    "delegation_delta",
+                    [
+                        {
+                            "type": "tool_call",
+                            "id": "call-task",
+                            "name": "task",
+                            "args": {},
+                        }
+                    ],
+                ),
+                (
+                    "delegation_delta",
+                    [
+                        {
+                            "type": "tool_call",
+                            "id": "call-task",
+                            "name": "task",
+                            "args": {"description": "write scary", "subagent_type": "general-purpose"},
+                        }
+                    ],
+                ),
+            ],
+        )
+
+    def test_raw_stream_smoke_summary_detects_tool_call_chunk(self) -> None:
+        summary = raw_event_summary(
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": [
+                        {
+                            "event": "content-block-delta",
+                            "delta": {
+                                "type": "tool_call_chunk",
+                                "id": "call-task",
+                                "name": "task",
+                                "args": '{"description":"write scary',
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(summary["method"], "messages")
+        self.assertEqual(summary["payload_kind"], "list:content-block-delta")
+        self.assertEqual(summary["protocol_event"], "content-block-delta")
+        self.assertEqual(summary["delta_type"], "tool_call_chunk")
+        self.assertEqual(
+            summary["tool_like"],
+            {
+                "type": "tool_call_chunk",
+                "id": "call-task",
+                "name": "task",
+                "args_sample": '{"description":"write scary',
+            },
+        )
+
+    def test_raw_stream_smoke_summary_detects_provider_function_call_block(self) -> None:
+        summary = raw_event_summary(
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": ["agent:abc"],
+                    "data": [
+                        {
+                            "event": "content-block-delta",
+                            "content_block": {
+                                "type": "function_call",
+                                "id": "call-read",
+                                "name": "read_file",
+                                "arguments": '{"path":"README.md"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(summary["namespace"], "agent")
+        self.assertEqual(summary["content_block_type"], "function_call")
+        self.assertEqual(summary["tool_like"]["type"], "function_call")
+        self.assertEqual(summary["tool_like"]["name"], "read_file")
+
+    def test_raw_stream_smoke_summary_scans_tuple_payloads(self) -> None:
+        summary = raw_event_summary(
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": (
+                        {
+                            "content_block": {
+                                "type": "function_call",
+                                "id": "call-task",
+                                "name": "task",
+                                "arguments": '{"description":"draft"}',
+                            }
+                        },
+                        {"metadata": "ignored"},
+                    ),
+                },
+            }
+        )
+
+        self.assertEqual(summary["payload_kind"], "tuple:dict")
+        self.assertEqual(summary["tool_like"]["name"], "task")
+        self.assertEqual(summary["tool_like"]["args_sample"], '{"description":"draft"}')
+
+    def test_raw_stream_smoke_summary_samples_opaque_block_delta(self) -> None:
+        summary = raw_event_summary(
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": (
+                        {
+                            "event": "content-block-delta",
+                            "delta": {
+                                "type": "block-delta",
+                                "index": 1,
+                                "args": '{"description":"partial task',
+                            },
+                        },
+                    ),
+                },
+            }
+        )
+
+        self.assertEqual(summary["delta_type"], "block-delta")
+        self.assertEqual(
+            summary["protocol_sample"],
+            {"delta": {"type": "block-delta", "index": "1", "args": '{"description":"partial task'}},
+        )
+
+    def test_sse_chunk_summary_detects_openai_tool_call_arguments(self) -> None:
+        summary = sse_chunk_summary(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-task",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "task",
+                                        "arguments": '{"description":"write story"}',
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(summary["payload_kind"], "chat.completion.chunk")
+        self.assertEqual(summary["delta_keys"], ["tool_calls"])
+        self.assertEqual(
+            summary["tool_like"],
+            {
+                "type": "function",
+                "id": "call-task",
+                "name": "task",
+                "args_sample": '{"description":"write story"}',
+            },
+        )
+
+    def test_sse_chunk_summary_ignores_plain_content_as_tool_call(self) -> None:
+        summary = sse_chunk_summary({"choices": [{"delta": {"content": "hello"}}]})
+
+        self.assertEqual(summary["sample"], "hello")
+        self.assertNotIn("tool_like", summary)
 
     async def test_async_tool_call_field_renders_draft_before_final_call(self) -> None:
         renderer = RecordingRenderer()

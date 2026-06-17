@@ -24,7 +24,7 @@ class ToolCallDrafts:
             return
 
         key = data["key"]
-        call = self._calls.setdefault(key, {"id": data["id"], "name": "", "args_raw": ""})
+        call = self._calls.setdefault(key, {"id": data["id"] or key, "name": "", "args_raw": ""})
         if data["id"]:
             call["id"] = data["id"]
         if data["name"]:
@@ -132,10 +132,10 @@ def tool_call_chunk_data(chunk: Any) -> dict[str, Any] | None:
     else:
         args = json.dumps(raw_args, ensure_ascii=False)
 
-    key = call_id or (f"index:{index}" if index is not None else "index:0")
+    key = f"index:{index}" if index is not None else (call_id or "index:0")
     return {
         "key": key,
-        "id": call_id or key,
+        "id": call_id,
         "name": str(name),
         "args": args,
         "replace_args": isinstance(source, dict) and "content_block" in source,

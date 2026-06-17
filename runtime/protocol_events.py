@@ -33,6 +33,11 @@ def event_delta(event: Any) -> dict[str, Any]:
         return {}
     delta = event.get("delta")
     if isinstance(delta, dict):
+        if delta.get("type") == "block-delta" and isinstance(delta.get("fields"), dict):
+            fields = dict(delta["fields"])
+            if is_tool_call_delta(str(fields.get("type") or "")):
+                fields.setdefault("index", event.get("index"))
+                return fields
         return delta
     block = event.get("content_block")
     if isinstance(block, dict):
