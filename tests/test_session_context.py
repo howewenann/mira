@@ -86,6 +86,54 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded["id"], "custom-session")
         self.assertFalse(re.match(r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$", loaded["id"]))
 
+    def test_session_store_clear_all_deletes_only_session_json(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root)
+            store.save(store.new(session_id="one", workspace=Path("workspace")))
+            store.save(store.new(session_id="two", workspace=Path("workspace")))
+            note = root / "notes.md"
+            note.write_text("keep", encoding="utf-8")
+
+            removed = store.clear_all()
+
+            self.assertEqual(removed, 2)
+            self.assertEqual(list(root.glob("*.json")), [])
+            self.assertEqual(note.read_text(encoding="utf-8"), "keep")
+
+    def test_session_store_clear_compactions_deletes_conversation_history_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mira = Path(directory) / ".mira"
+            store = SessionStore(mira / "_sessions")
+            archive = mira / "conversation_history" / "nested"
+            archive.mkdir(parents=True)
+            first = archive / "one.md"
+            second = mira / "conversation_history" / "two.md"
+            first.write_text("one", encoding="utf-8")
+            second.write_text("two", encoding="utf-8")
+            other = mira / "tools" / "keep.py"
+            other.parent.mkdir()
+            other.write_text("keep", encoding="utf-8")
+
+            removed = store.clear_compactions()
+
+            self.assertEqual(removed, 2)
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+            self.assertEqual(other.read_text(encoding="utf-8"), "keep")
+
+    def test_session_store_delete_one_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            store.save(store.new(session_id="one", workspace=Path("workspace")))
+            store.save(store.new(session_id="two", workspace=Path("workspace")))
+
+            self.assertTrue(store.delete("one"))
+            self.assertFalse(store.delete("missing"))
+
+            self.assertFalse(store.path("one").exists())
+            self.assertTrue(store.path("two").exists())
+
     def test_new_session_shape_is_readable(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
 

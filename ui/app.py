@@ -18,7 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
-from session.dashboard import ensure_dashboard, update_duration
+from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -37,6 +37,9 @@ from ui.widgets.session_history import SessionItem
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
+DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-prompts"}
+DESTRUCTIVE_CONFIRM_HINT = "Press O to confirm, C or Esc to cancel."
+DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
 
 
 class MiraApp(App[None]):
@@ -194,10 +197,16 @@ class MiraApp(App[None]):
         prompt = self.query_one(PromptBox)
         prompt.value = ""
         if not text or not self.ready or self.busy:
+            if text in DESTRUCTIVE_HISTORY_COMMANDS and self.busy:
+                self.system_message("finish the current turn before clearing history", kind="warning")
             self.action_focus_prompt()
             return
 
         self._record_prompt_history(text)
+        if text in DESTRUCTIVE_HISTORY_COMMANDS:
+            self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
+            return
+
         if await handle_command(text, self, self.session, self.model_name, self.mode):
             self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -344,6 +353,127 @@ class MiraApp(App[None]):
     def clear_log(self) -> None:
         """Clear chat output."""
         self.query_one(ChatLog).clear_log()
+
+    async def _run_history_command(self, text: str) -> None:
+        """Run a destructive history command outside the submit event handler."""
+        try:
+            await self._handle_history_command(text)
+            self._set_status(state="ready")
+        except Exception as exc:
+            self.system_message(f"clear history error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.action_focus_prompt()
+
+    async def _handle_history_command(self, text: str) -> bool:
+        """Handle destructive history slash commands with confirmation."""
+        if text not in DESTRUCTIVE_HISTORY_COMMANDS:
+            return False
+        if self.busy:
+            self.system_message("finish the current turn before clearing history", kind="warning")
+            return True
+
+        if text == "/clear-chat":
+            answer = await self._prompt_choice(
+                "Clear Current Chat?",
+                "Clear the saved transcript for this chat? Older chats and prompt history will be kept.\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear chat cancelled", kind="muted")
+                return True
+            self._clear_current_chat()
+            self.system_message("current chat history cleared", kind="info")
+            return True
+
+        if text == "/clear-all-chats":
+            answer = await self._prompt_choice(
+                "Clear All Chats?",
+                "Delete all saved chat sessions and compaction archives for this workspace? Prompt history is kept.\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear all chats cancelled", kind="muted")
+                return True
+            sessions, compactions = self._clear_all_chats()
+            session_suffix = "s" if sessions != 1 else ""
+            compaction_suffix = "s" if compactions != 1 else ""
+            self.system_message(
+                f"cleared {sessions} saved chat session{session_suffix} and "
+                f"{compactions} compaction file{compaction_suffix}",
+                kind="info",
+            )
+            return True
+
+        if text == "/clear-prompts":
+            answer = await self._prompt_choice(
+                "Clear Prompt History?",
+                "Clear prompt up/down history from .mira/history.txt? Saved chat sessions will be kept.\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear prompt history cancelled", kind="muted")
+                return True
+            self._clear_prompt_history()
+            self.system_message("prompt history cleared", kind="info")
+            return True
+
+        return False
+
+    def _clear_current_chat(self) -> None:
+        """Reset the active persisted transcript while keeping the same session id."""
+        self.session["title"] = "Untitled session"
+        self.session["turns"] = 0
+        self.session["events"] = []
+        self.session["dashboard"] = normalize_dashboard(None)
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        if self.store is not None:
+            self.store.save(self.session)
+        self._render_current_session()
+
+    def _clear_all_chats(self) -> tuple[int, int]:
+        """Delete saved session files and keep the active session usable."""
+        sessions = 0
+        compactions = 0
+        if self.store is not None:
+            clear_all = getattr(self.store, "clear_all", None)
+            if callable(clear_all):
+                sessions = int(clear_all())
+            clear_compactions = getattr(self.store, "clear_compactions", None)
+            if callable(clear_compactions):
+                compactions = int(clear_compactions())
+        self._clear_current_chat()
+        return sessions, compactions
+
+    def _clear_prompt_history(self) -> None:
+        """Clear prompt history on disk and in memory."""
+        try:
+            if self.history_path.exists():
+                self.history_path.write_text("", encoding="utf-8")
+            else:
+                self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        finally:
+            self.query_one(PromptBox).set_history([])
+
+    def _render_current_session(self) -> None:
+        """Rebuild visible chat output from the active session."""
+        chat = self.query_one(ChatLog)
+        chat.clear_log()
+        chat.startup(
+            model_name=self.model_name,
+            session_id=self.session["id"],
+            workspace=str(self.session["workspace"]),
+        )
+        chat.restore_session(self.session)
+        self._refresh_sessions()
 
     def plan(self, plan_id: int, text: str) -> None:
         """Display a saved plan."""

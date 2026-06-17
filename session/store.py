@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -91,6 +92,38 @@ class SessionStore:
             return None
 
         return max(paths, key=lambda path: path.stat().st_mtime)
+
+    def delete(self, session_id: str) -> bool:
+        """Delete one saved session JSON file."""
+        path = self.path(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def clear_all(self) -> int:
+        """Delete all saved session JSON files under the session root."""
+        count = 0
+        for path in list(self.root.glob("*.json")):
+            path.unlink()
+            count += 1
+        return count
+
+    def clear_compactions(self) -> int:
+        """Delete saved DeepAgents conversation-history files for this workspace."""
+        root = self.root.parent / "conversation_history"
+        if not root.exists() or not root.is_dir():
+            return 0
+
+        count = 0
+        for path in sorted(root.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+                count += 1
+            elif path.is_dir():
+                with contextlib.suppress(OSError):
+                    path.rmdir()
+        return count
 
     def path(self, session_id: str) -> Path:
         """Return the JSON path for a session id."""

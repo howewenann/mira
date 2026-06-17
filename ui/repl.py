@@ -46,6 +46,9 @@ COMMAND_HELP = {
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
     "/clear": "clear the log",
+    "/clear-chat": "clear the current saved chat transcript in the TUI",
+    "/clear-all-chats": "delete all saved chat sessions in the TUI",
+    "/clear-prompts": "clear prompt input history in the TUI",
     "/exit": "quit MIRA",
 }
 
@@ -258,6 +261,10 @@ async def handle_command(
 
     if text == "/clear":
         clear(renderer)
+        return True
+
+    if text in {"/clear-chat", "/clear-all-chats", "/clear-prompts"}:
+        write_line(renderer, f"{text} is available in the Textual app with confirmation", kind="warning")
         return True
 
     if text == "/plans":

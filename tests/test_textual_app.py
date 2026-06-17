@@ -17,7 +17,7 @@ from textual.widgets import Button, Input, Static, TextArea
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
-from ui.app import MiraApp, append_prompt_history, read_prompt_history
+from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory
 from ui.widgets.session_history import session_label
@@ -28,11 +28,23 @@ class FakeStore:
 
     def __init__(self) -> None:
         self.saves: list[dict[str, Any]] = []
+        self.clear_all_calls = 0
+        self.clear_compactions_calls = 0
 
     def save(self, record: dict[str, Any]) -> None:
         """Ignore session saves."""
         self.saves.append(record)
         return None
+
+    def clear_all(self) -> int:
+        """Record all-session clears."""
+        self.clear_all_calls += 1
+        return 3
+
+    def clear_compactions(self) -> int:
+        """Record compaction archive clears."""
+        self.clear_compactions_calls += 1
+        return 2
 
 
 class FakeWorker:
@@ -56,6 +68,15 @@ def renderable_plain(widget: Any) -> str:
     output = StringIO()
     Console(file=output, force_terminal=False, width=120).print(renderable)
     return output.getvalue()
+
+
+async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
+    """Wait until a UI side effect is visible to the test."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await asyncio.sleep(0.02)
 
 
 def make_app(workspace: Path | None = None, session: dict[str, Any] | None = None, **state_overrides: Any) -> MiraApp:
@@ -99,6 +120,10 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
 
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
+
+    def test_destructive_confirm_choices_match_visible_shortcuts(self) -> None:
+        """Clear confirmations should return the same shortcuts shown in their labels."""
+        self.assertEqual(DESTRUCTIVE_CONFIRM_CHOICES, [("o", "OK (o)"), ("c", "Cancel (c)")])
 
     def test_splash_text_uses_blocky_wordmark_and_logo_width(self) -> None:
         """The startup splash should preserve the old blocky logo structure."""
@@ -850,6 +875,229 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             append_prompt_history(history_path, "second prompt\nwith paste")
 
             self.assertEqual(read_prompt_history(history_path), ["first prompt", "second prompt\nwith paste"])
+
+    async def test_clear_chat_command_cancel_keeps_session(self) -> None:
+        """Cancelling /clear-chat should leave the active saved transcript untouched."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 2,
+            "events": [{"type": "user", "text": "keep me"}],
+        }
+        store = FakeStore()
+        app = make_app(session=session, store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "_prompt_choice", return_value="c"):
+                handled = await app._handle_history_command("/clear-chat")
+            await pilot.pause()
+
+            self.assertTrue(handled)
+            self.assertEqual(app.session["turns"], 2)
+            self.assertEqual(app.session["events"], [{"type": "user", "text": "keep me"}])
+            self.assertEqual(store.saves, [])
+
+    async def test_clear_chat_command_confirm_resets_current_session(self) -> None:
+        """Confirming /clear-chat should clear the current transcript and save it."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 2,
+            "dashboard": {"tokens": {"in": 10, "out": 5}},
+            "events": [{"type": "user", "text": "clear me"}],
+        }
+        store = FakeStore()
+        app = make_app(session=session, store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "_prompt_choice", return_value="o"):
+                handled = await app._handle_history_command("/clear-chat")
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertTrue(handled)
+            self.assertEqual(app.session["turns"], 0)
+            self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.session["dashboard"]["tokens"], {"in": 0, "out": 0})
+            self.assertEqual(len(store.saves), 1)
+            self.assertIn("current chat history cleared", rendered)
+            self.assertNotIn("clear me", rendered)
+
+    async def test_clear_chat_confirmation_accepts_ok_shortcut(self) -> None:
+        """The current-chat clear should visibly support O to confirm."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 1,
+            "events": [{"type": "user", "text": "clear me"}],
+        }
+        store = FakeStore()
+        app = make_app(session=session, store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            task = asyncio.create_task(app.submit_prompt(PromptBox.Submitted(prompt, "/clear-chat")))
+            await pilot.pause()
+            await asyncio.wait_for(task, timeout=2)
+
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            message = renderable_plain(app.query_one("#prompt-panel-message", Static))
+            self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+            self.assertIn("Press O to confirm, C or Esc to cancel.", message)
+
+            await pilot.press("o")
+            await wait_until(lambda: app.session["events"] == [])
+
+            self.assertEqual(app.session["events"], [])
+            self.assertEqual(len(store.saves), 1)
+
+    async def test_clear_all_chats_requires_confirmation_and_keeps_active_clean_session(self) -> None:
+        """The all-chat clear should require confirmation before deleting sessions."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 1,
+            "events": [{"type": "user", "text": "clear all"}],
+        }
+        store = FakeStore()
+        app = make_app(session=session, store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "_prompt_choice", return_value="c"):
+                await app._handle_history_command("/clear-all-chats")
+            self.assertEqual(store.clear_all_calls, 0)
+            self.assertEqual(store.clear_compactions_calls, 0)
+            self.assertEqual(app.session["events"], [{"type": "user", "text": "clear all"}])
+
+            with patch.object(app, "_prompt_choice", return_value="o"):
+                await app._handle_history_command("/clear-all-chats")
+            await pilot.pause()
+
+            self.assertEqual(store.clear_all_calls, 1)
+            self.assertEqual(store.clear_compactions_calls, 1)
+            self.assertEqual(app.session["turns"], 0)
+            self.assertEqual(app.session["events"], [])
+            self.assertGreaterEqual(len(store.saves), 1)
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("cleared 3 saved chat sessions and 2 compaction files", rendered)
+
+    async def test_clear_all_chats_confirmation_accepts_ok_shortcut(self) -> None:
+        """The all-chat confirmation should work from the ok/cancel choice box."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            task = asyncio.create_task(app.submit_prompt(PromptBox.Submitted(prompt, "/clear-all-chats")))
+            await pilot.pause()
+            await asyncio.wait_for(task, timeout=2)
+
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            message = renderable_plain(app.query_one("#prompt-panel-message", Static))
+            self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+            self.assertIn("Press O to confirm, C or Esc to cancel.", message)
+
+            await pilot.press("o")
+            await wait_until(lambda: store.clear_all_calls == 1)
+
+            self.assertEqual(store.clear_all_calls, 1)
+            self.assertEqual(store.clear_compactions_calls, 1)
+
+    async def test_clear_all_chats_confirmation_accepts_cancel_shortcut(self) -> None:
+        """The all-chat confirmation should visibly support C to cancel."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            task = asyncio.create_task(app.submit_prompt(PromptBox.Submitted(prompt, "/clear-all-chats")))
+            await pilot.pause()
+            await asyncio.wait_for(task, timeout=2)
+
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+
+            await pilot.press("c")
+            await wait_until(lambda: not app.query_one(PromptPanel).display)
+
+            self.assertEqual(store.clear_all_calls, 0)
+            self.assertEqual(store.clear_compactions_calls, 0)
+
+    async def test_clear_prompts_confirmation_accepts_escape_cancel(self) -> None:
+        """The prompt-history clear should visibly support Esc to cancel."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            history_path = workspace / ".mira" / "history.txt"
+            history_path.parent.mkdir()
+            history_path.write_text("\n# earlier\n+first prompt\n\n", encoding="utf-8")
+            app = make_app(workspace=workspace)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                task = asyncio.create_task(app.submit_prompt(PromptBox.Submitted(prompt, "/clear-prompts")))
+                await pilot.pause()
+                await asyncio.wait_for(task, timeout=2)
+
+                buttons = list(app.query_one(PromptPanel).query(Button))
+                message = renderable_plain(app.query_one("#prompt-panel-message", Static))
+                self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+                self.assertIn("Press O to confirm, C or Esc to cancel.", message)
+
+                await pilot.press("escape")
+                await wait_until(lambda: not app.query_one(PromptPanel).display)
+
+                self.assertEqual(read_prompt_history(history_path), ["first prompt"])
+
+    async def test_clear_prompts_command_clears_disk_and_prompt_history(self) -> None:
+        """Confirming /clear-prompts should clear history.txt and in-memory prompt history."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            history_path = workspace / ".mira" / "history.txt"
+            history_path.parent.mkdir()
+            history_path.write_text("\n# earlier\n+first prompt\n\n", encoding="utf-8")
+            app = make_app(workspace=workspace)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                self.assertEqual(read_prompt_history(history_path), ["first prompt"])
+
+                with patch.object(app, "_prompt_choice", return_value="o"):
+                    await app._handle_history_command("/clear-prompts")
+                await pilot.pause()
+
+                prompt.value = "draft"
+                prompt.focus()
+                await pilot.press("up")
+                self.assertEqual(history_path.read_text(encoding="utf-8"), "")
+                self.assertEqual(prompt.value, "draft")
+
+    async def test_destructive_history_command_is_refused_while_busy(self) -> None:
+        """Destructive history commands should not run during an active turn."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/clear-chat"))
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("finish the current turn before clearing history", rendered)
+            self.assertEqual(store.saves, [])
 
     def test_action_preview_shows_key_value_rows(self) -> None:
         """Approval previews should show scan-friendly rows with truncated values."""

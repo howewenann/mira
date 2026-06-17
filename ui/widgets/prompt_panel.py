@@ -46,7 +46,7 @@ class PromptPanel(Vertical):
     async def choose(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
         """Show a choice prompt and return the selected value."""
         await self._open("choice", title, message)
-        self._shortcuts = {value.lower(): value for value, _ in choices}
+        self._shortcuts = choice_shortcuts(choices)
         buttons = self.query_one("#prompt-panel-buttons", Horizontal)
         for index, (value, label) in enumerate(choices):
             button_id = f"prompt-choice-{index}"
@@ -199,6 +199,11 @@ class PromptPanel(Vertical):
     def on_key(self, event: Key) -> None:
         """Handle direct shortcuts and cancel keys."""
         if self._mode == "choice":
+            if event.key == "escape":
+                event.stop()
+                self._resolve(None)
+                return
+
             if event.key in {"left", "up"}:
                 event.stop()
                 self._focus_button_offset(-1)
@@ -226,3 +231,17 @@ class PromptPanel(Vertical):
         if self._mode in {"text", "json"} and event.key == "escape":
             event.stop()
             self._resolve(None)
+
+
+def choice_shortcuts(choices: list[tuple[str, str]]) -> dict[str, str]:
+    """Return keyboard shortcuts for choice values and short labels."""
+    shortcuts: dict[str, str] = {}
+    for value, label in choices:
+        value_key = value.lower()
+        if value_key:
+            shortcuts[value_key] = value
+        label_key = label.strip().lower()
+        if label_key:
+            shortcuts.setdefault(label_key, value)
+            shortcuts.setdefault(label_key[0], value)
+    return shortcuts
