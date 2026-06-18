@@ -16,17 +16,12 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
-from rich.table import Table
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from config.settings import (
-    DEFAULT_APPROVAL_TOOLS,
     git_protection_enabled,
     load_settings,
     save_settings,
-    set_git_protection,
-    set_tool_always_allow,
-    tool_always_allow,
 )
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -42,7 +37,7 @@ from ui.interrupts import (
     response_message,
 )
 from ui.repl import handle_command, initial_mode, refresh_agent_specs, run_user_turn
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, StatusBar
+from ui.widgets import ChatLog, ConfigPanel, PromptBox, PromptPanel, SessionHistory, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 
@@ -107,6 +102,7 @@ class MiraApp(App[None]):
         self._waiting_generation = 0
         self._waiting_delay_seconds = 0.8
         self._main_stream_active = False
+        self._config_panel: ConfigPanel | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -441,81 +437,64 @@ class MiraApp(App[None]):
     async def _run_config_command(self) -> None:
         """Run the interactive HITL settings menu."""
         try:
-            await self._handle_config_command()
+            self._handle_config_command()
             self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"config error: {exc}", kind="error")
             self._set_status(state="error")
-        finally:
-            self.action_focus_prompt()
 
-    async def _handle_config_command(self) -> bool:
-        """Prompt through HITL-related settings and persist changes."""
+    def _handle_config_command(self) -> bool:
+        """Mount the interactive HITL settings panel."""
         if self.busy:
             self.system_message("finish the current turn before changing config", kind="warning")
             return True
 
         settings = load_settings(self.workspace)
-        self.command_output(config_table(settings))
-        choices = [("y", "yes"), ("n", "no"), ("s", "skip"), ("d", "done")]
-
-        answer = await self._prompt_choice(
-            "Config",
-            "Git Protection\nEnable Git protection for this workspace?",
-            choices,
+        if self._config_panel is not None and self._config_panel.is_mounted:
+            self._config_panel.remove()
+        panel = ConfigPanel(
+            settings,
+            apply_change=self._apply_config_settings,
+            close_panel=self._close_config_panel,
         )
-        if answer == "d":
-            self.system_message("config unchanged", kind="muted")
-            return True
-        if answer in {"y", "n"}:
-            enabled = answer == "y"
-            settings = set_git_protection(settings, enabled)
-            if not save_settings(self.workspace, settings):
-                self.system_message("could not save .mira/settings.yml", kind="warning")
-                return True
-            self.config = dict(self.config or {})
-            self.config["settings"] = settings
-            if enabled:
-                await self._ensure_git_after_enabling()
-            else:
-                self.system_message("git protection disabled", kind="info")
-
-        for tool_name in config_tool_names(settings):
-            current = "yes" if tool_always_allow(settings, tool_name) else "no"
-            answer = await self._prompt_choice(
-                "Config",
-                f"{tool_name}\nAlways Allow this tool? Current: {current}",
-                choices,
-            )
-            if answer == "d":
-                break
-            if answer not in {"y", "n"}:
-                continue
-            settings = set_tool_always_allow(settings, tool_name, answer == "y")
-            if not save_settings(self.workspace, settings):
-                self.system_message("could not save .mira/settings.yml", kind="warning")
-                return True
-            self.config = dict(self.config or {})
-            self.config["settings"] = settings
-            await self._rebuild_agents()
-            state = "always allowed" if answer == "y" else "requires approval"
-            self.system_message(f"{tool_name}: {state}", kind="info")
-
+        self._config_panel = panel
+        self.query_one(ChatLog).config_panel(panel)
         return True
 
-    async def _ensure_git_after_enabling(self) -> None:
+    async def _apply_config_settings(self, settings: dict[str, Any]) -> tuple[bool, str]:
+        """Persist config settings and apply any needed runtime changes."""
+        old_settings = (self.config or {}).get("settings") or load_settings(self.workspace)
+        if old_settings == settings:
+            return True, "settings unchanged"
+        old_git_enabled = git_protection_enabled(old_settings)
+        new_git_enabled = git_protection_enabled(settings)
+        if not save_settings(self.workspace, settings):
+            return False, "could not save .mira/settings.yml"
+
+        self.config = dict(self.config or {})
+        self.config["settings"] = settings
+        if new_git_enabled != old_git_enabled:
+            if new_git_enabled:
+                return await self._ensure_git_after_enabling()
+            return True, "git protection disabled"
+
+        await self._rebuild_agents()
+        return True, "settings saved; agents rebuilt"
+
+    async def _ensure_git_after_enabling(self) -> tuple[bool, str]:
         """Initialize Git if protection was enabled for an unprotected workspace."""
-        from cli.git_guard import initialize_or_ask_to_continue, is_git_worktree
+        from cli.git_guard import init_git_repository, is_git_worktree
 
         if is_git_worktree(self.workspace):
-            self.system_message("git protection enabled", kind="info")
-            return
-        if await initialize_or_ask_to_continue(self.workspace, self):
-            self.config = dict(self.config or {})
-            self.config["settings"] = load_settings(self.workspace)
-            self.system_message("git protection enabled", kind="info")
-        else:
-            self.system_message("git protection enabled, but Git was not initialized", kind="warning")
+            return True, "git protection enabled"
+        if init_git_repository(self.workspace):
+            return True, "git protection enabled; repository initialized"
+        return True, "git protection enabled, but Git was not initialized"
+
+    def _close_config_panel(self) -> None:
+        """Forget the closed config panel and return focus to the prompt."""
+        self._config_panel = None
+        self.action_focus_prompt()
 
     def _clear_current_chat(self) -> None:
         """Reset the active persisted transcript while keeping the same session id."""
@@ -1049,25 +1028,3 @@ def append_prompt_history(path: Path, text: str) -> None:
 def is_compaction_notice(text: str) -> bool:
     """Return whether an info notice is really leaked compaction reasoning."""
     return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
-
-
-def config_tool_names(settings: dict[str, Any]) -> list[str]:
-    """Return tool names shown in the HITL settings menu."""
-    names = list(DEFAULT_APPROVAL_TOOLS)
-    hitl = settings.get("hitl") if isinstance(settings, dict) else None
-    tools = hitl.get("tools") if isinstance(hitl, dict) else None
-    if isinstance(tools, dict):
-        names.extend(name for name in tools if isinstance(name, str))
-    return sorted(set(names))
-
-
-def config_table(settings: dict[str, Any]) -> Table:
-    """Build a compact HITL settings table."""
-    table = Table(title="Config", title_style="bold cyan")
-    table.add_column("Setting", style="cyan", no_wrap=True)
-    table.add_column("Enable", no_wrap=True)
-    table.add_column("Always Allow", no_wrap=True)
-    table.add_row("Git Protection", "yes" if git_protection_enabled(settings) else "no", "-")
-    for tool_name in config_tool_names(settings):
-        table.add_row(tool_name, "-", "yes" if tool_always_allow(settings, tool_name) else "no")
-    return table

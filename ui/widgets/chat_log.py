@@ -181,6 +181,16 @@ class ChatLog(VerticalScroll):
         self.hide_model_activity()
         self._add_block("output", renderable, "message command")
 
+    def config_panel(self, widget: Any) -> None:
+        """Append an interactive config panel."""
+        self.hide_model_activity()
+        self.finish_main()
+        widget.border_title = "output"
+        widget.add_class("message")
+        widget.add_class("command")
+        self.mount(widget)
+        self._scroll_to_end()
+
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
         self.hide_waiting()
