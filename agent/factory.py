@@ -6,11 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
-from deepagents.middleware.summarization import create_summarization_tool_middleware
 from langchain_core.messages import AIMessage
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
+from agent.compaction import create_mira_summarization_tool_middleware as create_summarization_tool_middleware
 from agent.context_overflow import ContextPressureMiddleware
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt

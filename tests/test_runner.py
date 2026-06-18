@@ -8,6 +8,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from agent.compaction import mark_summarization_engine
+from runtime.compaction_state import compaction_active, compaction_scope
 from runtime import runner
 from runtime.message_events import consume_messages
 from runtime.output_events import final_text
@@ -1120,6 +1122,104 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await consume_messages(messages, renderer)
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_explicit_compaction_signal_hides_reasoning_and_text(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(["I am extracting context from the transcript."]),
+                    text=AsyncItems(["SESSION INTENT\n", "This should not be recorded."]),
+                )
+            ]
+        )
+
+        with compaction_scope():
+            await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [("compaction_started",), ("compaction_finished",)],
+        )
+
+    async def test_normal_turn_after_explicit_compaction_signal_still_renders(self) -> None:
+        renderer = RecordingRenderer()
+
+        with compaction_scope():
+            await consume_messages(
+                AsyncItems([Message(reasoning=AsyncItems(["internal summary"]), text=AsyncItems(["hidden"]))]),
+                renderer,
+            )
+        await consume_messages(
+            AsyncItems([Message(reasoning=AsyncItems(["thinking"]), text=AsyncItems(["visible answer"]))]),
+            renderer,
+        )
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("compaction_started",),
+                ("compaction_finished",),
+                ("reasoning", "thinking"),
+                ("text", "visible answer"),
+            ],
+        )
+
+    async def test_explicit_compaction_signal_hides_raw_message_stream(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                RawMessageStream(
+                    [
+                        {"type": "reasoning-delta", "reasoning": "internal"},
+                        {"type": "text-delta", "text": "hidden"},
+                    ]
+                )
+            ]
+        )
+
+        with compaction_scope():
+            await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [("compaction_started",), ("compaction_finished",)],
+        )
+
+    async def test_compaction_after_tool_result_is_hidden_before_next_answer(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+
+        await consume_tool_calls(AsyncItems([ToolCall("read_file", {"path": "x"}, "contents", "call-1")]), renderer, result)
+        with compaction_scope():
+            await consume_messages(AsyncItems([Message(text=AsyncItems(["internal summary"]))]), renderer)
+        await consume_messages(AsyncItems([Message(text=AsyncItems(["now answering"]))]), renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "read_file", {"path": "x"}, "call-1"),
+                ("tool_result", "read_file", "contents", "call-1"),
+                ("compaction_started",),
+                ("compaction_finished",),
+                ("text", "now answering"),
+            ],
+        )
+
+    async def test_summarization_engine_wrapper_marks_sync_and_async_summary_calls(self) -> None:
+        class Engine:
+            def _create_summary(self) -> bool:
+                return compaction_active()
+
+            async def _acreate_summary(self) -> bool:
+                return compaction_active()
+
+        engine = Engine()
+        mark_summarization_engine(engine)
+
+        self.assertTrue(engine._create_summary())
+        self.assertTrue(await engine._acreate_summary())
+        self.assertFalse(compaction_active())
 
     async def test_summary_extraction_reasoning_after_compaction_is_hidden(self) -> None:
         renderer = RecordingRenderer()
