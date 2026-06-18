@@ -21,8 +21,10 @@ COMPACTION_REASONING_MARKERS = (
 COMPACTION_REASONING_HINTS = (
     "context extraction assistant",
     "extract context from",
+    "extract the most important context",
     "extract the most relevant context",
     "extract the highest quality/most relevant context",
+    "key information to extract",
     "conversation history to replace",
     "conversation history will be replaced",
     "conversation history",
@@ -147,9 +149,17 @@ def is_compaction_reasoning(text: str) -> bool:
         return True
     if (
         "extract context from a conversation history" in lowered
+        or "extract the most important context" in lowered
         or "extract the most relevant context" in lowered
         or "conversation history has been saved to a file" in lowered
-    ) and ("session intent" in lowered or "condensed summary" in lowered or "next steps" in lowered):
+    ) and (
+        "session intent" in lowered
+        or "condensed summary" in lowered
+        or "next steps" in lowered
+        or "key information to extract" in lowered
+    ):
+        return True
+    if "conversation history" in lowered and "key information to extract" in lowered:
         return True
     if "compact" in lowered and "conversation" in lowered and ("summary" in lowered or "token" in lowered):
         return True
@@ -165,8 +175,10 @@ def is_compaction_reasoning_fragment(text: str) -> bool:
         return False
     if (
         "extract context from" in lowered
+        or "extract the most important context" in lowered
         or "extract the most relevant context" in lowered
         or "extract the highest quality/most relevant context" in lowered
+        or "key information to extract" in lowered
     ):
         return True
     if "already been summarized" in lowered and ("meta-task" in lowered or "summary" in lowered):
@@ -195,7 +207,14 @@ def could_be_compaction_reasoning_start(text: str) -> bool:
         return True
     if COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START):
         return True
-    if stripped.startswith(("the user wants me to extract context", "the user is asking me to extract context")):
+    if stripped.startswith(
+        (
+            "the user wants me to extract context",
+            "the user wants me to extract the most important context",
+            "the user is asking me to extract context",
+            "the user is asking me to extract the most important context",
+        )
+    ):
         return True
     if any(hint in stripped for hint in COMPACTION_REASONING_HINTS):
         return True

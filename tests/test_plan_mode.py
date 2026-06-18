@@ -14,6 +14,7 @@ from rich.console import Console
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
+from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
 from runtime import runner
 from ui import repl
@@ -206,7 +207,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["permissions"][0].mode, "deny")
         self.assertEqual(kwargs["permissions"][1].operations, ["read", "write"])
         self.assertEqual(kwargs["permissions"][1].mode, "allow")
-        self.assertTrue(any(factory._tool_name(tool) == "grep" for tool in kwargs["tools"]))
+        self.assertTrue(any(tool_name(tool) == "grep" for tool in kwargs["tools"]))
 
     def test_agent_build_passes_metadata_before_summarization_middleware(self) -> None:
         """Model metadata should be applied before DeepAgents summarization middleware is created."""
@@ -276,7 +277,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         filtered = middleware._filter_request(request)
 
-        names = [factory._tool_name(tool) for tool in filtered.tools]
+        names = [tool_name(tool) for tool in filtered.tools]
         self.assertEqual(names, ["read_file", "grep"])
 
     async def test_plan_and_act_commands_toggle_mode(self) -> None:

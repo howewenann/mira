@@ -448,6 +448,25 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("compacting context...", renderable_plain(compaction))
             self.assertNotIn("Configured context threshold", renderable_plain(compaction))
 
+    async def test_compaction_reasoning_notice_is_not_rendered_as_info(self) -> None:
+        """Leaked compaction reasoning must not render as an info notice."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            set_context_overflow_notice(
+                "The user wants me to extract the most important context from this conversation history. "
+                "Key information to extract: Session intent, Summary, Artifacts, Next Steps."
+            )
+            app.compaction_started()
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            self.assertEqual(str(getattr(blocks[-1], "border_title", "")), "mira")
+            self.assertIn("compacting context...", renderable_plain(blocks[-1]))
+            self.assertNotIn("Key information to extract", "\n".join(renderable_plain(block) for block in blocks))
+
     async def test_escaped_context_overflow_renders_info_and_ready_state(self) -> None:
         """An escaped context overflow should not become a red error block."""
         app = make_app()

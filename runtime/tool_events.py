@@ -6,7 +6,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from runtime.tool_call_args import normalized_call, tool_call_args, tool_call_id, tool_call_name
+from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
 
@@ -114,8 +114,3 @@ def tool_output_text(output: Any) -> str:
         return str(content)
 
     return str(output)
-
-
-def tool_call_input(call: Any) -> Any:
-    """Return streamed tool-call input across DeepAgents event shapes."""
-    return tool_call_args(call)

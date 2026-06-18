@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
+from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 
@@ -156,6 +157,8 @@ class SessionRecorder:
         self.save()
 
     def info(self, text: str) -> None:
+        if is_compaction_notice(text):
+            return
         append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
         self.save()
 
@@ -291,7 +294,7 @@ class RecordingRenderer:
 
     def _render_context_notice(self, notice: str) -> bool:
         """Render one context-pressure notice at most once per turn."""
-        if not notice or self._context_notice_rendered:
+        if not notice or self._context_notice_rendered or is_compaction_notice(notice):
             return False
         self._context_notice_rendered = True
         self.system_message(notice, kind="info")
@@ -318,6 +321,11 @@ def json_value(value: Any) -> Any:
         if isinstance(value, list | tuple):
             return [json_value(item) for item in value]
         return str(value)
+
+
+def is_compaction_notice(text: str) -> bool:
+    """Return whether an info notice is really leaked compaction reasoning."""
+    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
 
 
 def update_event_field(record: dict[str, Any], event_id: int, key: str, value: Any) -> None:

@@ -15,7 +15,7 @@ from agent.context_overflow import ContextPressureMiddleware
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
 from agent.resources import build_resources
-from agent.tools.specs import collect_tool_specs, tool_name
+from agent.tools.specs import collect_tool_specs, tool_name as resource_tool_name
 from config.metadata import ModelMetadata
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
@@ -181,11 +181,8 @@ class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):
 
     def _filter_request(self, request: Any) -> Any:
         """Return a request copy with excluded tools removed."""
-        tools = [tool for tool in request.tools if tool_name(tool) not in self.excluded_tools]
+        tools = [tool for tool in request.tools if resource_tool_name(tool) not in self.excluded_tools]
         return request.override(tools=tools)
-
-
-_tool_name = tool_name
 
 
 class FilesystemToolArgNormalizer(AgentMiddleware[Any, Any, Any]):

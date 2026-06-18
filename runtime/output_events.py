@@ -104,11 +104,6 @@ def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:
     return after_heading[paragraph_break:].lstrip(), True
 
 
-def headings_in_order(text: str) -> bool:
-    """Return whether compaction headings appear in the expected order."""
-    return len(compaction_heading_positions(text)) == len(COMPACTION_SUMMARY_HEADINGS)
-
-
 def compaction_heading_positions(text: str) -> list[int]:
     """Return compaction heading positions when all headings appear in order."""
     position = -1

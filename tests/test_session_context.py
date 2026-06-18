@@ -257,24 +257,25 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["dashboard"]["context"]["limit_tokens"], 10000)
         self.assertEqual(record["dashboard"]["context"]["source"], "unknown")
 
-    def test_title_uses_recent_topic(self) -> None:
+    def test_title_uses_recent_user_prompts_with_cap(self) -> None:
         record = {"title": "Untitled session", "events": []}
-        context.append_message(record, "user", "hello", "action")
-        context.append_message(record, "assistant", "Hello", "action")
+        context.append_event(record, {"type": "user", "mode": "action", "text": "hello"})
+        context.append_event(record, {"type": "assistant", "mode": "action", "text": "Hello"})
         context.update_title(record)
-        self.assertEqual(record["title"], "Untitled session")
+        self.assertEqual(record["title"], "hello")
 
-        context.append_message(record, "user", "help me debug qwen reasoning_content", "action")
-        context.append_message(record, "assistant", "done", "action")
+        context.append_event(record, {"type": "user", "mode": "action", "text": "help me debug qwen reasoning_content"})
+        context.append_event(record, {"type": "assistant", "mode": "action", "text": "done"})
         context.update_title(record)
-        self.assertEqual(record["title"], "Debug Qwen reasoning_content")
+        self.assertEqual(record["title"], "help me debug qwen reasoning_content hello")
 
-        context.append_message(record, "user", "now check deepagents compact_conversation history", "action")
-        context.append_message(record, "assistant", "done", "action")
+        context.append_event(
+            record,
+            {"type": "user", "mode": "action", "text": "now check deepagents compact_conversation history"},
+        )
+        context.append_event(record, {"type": "assistant", "mode": "action", "text": "done"})
         context.update_title(record)
-        title = record["title"].lower()
-        self.assertIn("deepagents", title)
-        self.assertIn("compact_conversation", title)
+        self.assertEqual(record["title"], "now check deepagents compact_conversation histor")
 
     async def test_deepagents_compaction_event_is_copied_once(self) -> None:
         record = {"events": []}
@@ -344,12 +345,18 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 },
                 {
                     "id": 3,
-                    "type": "reasoning",
+                    "type": "info",
                     "created_at": "2026-06-18T05:15:47+00:00",
                     "mode": "action",
                     "text": (
-                        "The user is asking me to extract context from a conversation history "
-                        "that has already been summarized. This appears to be a meta-task."
+                        "The user wants me to extract the most important context from this "
+                        "conversation history. Let me analyze what's happened:\n\n"
+                        "Key information to extract:\n"
+                        "- Session intent: User wants a short story written to a file\n"
+                        "- Summary: Story content was created\n"
+                        "- Artifacts: File /mira-short-story.txt\n"
+                        "- Next Steps: Verify the file was written successfully\n\n"
+                        "Let me structure this properly according to the instructions."
                     ),
                 },
             ]
@@ -360,6 +367,17 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(changed)
         self.assertEqual([event["type"] for event in record["events"]], ["compaction"])
+
+    def test_recorder_does_not_save_compaction_reasoning_as_info(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.info(
+            "The user wants me to extract the most important context from this conversation history. "
+            "Key information to extract: Session intent, Summary, Artifacts, Next Steps."
+        )
+
+        self.assertEqual(record["events"], [])
 
     def test_recorder_does_not_duplicate_streamed_assistant_final_text(self) -> None:
         record = {"events": []}

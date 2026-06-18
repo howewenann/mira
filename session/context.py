@@ -14,76 +14,7 @@ TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
 RESUME_MESSAGE_LIMIT = 20
 
-TECH_RE = re.compile(r"[A-Za-z0-9_./\\:-]+")
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
-FILLER_PHRASES = (
-    "can you",
-    "could you",
-    "would you",
-    "please",
-    "help me",
-    "lets",
-    "let's",
-    "i want to",
-    "i was thinking",
-)
-CHATTER = {
-    "hello",
-    "hi",
-    "hey",
-    "thanks",
-    "thank",
-    "ok",
-    "okay",
-    "cool",
-    "nice",
-    "yes",
-    "no",
-    "yep",
-    "nope",
-}
-STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "be",
-    "but",
-    "for",
-    "from",
-    "how",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "its",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "this",
-    "to",
-    "what",
-    "when",
-    "with",
-    "you",
-    "your",
-}
-ACTION_WORDS = {
-    "add",
-    "build",
-    "check",
-    "debug",
-    "fix",
-    "implement",
-    "inspect",
-    "remove",
-    "review",
-    "update",
-}
 
 
 def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
@@ -195,14 +126,6 @@ def normalize_compactions(value: Any) -> list[dict[str, Any]]:
     return compactions
 
 
-def append_message(record: dict[str, Any], role: str, content: str, mode: str) -> None:
-    content = str(content or "").strip()
-    if role not in {"user", "assistant"} or not content:
-        return
-
-    append_event(record, {"type": role, "mode": mode, "text": content})
-
-
 def append_event(record: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     events = record.setdefault("events", [])
     next_id = max((int(item.get("id", 0)) for item in events if isinstance(item, dict)), default=0) + 1
@@ -225,61 +148,7 @@ def update_title(record: dict[str, Any]) -> None:
 
 def title_from_messages(messages: list[dict[str, Any]]) -> str:
     recent = [message["content"] for message in messages if message["role"] == "user"][-TITLE_MESSAGE_LIMIT:]
-    words = title_words(" ".join(reversed(recent)))
-    if not words:
-        return UNTITLED_SESSION
-
-    title = " ".join(display_word(word) for word in words)
-    return safe_title(title)
-
-
-def title_words(text: str) -> list[str]:
-    cleaned = clean_title_source(text)
-    if compact_line(cleaned).lower() in CHATTER:
-        return []
-
-    words: list[str] = []
-    for match in TECH_RE.finditer(cleaned):
-        raw = match.group(0).strip(".,!?;()[]{}'\"`")
-        lowered = raw.lower()
-        if not raw or lowered in CHATTER or lowered in STOPWORDS:
-            continue
-        if raw.startswith("/") and len(raw) < 3:
-            continue
-        if lowered in ACTION_WORDS or is_technical(raw) or len(raw) > 2:
-            words.append(raw)
-        if len(words) >= 7:
-            break
-    return trim_title_words(words)
-
-
-def clean_title_source(text: str) -> str:
-    cleaned = text.lower()
-    for phrase in FILLER_PHRASES:
-        cleaned = cleaned.replace(phrase, " ")
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def trim_title_words(words: list[str]) -> list[str]:
-    while words and words[0].lower() not in ACTION_WORDS and len(words) > 5:
-        words.pop(0)
-    while words and len(" ".join(display_word(word) for word in words)) > TITLE_MAX_CHARS:
-        words.pop()
-    return words
-
-
-def display_word(word: str) -> str:
-    if is_technical(word):
-        return word
-    return word.capitalize()
-
-
-def is_technical(word: str) -> bool:
-    return (
-        any(character in word for character in "_./\\:-")
-        or any(character.isdigit() for character in word)
-        or any(character.isupper() for character in word[1:])
-    )
+    return safe_title(" ".join(reversed(recent)))
 
 
 async def sync_deepagents_compaction(record: dict[str, Any], agent: Any, thread_id: str) -> bool:
@@ -361,7 +230,7 @@ def scrub_compaction_reasoning_events(record: dict[str, Any]) -> bool:
     kept = []
     changed = False
     for event in events:
-        if isinstance(event, dict) and event.get("type") == "reasoning":
+        if isinstance(event, dict) and event.get("type") in {"reasoning", "info"}:
             text = str(event.get("text") or "")
             if is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text):
                 changed = True

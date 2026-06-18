@@ -1286,6 +1286,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
+    async def test_most_important_context_compaction_reasoning_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user wants me to extract the most important context from this conversation history. ",
+                            "Let me analyze what's happened:\n\n",
+                            "1. User requested to write a 10-word short story to a file\n",
+                            "2. A tool call was made to write_file\n\n",
+                            "Key information to extract:\n",
+                            "- Session intent: User wants a short story written to a file\n",
+                            "- Summary: Story content was created\n",
+                            "- Artifacts: File /mira-short-story.txt\n",
+                            "- Next Steps: Verify the file was written successfully\n\n",
+                            "Let me structure this properly according to the instructions.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
     async def test_long_summary_extraction_reasoning_with_visible_headings_is_hidden(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(

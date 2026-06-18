@@ -9,6 +9,7 @@ from itertools import count
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
+from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -78,7 +79,7 @@ class Renderer:
     def compaction_started(self) -> None:
         """Print a context compaction status."""
         notice = pop_context_overflow_notice()
-        if notice:
+        if notice and not is_compaction_notice(notice):
             self.system_message(notice, kind="info")
         self._block("mira", "compacting context...")
 
@@ -246,3 +247,8 @@ class Renderer:
     def _next_suffix(self) -> str:
         """Return a readable subagent suffix."""
         return generate_slug(fallback=self._subagent_ids)
+
+
+def is_compaction_notice(text: str) -> bool:
+    """Return whether an info notice is really leaked compaction reasoning."""
+    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)

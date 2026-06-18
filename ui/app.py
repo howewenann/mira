@@ -18,6 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
+from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -339,7 +340,7 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self.waiting_finished()
         notice = pop_context_overflow_notice()
-        if notice:
+        if notice and not is_compaction_notice(notice):
             self.query_one(ChatLog).system_message(notice, kind="info")
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
@@ -941,3 +942,8 @@ def append_prompt_history(path: Path, text: str) -> None:
         handle.write(f"\n# {timestamp}\n")
         for line in entry.splitlines():
             handle.write(f"+{line}\n")
+
+
+def is_compaction_notice(text: str) -> bool:
+    """Return whether an info notice is really leaked compaction reasoning."""
+    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
