@@ -100,13 +100,17 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     update_title(app["session"])
     recorder.save()
     renderer = RecordingRenderer(app["renderer"], recorder)
-    result = await run_turn(
-        agent=app["agent"],
-        text=request_text,
-        renderer=renderer,
-        thread_id=app["session"]["id"],
-        **run_kwargs,
-    )
+    try:
+        result = await run_turn(
+            agent=app["agent"],
+            text=request_text,
+            renderer=renderer,
+            thread_id=app["session"]["id"],
+            **run_kwargs,
+        )
+    except Exception as exc:
+        recorder.system_error(f"turn error: {exc}")
+        raise
     recorder.ensure_assistant(getattr(result, "final_text", ""))
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
     update_title(app["session"])

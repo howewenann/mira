@@ -349,6 +349,51 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 direct=True,
             )
 
+    async def test_one_shot_records_system_error_when_turn_fails(self) -> None:
+        """One-shot prompt failures should be visible in the saved session."""
+        config = {
+            "tool_output_chars": 123,
+            "session_dir": "unused",
+            "llm_provider": "lmstudio",
+            "llm_model": "local-model",
+        }
+        session_record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        saved: list[dict[str, object]] = []
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            return True
+
+        async def bootstrap(
+            workspace: Path,
+            session: str | None,
+            resume: bool,
+            config: dict[str, object] | None = None,
+            renderer: object | None = None,
+        ) -> dict[str, object]:
+            return {
+                "agent": "agent",
+                "renderer": renderer,
+                "session": session_record,
+                "store": type("Store", (), {"save": lambda self, record: saved.append(record.copy())})(),
+            }
+
+        async def run_turn(*args: object, **kwargs: object) -> object:
+            raise RuntimeError("unexecuted tool call")
+
+        with (
+            patch("config.loader.load_config", return_value=config),
+            patch("ui.renderer.Renderer", return_value=object()),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap", bootstrap),
+            patch("runtime.runner.run_turn", run_turn),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
+                await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
+
+        self.assertEqual([event["type"] for event in session_record["events"]], ["user", "system_error"])
+        self.assertIn("unexecuted tool call", session_record["events"][-1]["text"])
+        self.assertTrue(saved)
+
     async def test_run_exits_when_git_guard_blocks_startup(self) -> None:
         """Choosing exit after a Git failure should stop before bootstrap."""
         renderer = object()

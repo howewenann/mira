@@ -154,10 +154,6 @@ def could_be_compaction_summary_start(text: str) -> bool:
 
 def message_text(message: Any) -> str:
     """Extract plain text from common LangChain message content shapes."""
-    text = field(message, "text")
-    if text is not None:
-        return str(text)
-
     content = field(message, "content")
     if isinstance(content, str):
         return content
@@ -169,7 +165,48 @@ def message_text(message: Any) -> str:
                 parts.append(str(item.get("text", "")))
         return "".join(parts)
 
+    text = field(message, "text")
+    if text is not None and not callable(text):
+        return str(text)
+
     return ""
+
+
+def output_tool_calls(output: Any) -> list[Any]:
+    """Return pending tool calls found at the tail of final output messages."""
+    if not isinstance(output, dict):
+        return []
+
+    messages = output.get("messages") or []
+    for message in reversed(messages):
+        message_calls = field(message, "tool_calls")
+        if message_calls:
+            return [normalized_output_tool_call(call) for call in message_calls]
+        if visible_message_text(message) or field(message, "content"):
+            return []
+    return []
+
+
+def output_has_tool_call_repr(output: Any) -> bool:
+    """Return whether final output leaked an AIMessage repr with tool calls."""
+    text = final_text(output)
+    return text.startswith("AIMessage(content=") and "tool_calls=[" in text
+
+
+def normalized_output_tool_call(call: Any) -> Any:
+    """Normalize fallback file-tool args without changing canonical streams."""
+    if not isinstance(call, dict):
+        return call
+    if call.get("name") not in {"read_file", "write_file", "edit_file"}:
+        return call
+
+    args = call.get("args")
+    if not isinstance(args, dict) or "file_path" in args or "path" not in args:
+        return call
+
+    normalized_args = dict(args)
+    normalized_args["file_path"] = normalized_args.pop("path")
+    return {**call, "args": normalized_args}
 
 
 def find_interrupts(value: Any) -> list[Any]:

@@ -17,6 +17,7 @@ from runtime.output_events import (
     is_summarization_metadata_message,
     normalize_response_delta,
     strip_compaction_summary_prefix,
+    visible_message_text,
 )
 from runtime.protocol_events import event_delta, is_raw_message_stream, is_tool_call_delta
 from runtime.tool_call_args import ToolCallDrafts, normalized_call, tool_call_args, tool_call_id, tool_call_name
@@ -114,7 +115,10 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
         return
 
     msg_text = getattr(message, "text", None)
-    if msg_text is None:
+    if msg_text is None or callable(msg_text):
+        text = visible_message_text(message)
+        if text:
+            renderer.text_delta(text)
         return
 
     if hasattr(msg_text, "__aiter__"):
@@ -200,8 +204,8 @@ def render_tool_calls(
         if not render_normal_tools:
             continue
 
-        if result is not None:
-            result.record_tool_call(name, call_id)
+        if result is not None and not result.record_tool_call(name, call_id):
+            continue
 
         renderer.tool_call(name, call.get("args", {}), call_id=call_id)
 

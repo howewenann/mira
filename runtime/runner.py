@@ -12,7 +12,7 @@ from typing import Any
 from langgraph.types import Command
 
 from runtime.message_events import consume_messages
-from runtime.output_events import capture_output, collect_interrupts, final_text
+from runtime.output_events import capture_output, collect_interrupts, final_text, output_has_tool_call_repr, output_tool_calls
 from runtime.subagent_events import consume_subagents
 from runtime.tool_call_args import tool_call_args
 from runtime.tool_events import consume_tool_calls
@@ -164,6 +164,8 @@ async def run_turn(
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
+    approved_fallback_actions: list[dict[str, Any]] = []
+    approved_result_start = 0
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
@@ -191,6 +193,22 @@ async def run_turn(
         interrupts = await collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
+            pending_calls = output_tool_calls(output.get("value"))
+            leaked_tool_repr = output_has_tool_call_repr(output.get("value"))
+            if (
+                approved_fallback_actions
+                and len(result.tool_results) == approved_result_start
+                and (pending_calls or leaked_tool_repr)
+            ):
+                await execute_approved_filesystem_fallbacks(agent, approved_fallback_actions, event_renderer, result)
+                result.final_text = ""
+                return result
+
+            if pending_calls:
+                names = ", ".join(str(call.get("name") or "tool") for call in pending_calls if isinstance(call, dict))
+                raise RuntimeError(f"model returned unexecuted tool call(s): {names or 'tool'}")
+            if leaked_tool_repr:
+                raise RuntimeError("model returned unexecuted tool call(s): tool")
             return result
 
         ask_user_interrupt = first_ask_user_interrupt(interrupts)
@@ -198,6 +216,8 @@ async def run_turn(
             payload = Command(resume=await renderer.ask_user(ask_user_interrupt))
         else:
             decisions = await renderer.ask_approvals(interrupts)
+            approved_fallback_actions = approved_actions(interrupts, decisions)
+            approved_result_start = len(result.tool_results)
             payload = Command(resume={"decisions": decisions})
 
 
@@ -213,6 +233,89 @@ def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:
 def interrupt_value(interrupt: Any) -> Any:
     """Extract the LangGraph interrupt value from common payload shapes."""
     return getattr(interrupt, "value", interrupt)
+
+
+def approved_actions(interrupts: list[Any], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return filesystem actions explicitly approved by the user."""
+    actions = []
+    decision_index = 0
+    for interrupt in interrupts:
+        for action in interrupt_actions(interrupt):
+            if decision_index >= len(decisions):
+                return actions
+            decision = decisions[decision_index]
+            decision_index += 1
+            if decision.get("type") == "approve" and isinstance(action, dict):
+                actions.append(action)
+            elif decision.get("type") == "edit":
+                edited = decision.get("edited_action")
+                if isinstance(edited, dict):
+                    actions.append(edited)
+    return actions
+
+
+def interrupt_actions(interrupt: Any) -> list[Any]:
+    """Extract approval action requests from a LangGraph interrupt."""
+    value = interrupt_value(interrupt)
+    if isinstance(value, dict) and value.get("action_requests"):
+        return list(value["action_requests"])
+    return [value]
+
+
+async def execute_approved_filesystem_fallbacks(
+    agent: Any,
+    actions: list[dict[str, Any]],
+    renderer: Any,
+    result: TurnResult,
+) -> None:
+    """Execute approved built-in filesystem actions if HITL resume failed to do so."""
+    backend = getattr(agent, "mira_backend", None)
+    if backend is None:
+        raise RuntimeError("approved filesystem action was not executed and no backend fallback is available")
+
+    for action in actions:
+        name = str(action.get("name") or "")
+        args = action.get("args", {})
+        if name not in {"read_file", "write_file", "edit_file"} or not isinstance(args, dict):
+            continue
+
+        result.record_tool_call(name, "")
+        renderer.tool_call(name, args, call_id="")
+        output = execute_filesystem_action(backend, name, args)
+        result.tool_results.append(output)
+        renderer.tool_result(name, output, call_id="")
+
+
+def execute_filesystem_action(backend: Any, name: str, args: dict[str, Any]) -> str:
+    """Run one approved filesystem action against the DeepAgents backend."""
+    if name == "read_file":
+        response = backend.read(
+            str(args.get("file_path") or args.get("path") or ""),
+            offset=positive_int(args.get("offset")),
+            limit=positive_int(args.get("limit")) or 2000,
+        )
+        error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
+        if error:
+            return f"Error: {error}"
+        file_data = getattr(response, "file_data", None) or (response.get("file_data") if isinstance(response, dict) else None)
+        content = getattr(file_data, "content", None) or (file_data.get("content") if isinstance(file_data, dict) else "")
+        return str(content)
+
+    if name == "write_file":
+        file_path = str(args.get("file_path") or args.get("path") or "")
+        response = backend.write(file_path, str(args.get("content") or ""))
+        error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
+        return f"Error: {error}" if error else f"Successfully wrote to {file_path}"
+
+    file_path = str(args.get("file_path") or args.get("path") or "")
+    response = backend.edit(
+        file_path,
+        str(args.get("old_string") or ""),
+        str(args.get("new_string") or ""),
+        bool(args.get("replace_all", False)),
+    )
+    error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
+    return f"Error: {error}" if error else f"Successfully edited {file_path}"
 
 
 def task_descriptions(calls: list[Any]) -> list[str]:

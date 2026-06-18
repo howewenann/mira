@@ -158,7 +158,7 @@ def should_flush_reasoning_probe(text: str) -> bool:
     lowered = text.lower()
     if could_be_compaction_reasoning_start(text):
         return False
-    if len(text) >= 1200:
+    if len(text) >= 1200 and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
         return True
     if "\n\n" in text and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
         return True

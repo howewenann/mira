@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage
+
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.recorder import SessionRecorder
@@ -428,6 +430,40 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         recorder.ensure_assistant(result.final_text)
+
+        self.assertEqual(context.normalize_messages(record["events"]), [])
+
+    async def test_ai_message_tool_call_repr_is_not_persisted_as_assistant(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "action")
+        message = AIMessage(
+            content=[
+                {"type": "reasoning", "reasoning": "Need to write a file."},
+                {"type": "text", "text": "\n\n"},
+                {
+                    "type": "tool_call",
+                    "id": "call-write",
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                    "id": "call-write",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
+            result = await runner.run_turn(
+                FakeAgent([FakeStream(output={"messages": [message]})]),
+                "write",
+                RunTurnRenderer(),
+                "thread-1",
+            )
+            recorder.ensure_assistant(result.final_text)
 
         self.assertEqual(context.normalize_messages(record["events"]), [])
 

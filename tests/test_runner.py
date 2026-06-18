@@ -6,6 +6,8 @@ import asyncio
 import unittest
 from typing import Any
 
+from langchain_core.messages import AIMessage
+
 from runtime import runner
 from runtime.message_events import consume_messages
 from runtime.output_events import final_text
@@ -102,6 +104,12 @@ class ToolCall:
         self.args = args
         self.output = output
         self.id = call_id
+
+
+class IncompleteToolCall(ToolCall):
+    """Fake interrupted tool call whose output must not be awaited yet."""
+
+    completed = False
 
 
 class DocumentedToolCall:
@@ -349,6 +357,17 @@ class FakeAgent:
     async def astream_events(self, payload: Any, config: dict[str, Any], version: str) -> FakeStream:
         self.payloads.append(payload)
         return self.streams.pop(0)
+
+
+class FakeBackend:
+    """Minimal backend for approved filesystem fallback tests."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str]] = []
+
+    def write(self, file_path: str, content: str) -> object:
+        self.writes.append((file_path, content))
+        return type("WriteResult", (), {"error": None})()
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -610,6 +629,30 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(final_text({"messages": [OutputMessage(text)]}), text)
 
+    def test_final_text_ignores_ai_message_tool_call_repr(self) -> None:
+        """Structured tool-call messages should not be persisted as assistant prose."""
+        message = AIMessage(
+            content=[
+                {"type": "reasoning", "reasoning": "Need to write a file."},
+                {"type": "text", "text": "\n\n"},
+                {
+                    "type": "tool_call",
+                    "id": "call-write",
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                    "id": "call-write",
+                }
+            ],
+        )
+
+        self.assertEqual(final_text({"messages": [message]}), "")
+
     async def test_run_turn_records_final_message_usage(self) -> None:
         agent = FakeAgent(
             [
@@ -778,6 +821,87 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tool_calls, ["write_file"])
         self.assertIn("permission denied for write on /x", result.tool_results)
 
+    async def test_run_turn_rejects_output_level_ai_message_tool_calls_without_execution(self) -> None:
+        """Final AIMessage tool calls should not be recorded as executed tools."""
+        message = AIMessage(
+            content=[
+                {"type": "text", "text": "\n\n"},
+                {
+                    "type": "tool_call",
+                    "id": "call-write",
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                    "id": "call-write",
+                }
+            ],
+        )
+        agent = FakeAgent([FakeStream(output={"messages": [message]}, interrupts=[])])
+        renderer = RunTurnRenderer()
+
+        with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
+            await runner.run_turn(agent, "write", renderer, "thread-1")
+
+        self.assertNotIn(
+            ("tool_call", "write_file", {"file_path": "/story.txt", "content": "hello"}, "call-write"),
+            renderer.events,
+        )
+
+    async def test_run_turn_executes_approved_filesystem_fallback_when_resume_skips_tool_node(self) -> None:
+        """Approved write calls should execute even if HITL resume returns only the AIMessage."""
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": "write_file",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+        message = AIMessage(
+            content=[
+                {
+                    "type": "tool_call",
+                    "id": "call-write",
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                    "id": "call-write",
+                }
+            ],
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": [message]}, interrupts=[]),
+            ]
+        )
+        backend = FakeBackend()
+        agent.mira_backend = backend
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        result = await runner.run_turn(agent, "write", renderer, "thread-1")
+
+        self.assertEqual(backend.writes, [("/story.txt", "hello")])
+        self.assertIn("Successfully wrote to /story.txt", result.tool_results)
+        self.assertIn(("tool_call", "write_file", {"file_path": "/story.txt", "content": "hello"}, ""), renderer.events)
+        self.assertIn(("tool_result", "write_file", "Successfully wrote to /story.txt", ""), renderer.events)
+
     async def test_run_turn_uses_tool_stream_as_canonical_normal_tool_display(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
         agent.streams[0].messages = AsyncItems([Message([{"name": "read_file", "args": {"path": "README.md"}}])])
@@ -832,6 +956,18 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-single"),
             ],
         )
+
+    async def test_incomplete_tool_call_stream_item_does_not_await_output(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        blocked = BlockingOutput()
+
+        await consume_tool_calls(AsyncItems([IncompleteToolCall("write_file", {"file_path": "/x"}, blocked, "call-1")]), renderer, result)
+
+        self.assertFalse(blocked.awaited)
+        self.assertEqual(result.tool_calls, ["write_file"])
+        self.assertEqual(result.tool_results, [])
+        self.assertEqual(renderer.events, [("tool_call", "write_file", {"file_path": "/x"}, "call-1")])
 
     async def test_task_tool_calls_emit_immediately_without_waiting_for_output(self) -> None:
         renderer = RecordingRenderer()
@@ -996,6 +1132,32 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                             "The conversation history has been saved to a file and a condensed summary is provided. ",
                             "My task is to extract the most relevant context to replace this conversation history. ",
                             "I should structure this according to the required format (SESSION INTENT, SUMMARY, ARTIFACTS, NEXT STEPS).",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_long_summary_extraction_reasoning_with_visible_headings_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user wants me to extract context from the conversation history. ",
+                            "This is a simple task where I need to summarize what happened and what remains to be done. ",
+                            "Looking at the conversation:\n",
+                            "1. User asked for a 10-word short story written to a file\n",
+                            "2. A tool call was made to write_file but it did not complete\n",
+                            "This preamble is intentionally long. " * 45,
+                            "\n\n## SESSION INTENT\nCreate a 10-word short story.\n\n",
+                            "## SUMMARY\nThe write did not complete.\n\n",
+                            "## ARTIFACTS\nNone.\n\n## NEXT STEPS\nRead the file only after it exists.",
                         ]
                     )
                 )

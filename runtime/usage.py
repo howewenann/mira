@@ -215,10 +215,6 @@ def role_prefixed_text(message: Any) -> str:
 
 def message_text(message: Any) -> str:
     """Extract plain text from common LangChain message content shapes."""
-    text = field(message, "text")
-    if text is not None:
-        return str(text)
-
     content = field(message, "content")
     if isinstance(content, str):
         return content
@@ -229,6 +225,10 @@ def message_text(message: Any) -> str:
             if isinstance(item, dict) and item.get("type") == "text":
                 parts.append(str(item.get("text", "")))
         return "".join(parts)
+
+    text = field(message, "text")
+    if text is not None and not callable(text):
+        return str(text)
 
     return ""
 

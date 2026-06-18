@@ -28,6 +28,9 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
         if is_new_call:
             renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
 
+        if field(call, "completed") is False:
+            continue
+
         output = await tool_call_output(call)
         if isinstance(output, Command):
             continue

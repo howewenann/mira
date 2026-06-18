@@ -7,6 +7,7 @@ from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.middleware.summarization import create_summarization_tool_middleware
+from langchain_core.messages import AIMessage
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -82,6 +83,7 @@ def _build_agent(
     backend = resources.backend
 
     middleware: list[Any] = [
+        FilesystemToolArgNormalizer(Path(workspace)),
         ContextPressureMiddleware(
             context_limit_tokens=context_limit_tokens(config, metadata),
             threshold_fraction=config.get("context_pressure_fraction", 0.98),
@@ -116,6 +118,7 @@ def _build_agent(
         ),
     )
     _attach_resources(agent, resources.metadata)
+    _attach_backend(agent, backend)
     return agent
 
 
@@ -185,6 +188,101 @@ class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):
 _tool_name = tool_name
 
 
+class FilesystemToolArgNormalizer(AgentMiddleware[Any, Any, Any]):
+    """Normalize common file-tool arg shapes before HITL and execution."""
+
+    FILE_PATH_TOOLS = {"read_file", "write_file", "edit_file"}
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = Path(workspace).expanduser().resolve()
+
+    def after_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+        if not messages:
+            return None
+
+        last_ai_msg = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
+        if last_ai_msg is None or not last_ai_msg.tool_calls:
+            return None
+
+        changed = False
+        normalized_calls = []
+        for call in last_ai_msg.tool_calls:
+            normalized, call_changed = self._normalize_tool_call(call)
+            normalized_calls.append(normalized)
+            changed = changed or call_changed
+
+        normalized_content, content_changed = self._normalize_content_blocks(last_ai_msg.content)
+        changed = changed or content_changed
+
+        if not changed:
+            return None
+
+        last_ai_msg.tool_calls = normalized_calls
+        if content_changed:
+            last_ai_msg.content = normalized_content
+        return {"messages": [last_ai_msg]}
+
+    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        return self.after_model(state, runtime)
+
+    def _normalize_tool_call(self, call: Any) -> tuple[Any, bool]:
+        if not isinstance(call, dict):
+            return call, False
+        if call.get("name") not in self.FILE_PATH_TOOLS:
+            return call, False
+
+        args = call.get("args")
+        if not isinstance(args, dict):
+            return call, False
+
+        normalized_args = dict(args)
+        changed = False
+        if "file_path" not in normalized_args and "path" in normalized_args:
+            normalized_args["file_path"] = normalized_args.pop("path")
+            changed = True
+
+        file_path = normalized_args.get("file_path")
+        if isinstance(file_path, str):
+            normalized_path = self._normalize_workspace_path(file_path)
+            if normalized_path != file_path:
+                normalized_args["file_path"] = normalized_path
+                changed = True
+
+        if not changed:
+            return call, False
+
+        return {**call, "args": normalized_args}, True
+
+    def _normalize_content_blocks(self, content: Any) -> tuple[Any, bool]:
+        if not isinstance(content, list):
+            return content, False
+
+        changed = False
+        normalized_blocks = []
+        for block in content:
+            normalized, block_changed = self._normalize_tool_call(block)
+            normalized_blocks.append(normalized)
+            changed = changed or block_changed
+        return normalized_blocks, changed
+
+    def _normalize_workspace_path(self, value: str) -> str:
+        if value.startswith("/"):
+            return value
+        try:
+            path = Path(value).expanduser()
+        except (OSError, RuntimeError):
+            return value
+        if not path.is_absolute():
+            return value
+
+        try:
+            relative = path.resolve().relative_to(self.workspace)
+        except (OSError, RuntimeError, ValueError):
+            return value
+        return f"/{relative.as_posix()}"
+
+
 def _attach_tool_specs(agent: Any, specs: list[dict[str, str]]) -> None:
     """Attach tool display metadata used by the REPL."""
     try:
@@ -197,5 +295,13 @@ def _attach_resources(agent: Any, resources: dict[str, list[dict[str, str]]]) ->
     """Attach resource display metadata used by the REPL."""
     try:
         agent.mira_resources = resources
+    except AttributeError:
+        return
+
+
+def _attach_backend(agent: Any, backend: Any) -> None:
+    """Attach the workspace backend for approved filesystem fallback execution."""
+    try:
+        agent.mira_backend = backend
     except AttributeError:
         return
