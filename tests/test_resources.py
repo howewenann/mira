@@ -206,9 +206,6 @@ def project_grep(pattern: str) -> str:
 def project_status() -> str:
     """Return project status."""
     return "ready"
-
-
-TOOLS = [project_grep, project_status]
 ''',
                 encoding="utf-8",
             )
@@ -242,6 +239,125 @@ TOOLS = [project_grep, project_status]
                 ],
             )
 
+    def test_project_decorated_tool_loads_without_tools_export(self) -> None:
+        """A module-level @tool object should load without TOOLS."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "web_search.py").write_text(
+                '''from langchain_core.tools import tool
+
+
+@tool("web_search")
+def web_search(query: str) -> str:
+    """Search the web."""
+    return f"result: {query}"
+''',
+                encoding="utf-8",
+            )
+
+            resources = build_resources(workspace, create_examples=False)
+
+            tool = next(tool for tool in resources.tools if tool.name == "web_search")
+            self.assertEqual(tool.invoke({"query": "mira"}), "result: mira")
+            self.assertIn(
+                {
+                    "name": "web_search",
+                    "path": "/.mira/tools/web_search.py",
+                    "source": "project",
+                    "replaces": "",
+                },
+                resources.metadata["tools"],
+            )
+
+    def test_multiple_decorated_tools_load_from_one_file(self) -> None:
+        """All module-level @tool objects in a file should load."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "multi.py").write_text(
+                '''from langchain.tools import tool
+
+
+@tool
+def first_tool() -> str:
+    """Return first."""
+    return "first"
+
+
+@tool
+def second_tool() -> str:
+    """Return second."""
+    return "second"
+''',
+                encoding="utf-8",
+            )
+
+            resources = build_resources(workspace, create_examples=False)
+
+            names = [tool.name for tool in resources.tools]
+            self.assertIn("first_tool", names)
+            self.assertIn("second_tool", names)
+
+    def test_explicit_tools_export_still_works_and_deduplicates(self) -> None:
+        """TOOLS remains supported without duplicating module-level tools."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "explicit.py").write_text(
+                '''from langchain.tools import tool
+
+
+@tool
+def exported_tool() -> str:
+    """Return exported."""
+    return "exported"
+
+
+TOOLS = [exported_tool]
+''',
+                encoding="utf-8",
+            )
+
+            resources = build_resources(workspace, create_examples=False)
+
+            names = [tool.name for tool in resources.tools]
+            self.assertEqual(names.count("exported_tool"), 1)
+            self.assertEqual(next(tool for tool in resources.tools if tool.name == "exported_tool").invoke({}), "exported")
+
+    def test_get_tools_export_still_loads_backend_bound_tools(self) -> None:
+        """get_tools(project_backend) should remain supported."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "dynamic.py").write_text(
+                '''from langchain.tools import tool
+
+
+def get_tools(project_backend):
+    """Return tools bound to the workspace backend."""
+
+    @tool
+    def workspace_root() -> str:
+        """List the workspace root."""
+        result = project_backend.ls("/")
+        return ",".join(item["path"] for item in result.entries or [])
+
+    return [workspace_root]
+''',
+                encoding="utf-8",
+            )
+            (workspace / "sample.txt").write_text("sample", encoding="utf-8")
+
+            resources = build_resources(workspace, create_examples=False)
+
+            tool = next(tool for tool in resources.tools if tool.name == "workspace_root")
+            self.assertIn("/sample.txt", tool.invoke({}))
+
     def test_factory_passes_resources_to_deepagents_and_attaches_metadata(self) -> None:
         """Agent construction should pass discovered resources into DeepAgents."""
         with tempfile.TemporaryDirectory() as directory:
@@ -259,7 +375,7 @@ TOOLS = [project_grep, project_status]
         self.assertEqual(code_middleware.call_args.kwargs["ptc"], ["task"])
         self.assertIsNotNone(code_middleware.call_args.kwargs["skills_backend"])
         kwargs = create_deep_agent.call_args.kwargs
-        self.assertIsInstance(kwargs["middleware"][0], ContextPressureMiddleware)
+        self.assertTrue(any(isinstance(middleware, ContextPressureMiddleware) for middleware in kwargs["middleware"]))
         self.assertIn("/mira-defaults/skills", kwargs["skills"])
         self.assertIn("/.mira/skills", kwargs["skills"])
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")

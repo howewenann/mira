@@ -16,8 +16,9 @@ from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
+from config.settings import load_settings, tool_always_allow
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
-from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
+from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, config_table, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory
 from ui.widgets.session_history import session_label
@@ -1117,6 +1118,53 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertIn("finish the current turn before clearing history", rendered)
             self.assertEqual(store.saves, [])
+
+    async def test_config_command_toggles_tool_and_rebuilds_agents(self) -> None:
+        """Changing a tool approval toggle should save settings and rebuild agents."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls: list[dict[str, Any]] = []
+
+            async def rebuild(**kwargs: Any) -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with (
+                    patch.object(app, "_prompt_choice", side_effect=["s", "y", "d"]),
+                    patch.object(app, "_rebuild_agents", rebuild),
+                ):
+                    await app._handle_config_command()
+
+            loaded = load_settings(workspace)
+            self.assertTrue(tool_always_allow(loaded, "edit_file"))
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(tool_always_allow(calls[0], "edit_file"))
+
+    async def test_config_command_disables_git_without_deleting_git_directory(self) -> None:
+        """Turning off Git protection should save settings and leave .git untouched."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            git_dir = workspace / ".git"
+            git_dir.mkdir()
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with patch.object(app, "_prompt_choice", side_effect=["n", "d"]):
+                    await app._handle_config_command()
+
+            self.assertTrue(git_dir.exists())
+            self.assertFalse(load_settings(workspace)["hitl"]["git_protection"]["enabled"])
+
+    def test_config_table_renders_default_rows(self) -> None:
+        """The config table should include Git and default approval tools."""
+        rendered = renderable_plain(type("Widget", (), {"renderable": config_table(load_settings(Path.cwd()))})())
+
+        self.assertIn("Git Protection", rendered)
+        self.assertIn("write_file", rendered)
+        self.assertIn("edit_file", rendered)
 
     def test_action_preview_shows_key_value_rows(self) -> None:
         """Approval previews should show scan-friendly rows with truncated values."""

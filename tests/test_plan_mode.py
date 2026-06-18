@@ -209,6 +209,33 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["permissions"][1].mode, "allow")
         self.assertTrue(any(tool_name(tool) == "grep" for tool in kwargs["tools"]))
 
+    def test_action_agent_respects_tool_always_allow_settings(self) -> None:
+        """Configured always-allow tools should be removed from interrupts."""
+        config = {
+            "settings": {
+                "hitl": {
+                    "tools": {
+                        "write_file": {"always_allow": True},
+                        "edit_file": {"always_allow": False},
+                        "web_search": {"always_allow": False},
+                    }
+                }
+            }
+        }
+
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
+        ):
+            factory.build_agent(config, ".", "checkpointer")
+
+        interrupts = create_deep_agent.call_args.kwargs["interrupt_on"]
+        self.assertNotIn("write_file", interrupts)
+        self.assertIn("edit_file", interrupts)
+        self.assertIn("web_search", interrupts)
+
     def test_agent_build_passes_metadata_before_summarization_middleware(self) -> None:
         """Model metadata should be applied before DeepAgents summarization middleware is created."""
         metadata = ModelMetadata(10000, "test")
@@ -324,6 +351,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/act", output)
         self.assertIn("return to action mode", output)
         self.assertIn("/tools", output)
+        self.assertIn("/config", output)
         self.assertIn("list tools", output)
         self.assertIn("/memories", output)
         self.assertIn("/skills", output)

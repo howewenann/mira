@@ -695,7 +695,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 300)
         self.assertEqual(result.usage["output_tokens"], 30)
 
-    def test_commit_loop_usage_keeps_request_floor_above_low_provider_total(self) -> None:
+    def test_commit_loop_usage_uses_request_estimate_above_low_provider_total(self) -> None:
         result = runner.TurnResult()
 
         usage = result.commit_loop_usage(
@@ -705,13 +705,50 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(usage["input_tokens"], 1400)
         self.assertEqual(usage["output_tokens"], 67)
-        self.assertEqual(usage["context_tokens"], 1467)
+        self.assertEqual(usage["context_tokens"], 10013)
         self.assertEqual(usage["context_floor_tokens"], 10013)
+        self.assertEqual(usage["context_source"], "request_estimate.count_tokens")
         self.assertEqual(result.usage["input_tokens"], 1400)
         self.assertEqual(result.usage["output_tokens"], 67)
         self.assertEqual(result.usage["context_tokens"], 10013)
         self.assertEqual(result.usage["context_floor_tokens"], 10013)
-        self.assertEqual(result.usage["source"], "request_floor.count_tokens")
+        self.assertEqual(result.usage["context_source"], "request_estimate.count_tokens")
+
+    def test_commit_loop_usage_uses_provider_pair_above_visible_estimate(self) -> None:
+        result = runner.TurnResult()
+
+        result.add_usage(
+            {
+                "input_tokens": 9467,
+                "output_tokens": 123,
+                "context_tokens": 454,
+                "context_source": "langchain_approx.count_tokens",
+                "source": "usage_metadata",
+            }
+        )
+
+        self.assertEqual(result.usage["input_tokens"], 9467)
+        self.assertEqual(result.usage["output_tokens"], 123)
+        self.assertEqual(result.usage["context_tokens"], 9590)
+        self.assertEqual(result.usage["context_source"], "provider.input_output_tokens")
+
+    def test_commit_loop_usage_replaces_pre_compaction_context_with_retry_estimate(self) -> None:
+        result = runner.TurnResult()
+
+        result.commit_loop_usage(
+            {"messages": [OutputMessage("before", {"input_tokens": 9467, "output_tokens": 123})]},
+            context_floor_tokens=10013,
+        )
+        result.commit_loop_usage(
+            {"messages": [OutputMessage("after", {"input_tokens": 300, "output_tokens": 20})]},
+            context_floor_tokens=4200,
+        )
+
+        self.assertEqual(result.usage["input_tokens"], 9767)
+        self.assertEqual(result.usage["output_tokens"], 143)
+        self.assertEqual(result.usage["context_tokens"], 4200)
+        self.assertEqual(result.usage["context_floor_tokens"], 4200)
+        self.assertEqual(result.usage["context_source"], "request_estimate.count_tokens")
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""

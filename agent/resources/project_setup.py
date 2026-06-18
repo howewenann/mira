@@ -42,9 +42,10 @@ MIRA loads project resources from this folder on top of its defaults.
   skills when the frontmatter `name` is the same.
 - `subagents/*.py`: Python files that export `SUBAGENTS = [...]`. Project
   subagents override default subagents when the `name` is the same.
-- `tools/*.py`: Python files that export `TOOLS = [...]` or
-  `get_tools(project_backend)`. Project tools override defaults when the tool
-  `name` is the same.
+- `tools/*.py`: Python files with module-level LangChain `@tool` objects.
+  Files can also define `get_tools(project_backend)` for tools that need
+  workspace access. Project tools override defaults when the tool `name` is
+  the same.
 
 Use `/memories`, `/skills`, `/subagents`, and `/tools` in the REPL to inspect
 what MIRA loaded.
@@ -96,7 +97,4 @@ from langchain.tools import tool
 def project_note() -> str:
     """Return a short note proving project tools are loaded."""
     return "Project tool loaded."
-
-
-TOOLS = [project_note]
 '''

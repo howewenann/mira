@@ -9,7 +9,7 @@ from typing import Any
 
 from langchain_core.messages.utils import count_tokens_approximately
 
-from runtime.usage import positive_int
+from runtime.usage import item_context_source, positive_int, select_context_usage
 
 DEFAULT_DASHBOARD = {
     "model": "",
@@ -76,9 +76,8 @@ def apply_turn_usage(
 
     input_tokens = positive_int(usage.get("input_tokens"))
     output_tokens = positive_int(usage.get("output_tokens"))
-    reported_context_tokens = positive_int(usage.get("context_tokens")) or input_tokens
-    context_floor_tokens = positive_int(usage.get("context_floor_tokens"))
-    context_tokens = max(reported_context_tokens, context_floor_tokens)
+    context_usage = select_context_usage(usage)
+    context_tokens = positive_int(context_usage.get("context_tokens"))
 
     dashboard["tokens"]["in"] += input_tokens
     dashboard["tokens"]["out"] += output_tokens
@@ -86,10 +85,7 @@ def apply_turn_usage(
     context = dashboard["context"]
     if context_tokens:
         context["used_tokens"] = context_tokens
-        if context_floor_tokens > reported_context_tokens:
-            context["source"] = "request_floor.count_tokens"
-        else:
-            context["source"] = str(usage.get("source") or "usage_metadata")
+        context["source"] = item_context_source(context_usage)
 
     if context_limit_tokens:
         context["limit_tokens"] = positive_int(context_limit_tokens)
@@ -198,6 +194,7 @@ def result_usage(result: Any) -> dict[str, Any]:
         "output_tokens": positive_int(getattr(result, "output_tokens", 0)),
         "context_tokens": positive_int(getattr(result, "context_tokens", 0)),
         "context_floor_tokens": positive_int(getattr(result, "context_floor_tokens", 0)),
+        "context_source": str(getattr(result, "context_source", "unknown") or "unknown"),
         "source": str(getattr(result, "usage_source", "unknown") or "unknown"),
     }
 

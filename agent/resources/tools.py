@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from langchain_core.tools import BaseTool
+
 from agent.resources.items import display_item
 from agent.resources.paths import (
     TOOLS_DIR,
@@ -57,9 +59,9 @@ def tool_files(root: Path, virtual_root: str, source: str, project_backend: Any)
 
 
 def tools_from_file(path: Path, project_backend: Any) -> list[Any]:
-    """Return tools from TOOLS and get_tools(project_backend)."""
+    """Return decorated module tools, TOOLS, and get_tools(project_backend)."""
     module = import_python_file(path, "mira_resource_tools")
-    tools = []
+    tools = module_tools(module)
     declared = getattr(module, "TOOLS", [])
     if declared:
         if not isinstance(declared, list | tuple):
@@ -73,7 +75,26 @@ def tools_from_file(path: Path, project_backend: Any) -> list[Any]:
             raise TypeError(f"{path} get_tools() must return a list")
         tools.extend(created)
 
-    return tools
+    return deduplicate_tools(tools)
+
+
+def module_tools(module: Any) -> list[Any]:
+    """Return module-level LangChain tools in definition order."""
+    return [
+        value
+        for value in vars(module).values()
+        if isinstance(value, BaseTool)
+    ]
+
+
+def deduplicate_tools(tools: list[Any]) -> list[Any]:
+    """Keep the first tool for each name."""
+    unique = {}
+    for tool in tools:
+        name = tool_name(tool)
+        if name not in unique:
+            unique[name] = tool
+    return list(unique.values())
 
 
 def tool_name(tool: Any) -> str:

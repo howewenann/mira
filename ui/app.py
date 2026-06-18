@@ -16,8 +16,18 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import ListView, Static
+from rich.table import Table
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
+from config.settings import (
+    DEFAULT_APPROVAL_TOOLS,
+    git_protection_enabled,
+    load_settings,
+    save_settings,
+    set_git_protection,
+    set_tool_always_allow,
+    tool_always_allow,
+)
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from ui.interrupts import (
@@ -206,6 +216,10 @@ class MiraApp(App[None]):
         self._record_prompt_history(text)
         if text in DESTRUCTIVE_HISTORY_COMMANDS:
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
+            return
+
+        if text == "/config":
+            self.run_worker(self._run_config_command(), name="config-command", exclusive=False)
             return
 
         if await handle_command(text, self, self.session, self.model_name, self.mode):
@@ -423,6 +437,85 @@ class MiraApp(App[None]):
             return True
 
         return False
+
+    async def _run_config_command(self) -> None:
+        """Run the interactive HITL settings menu."""
+        try:
+            await self._handle_config_command()
+            self._set_status(state="ready")
+        except Exception as exc:
+            self.system_message(f"config error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.action_focus_prompt()
+
+    async def _handle_config_command(self) -> bool:
+        """Prompt through HITL-related settings and persist changes."""
+        if self.busy:
+            self.system_message("finish the current turn before changing config", kind="warning")
+            return True
+
+        settings = load_settings(self.workspace)
+        self.command_output(config_table(settings))
+        choices = [("y", "yes"), ("n", "no"), ("s", "skip"), ("d", "done")]
+
+        answer = await self._prompt_choice(
+            "Config",
+            "Git Protection\nEnable Git protection for this workspace?",
+            choices,
+        )
+        if answer == "d":
+            self.system_message("config unchanged", kind="muted")
+            return True
+        if answer in {"y", "n"}:
+            enabled = answer == "y"
+            settings = set_git_protection(settings, enabled)
+            if not save_settings(self.workspace, settings):
+                self.system_message("could not save .mira/settings.yml", kind="warning")
+                return True
+            self.config = dict(self.config or {})
+            self.config["settings"] = settings
+            if enabled:
+                await self._ensure_git_after_enabling()
+            else:
+                self.system_message("git protection disabled", kind="info")
+
+        for tool_name in config_tool_names(settings):
+            current = "yes" if tool_always_allow(settings, tool_name) else "no"
+            answer = await self._prompt_choice(
+                "Config",
+                f"{tool_name}\nAlways Allow this tool? Current: {current}",
+                choices,
+            )
+            if answer == "d":
+                break
+            if answer not in {"y", "n"}:
+                continue
+            settings = set_tool_always_allow(settings, tool_name, answer == "y")
+            if not save_settings(self.workspace, settings):
+                self.system_message("could not save .mira/settings.yml", kind="warning")
+                return True
+            self.config = dict(self.config or {})
+            self.config["settings"] = settings
+            await self._rebuild_agents()
+            state = "always allowed" if answer == "y" else "requires approval"
+            self.system_message(f"{tool_name}: {state}", kind="info")
+
+        return True
+
+    async def _ensure_git_after_enabling(self) -> None:
+        """Initialize Git if protection was enabled for an unprotected workspace."""
+        from cli.git_guard import initialize_or_ask_to_continue, is_git_worktree
+
+        if is_git_worktree(self.workspace):
+            self.system_message("git protection enabled", kind="info")
+            return
+        if await initialize_or_ask_to_continue(self.workspace, self):
+            self.config = dict(self.config or {})
+            self.config["settings"] = load_settings(self.workspace)
+            self.system_message("git protection enabled", kind="info")
+        else:
+            self.system_message("git protection enabled, but Git was not initialized", kind="warning")
 
     def _clear_current_chat(self) -> None:
         """Reset the active persisted transcript while keeping the same session id."""
@@ -841,6 +934,23 @@ class MiraApp(App[None]):
         self.config["llm_context_source"] = metadata.context_source
         self.context_limit_tokens = metadata.context_tokens
         self.context_limit_source = metadata.context_source
+        await self._rebuild_agents(metadata=metadata)
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        self.store.save(self.session)
+        self._set_status(state=self.status_state, detail=f"context window: {metadata.context_tokens}")
+
+    async def _rebuild_agents(self, metadata: Any | None = None) -> None:
+        """Rebuild action and planning agents after settings or metadata changes."""
+        if self.config is None or self.checkpointer is None:
+            return
+
+        from agent.factory import build_agent, build_plan_agent
+
         self.agent = build_agent(
             config=self.config,
             workspace=self.workspace,
@@ -854,14 +964,6 @@ class MiraApp(App[None]):
             metadata=metadata,
         )
         refresh_agent_specs(self.mode, self.agent, self.plan_agent)
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-        self.store.save(self.session)
-        self._set_status(state=self.status_state, detail=f"context window: {metadata.context_tokens}")
 
     def _refresh_sessions(self) -> None:
         """Reload the session list if the store is available."""
@@ -947,3 +1049,25 @@ def append_prompt_history(path: Path, text: str) -> None:
 def is_compaction_notice(text: str) -> bool:
     """Return whether an info notice is really leaked compaction reasoning."""
     return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
+
+
+def config_tool_names(settings: dict[str, Any]) -> list[str]:
+    """Return tool names shown in the HITL settings menu."""
+    names = list(DEFAULT_APPROVAL_TOOLS)
+    hitl = settings.get("hitl") if isinstance(settings, dict) else None
+    tools = hitl.get("tools") if isinstance(hitl, dict) else None
+    if isinstance(tools, dict):
+        names.extend(name for name in tools if isinstance(name, str))
+    return sorted(set(names))
+
+
+def config_table(settings: dict[str, Any]) -> Table:
+    """Build a compact HITL settings table."""
+    table = Table(title="Config", title_style="bold cyan")
+    table.add_column("Setting", style="cyan", no_wrap=True)
+    table.add_column("Enable", no_wrap=True)
+    table.add_column("Always Allow", no_wrap=True)
+    table.add_row("Git Protection", "yes" if git_protection_enabled(settings) else "no", "-")
+    for tool_name in config_tool_names(settings):
+        table.add_row(tool_name, "-", "yes" if tool_always_allow(settings, tool_name) else "no")
+    return table

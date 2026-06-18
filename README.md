@@ -206,7 +206,7 @@ your-project/
   .mira/
     _sessions/
     README.md
-    git_safety.json
+    settings.yml
     memories/
       AGENTS.md
     skills/
@@ -220,8 +220,8 @@ your-project/
 
 MIRA creates the `.mira` resource examples if they are missing and never
 overwrites existing files. `_sessions/` stores durable session JSON, and
-`git_safety.json` remembers when you choose to continue in a workspace without Git. Delete `git_safety.json` if
-you want MIRA to ask again.
+`settings.yml` stores workspace settings such as Git protection and HITL tool
+approvals. Use `/config` in the TUI to change those settings.
 
 Use `.mira/memories/*.md` for always-on project context. The bundled default
 memory is only `AGENTS.md`; `.mira/memories/AGENTS.md` replaces it. Additional
@@ -236,8 +236,9 @@ Use `.mira/subagents/*.py` for DeepAgents subagents. Each file should export
 including dictionary specs, compiled subagents, and async subagents. A project
 subagent with the same `name` as a default subagent takes priority.
 
-Use `.mira/tools/*.py` for LangChain tools. Each file can export `TOOLS = [...]`
-or `get_tools(project_backend) -> list[...]` for tools that need workspace file
+Use `.mira/tools/*.py` for LangChain tools. MIRA auto-loads module-level
+objects created with LangChain's `@tool` decorator. Files can also define
+`get_tools(project_backend) -> list[...]` for tools that need workspace file
 access. MIRA includes a default regex-capable `grep` tool that replaces
 DeepAgents' literal-only `grep`, plus `ask_user`, which lets the model pause
 for a concrete multiple-choice user decision. A project tool with the same

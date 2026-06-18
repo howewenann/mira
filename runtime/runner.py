@@ -23,8 +23,10 @@ from runtime.usage import (
     empty_usage,
     has_context_usage,
     has_usage,
+    item_context_source,
     merge_usage,
     positive_int,
+    select_context_usage,
     usage_from_output,
 )
 
@@ -41,6 +43,7 @@ class TurnResult:
     total_tokens: int = 0
     context_tokens: int = 0
     context_floor_tokens: int = 0
+    context_source: str = "unknown"
     usage_source: str = "unknown"
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
@@ -54,6 +57,7 @@ class TurnResult:
             "total_tokens": self.total_tokens,
             "context_tokens": self.context_tokens,
             "context_floor_tokens": self.context_floor_tokens,
+            "context_source": self.context_source,
             "source": self.usage_source,
         }
 
@@ -62,20 +66,11 @@ class TurnResult:
         input_tokens = positive_int(usage.get("input_tokens"))
         output_tokens = positive_int(usage.get("output_tokens"))
         total_tokens = positive_int(usage.get("total_tokens")) or input_tokens + output_tokens
-        context_floor_tokens = positive_int(usage.get("context_floor_tokens"))
-        reported_context_tokens = max(positive_int(usage.get("context_tokens")), input_tokens)
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.total_tokens += total_tokens
-        self.context_tokens = max(
-            self.context_tokens,
-            reported_context_tokens,
-            context_floor_tokens,
-        )
-        self.context_floor_tokens = max(self.context_floor_tokens, context_floor_tokens)
-        if context_floor_tokens > reported_context_tokens:
-            self.usage_source = "request_floor.count_tokens"
-        elif self.usage_source == "unknown" and usage.get("source"):
+        self.set_context_usage(select_context_usage(usage))
+        if self.usage_source == "unknown" and usage.get("source"):
             self.usage_source = str(usage["source"])
 
     def add_stream_usage(self, usage: dict[str, Any]) -> None:
@@ -86,14 +81,12 @@ class TurnResult:
         """Set current context usage without changing cumulative In/Out totals."""
         if not has_context_usage(usage):
             return
-        context_tokens = positive_int(usage.get("context_tokens"))
-        context_floor_tokens = positive_int(usage.get("context_floor_tokens"))
-        self.context_tokens = max(self.context_tokens, context_tokens, context_floor_tokens)
-        self.context_floor_tokens = max(self.context_floor_tokens, context_floor_tokens)
-        if context_floor_tokens > context_tokens:
-            self.usage_source = "request_floor.count_tokens"
-        elif self.usage_source == "unknown" and usage.get("source"):
-            self.usage_source = str(usage["source"])
+        selected = select_context_usage(usage)
+        self.context_tokens = positive_int(selected.get("context_tokens"))
+        self.context_floor_tokens = positive_int(selected.get("context_floor_tokens"))
+        self.context_source = item_context_source(selected)
+        if self.usage_source == "unknown" and self.context_source != "unknown":
+            self.usage_source = self.context_source
 
     def commit_loop_usage(
         self,
@@ -109,29 +102,26 @@ class TurnResult:
             output_usage["context_floor_tokens"] = context_floor_tokens
         if has_usage(output_usage):
             self.add_usage(output_usage)
-            committed = dict(output_usage)
+            committed = select_context_usage(output_usage)
         elif has_usage(self._stream_usage):
             if context_floor_tokens:
                 self._stream_usage["context_floor_tokens"] = context_floor_tokens
             self.add_usage(self._stream_usage)
-            committed = dict(self._stream_usage)
+            committed = select_context_usage(self._stream_usage)
 
         context_usage = context_from_output(output, token_counter)
         if context_floor_tokens:
             context_usage["context_floor_tokens"] = context_floor_tokens
-            context_usage["context_tokens"] = max(
-                positive_int(context_usage.get("context_tokens")),
-                context_floor_tokens,
-            )
+            context_usage["context_source"] = "request_estimate.count_tokens"
         if not has_context_usage(committed):
             self.set_context_usage(context_usage)
         if not has_context_usage(committed) and has_context_usage(context_usage):
-            committed["context_tokens"] = max(
-                positive_int(committed.get("context_tokens")),
-                positive_int(context_usage.get("context_tokens")),
-            )
-            if committed.get("source") == "unknown" and context_usage.get("source"):
-                committed["source"] = str(context_usage["source"])
+            selected = select_context_usage(context_usage)
+            committed["context_tokens"] = positive_int(selected.get("context_tokens"))
+            committed["context_floor_tokens"] = positive_int(selected.get("context_floor_tokens"))
+            committed["context_source"] = item_context_source(selected)
+            if committed.get("source") == "unknown" and selected.get("source"):
+                committed["source"] = str(selected["source"])
         self._stream_usage = empty_usage()
         return committed
 

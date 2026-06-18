@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cli import git_guard
+from config.settings import load_settings, save_settings, set_git_protection, git_protection_enabled
 
 
 class PromptRenderer:
@@ -66,7 +67,7 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
         ):
             workspace = Path(directory)
             result = await git_guard.ensure_git_repository(workspace, renderer)
-            self.assertFalse(git_guard.git_safety_path(workspace).exists())
+            self.assertFalse((workspace / ".mira" / "settings.yml").exists())
 
         self.assertTrue(result)
         init_git.assert_called_once_with(workspace)
@@ -88,8 +89,8 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
         init_git.assert_called_once_with(workspace)
         self.assertEqual(renderer.create_messages, [git_guard.FIRST_GIT_PROMPT, git_guard.SECOND_GIT_PROMPT])
 
-    async def test_no_twice_saves_preference_and_continues(self) -> None:
-        """Declining both prompts should save the workspace preference."""
+    async def test_no_twice_disables_git_protection_and_continues(self) -> None:
+        """Declining both prompts should save disabled Git protection."""
         renderer = PromptRenderer(create_answers=[False, False])
 
         with (
@@ -98,13 +99,13 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
         ):
             workspace = Path(directory)
             result = await git_guard.ensure_git_repository(workspace, renderer)
-            self.assertTrue(git_guard.continue_without_git_is_saved(workspace))
+            self.assertFalse(git_protection_enabled(load_settings(workspace)))
 
         self.assertTrue(result)
         self.assertEqual(renderer.create_messages, [git_guard.FIRST_GIT_PROMPT, git_guard.SECOND_GIT_PROMPT])
 
-    async def test_saved_preference_suppresses_future_prompts(self) -> None:
-        """A saved continue-without-Git choice should avoid repeat prompts."""
+    async def test_disabled_git_protection_suppresses_future_prompts(self) -> None:
+        """A saved disabled Git protection setting should avoid repeat prompts."""
         renderer = PromptRenderer()
 
         with (
@@ -112,7 +113,7 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
         ):
             workspace = Path(directory)
-            self.assertTrue(git_guard.save_continue_without_git(workspace))
+            save_settings(workspace, set_git_protection(load_settings(workspace), False))
             result = await git_guard.ensure_git_repository(workspace, renderer)
 
         self.assertTrue(result)
@@ -130,7 +131,7 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
         ):
             workspace = Path(directory)
             result = await git_guard.ensure_git_repository(workspace, renderer)
-            self.assertTrue(git_guard.continue_without_git_is_saved(workspace))
+            self.assertFalse(git_protection_enabled(load_settings(workspace)))
 
         self.assertTrue(result)
         self.assertEqual(renderer.continue_messages, [git_guard.GIT_FAILURE_PROMPT])
@@ -146,7 +147,7 @@ class GitGuardTests(unittest.IsolatedAsyncioTestCase):
         ):
             workspace = Path(directory)
             result = await git_guard.ensure_git_repository(workspace, renderer)
-            self.assertFalse(git_guard.continue_without_git_is_saved(workspace))
+            self.assertTrue(git_protection_enabled(load_settings(workspace)))
 
         self.assertFalse(result)
         self.assertEqual(renderer.continue_messages, [git_guard.GIT_FAILURE_PROMPT])

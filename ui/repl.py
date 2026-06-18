@@ -37,6 +37,7 @@ User request:
 COMMAND_HELP = {
     "/help": "show commands and what they do",
     "/tools": "list tools available in the current mode",
+    "/config": "configure HITL approvals in the TUI",
     "/memories": "list loaded memory files and replacements",
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
@@ -227,6 +228,10 @@ async def handle_command(
 
     if text == "/tools":
         print_tools(renderer, mode)
+        return True
+
+    if text == "/config":
+        write_line(renderer, "/config is available in the Textual app", kind="warning")
         return True
 
     if text == "/memories":

@@ -14,6 +14,7 @@ def empty_usage() -> dict[str, Any]:
         "total_tokens": 0,
         "context_tokens": 0,
         "context_floor_tokens": 0,
+        "context_source": "unknown",
         "source": "unknown",
     }
 
@@ -25,7 +26,7 @@ def has_usage(usage: dict[str, Any]) -> bool:
 
 def has_context_usage(usage: dict[str, Any]) -> bool:
     """Return whether a context token count is present."""
-    return positive_int(usage.get("context_tokens")) > 0
+    return positive_int(usage.get("context_tokens")) > 0 or positive_int(usage.get("context_floor_tokens")) > 0
 
 
 def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +48,8 @@ def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
             merged["context_floor_tokens"],
             positive_int(item.get("context_floor_tokens")),
         )
+        if item_context_source(item) != "unknown":
+            merged["context_source"] = item_context_source(item)
         if merged["source"] == "unknown" and item.get("source"):
             merged["source"] = str(item["source"])
 
@@ -128,6 +131,7 @@ def context_from_output(output: Any, token_counter: TokenCounter | None) -> dict
         "total_tokens": 0,
         "context_tokens": context_tokens,
         "context_floor_tokens": 0,
+        "context_source": "langchain_approx.count_tokens" if context_tokens else "unknown",
         "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
@@ -160,7 +164,7 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
         "tokens_out",
         "completion_token_count",
     )
-    total_tokens = first_int(
+    total_tokens, total_key = first_int_with_key(
         value,
         "total_tokens",
         "total_token_count",
@@ -186,6 +190,7 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
             }
         ),
         "context_floor_tokens": 0,
+        "context_source": context_source_for_mapping(source, total_key, input_tokens, output_tokens, total_tokens),
         "source": source if input_tokens or output_tokens or total_tokens else "unknown",
     }
     return usage
@@ -217,6 +222,7 @@ def context_from_message_texts(messages: list[Any], token_counter: TokenCounter 
         "total_tokens": 0,
         "context_tokens": context_tokens,
         "context_floor_tokens": 0,
+        "context_source": "langchain_approx.count_tokens" if context_tokens else "unknown",
         "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
@@ -317,11 +323,78 @@ def field(value: Any, name: str) -> Any:
 
 def first_int(value: dict[str, Any], *keys: str) -> int:
     """Return the first positive integer found under the given keys."""
+    parsed, _key = first_int_with_key(value, *keys)
+    return parsed
+
+
+def first_int_with_key(value: dict[str, Any], *keys: str) -> tuple[int, str]:
+    """Return the first positive integer and key found in a mapping."""
     for key in keys:
         parsed = positive_int(value.get(key))
         if parsed:
-            return parsed
-    return 0
+            return parsed, key
+    return 0, ""
+
+
+def context_source_for_mapping(
+    source: str,
+    total_key: str,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+) -> str:
+    """Return the source for current-context occupancy from provider metadata."""
+    if total_key in {"total_token_count", "total_tokens_count", "totalTokensCount", "n_tokens", "nTokens"}:
+        return source
+    if input_tokens or output_tokens:
+        return "provider.input_output_tokens"
+    return source if total_tokens else "unknown"
+
+
+def item_context_source(usage: dict[str, Any]) -> str:
+    """Return context-specific source, falling back to usage source."""
+    return str(usage.get("context_source") or usage.get("source") or "unknown")
+
+
+def select_context_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    """Select current-context occupancy by source precedence."""
+    selected = dict(usage)
+    input_tokens = positive_int(usage.get("input_tokens"))
+    output_tokens = positive_int(usage.get("output_tokens"))
+    provider_pair = input_tokens + output_tokens
+    context_tokens = positive_int(usage.get("context_tokens"))
+    request_estimate = positive_int(usage.get("context_floor_tokens"))
+    context_source = item_context_source(usage)
+
+    if is_trusted_full_context_source(context_source) and context_tokens:
+        selected["context_tokens"] = context_tokens
+        selected["context_source"] = context_source
+    elif request_estimate:
+        selected["context_tokens"] = request_estimate
+        selected["context_source"] = "request_estimate.count_tokens"
+    elif provider_pair:
+        selected["context_tokens"] = provider_pair
+        selected["context_source"] = "provider.input_output_tokens"
+    elif context_tokens:
+        selected["context_tokens"] = context_tokens
+        selected["context_source"] = context_source
+    else:
+        selected["context_tokens"] = 0
+        selected["context_source"] = "unknown"
+    return selected
+
+
+def is_trusted_full_context_source(source: str) -> bool:
+    """Return whether a source is known to report full context occupancy."""
+    return source not in {
+        "",
+        "unknown",
+        "langchain_approx.count_tokens",
+        "provider.input_output_tokens",
+        "request_estimate.count_tokens",
+        "request_floor.count_tokens",
+        "usage_metadata",
+    }
 
 
 def positive_int(value: Any) -> int:

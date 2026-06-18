@@ -46,6 +46,3 @@ def normalize_options(options: list[str]) -> list[str]:
 
     normalized.append(ASK_USER_OPEN_OPTION)
     return normalized
-
-
-TOOLS = [ask_user]

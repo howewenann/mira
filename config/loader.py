@@ -9,6 +9,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from config.llm import load_llm_config
+from config.settings import load_settings
 
 
 def _int_env(name: str, default: int) -> int:
@@ -59,6 +60,7 @@ def load_config(workspace: Path) -> dict[str, Any]:
 
     return {
         "workspace": str(workspace),
+        "settings": load_settings(workspace),
         **load_llm_config(os.environ),
         "tool_output_chars": _int_env("MIRA_TOOL_OUTPUT_CHARS", 240),
         "lmstudio_metadata_timeout": _float_env("MIRA_LMSTUDIO_METADATA_TIMEOUT", 2.0),

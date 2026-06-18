@@ -17,6 +17,7 @@ from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOL
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs, tool_name as resource_tool_name
 from config.metadata import ModelMetadata
+from config.settings import hitl_settings
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -34,7 +35,7 @@ def build_agent(
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_action_permissions(),
-        interrupt_on=_write_interrupts(),
+        interrupt_on=_write_interrupts(config),
         excluded_tools=(),
     )
     return agent
@@ -149,12 +150,19 @@ def _plan_permissions() -> list[FilesystemPermission]:
     ]
 
 
-def _write_interrupts() -> dict[str, dict[str, list[str]]]:
-    """Require human approval before the action agent writes project files."""
-    return {
-        "write_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
-        "edit_file": {"allowed_decisions": ["approve", "edit", "reject", "respond"]},
-    }
+def _write_interrupts(config: dict[str, Any] | None = None) -> dict[str, dict[str, list[str]]]:
+    """Return human approval policy for action-mode tools."""
+    tools = hitl_settings(config).get("tools", {})
+    interrupts: dict[str, dict[str, list[str]]] = {}
+    if not isinstance(tools, dict):
+        return interrupts
+    for name, spec in tools.items():
+        if not isinstance(name, str) or not isinstance(spec, dict):
+            continue
+        if spec.get("always_allow") is True:
+            continue
+        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
+    return interrupts
 
 
 def context_limit_tokens(config: dict[str, Any], metadata: ModelMetadata | None) -> int | None:
