@@ -11,6 +11,7 @@ from agent.context_overflow import (
     PROVIDER_CONTEXT_NOTICE,
     ContextPressureMiddleware,
     is_context_overflow_error,
+    pop_context_floor_tokens,
     pop_context_overflow_notice,
 )
 
@@ -86,6 +87,7 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         pop_context_overflow_notice()
+        pop_context_floor_tokens("thread-1")
 
     async def test_reported_context_pressure_raises_once_per_signature(self) -> None:
         middleware = ContextPressureMiddleware(context_limit_tokens=1000, threshold_fraction=0.98)
@@ -181,6 +183,38 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
         notice = pop_context_overflow_notice(caught.exception)
         self.assertIn("99 tokens estimated", notice)
         self.assertIn("threshold 98", notice)
+
+    async def test_request_token_count_is_remembered_as_context_floor(self) -> None:
+        middleware = ContextPressureMiddleware(
+            context_limit_tokens=1000,
+            threshold_fraction=0.98,
+            token_counter=lambda messages, tools=None: 513,
+        )
+
+        async def handler(request: Any) -> str:
+            return "ok"
+
+        self.assertEqual(await middleware.awrap_model_call(Request(messages=[]), handler), "ok")
+
+        self.assertEqual(pop_context_floor_tokens("thread-1"), 513)
+
+    async def test_compaction_retry_replaces_pre_compaction_context_floor(self) -> None:
+        counts = iter([99, 42])
+        middleware = ContextPressureMiddleware(
+            context_limit_tokens=100,
+            threshold_fraction=0.98,
+            token_counter=lambda messages, tools=None: next(counts),
+        )
+
+        async def handler(request: Any) -> str:
+            return "ok"
+
+        with self.assertRaises(ContextOverflowError):
+            await middleware.awrap_model_call(Request(messages=[]), handler)
+
+        self.assertEqual(await middleware.awrap_model_call(Request(messages=[]), handler), "ok")
+
+        self.assertEqual(pop_context_floor_tokens("thread-1"), 42)
 
     async def test_provider_context_errors_are_rethrown_as_context_overflow(self) -> None:
         middleware = ContextPressureMiddleware(context_limit_tokens=1000, enabled=False)

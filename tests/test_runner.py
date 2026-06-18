@@ -695,6 +695,24 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 300)
         self.assertEqual(result.usage["output_tokens"], 30)
 
+    def test_commit_loop_usage_keeps_request_floor_above_low_provider_total(self) -> None:
+        result = runner.TurnResult()
+
+        usage = result.commit_loop_usage(
+            {"messages": [OutputMessage("done", {"input_tokens": 1400, "output_tokens": 67, "total_tokens": 1467})]},
+            context_floor_tokens=10013,
+        )
+
+        self.assertEqual(usage["input_tokens"], 1400)
+        self.assertEqual(usage["output_tokens"], 67)
+        self.assertEqual(usage["context_tokens"], 1467)
+        self.assertEqual(usage["context_floor_tokens"], 10013)
+        self.assertEqual(result.usage["input_tokens"], 1400)
+        self.assertEqual(result.usage["output_tokens"], 67)
+        self.assertEqual(result.usage["context_tokens"], 10013)
+        self.assertEqual(result.usage["context_floor_tokens"], 10013)
+        self.assertEqual(result.usage["source"], "request_floor.count_tokens")
+
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""
         usage = usage_from_output(
@@ -2133,6 +2151,22 @@ Await further instructions.
         self.assertEqual(usage["output_tokens"], 1424)
         self.assertEqual(usage["total_tokens"], 9624)
         self.assertEqual(usage["context_tokens"], 9624)
+
+    def test_usage_parser_accepts_lmstudio_n_tokens_context_count(self) -> None:
+        usage = usage_from_message(
+            {
+                "stats": {
+                    "promptTokensCount": 1400,
+                    "predictedTokensCount": 67,
+                    "n_tokens": 10013,
+                }
+            }
+        )
+
+        self.assertEqual(usage["input_tokens"], 1400)
+        self.assertEqual(usage["output_tokens"], 67)
+        self.assertEqual(usage["total_tokens"], 10013)
+        self.assertEqual(usage["context_tokens"], 10013)
 
 
 if __name__ == "__main__":

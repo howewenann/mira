@@ -13,6 +13,7 @@ def empty_usage() -> dict[str, Any]:
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": 0,
+        "context_floor_tokens": 0,
         "source": "unknown",
     }
 
@@ -40,6 +41,11 @@ def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
             merged["context_tokens"],
             positive_int(item.get("context_tokens")),
             context_tokens_from_counts(item),
+            positive_int(item.get("context_floor_tokens")),
+        )
+        merged["context_floor_tokens"] = max(
+            merged["context_floor_tokens"],
+            positive_int(item.get("context_floor_tokens")),
         )
         if merged["source"] == "unknown" and item.get("source"):
             merged["source"] = str(item["source"])
@@ -121,6 +127,7 @@ def context_from_output(output: Any, token_counter: TokenCounter | None) -> dict
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": context_tokens,
+        "context_floor_tokens": 0,
         "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
@@ -153,7 +160,15 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
         "tokens_out",
         "completion_token_count",
     )
-    total_tokens = first_int(value, "total_tokens", "total_token_count", "total_tokens_count", "totalTokensCount")
+    total_tokens = first_int(
+        value,
+        "total_tokens",
+        "total_token_count",
+        "total_tokens_count",
+        "totalTokensCount",
+        "n_tokens",
+        "nTokens",
+    )
     if total_tokens and input_tokens and not output_tokens:
         output_tokens = max(0, total_tokens - input_tokens)
     if total_tokens and output_tokens and not input_tokens:
@@ -170,6 +185,7 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
                 "total_tokens": total_tokens,
             }
         ),
+        "context_floor_tokens": 0,
         "source": source if input_tokens or output_tokens or total_tokens else "unknown",
     }
     return usage
@@ -200,6 +216,7 @@ def context_from_message_texts(messages: list[Any], token_counter: TokenCounter 
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": context_tokens,
+        "context_floor_tokens": 0,
         "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
     }
 
@@ -283,6 +300,9 @@ def object_mapping(value: Any) -> dict[str, Any] | None:
         "prompt_tokens_count",
         "predicted_tokens_count",
         "total_tokens_count",
+        "totalTokensCount",
+        "n_tokens",
+        "nTokens",
     )
     mapped = {key: getattr(value, key) for key in keys if hasattr(value, key)}
     return mapped or None

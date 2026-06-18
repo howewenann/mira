@@ -24,6 +24,7 @@ COMPACTION_SUMMARY_HEADINGS = ("session intent", "summary", "artifacts", "next s
 
 _context_notice: ContextVar[str | None] = ContextVar("mira_context_notice", default=None)
 _fallback_context_notice: str | None = None
+_context_floor_tokens: dict[str, int] = {}
 
 
 class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -73,11 +74,11 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
             return
 
         thread = thread_id(request)
-        if self._consume_retry_skip(thread):
-            return
-
+        skip_pressure = self._consume_retry_skip(thread)
         threshold = max(1, int(self.context_limit_tokens * self.threshold_fraction))
         pressure = self._request_pressure(request, threshold, thread)
+        if skip_pressure:
+            return
         if pressure is None:
             return
 
@@ -93,10 +94,11 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
     def _request_pressure(self, request: Any, threshold: int, thread: str) -> tuple[str, int, str] | None:
         messages = list(getattr(request, "messages", []) or [])
         reported = reported_context_pressure(messages, threshold, thread)
+        estimated = self._count_request_tokens(request)
+        remember_context_floor(thread, estimated)
         if reported is not None:
             return reported
 
-        estimated = self._count_request_tokens(request)
         if estimated >= threshold:
             return (
                 "estimated",
@@ -113,7 +115,12 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
         try:
             return positive_int(self.token_counter(counted_messages, tools=tools))
         except TypeError:
-            return positive_int(self.token_counter(counted_messages))
+            try:
+                return positive_int(self.token_counter(counted_messages))
+            except Exception:
+                return 0
+        except Exception:
+            return 0
 
     def _remember_signature(self, signature: str) -> bool:
         if signature in self._triggered_signatures:
@@ -274,6 +281,20 @@ def pop_context_overflow_notice(exc: BaseException | None = None) -> str:
     if notice:
         return notice
     return context_overflow_fallback_notice(exc) if exc is not None else ""
+
+
+def remember_context_floor(thread: str, tokens: int) -> None:
+    """Remember the latest full-request token estimate for a thread."""
+    thread = str(thread or "")
+    tokens = positive_int(tokens)
+    if not thread or not tokens:
+        return
+    _context_floor_tokens[thread] = tokens
+
+
+def pop_context_floor_tokens(thread: str) -> int:
+    """Return and clear the latest full-request token estimate for a thread."""
+    return positive_int(_context_floor_tokens.pop(str(thread or ""), 0))
 
 
 def context_overflow_fallback_notice(exc: BaseException | None = None) -> str:

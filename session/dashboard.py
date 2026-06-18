@@ -76,7 +76,9 @@ def apply_turn_usage(
 
     input_tokens = positive_int(usage.get("input_tokens"))
     output_tokens = positive_int(usage.get("output_tokens"))
-    context_tokens = positive_int(usage.get("context_tokens")) or input_tokens
+    reported_context_tokens = positive_int(usage.get("context_tokens")) or input_tokens
+    context_floor_tokens = positive_int(usage.get("context_floor_tokens"))
+    context_tokens = max(reported_context_tokens, context_floor_tokens)
 
     dashboard["tokens"]["in"] += input_tokens
     dashboard["tokens"]["out"] += output_tokens
@@ -84,7 +86,9 @@ def apply_turn_usage(
     context = dashboard["context"]
     if context_tokens:
         context["used_tokens"] = context_tokens
-        if context.get("source") == "unknown":
+        if context_floor_tokens > reported_context_tokens:
+            context["source"] = "request_floor.count_tokens"
+        else:
             context["source"] = str(usage.get("source") or "usage_metadata")
 
     if context_limit_tokens:
@@ -193,6 +197,7 @@ def result_usage(result: Any) -> dict[str, Any]:
         "input_tokens": positive_int(getattr(result, "input_tokens", 0)),
         "output_tokens": positive_int(getattr(result, "output_tokens", 0)),
         "context_tokens": positive_int(getattr(result, "context_tokens", 0)),
+        "context_floor_tokens": positive_int(getattr(result, "context_floor_tokens", 0)),
         "source": str(getattr(result, "usage_source", "unknown") or "unknown"),
     }
 
