@@ -11,7 +11,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from agent.context_overflow import DEFAULT_CONTEXT_PRESSURE_FRACTION, pop_compaction_retry, pop_context_floor_tokens, set_context_overflow_notice
+from agent.context_overflow import DEFAULT_CONTEXT_PRESSURE_FRACTION, pop_compaction_retry, pop_context_floor_tokens
 from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text, output_has_tool_call_repr, output_tool_calls
 from runtime.subagent_events import consume_subagents
@@ -45,6 +45,7 @@ class TurnResult:
     context_floor_tokens: int = 0
     context_source: str = "unknown"
     usage_source: str = "unknown"
+    possibly_truncated: bool = False
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
 
@@ -187,7 +188,6 @@ async def run_turn(
     result = TurnResult()
     approved_fallback_actions: list[dict[str, Any]] = []
     approved_result_start = 0
-    cutoff_retried = False
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
@@ -212,7 +212,7 @@ async def run_turn(
         )
         if usage_callback is not None and (has_usage(usage_delta) or has_context_usage(usage_delta)):
             usage_callback(usage_delta)
-        compaction_retry_finished = pop_compaction_retry(thread_id)
+        pop_compaction_retry(thread_id)
         waiting_finished = getattr(renderer, "waiting_finished", None)
         if callable(waiting_finished):
             waiting_finished()
@@ -236,27 +236,12 @@ async def run_turn(
                 raise RuntimeError(f"model returned unexecuted tool call(s): {names or 'tool'}")
             if leaked_tool_repr:
                 raise RuntimeError("model returned unexecuted tool call(s): tool")
-            if compaction_retry_finished:
-                call_renderer(renderer, "system_message", "Context compacted. Continuing with summarized history.", kind="info")
-            if should_retry_after_cutoff(
+            if should_warn_after_cutoff(
                 result,
                 context_limit_tokens=context_limit_tokens,
                 context_pressure_fraction=context_pressure_fraction,
-            ) and not cutoff_retried:
-                cutoff_retried = True
-                call_renderer(renderer, "discard_last_assistant")
-                call_renderer(
-                    renderer,
-                    "system_message",
-                    "Response ended near the context limit. Compacting older context and retrying.",
-                    kind="info",
-                )
-                set_context_overflow_notice(
-                    "Response ended near the context limit. Compacting older context and retrying."
-                )
-                result = TurnResult()
-                payload = {"messages": [{"role": "user", "content": text}]}
-                continue
+            ):
+                result.possibly_truncated = True
             return result
 
         ask_user_interrupt = first_ask_user_interrupt(interrupts)
@@ -269,13 +254,13 @@ async def run_turn(
             payload = Command(resume={"decisions": decisions})
 
 
-def should_retry_after_cutoff(
+def should_warn_after_cutoff(
     result: TurnResult,
     *,
     context_limit_tokens: int | None,
     context_pressure_fraction: float,
 ) -> bool:
-    """Return whether a silent provider cutoff should force compaction retry."""
+    """Return whether a completed response may have been cut off near the limit."""
     threshold = context_threshold(context_limit_tokens, context_pressure_fraction)
     if not threshold:
         return False

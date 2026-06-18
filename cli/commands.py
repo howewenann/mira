@@ -92,6 +92,7 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     from session.dashboard import apply_turn_usage
     from session.context import sync_deepagents_compaction, update_title, with_resume_context
     from session.recorder import RecordingRenderer, SessionRecorder
+    from ui.repl import maybe_compact_after_turn
     from agent.context_overflow import (
         context_notice_rendered,
         mark_context_notice_rendered,
@@ -146,6 +147,15 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         model_name=app.get("model_name", ""),
         context_limit_tokens=app.get("context_limit_tokens"),
         context_limit_source=app.get("context_limit_source", "unknown"),
+    )
+    await maybe_compact_after_turn(
+        session=app["session"],
+        agent=app["agent"],
+        thread_id=app["session"]["id"],
+        recorder=recorder,
+        renderer=app["renderer"],
+        result=result,
+        context_pressure_fraction=(app.get("config") or {}).get("context_pressure_fraction", 0.98),
     )
     app["store"].save(app["session"])
 

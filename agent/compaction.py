@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
 from deepagents.middleware.summarization import create_summarization_tool_middleware
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 
 from runtime.compaction_state import compaction_scope
 
@@ -16,6 +17,77 @@ def create_mira_summarization_tool_middleware(model: Any, backend: Any) -> Any:
     middleware = create_summarization_tool_middleware(model=model, backend=backend)
     mark_summarization_engine(getattr(middleware, "_summarization", None))
     return middleware
+
+
+@dataclass(frozen=True)
+class PostTurnCompactionResult:
+    """Outcome of a post-turn compaction attempt."""
+
+    compacted: bool = False
+    reason: str = ""
+    file_path: str = ""
+    summary: str = ""
+
+
+async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionResult:
+    """Compact older context after a completed turn without re-answering the prompt."""
+    summarization = getattr(agent, "mira_summarization", None)
+    if summarization is None:
+        return PostTurnCompactionResult(reason="unavailable")
+    if not callable(getattr(agent, "aget_state", None)) or not callable(getattr(agent, "aupdate_state", None)):
+        return PostTurnCompactionResult(reason="state_unavailable")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = await agent.aget_state(config)
+    state = getattr(snapshot, "values", None)
+    if not isinstance(state, dict):
+        return PostTurnCompactionResult(reason="state_unavailable")
+
+    try:
+        messages = convert_to_messages(state.get("messages") or [])
+    except Exception:
+        messages = list(state.get("messages") or [])
+    if not messages:
+        return PostTurnCompactionResult(reason="no_messages")
+
+    event = state.get("_summarization_event")
+    effective = summarization._apply_event_to_messages(messages, event)
+    cutoff = int(summarization._determine_cutoff_index(effective) or 0)
+    if cutoff <= 0:
+        return PostTurnCompactionResult(reason="nothing_to_compact")
+
+    to_summarize, _preserved = summarization._partition_messages(effective, cutoff)
+    if not to_summarize:
+        return PostTurnCompactionResult(reason="nothing_to_compact")
+
+    original_get_thread_id = getattr(summarization, "_get_thread_id", None)
+    if callable(original_get_thread_id):
+        setattr(summarization, "_get_thread_id", lambda: str(thread_id))
+    try:
+        backend = getattr(summarization, "_backend", None)
+        if callable(backend):
+            return PostTurnCompactionResult(reason="backend_unavailable")
+        with compaction_scope():
+            file_path = await summarization._aoffload_to_backend(backend, to_summarize)
+            summary = await summarization._acreate_summary(to_summarize)
+    finally:
+        if callable(original_get_thread_id):
+            setattr(summarization, "_get_thread_id", original_get_thread_id)
+
+    summary_message = summarization._build_new_messages_with_path(summary, file_path)[0]
+    state_cutoff = summarization._compute_state_cutoff(event, cutoff)
+    new_event = {
+        "cutoff_index": state_cutoff,
+        "summary_message": summary_message,
+        "file_path": file_path,
+    }
+    await agent.aupdate_state(config, {"_summarization_event": new_event})
+    return PostTurnCompactionResult(
+        compacted=True,
+        reason="compacted",
+        file_path=str(file_path or ""),
+        summary=str(summary or ""),
+    )
 
 
 def mark_summarization_engine(summarization: Any) -> None:
@@ -173,6 +245,8 @@ def field(value: Any, name: str) -> Any:
 
 
 __all__ = [
+    "PostTurnCompactionResult",
+    "compact_after_turn",
     "create_mira_summarization_tool_middleware",
     "mark_summarization_engine",
     "sanitize_messages_for_archive",

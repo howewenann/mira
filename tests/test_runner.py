@@ -435,7 +435,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(len(agent.payloads), 1)
 
-    async def test_run_turn_retries_truncated_high_context_completion_once(self) -> None:
+    async def test_run_turn_marks_truncated_high_context_completion_without_retry(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(
@@ -447,8 +447,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                             )
                         ]
                     }
-                ),
-                FakeStream(output={"messages": [OutputMessage("Recovered answer.")]})
+                )
             ]
         )
         renderer = RunTurnRenderer()
@@ -462,13 +461,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             context_pressure_fraction=0.98,
         )
 
-        self.assertEqual(len(agent.payloads), 2)
-        self.assertEqual(result.final_text, "Recovered answer.")
-        self.assertIn(("discard_last_assistant",), renderer.events)
-        self.assertIn(
-            ("system_message", "info", "Response ended near the context limit. Compacting older context and retrying."),
-            renderer.events,
-        )
+        self.assertEqual(len(agent.payloads), 1)
+        self.assertEqual(result.final_text, "Since it")
+        self.assertTrue(result.possibly_truncated)
+        self.assertNotIn(("discard_last_assistant",), renderer.events)
 
     async def test_run_turn_keeps_complete_high_context_completion(self) -> None:
         agent = FakeAgent(

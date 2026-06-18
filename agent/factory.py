@@ -83,6 +83,7 @@ def _build_agent(
     resources = build_resources(Path(workspace))
     backend = resources.backend
 
+    summarization_middleware = create_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
         FilesystemToolArgNormalizer(Path(workspace)),
         ContextPressureMiddleware(
@@ -91,7 +92,7 @@ def _build_agent(
             enabled=bool(config.get("context_pressure_compaction", True)),
         ),
         CodeInterpreterMiddleware(ptc=["task"], skills_backend=backend),
-        create_summarization_tool_middleware(model=model, backend=backend),
+        summarization_middleware,
     ]
     middleware.extend(extra_middleware or [])
 
@@ -120,6 +121,7 @@ def _build_agent(
     )
     _attach_resources(agent, resources.metadata)
     _attach_backend(agent, backend)
+    _attach_summarization(agent, getattr(summarization_middleware, "_summarization", None))
     return agent
 
 
@@ -308,5 +310,13 @@ def _attach_backend(agent: Any, backend: Any) -> None:
     """Attach the workspace backend for approved filesystem fallback execution."""
     try:
         agent.mira_backend = backend
+    except AttributeError:
+        return
+
+
+def _attach_summarization(agent: Any, summarization: Any) -> None:
+    """Attach DeepAgents summarization for post-turn compaction."""
+    try:
+        agent.mira_summarization = summarization
     except AttributeError:
         return

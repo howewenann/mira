@@ -7,8 +7,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
-from langchain_core.messages import AIMessage
+from agent.compaction import PostTurnCompactionResult, compact_after_turn, mark_summarization_engine
+from langchain_core.messages import AIMessage, HumanMessage
 
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
@@ -32,6 +34,55 @@ class AgentWithState:
     async def aget_state(self, config: dict[str, Any]) -> Snapshot:
         self.configs.append(config)
         return Snapshot(self.values)
+
+
+class AgentWithMutableState(AgentWithState):
+    def __init__(self, values: dict[str, Any], summarization: Any) -> None:
+        super().__init__(values)
+        self.mira_summarization = summarization
+        self.updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    async def aupdate_state(self, config: dict[str, Any], values: dict[str, Any]) -> None:
+        self.updates.append((config, values))
+        self.values.update(values)
+
+
+class FakeSummarization:
+    def __init__(self) -> None:
+        self._backend = object()
+        self.offloaded: list[Any] = []
+        self.thread_ids: list[str] = []
+
+    def _get_thread_id(self) -> str:
+        return "unset"
+
+    def _apply_event_to_messages(self, messages: list[Any], event: Any) -> list[Any]:
+        return messages
+
+    def _determine_cutoff_index(self, messages: list[Any]) -> int:
+        return 1
+
+    def _partition_messages(self, messages: list[Any], cutoff: int) -> tuple[list[Any], list[Any]]:
+        return messages[:cutoff], messages[cutoff:]
+
+    async def _aoffload_to_backend(self, backend: Any, messages: list[Any]) -> str:
+        self.thread_ids.append(self._get_thread_id())
+        self.offloaded.append(messages)
+        return "/.mira/conversation_history/thread-1.md"
+
+    async def _acreate_summary(self, messages: list[Any]) -> str:
+        return "Older context was summarized."
+
+    def _build_new_messages_with_path(self, summary: str, file_path: str) -> list[Any]:
+        return [
+            HumanMessage(
+                content=f"Summary: {summary}\nArchive: {file_path}",
+                additional_kwargs={"lc_source": "summarization"},
+            )
+        ]
+
+    def _compute_state_cutoff(self, event: Any, cutoff: int) -> int:
+        return cutoff
 
 
 class AgentWithFailingState(FakeAgent):
@@ -366,6 +417,40 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         compactions = context.normalize_compactions(record["events"])
         self.assertEqual(compactions[0]["summary"], "Earlier messages were summarized.")
 
+    async def test_post_turn_compaction_updates_summary_event_and_sanitizes_archive_messages(self) -> None:
+        summarization = FakeSummarization()
+        mark_summarization_engine(summarization)
+        agent = AgentWithMutableState(
+            {
+                "messages": [
+                    AIMessage(
+                        content=[
+                            {"type": "reasoning", "reasoning": "private chain of thought"},
+                            {"type": "text", "text": "Visible answer."},
+                        ],
+                        additional_kwargs={"reasoning_content": "private chain of thought"},
+                    ),
+                    HumanMessage(content="recent prompt"),
+                ]
+            },
+            summarization,
+        )
+
+        result = await compact_after_turn(agent, "thread-1")
+
+        self.assertTrue(result.compacted)
+        self.assertEqual(summarization.thread_ids, ["thread-1"])
+        self.assertEqual(agent.updates[0][0], {"configurable": {"thread_id": "thread-1"}})
+        event = agent.values["_summarization_event"]
+        self.assertEqual(event["cutoff_index"], 1)
+        self.assertEqual(event["file_path"], "/.mira/conversation_history/thread-1.md")
+        self.assertIsInstance(event["summary_message"], HumanMessage)
+        self.assertNotEqual(event["summary_message"].additional_kwargs.get("lc_source"), "summarization")
+        rendered_archive = repr(summarization.offloaded[0][0])
+        self.assertIn("Visible answer.", rendered_archive)
+        self.assertNotIn("private chain", rendered_archive)
+        self.assertNotIn("reasoning_content", rendered_archive)
+
     async def test_compaction_sync_scrubs_leaked_reasoning_events(self) -> None:
         record = {
             "events": [
@@ -626,6 +711,89 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["user", "system_error"])
         self.assertIn("main turn failed", events[-1]["text"])
+
+    async def test_post_turn_high_context_compacts_without_duplicate_answer(self) -> None:
+        record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        store = Store()
+        agent = AgentWithState({})
+        calls = 0
+
+        async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
+            nonlocal calls
+            calls += 1
+            return runner.TurnResult(
+                final_text="Why did the scarecrow win an award? Because he was outstanding in his field!",
+                input_tokens=9900,
+                output_tokens=89,
+                total_tokens=9989,
+                context_tokens=9989,
+                context_source="usage_metadata",
+                usage_source="usage_metadata",
+            )
+
+        async def fake_compact(*args: Any, **kwargs: Any) -> PostTurnCompactionResult:
+            agent.values["_summarization_event"] = {
+                "cutoff_index": 2,
+                "file_path": "/.mira/conversation_history/thread-1.md",
+                "summary": "Older greetings summarized.",
+            }
+            return PostTurnCompactionResult(compacted=True, reason="compacted")
+
+        with patch("ui.repl.run_turn", fake_run_turn), patch("ui.repl.compact_after_turn", fake_compact):
+            result = await run_user_turn(
+                agent=agent,
+                plan_agent=agent,
+                renderer=RunTurnRenderer(),
+                store=store,
+                session=record,
+                mode={"planning": False},
+                text="tell me a joke",
+                context_limit_tokens=10000,
+                context_pressure_fraction=0.98,
+            )
+
+        self.assertEqual(calls, 1)
+        self.assertIn("scarecrow", result.final_text)
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["user", "assistant", "info", "compaction", "info"])
+        self.assertIn("Context compacted", events[-1]["text"])
+
+    async def test_post_turn_high_context_warns_when_nothing_can_compact(self) -> None:
+        record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        store = Store()
+        agent = AgentWithState({})
+
+        async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
+            return runner.TurnResult(
+                final_text="Complete answer.",
+                input_tokens=9900,
+                output_tokens=89,
+                total_tokens=9989,
+                context_tokens=9989,
+                context_source="usage_metadata",
+                usage_source="usage_metadata",
+            )
+
+        async def fake_compact(*args: Any, **kwargs: Any) -> PostTurnCompactionResult:
+            return PostTurnCompactionResult(compacted=False, reason="nothing_to_compact")
+
+        with patch("ui.repl.run_turn", fake_run_turn), patch("ui.repl.compact_after_turn", fake_compact):
+            await run_user_turn(
+                agent=agent,
+                plan_agent=agent,
+                renderer=RunTurnRenderer(),
+                store=store,
+                session=record,
+                mode={"planning": False},
+                text="hello",
+                context_limit_tokens=10000,
+                context_pressure_fraction=0.98,
+            )
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["user", "assistant", "info", "info"])
+        self.assertIn("not enough old history", events[-1]["text"])
+        self.assertFalse(any(event["type"] == "compaction" for event in events))
 
     def test_resume_context_injects_once(self) -> None:
         record = {
