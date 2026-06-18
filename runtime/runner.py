@@ -11,7 +11,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from agent.context_overflow import pop_context_floor_tokens
+from agent.context_overflow import DEFAULT_CONTEXT_PRESSURE_FRACTION, pop_compaction_retry, pop_context_floor_tokens, set_context_overflow_notice
 from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text, output_has_tool_call_repr, output_tool_calls
 from runtime.subagent_events import consume_subagents
@@ -171,6 +171,8 @@ async def run_turn(
     thread_id: str,
     token_counter: TokenCounter | None = None,
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
+    context_limit_tokens: int | None = None,
+    context_pressure_fraction: float = DEFAULT_CONTEXT_PRESSURE_FRACTION,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -185,6 +187,7 @@ async def run_turn(
     result = TurnResult()
     approved_fallback_actions: list[dict[str, Any]] = []
     approved_result_start = 0
+    cutoff_retried = False
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
@@ -209,6 +212,7 @@ async def run_turn(
         )
         if usage_callback is not None and (has_usage(usage_delta) or has_context_usage(usage_delta)):
             usage_callback(usage_delta)
+        compaction_retry_finished = pop_compaction_retry(thread_id)
         waiting_finished = getattr(renderer, "waiting_finished", None)
         if callable(waiting_finished):
             waiting_finished()
@@ -232,6 +236,27 @@ async def run_turn(
                 raise RuntimeError(f"model returned unexecuted tool call(s): {names or 'tool'}")
             if leaked_tool_repr:
                 raise RuntimeError("model returned unexecuted tool call(s): tool")
+            if compaction_retry_finished:
+                call_renderer(renderer, "system_message", "Context compacted. Continuing with summarized history.", kind="info")
+            if should_retry_after_cutoff(
+                result,
+                context_limit_tokens=context_limit_tokens,
+                context_pressure_fraction=context_pressure_fraction,
+            ) and not cutoff_retried:
+                cutoff_retried = True
+                call_renderer(renderer, "discard_last_assistant")
+                call_renderer(
+                    renderer,
+                    "system_message",
+                    "Response ended near the context limit. Compacting older context and retrying.",
+                    kind="info",
+                )
+                set_context_overflow_notice(
+                    "Response ended near the context limit. Compacting older context and retrying."
+                )
+                result = TurnResult()
+                payload = {"messages": [{"role": "user", "content": text}]}
+                continue
             return result
 
         ask_user_interrupt = first_ask_user_interrupt(interrupts)
@@ -242,6 +267,66 @@ async def run_turn(
             approved_fallback_actions = approved_actions(interrupts, decisions)
             approved_result_start = len(result.tool_results)
             payload = Command(resume={"decisions": decisions})
+
+
+def should_retry_after_cutoff(
+    result: TurnResult,
+    *,
+    context_limit_tokens: int | None,
+    context_pressure_fraction: float,
+) -> bool:
+    """Return whether a silent provider cutoff should force compaction retry."""
+    threshold = context_threshold(context_limit_tokens, context_pressure_fraction)
+    if not threshold:
+        return False
+    if max(positive_int(result.context_tokens), positive_int(result.context_floor_tokens)) < threshold:
+        return False
+    if result.tool_calls or result.tool_results:
+        return False
+    return looks_truncated(result.final_text)
+
+
+def context_threshold(context_limit_tokens: int | None, fraction: float) -> int:
+    """Return the configured compaction threshold token count."""
+    limit = positive_int(context_limit_tokens)
+    if not limit:
+        return 0
+    try:
+        parsed_fraction = float(fraction)
+    except (TypeError, ValueError):
+        parsed_fraction = DEFAULT_CONTEXT_PRESSURE_FRACTION
+    if parsed_fraction <= 0:
+        parsed_fraction = DEFAULT_CONTEXT_PRESSURE_FRACTION
+    return max(1, int(limit * parsed_fraction))
+
+
+def looks_truncated(text: str) -> bool:
+    """Conservatively identify LM Studio-style silent mid-response cutoffs."""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    if len(stripped.split()) == 1:
+        return False
+    if stripped.count("```") % 2:
+        return True
+    if stripped.endswith((".", "!", "?", "\"", "'", ")", "]", "}", "`")):
+        return False
+    tail = stripped.rsplit(maxsplit=6)[-6:]
+    dangling = {"and", "or", "but", "because", "since", "if", "when", "while", "the", "a", "an", "to", "of", "with"}
+    if tail and tail[-1].lower().strip(",;:") in dangling:
+        return True
+    if len(stripped) < 120:
+        return True
+    return stripped.endswith((",", ";", ":", "-", "—"))
+
+
+def call_renderer(renderer: Any, method: str, *args: Any, **kwargs: Any) -> bool:
+    """Call an optional renderer method."""
+    callback = getattr(renderer, method, None)
+    if not callable(callback):
+        return False
+    callback(*args, **kwargs)
+    return True
 
 
 def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:

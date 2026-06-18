@@ -248,6 +248,7 @@ class MiraApp(App[None]):
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
+                context_pressure_fraction=self.config.get("context_pressure_fraction", 0.98),
                 token_counter=self.token_counter,
             )
             self._refresh_sessions()

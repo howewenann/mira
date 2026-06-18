@@ -103,6 +103,7 @@ async def run_user_turn(
     model_name: str = "",
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
+    context_pressure_fraction: float = 0.98,
     token_counter: Any | None = None,
 ) -> TurnResult:
     """Route one submitted user prompt through planning or action mode."""
@@ -156,6 +157,8 @@ async def run_user_turn(
             renderer=wrapped_renderer,
             thread_id=thread_id,
             usage_callback=apply_live_usage,
+            context_limit_tokens=context_limit_tokens,
+            context_pressure_fraction=context_pressure_fraction,
             **run_kwargs,
         )
     except asyncio.CancelledError:

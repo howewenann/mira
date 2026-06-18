@@ -103,10 +103,10 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("MIRA simulated a context overflow", str(caught.exception))
         notice = pop_context_overflow_notice(caught.exception)
-        self.assertIn("Configured context threshold reached", notice)
-        self.assertIn("1.0k tokens reported", notice)
-        self.assertIn("threshold 980", notice)
-        self.assertIn("limit 1.0k", notice)
+        self.assertIn("Context reached 98%", notice)
+        self.assertIn("1.0k reported", notice)
+        self.assertIn("1.0k tokens", notice)
+        self.assertIn("Compacting older context", notice)
 
         self.assertEqual(await middleware.awrap_model_call(Request(), handler), "ok")
         self.assertEqual(calls, 1)
@@ -181,8 +181,8 @@ class ContextOverflowTests(unittest.IsolatedAsyncioTestCase):
             await middleware.awrap_model_call(Request(messages=[]), handler)
 
         notice = pop_context_overflow_notice(caught.exception)
-        self.assertIn("99 tokens estimated", notice)
-        self.assertIn("threshold 98", notice)
+        self.assertIn("99 estimated", notice)
+        self.assertIn("Context reached 98%", notice)
 
     async def test_request_token_count_is_remembered_as_context_floor(self) -> None:
         middleware = ContextPressureMiddleware(

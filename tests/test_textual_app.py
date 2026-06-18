@@ -434,8 +434,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             set_context_overflow_notice(
-                "Configured context threshold reached: 10.6k tokens reported, "
-                "threshold 9.8k, limit 10.0k. Compacting before the provider rejects the request."
+                "Context reached 98% of 10.0k tokens (10.6k reported). "
+                "Compacting older context before continuing."
             )
             app.compaction_started()
             await pilot.pause()
@@ -444,10 +444,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             info = blocks[-2]
             compaction = blocks[-1]
             self.assertEqual(str(getattr(info, "border_title", "")), "info")
-            self.assertIn("Configured context threshold reached", renderable_plain(info))
+            self.assertIn("Context reached 98%", renderable_plain(info))
             self.assertEqual(str(getattr(compaction, "border_title", "")), "mira")
             self.assertIn("compacting context...", renderable_plain(compaction))
-            self.assertNotIn("Configured context threshold", renderable_plain(compaction))
+            self.assertNotIn("Context reached", renderable_plain(compaction))
 
     async def test_compaction_reasoning_notice_is_not_rendered_as_info(self) -> None:
         """Leaked compaction reasoning must not render as an info notice."""
@@ -657,7 +657,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "type": "info",
                     "mode": "action",
                     "created_at": "2026-01-01T00:01:30+00:00",
-                    "text": "Configured context threshold reached.",
+                    "text": "Context reached 98% of the limit.",
                 },
                 {
                     "id": 3,
@@ -707,7 +707,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("you (plan)", titles)
             self.assertIn("mira", titles)
             self.assertIn("Older turns compacted", rendered)
-            self.assertIn("Configured context threshold reached.", rendered)
+            self.assertIn("Context reached 98% of the limit.", rendered)
             self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)

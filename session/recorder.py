@@ -7,7 +7,11 @@ import json
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
-from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
+from runtime.compaction_filter import (
+    is_compaction_reasoning,
+    is_compaction_reasoning_fragment,
+    should_flush_reasoning_probe,
+)
 from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 
@@ -27,6 +31,7 @@ class SessionRecorder:
         self._last_assistant_id: int | None = None
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
+        self._reasoning_pending = ""
         self._running_subagents: dict[str, str] = {}
         self._running_subagent_event_ids: dict[str, int] = {}
         self._delegation_keys: set[tuple[str, str]] = set()
@@ -54,6 +59,18 @@ class SessionRecorder:
     def reasoning_delta(self, delta: str) -> None:
         if not delta:
             return
+        self._reasoning_pending += str(delta)
+        if is_compaction_reasoning(self._reasoning_pending):
+            self._reasoning_pending = ""
+            self._delete_reasoning_event()
+            return
+        if not should_flush_reasoning_probe(self._reasoning_pending):
+            return
+        delta = self._reasoning_pending
+        self._reasoning_pending = ""
+        self._append_reasoning(delta)
+
+    def _append_reasoning(self, delta: str) -> None:
         if self._reasoning_id is None:
             event = append_event(self.record, {"type": "reasoning", "mode": self.mode, "text": ""})
             self._reasoning_id = int(event["id"])
@@ -179,7 +196,40 @@ class SessionRecorder:
             self.save()
 
     def finish_main(self) -> None:
+        if self._reasoning_pending:
+            if is_compaction_reasoning_fragment(self._reasoning_pending):
+                self._delete_reasoning_event()
+            else:
+                self._append_reasoning(self._reasoning_pending)
+            self._reasoning_pending = ""
         self._assistant_id = None
+        self._reasoning_id = None
+        self._reasoning_text = ""
+
+    def discard_last_assistant(self) -> None:
+        """Remove the currently streamed assistant answer after a cutoff retry."""
+        event_id = self._assistant_id or self._last_assistant_id
+        if event_id is not None:
+            self.record["events"] = [
+                event
+                for event in self.record.get("events", [])
+                if not (isinstance(event, dict) and int(event.get("id") or 0) == event_id)
+            ]
+            self.save()
+        self._assistant_id = None
+        self._last_assistant_id = None
+        self._assistant_text = ""
+        self._assistant_seen = False
+
+    def _delete_reasoning_event(self) -> None:
+        if self._reasoning_id is not None:
+            event_id = self._reasoning_id
+            self.record["events"] = [
+                event
+                for event in self.record.get("events", [])
+                if not (isinstance(event, dict) and int(event.get("id") or 0) == event_id)
+            ]
+            self.save()
         self._reasoning_id = None
         self._reasoning_text = ""
 
@@ -283,6 +333,12 @@ class RecordingRenderer:
     def finish_main(self) -> None:
         self.renderer.finish_main()
         self.recorder.finish_main()
+
+    def discard_last_assistant(self) -> None:
+        callback = getattr(self.renderer, "discard_last_assistant", None)
+        if callable(callback):
+            callback()
+        self.recorder.discard_last_assistant()
 
     def context_notice_rendered(self) -> bool:
         """Return whether this turn already rendered a context-pressure notice."""

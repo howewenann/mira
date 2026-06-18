@@ -92,9 +92,19 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     from session.dashboard import apply_turn_usage
     from session.context import sync_deepagents_compaction, update_title, with_resume_context
     from session.recorder import RecordingRenderer, SessionRecorder
+    from agent.context_overflow import (
+        context_notice_rendered,
+        mark_context_notice_rendered,
+        pop_context_overflow_notice,
+    )
+    from langchain_core.exceptions import ContextOverflowError
 
     request_text = with_resume_context(app["session"], prompt)
     run_kwargs = {"token_counter": app["token_counter"]} if app.get("token_counter") is not None else {}
+    if app.get("context_limit_tokens") is not None:
+        run_kwargs["context_limit_tokens"] = app.get("context_limit_tokens")
+    if isinstance(app.get("config"), dict):
+        run_kwargs["context_pressure_fraction"] = app["config"].get("context_pressure_fraction", 0.98)
     recorder = SessionRecorder(app["session"], app["store"], "action")
     recorder.user_message(prompt)
     update_title(app["session"])
@@ -108,6 +118,19 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
             thread_id=app["session"]["id"],
             **run_kwargs,
         )
+    except ContextOverflowError as exc:
+        with suppress(Exception):
+            await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"])
+        notice = pop_context_overflow_notice(exc)
+        if notice and not context_notice_rendered(exc):
+            system_message = getattr(renderer, "system_message", None)
+            if callable(system_message):
+                system_message(notice, kind="info")
+            else:
+                recorder.info(notice)
+            mark_context_notice_rendered(exc)
+        app["store"].save(app["session"])
+        return
     except Exception as exc:
         recorder.system_error(f"turn error: {exc}")
         raise

@@ -500,6 +500,17 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delegations[0]["calls"]), 2)
         self.assertEqual(delegations[1]["calls"][0]["args"]["description"], "three")
 
+    def test_recorder_does_not_temporarily_save_compaction_reasoning(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "action")
+
+        recorder.reasoning_delta("The user wants me to extract context from the conversation history. ")
+        recorder.reasoning_delta("Key information to extract: Session intent, Summary, Artifacts, Next Steps.")
+
+        self.assertEqual(record["events"], [])
+        self.assertEqual(store.saved, [])
+
     async def test_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
         record = {"events": []}
         store = Store()

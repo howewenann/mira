@@ -8,7 +8,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
-from agent.compaction import mark_summarization_engine
+from agent.compaction import mark_summarization_engine, sanitize_messages_for_archive
 from runtime.compaction_state import compaction_active, compaction_scope
 from runtime import runner
 from runtime.message_events import consume_messages
@@ -307,6 +307,12 @@ class RecordingRenderer:
     def subagents_cancelled(self) -> None:
         self.events.append(("subagents_cancelled",))
 
+    def system_message(self, text: str, *, kind: str = "system") -> None:
+        self.events.append(("system_message", kind, text))
+
+    def discard_last_assistant(self) -> None:
+        self.events.append(("discard_last_assistant",))
+
 
 class RunTurnRenderer(RecordingRenderer):
     """Renderer double with approval support for full run-turn tests."""
@@ -428,6 +434,99 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(len(agent.payloads), 1)
+
+    async def test_run_turn_retries_truncated_high_context_completion_once(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage(
+                                "Since it",
+                                usage_metadata={"input_tokens": 9900, "output_tokens": 12, "total_tokens": 9912},
+                            )
+                        ]
+                    }
+                ),
+                FakeStream(output={"messages": [OutputMessage("Recovered answer.")]})
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "answer",
+            renderer,
+            "thread-1",
+            context_limit_tokens=10000,
+            context_pressure_fraction=0.98,
+        )
+
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(result.final_text, "Recovered answer.")
+        self.assertIn(("discard_last_assistant",), renderer.events)
+        self.assertIn(
+            ("system_message", "info", "Response ended near the context limit. Compacting older context and retrying."),
+            renderer.events,
+        )
+
+    async def test_run_turn_keeps_complete_high_context_completion(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage(
+                                "Complete answer.",
+                                usage_metadata={"input_tokens": 9900, "output_tokens": 12, "total_tokens": 9912},
+                            )
+                        ]
+                    }
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "answer",
+            renderer,
+            "thread-1",
+            context_limit_tokens=10000,
+            context_pressure_fraction=0.98,
+        )
+
+        self.assertEqual(len(agent.payloads), 1)
+        self.assertEqual(result.final_text, "Complete answer.")
+
+    async def test_run_turn_keeps_one_word_high_context_completion(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            OutputMessage(
+                                "Ok",
+                                usage_metadata={"input_tokens": 9900, "output_tokens": 1, "total_tokens": 9901},
+                            )
+                        ]
+                    }
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "answer",
+            renderer,
+            "thread-1",
+            context_limit_tokens=10000,
+            context_pressure_fraction=0.98,
+        )
+
+        self.assertEqual(len(agent.payloads), 1)
+        self.assertEqual(result.final_text, "Ok")
 
     async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
         stream = FakeStream(output={"messages": []})
@@ -1275,6 +1374,40 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine._create_summary())
         self.assertTrue(await engine._acreate_summary())
         self.assertFalse(compaction_active())
+
+    def test_compaction_archive_sanitizer_strips_reasoning_internals(self) -> None:
+        message = AIMessage(
+            content=[
+                {"type": "reasoning", "reasoning": "internal chain of thought"},
+                {"type": "text", "text": "Visible reply."},
+                {
+                    "type": "tool_call",
+                    "id": "call-write",
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                },
+            ],
+            additional_kwargs={
+                "reasoning_content": "internal chain of thought",
+                "tool_calls": ["ChoiceDeltaToolCall(...)"],
+            },
+            tool_calls=[
+                {
+                    "name": "write_file",
+                    "args": {"file_path": "/story.txt", "content": "hello"},
+                    "id": "call-write",
+                }
+            ],
+        )
+
+        sanitized = sanitize_messages_for_archive([message])
+        rendered = repr(sanitized[0])
+
+        self.assertIn("Visible reply.", rendered)
+        self.assertIn("Tool call: write_file", rendered)
+        self.assertNotIn("reasoning_content", rendered)
+        self.assertNotIn("internal chain", rendered)
+        self.assertNotIn("ChoiceDeltaToolCall", rendered)
 
     async def test_summary_extraction_reasoning_after_compaction_is_hidden(self) -> None:
         renderer = RecordingRenderer()

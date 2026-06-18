@@ -25,6 +25,7 @@ COMPACTION_SUMMARY_HEADINGS = ("session intent", "summary", "artifacts", "next s
 _context_notice: ContextVar[str | None] = ContextVar("mira_context_notice", default=None)
 _fallback_context_notice: str | None = None
 _context_floor_tokens: dict[str, int] = {}
+_compaction_retry_threads: set[str] = set()
 
 
 class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -87,6 +88,7 @@ class ContextPressureMiddleware(AgentMiddleware[Any, Any, Any]):
             return
         notice = configured_threshold_notice(source, tokens, threshold, self.context_limit_tokens)
         self._skip_next_threads.add(thread)
+        mark_compaction_retry(thread)
         # DeepAgents' summarization middleware compacts by catching this
         # internal exception, then immediately retries with summarized context.
         raise context_overflow_error("configured context threshold reached", notice)
@@ -226,11 +228,12 @@ def raise_context_overflow_if_detected(exc: Exception) -> None:
 
 def configured_threshold_notice(source: str, tokens: int, threshold: int, limit: int) -> str:
     """Return the concise user-facing notice for proactive compaction."""
+    percent = int(round((threshold / limit) * 100)) if limit else int(DEFAULT_CONTEXT_PRESSURE_FRACTION * 100)
     token_kind = "estimated" if source == "estimated" else "reported"
     return (
-        f"Configured context threshold reached: {format_tokens(tokens)} tokens {token_kind}, "
-        f"threshold {format_tokens(threshold)}, limit {format_tokens(limit)}. "
-        "Compacting before the provider rejects the request."
+        f"Context reached {percent}% of {format_tokens(limit)} tokens "
+        f"({format_tokens(tokens)} {token_kind}). "
+        "Compacting older context before continuing."
     )
 
 
@@ -295,6 +298,22 @@ def remember_context_floor(thread: str, tokens: int) -> None:
 def pop_context_floor_tokens(thread: str) -> int:
     """Return and clear the latest full-request token estimate for a thread."""
     return positive_int(_context_floor_tokens.pop(str(thread or ""), 0))
+
+
+def mark_compaction_retry(thread: str) -> None:
+    """Remember that the next model call for a thread is a compaction retry."""
+    thread = str(thread or "")
+    if thread:
+        _compaction_retry_threads.add(thread)
+
+
+def pop_compaction_retry(thread: str) -> bool:
+    """Return whether a thread just passed through a compaction retry."""
+    thread = str(thread or "")
+    if thread not in _compaction_retry_threads:
+        return False
+    _compaction_retry_threads.remove(thread)
+    return True
 
 
 def context_overflow_fallback_notice(exc: BaseException | None = None) -> str:

@@ -850,7 +850,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
         mode = repl.initial_mode("action-agent", "plan-agent")
-        notice = "Configured context threshold reached: 9.8k tokens reported, threshold 9.8k, limit 10.0k."
+        notice = "Context reached 98% of 10.0k tokens (9.8k reported). Compacting older context before continuing."
 
         async def fake_run_turn(
             agent: Any,
@@ -890,7 +890,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["events"][-1]["text"], "The story continued.")
         self.assertEqual(session["turns"], 1)
         rendered = "\n".join(renderer.console.lines)
-        self.assertEqual(rendered.count("Configured context threshold reached"), 1)
+        self.assertEqual(rendered.count("Context reached 98%"), 1)
         self.assertIn("context compacted", rendered)
 
     async def test_session_command_shows_current_mode(self) -> None:
