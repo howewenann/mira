@@ -317,6 +317,50 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         compactions = context.normalize_compactions(record["events"])
         self.assertEqual(compactions[0]["summary"], "Earlier messages were summarized.")
 
+    async def test_compaction_sync_scrubs_leaked_reasoning_events(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "reasoning",
+                    "created_at": "2026-06-18T05:01:45+00:00",
+                    "mode": "action",
+                    "text": (
+                        "The user wants me to extract context from the conversation history. "
+                        "Looking at the messages provided:\n\n"
+                        "## SESSION INTENT\nWrite a story.\n\n"
+                        "## SUMMARY\nThe task was completed.\n\n"
+                        "## ARTIFACTS\nFile created.\n\n"
+                        "## NEXT STEPS\nNone."
+                    ),
+                },
+                {
+                    "id": 2,
+                    "type": "compaction",
+                    "created_at": "2026-06-18T05:15:40+00:00",
+                    "cutoff_index": 2,
+                    "file_path": "/.mira/conversation_history/thread-1.md",
+                    "summary": "Write a story.",
+                },
+                {
+                    "id": 3,
+                    "type": "reasoning",
+                    "created_at": "2026-06-18T05:15:47+00:00",
+                    "mode": "action",
+                    "text": (
+                        "The user is asking me to extract context from a conversation history "
+                        "that has already been summarized. This appears to be a meta-task."
+                    ),
+                },
+            ]
+        }
+        agent = AgentWithState({})
+
+        changed = await context.sync_deepagents_compaction(record, agent, "thread-1")
+
+        self.assertTrue(changed)
+        self.assertEqual([event["type"] for event in record["events"]], ["compaction"])
+
     def test_recorder_does_not_duplicate_streamed_assistant_final_text(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

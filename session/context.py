@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from session.dashboard import normalize_dashboard
+from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -282,14 +283,15 @@ def is_technical(word: str) -> bool:
 
 
 async def sync_deepagents_compaction(record: dict[str, Any], agent: Any, thread_id: str) -> bool:
+    changed = scrub_compaction_reasoning_events(record)
     state = await agent_state(agent, thread_id)
     event = state.get("_summarization_event")
     if not isinstance(event, dict):
-        return False
+        return changed
 
     compaction = compaction_from_event(event)
     if compaction is None or is_known_compaction(record, compaction):
-        return False
+        return changed
 
     append_event(record, {"type": "compaction", **compaction})
     return True
@@ -348,6 +350,27 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
         ):
             return True
     return False
+
+
+def scrub_compaction_reasoning_events(record: dict[str, Any]) -> bool:
+    """Remove leaked DeepAgents compaction reasoning from durable transcripts."""
+    events = record.get("events")
+    if not isinstance(events, list):
+        return False
+
+    kept = []
+    changed = False
+    for event in events:
+        if isinstance(event, dict) and event.get("type") == "reasoning":
+            text = str(event.get("text") or "")
+            if is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text):
+                changed = True
+                continue
+        kept.append(event)
+
+    if changed:
+        record["events"] = kept
+    return changed
 
 
 def build_resume_context(record: dict[str, Any]) -> str:

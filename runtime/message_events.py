@@ -11,6 +11,7 @@ from runtime.compaction_filter import (
     TextFilter,
     call_renderer,
     is_compaction_reasoning,
+    is_compaction_reasoning_fragment,
     should_flush_reasoning_probe,
 )
 from runtime.compaction_state import compaction_active
@@ -103,6 +104,10 @@ async def _consume_reasoning(message: Any, renderer: Any) -> bool:
 
     if compacting:
         call_renderer(renderer, "compaction_finished")
+    elif pending and is_compaction_reasoning_fragment(pending):
+        call_renderer(renderer, "compaction_started")
+        call_renderer(renderer, "compaction_finished")
+        return True
     elif pending:
         renderer.reasoning_delta(pending)
     return compacting

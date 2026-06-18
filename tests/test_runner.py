@@ -1242,6 +1242,50 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
+    async def test_partial_summary_extraction_reasoning_is_hidden_on_finish(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user is asking me to extract context from a conversation history that has already ",
+                            "been summarized. This appears to be a meta-task where I need to create a",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_leaked_session_compaction_reasoning_shape_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user wants me to extract context from the conversation history. Looking at the messages provided:\n\n",
+                            "1. Human asked to write a 10-word short story to a file\n",
+                            "2. The AI responded with reasoning and made a tool call to write_file.\n\n",
+                            "## SESSION INTENT\nWrite a 10-word short story to a file.\n\n",
+                            "## SUMMARY\nThe task has been completed.\n\n",
+                            "## ARTIFACTS\nFile created: `/mira-short-story.txt`.\n\n",
+                            "## NEXT STEPS\nNone.\n\n",
+                            "Let me structure this properly following the instructions.\n",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
     async def test_long_summary_extraction_reasoning_with_visible_headings_is_hidden(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(

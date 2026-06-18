@@ -20,6 +20,8 @@ COMPACTION_REASONING_MARKERS = (
 )
 COMPACTION_REASONING_HINTS = (
     "context extraction assistant",
+    "extract context from",
+    "extract the most relevant context",
     "extract the highest quality/most relevant context",
     "conversation history to replace",
     "conversation history will be replaced",
@@ -68,6 +70,9 @@ class ReasoningFilter:
 
     def finish(self) -> None:
         if self.compacting:
+            call_renderer(self.renderer, "compaction_finished")
+        elif self.pending and is_compaction_reasoning_fragment(self.pending):
+            call_renderer(self.renderer, "compaction_started")
             call_renderer(self.renderer, "compaction_finished")
         elif self.pending:
             self.renderer.reasoning_delta(self.pending)
@@ -153,10 +158,28 @@ def is_compaction_reasoning(text: str) -> bool:
     return False
 
 
+def is_compaction_reasoning_fragment(text: str) -> bool:
+    """Return whether a partial reasoning chunk is likely compaction internals."""
+    lowered = text.lower()
+    if "conversation history" not in lowered:
+        return False
+    if (
+        "extract context from" in lowered
+        or "extract the most relevant context" in lowered
+        or "extract the highest quality/most relevant context" in lowered
+    ):
+        return True
+    if "already been summarized" in lowered and ("meta-task" in lowered or "summary" in lowered):
+        return True
+    return False
+
+
 def should_flush_reasoning_probe(text: str) -> bool:
     """Return whether buffered reasoning is unlikely to be compaction metadata."""
     lowered = text.lower()
     if could_be_compaction_reasoning_start(text):
+        return False
+    if is_compaction_reasoning_fragment(text):
         return False
     if len(text) >= 1200 and not any(marker in lowered for marker in COMPACTION_REASONING_HINTS):
         return True
@@ -171,6 +194,8 @@ def could_be_compaction_reasoning_start(text: str) -> bool:
     if not stripped:
         return True
     if COMPACTION_REASONING_START.startswith(stripped) or stripped.startswith(COMPACTION_REASONING_START):
+        return True
+    if stripped.startswith(("the user wants me to extract context", "the user is asking me to extract context")):
         return True
     if any(hint in stripped for hint in COMPACTION_REASONING_HINTS):
         return True
