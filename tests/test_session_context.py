@@ -253,7 +253,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized["dashboard"]["context"]["used_tokens"], 9624)
         self.assertEqual(normalized["dashboard"]["context"]["percent"], 96.2)
 
-    def test_dashboard_context_uses_request_estimate_above_low_provider_total(self) -> None:
+    def test_dashboard_context_uses_provider_total_when_reported(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
         result = type(
             "Result",
@@ -264,7 +264,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                     "output_tokens": 67,
                     "total_tokens": 1467,
                     "context_tokens": 1467,
-                    "context_floor_tokens": 10013,
                     "source": "usage_metadata",
                 }
             },
@@ -273,9 +272,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         apply_turn_usage(record, result, model_name="lmstudio:qwen3.5-27b-mtp", context_limit_tokens=12000)
 
         self.assertEqual(record["dashboard"]["tokens"], {"in": 1400, "out": 67})
-        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 10013)
-        self.assertEqual(record["dashboard"]["context"]["percent"], 83.4)
-        self.assertEqual(record["dashboard"]["context"]["source"], "request_estimate.count_tokens")
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 1467)
+        self.assertEqual(record["dashboard"]["context"]["percent"], 12.2)
+        self.assertEqual(record["dashboard"]["context"]["source"], "provider.input_output_tokens")
 
     def test_dashboard_context_uses_provider_pair_above_visible_estimate(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -712,7 +711,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events], ["user", "system_error"])
         self.assertIn("main turn failed", events[-1]["text"])
 
-    async def test_post_turn_high_context_compacts_without_duplicate_answer(self) -> None:
+    async def test_high_context_turn_does_not_trigger_manual_post_turn_compaction(self) -> None:
         record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
         store = Store()
         agent = AgentWithState({})
@@ -731,15 +730,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 usage_source="usage_metadata",
             )
 
-        async def fake_compact(*args: Any, **kwargs: Any) -> PostTurnCompactionResult:
-            agent.values["_summarization_event"] = {
-                "cutoff_index": 2,
-                "file_path": "/.mira/conversation_history/thread-1.md",
-                "summary": "Older greetings summarized.",
-            }
-            return PostTurnCompactionResult(compacted=True, reason="compacted")
-
-        with patch("ui.repl.run_turn", fake_run_turn), patch("ui.repl.compact_after_turn", fake_compact):
+        with patch("ui.repl.run_turn", fake_run_turn):
             result = await run_user_turn(
                 agent=agent,
                 plan_agent=agent,
@@ -749,50 +740,12 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 mode={"planning": False},
                 text="tell me a joke",
                 context_limit_tokens=10000,
-                context_pressure_fraction=0.98,
             )
 
         self.assertEqual(calls, 1)
         self.assertIn("scarecrow", result.final_text)
         events = context.normalize_events(record["events"])
-        self.assertEqual([event["type"] for event in events], ["user", "assistant", "info", "compaction", "info"])
-        self.assertIn("Context compacted", events[-1]["text"])
-
-    async def test_post_turn_high_context_warns_when_nothing_can_compact(self) -> None:
-        record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
-        store = Store()
-        agent = AgentWithState({})
-
-        async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
-            return runner.TurnResult(
-                final_text="Complete answer.",
-                input_tokens=9900,
-                output_tokens=89,
-                total_tokens=9989,
-                context_tokens=9989,
-                context_source="usage_metadata",
-                usage_source="usage_metadata",
-            )
-
-        async def fake_compact(*args: Any, **kwargs: Any) -> PostTurnCompactionResult:
-            return PostTurnCompactionResult(compacted=False, reason="nothing_to_compact")
-
-        with patch("ui.repl.run_turn", fake_run_turn), patch("ui.repl.compact_after_turn", fake_compact):
-            await run_user_turn(
-                agent=agent,
-                plan_agent=agent,
-                renderer=RunTurnRenderer(),
-                store=store,
-                session=record,
-                mode={"planning": False},
-                text="hello",
-                context_limit_tokens=10000,
-                context_pressure_fraction=0.98,
-            )
-
-        events = context.normalize_events(record["events"])
-        self.assertEqual([event["type"] for event in events], ["user", "assistant", "info", "info"])
-        self.assertIn("not enough old history", events[-1]["text"])
+        self.assertEqual([event["type"] for event in events], ["user", "assistant"])
         self.assertFalse(any(event["type"] == "compaction" for event in events))
 
     def test_resume_context_injects_once(self) -> None:

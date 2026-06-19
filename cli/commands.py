@@ -92,7 +92,6 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     from session.dashboard import apply_turn_usage
     from session.context import sync_deepagents_compaction, update_title, with_resume_context
     from session.recorder import RecordingRenderer, SessionRecorder
-    from ui.repl import maybe_compact_after_turn
     from agent.context_overflow import (
         context_notice_rendered,
         mark_context_notice_rendered,
@@ -101,11 +100,6 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     from langchain_core.exceptions import ContextOverflowError
 
     request_text = with_resume_context(app["session"], prompt)
-    run_kwargs = {"token_counter": app["token_counter"]} if app.get("token_counter") is not None else {}
-    if app.get("context_limit_tokens") is not None:
-        run_kwargs["context_limit_tokens"] = app.get("context_limit_tokens")
-    if isinstance(app.get("config"), dict):
-        run_kwargs["context_pressure_fraction"] = app["config"].get("context_pressure_fraction", 0.98)
     recorder = SessionRecorder(app["session"], app["store"], "action")
     recorder.user_message(prompt)
     update_title(app["session"])
@@ -117,7 +111,6 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
             text=request_text,
             renderer=renderer,
             thread_id=app["session"]["id"],
-            **run_kwargs,
         )
     except ContextOverflowError as exc:
         with suppress(Exception):
@@ -148,15 +141,6 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         context_limit_tokens=app.get("context_limit_tokens"),
         context_limit_source=app.get("context_limit_source", "unknown"),
     )
-    await maybe_compact_after_turn(
-        session=app["session"],
-        agent=app["agent"],
-        thread_id=app["session"]["id"],
-        recorder=recorder,
-        renderer=app["renderer"],
-        result=result,
-        context_pressure_fraction=(app.get("config") or {}).get("context_pressure_fraction", 0.98),
-    )
     app["store"].save(app["session"])
 
 
@@ -169,12 +153,12 @@ async def _bootstrap(
 ) -> dict[str, Any]:
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
-    from agent.llm import get_model_name
+    from agent.llm import get_llm, get_model_name
     from config.loader import load_config
-    from config.metadata import infer_model_metadata
+    from config.metadata import ModelMetadata, infer_model_metadata
     from session.checkpoint import make_checkpointer
     from session.context import mark_resume_context_pending
-    from session.dashboard import ensure_dashboard, token_counter_for_model
+    from session.dashboard import ensure_dashboard
     from session.store import SessionStore
     from ui.renderer import Renderer
 
@@ -189,7 +173,8 @@ async def _bootstrap(
     mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
     startup_progress(renderer, "loading model metadata...")
-    metadata = await infer_model_metadata(config)
+    inspect_model = get_llm(config, metadata=ModelMetadata())
+    metadata = await infer_model_metadata(config, model=inspect_model)
     config["llm_inferred_context_tokens"] = metadata.context_tokens
     config["llm_context_source"] = metadata.context_source
     startup_progress(renderer, "building agents...")
@@ -198,7 +183,6 @@ async def _bootstrap(
     model_name = get_model_name(config)
     context_limit_tokens = metadata.context_tokens
     context_limit_source = metadata.context_source
-    token_counter = token_counter_for_model()
     ensure_dashboard(
         record,
         model_name=model_name,
@@ -213,7 +197,6 @@ async def _bootstrap(
         "model_name": model_name,
         "context_limit_tokens": context_limit_tokens,
         "context_limit_source": context_limit_source,
-        "token_counter": token_counter,
         "renderer": renderer,
         "session": record,
         "store": store,

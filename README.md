@@ -75,9 +75,10 @@ include `lmstudio`, `ollama`, `openai`, `anthropic`, `gemini`, `groq`, and
 generation values: `MIRA_LLM_TEMPERATURE`, `MIRA_LLM_MAX_TOKENS`, and
 `MIRA_LLM_TOP_P`. For LM Studio, MIRA reads the loaded model context window
 from `/api/v1/models` before each user turn and rebuilds agents only when that
-value changes. For other local or custom providers that do not expose a
-LangChain model profile, set `MIRA_LLM_CONTEXT_TOKENS` to the model's actual
-context window.
+value changes. For providers with LangChain model profiles, MIRA uses
+`model.profile["max_input_tokens"]`. `MIRA_LLM_CONTEXT_TOKENS` is MIRA's safe
+effective context cap/fallback; it defaults to `32768`, fills in missing
+provider metadata, and caps provider/profile values when lower.
 
 MIRA does not create or overwrite `.env`. If you already have one, use
 `.env.example` as a reference and update your own file by hand.
@@ -89,12 +90,9 @@ shown in the terminal, including the final tool output shown for subagents.
 Tool output is shown on one line; set the value to `0` to show full output.
 MIRA uses the resolved model metadata to set DeepAgents' context profile and to
 show context pressure as a colored bar.
-When the provider reports that the prompt is already at the configured context
-ceiling, MIRA triggers DeepAgents-compatible compaction internally and shows a
-non-error info notice before retrying. This fallback is controlled by
-`MIRA_CONTEXT_PRESSURE_COMPACTION` and defaults to on; adjust the high-water
-mark with `MIRA_CONTEXT_PRESSURE_FRACTION` if your local runtime reports limits
-too early or too late.
+DeepAgents handles runtime context compaction from that model profile. MIRA
+only normalizes provider context-limit exceptions into DeepAgents-compatible
+overflow errors so providers that raise can still summarize and retry.
 
 Session titles are generated deterministically from recent user messages. MIRA
 stores its own replayable user/assistant transcript for session history.
@@ -109,6 +107,7 @@ MIRA_LLM_PROVIDER=lmstudio
 MIRA_LLM_MODEL=local-model
 MIRA_LLM_BASE_URL=http://localhost:1234/v1
 MIRA_LLM_API_KEY=lm-studio
+MIRA_LLM_CONTEXT_TOKENS=32768
 MIRA_TOOL_OUTPUT_CHARS=240
 ```
 

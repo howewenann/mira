@@ -30,7 +30,6 @@ from runtime.runner import SubagentRequestRenderer, run_turn  # noqa: E402
 from runtime.subagent_events import consume_subagents  # noqa: E402
 from runtime.tool_events import consume_tool_calls  # noqa: E402
 from session.checkpoint import make_checkpointer  # noqa: E402
-from session.dashboard import token_counter_for_model  # noqa: E402
 
 DEFAULT_PROMPT = "use 2 subagents to tell me 2 100 word different stories, one scary, one funny"
 
@@ -455,7 +454,6 @@ async def main() -> int:
                 text=args.prompt,
                 renderer=renderer,
                 thread_id=f"stream-smoke-{uuid.uuid4()}",
-                token_counter=token_counter_for_model(),
             ),
             timeout=args.timeout,
         )

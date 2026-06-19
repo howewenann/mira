@@ -37,10 +37,10 @@ def get_llm(config: dict[str, Any], metadata: ModelMetadata | None = None) -> Ch
             }
         }
     model = ChatAnyLLM(**kwargs)
-    fallback_metadata = ModelMetadata(
-        context_tokens=config.get("llm_inferred_context_tokens") or config.get("llm_context_tokens")
-    )
-    return apply_model_metadata(model, metadata or fallback_metadata)
+    if metadata is not None:
+        return apply_model_metadata(model, metadata)
+    fallback = config.get("llm_inferred_context_tokens") or config.get("llm_context_tokens")
+    return apply_model_metadata(model, ModelMetadata(context_tokens=fallback))
 
 
 def get_model_name(config: dict[str, Any]) -> str:

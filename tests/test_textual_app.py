@@ -426,17 +426,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("info", block.classes)
             self.assertIn("context notice", renderable_plain(block))
 
-    async def test_context_pressure_notice_stays_separate_from_compaction_block(self) -> None:
-        """Context-pressure copy should render as info, not inside compacting status."""
+    async def test_context_overflow_notice_stays_separate_from_compaction_block(self) -> None:
+        """Context-overflow copy should render as info, not inside compacting status."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            set_context_overflow_notice(
-                "Context reached 98% of 10.0k tokens (10.6k reported). "
-                "Compacting older context before continuing."
-            )
+            set_context_overflow_notice("Provider context limit reached. Compacting older context and retrying.")
             app.compaction_started()
             await pilot.pause()
 
@@ -444,10 +441,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             info = blocks[-2]
             compaction = blocks[-1]
             self.assertEqual(str(getattr(info, "border_title", "")), "info")
-            self.assertIn("Context reached 98%", renderable_plain(info))
+            self.assertIn("Provider context limit reached", renderable_plain(info))
             self.assertEqual(str(getattr(compaction, "border_title", "")), "mira")
             self.assertIn("compacting context...", renderable_plain(compaction))
-            self.assertNotIn("Context reached", renderable_plain(compaction))
+            self.assertNotIn("Provider context limit", renderable_plain(compaction))
 
     async def test_compaction_reasoning_notice_is_not_rendered_as_info(self) -> None:
         """Leaked compaction reasoning must not render as an info notice."""
@@ -474,7 +471,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         notice = "Context limit pressure detected. Compacting older context and retrying."
 
         async def fake_run_user_turn(**kwargs: Any) -> None:
-            raise context_overflow_error("configured context threshold reached", notice)
+            raise context_overflow_error("provider context limit reached", notice)
 
         with patch("ui.app.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -657,7 +654,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "type": "info",
                     "mode": "action",
                     "created_at": "2026-01-01T00:01:30+00:00",
-                    "text": "Context reached 98% of the limit.",
+                    "text": "Provider context limit reached.",
                 },
                 {
                     "id": 3,
@@ -707,19 +704,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("you (plan)", titles)
             self.assertIn("mira", titles)
             self.assertIn("Older turns compacted", rendered)
-            self.assertIn("Context reached 98% of the limit.", rendered)
+            self.assertIn("Provider context limit reached.", rendered)
             self.assertIn("/.mira/conversation_history/past-1.md", rendered)
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)
 
     async def test_unchanged_context_metadata_does_not_rebuild_agents(self) -> None:
         """A matching refreshed context window should avoid rebuilding both agents."""
-        app = make_app()
+        app = make_app(config={"llm_provider": "lmstudio", "llm_model": "local-model"})
 
-        async def infer_metadata(config: dict[str, Any]) -> ModelMetadata:
+        async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
             return ModelMetadata(8192, "lmstudio.api.v1.loaded_instance")
 
         with (
+            patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
             patch("config.metadata.infer_model_metadata", infer_metadata),
             patch("agent.factory.build_agent") as build_agent,
             patch("agent.factory.build_plan_agent") as build_plan_agent,
@@ -734,12 +732,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_context_metadata_rebuilds_agents_once(self) -> None:
         """A changed context window should rebuild action and planning agents once."""
         store = FakeStore()
-        app = make_app(store=store)
+        app = make_app(store=store, config={"llm_provider": "lmstudio", "llm_model": "local-model"})
 
-        async def infer_metadata(config: dict[str, Any]) -> ModelMetadata:
+        async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
             return ModelMetadata(10000, "lmstudio.api.v1.loaded_instance")
 
         with (
+            patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
             patch("config.metadata.infer_model_metadata", infer_metadata),
             patch("agent.factory.build_agent", return_value="new-agent") as build_agent,
             patch("agent.factory.build_plan_agent", return_value="new-plan-agent") as build_plan_agent,
@@ -753,7 +752,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.context_limit_tokens, 10000)
         self.assertEqual(app.context_limit_source, "lmstudio.api.v1.loaded_instance")
         self.assertEqual(app.config["llm_inferred_context_tokens"], 10000)
-        self.assertNotIn("llm_context_tokens", app.config)
         self.assertEqual(build_agent.call_count, 1)
         self.assertEqual(build_plan_agent.call_count, 1)
         self.assertEqual(len(store.saves), 1)

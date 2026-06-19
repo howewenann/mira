@@ -11,15 +11,12 @@ from typing import Any
 
 from langgraph.types import Command
 
-from agent.context_overflow import DEFAULT_CONTEXT_PRESSURE_FRACTION, pop_compaction_retry, pop_context_floor_tokens
 from runtime.message_events import consume_messages
 from runtime.output_events import capture_output, collect_interrupts, final_text, output_has_tool_call_repr, output_tool_calls
 from runtime.subagent_events import consume_subagents
 from runtime.tool_call_args import tool_call_args
 from runtime.tool_events import consume_tool_calls
 from runtime.usage import (
-    TokenCounter,
-    context_from_output,
     empty_usage,
     has_context_usage,
     has_usage,
@@ -42,10 +39,8 @@ class TurnResult:
     output_tokens: int = 0
     total_tokens: int = 0
     context_tokens: int = 0
-    context_floor_tokens: int = 0
     context_source: str = "unknown"
     usage_source: str = "unknown"
-    possibly_truncated: bool = False
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
 
@@ -57,7 +52,6 @@ class TurnResult:
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "context_tokens": self.context_tokens,
-            "context_floor_tokens": self.context_floor_tokens,
             "context_source": self.context_source,
             "source": self.usage_source,
         }
@@ -84,45 +78,20 @@ class TurnResult:
             return
         selected = select_context_usage(usage)
         self.context_tokens = positive_int(selected.get("context_tokens"))
-        self.context_floor_tokens = positive_int(selected.get("context_floor_tokens"))
         self.context_source = item_context_source(selected)
         if self.usage_source == "unknown" and self.context_source != "unknown":
             self.usage_source = self.context_source
 
-    def commit_loop_usage(
-        self,
-        output: Any,
-        token_counter: TokenCounter | None = None,
-        context_floor_tokens: int = 0,
-    ) -> dict[str, Any]:
+    def commit_loop_usage(self, output: Any) -> dict[str, Any]:
         """Commit LangChain token usage and return the per-loop usage delta."""
-        context_floor_tokens = positive_int(context_floor_tokens)
         committed = empty_usage()
         output_usage = usage_from_output(output)
-        if context_floor_tokens:
-            output_usage["context_floor_tokens"] = context_floor_tokens
         if has_usage(output_usage):
             self.add_usage(output_usage)
             committed = select_context_usage(output_usage)
         elif has_usage(self._stream_usage):
-            if context_floor_tokens:
-                self._stream_usage["context_floor_tokens"] = context_floor_tokens
             self.add_usage(self._stream_usage)
             committed = select_context_usage(self._stream_usage)
-
-        context_usage = context_from_output(output, token_counter)
-        if context_floor_tokens:
-            context_usage["context_floor_tokens"] = context_floor_tokens
-            context_usage["context_source"] = "request_estimate.count_tokens"
-        if not has_context_usage(committed):
-            self.set_context_usage(context_usage)
-        if not has_context_usage(committed) and has_context_usage(context_usage):
-            selected = select_context_usage(context_usage)
-            committed["context_tokens"] = positive_int(selected.get("context_tokens"))
-            committed["context_floor_tokens"] = positive_int(selected.get("context_floor_tokens"))
-            committed["context_source"] = item_context_source(selected)
-            if committed.get("source") == "unknown" and selected.get("source"):
-                committed["source"] = str(selected["source"])
         self._stream_usage = empty_usage()
         return committed
 
@@ -170,10 +139,7 @@ async def run_turn(
     text: str,
     renderer: Any,
     thread_id: str,
-    token_counter: TokenCounter | None = None,
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
-    context_limit_tokens: int | None = None,
-    context_pressure_fraction: float = DEFAULT_CONTEXT_PRESSURE_FRACTION,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -205,14 +171,9 @@ async def run_turn(
         )
 
         result.final_text = final_text(output.get("value")) or result.final_text
-        usage_delta = result.commit_loop_usage(
-            output.get("value"),
-            token_counter=token_counter,
-            context_floor_tokens=pop_context_floor_tokens(thread_id),
-        )
+        usage_delta = result.commit_loop_usage(output.get("value"))
         if usage_callback is not None and (has_usage(usage_delta) or has_context_usage(usage_delta)):
             usage_callback(usage_delta)
-        pop_compaction_retry(thread_id)
         waiting_finished = getattr(renderer, "waiting_finished", None)
         if callable(waiting_finished):
             waiting_finished()
@@ -236,12 +197,6 @@ async def run_turn(
                 raise RuntimeError(f"model returned unexecuted tool call(s): {names or 'tool'}")
             if leaked_tool_repr:
                 raise RuntimeError("model returned unexecuted tool call(s): tool")
-            if should_warn_after_cutoff(
-                result,
-                context_limit_tokens=context_limit_tokens,
-                context_pressure_fraction=context_pressure_fraction,
-            ):
-                result.possibly_truncated = True
             return result
 
         ask_user_interrupt = first_ask_user_interrupt(interrupts)
@@ -254,64 +209,6 @@ async def run_turn(
             payload = Command(resume={"decisions": decisions})
 
 
-def should_warn_after_cutoff(
-    result: TurnResult,
-    *,
-    context_limit_tokens: int | None,
-    context_pressure_fraction: float,
-) -> bool:
-    """Return whether a completed response may have been cut off near the limit."""
-    threshold = context_threshold(context_limit_tokens, context_pressure_fraction)
-    if not threshold:
-        return False
-    if max(positive_int(result.context_tokens), positive_int(result.context_floor_tokens)) < threshold:
-        return False
-    if result.tool_calls or result.tool_results:
-        return False
-    return looks_truncated(result.final_text)
-
-
-def context_threshold(context_limit_tokens: int | None, fraction: float) -> int:
-    """Return the configured compaction threshold token count."""
-    limit = positive_int(context_limit_tokens)
-    if not limit:
-        return 0
-    try:
-        parsed_fraction = float(fraction)
-    except (TypeError, ValueError):
-        parsed_fraction = DEFAULT_CONTEXT_PRESSURE_FRACTION
-    if parsed_fraction <= 0:
-        parsed_fraction = DEFAULT_CONTEXT_PRESSURE_FRACTION
-    return max(1, int(limit * parsed_fraction))
-
-
-def looks_truncated(text: str) -> bool:
-    """Conservatively identify LM Studio-style silent mid-response cutoffs."""
-    stripped = str(text or "").strip()
-    if not stripped:
-        return False
-    if len(stripped.split()) == 1:
-        return False
-    if stripped.count("```") % 2:
-        return True
-    if stripped.endswith((".", "!", "?", "\"", "'", ")", "]", "}", "`")):
-        return False
-    tail = stripped.rsplit(maxsplit=6)[-6:]
-    dangling = {"and", "or", "but", "because", "since", "if", "when", "while", "the", "a", "an", "to", "of", "with"}
-    if tail and tail[-1].lower().strip(",;:") in dangling:
-        return True
-    if len(stripped) < 120:
-        return True
-    return stripped.endswith((",", ";", ":", "-", "—"))
-
-
-def call_renderer(renderer: Any, method: str, *args: Any, **kwargs: Any) -> bool:
-    """Call an optional renderer method."""
-    callback = getattr(renderer, method, None)
-    if not callable(callback):
-        return False
-    callback(*args, **kwargs)
-    return True
 
 
 def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:

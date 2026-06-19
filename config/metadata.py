@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from config.llm import DEFAULT_CONTEXT_TOKENS
 from runtime.usage import positive_int
 
 
@@ -20,21 +21,23 @@ class ModelMetadata:
 
 async def infer_model_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
     """Infer metadata for the configured model."""
-    configured_limit = positive_int(config.get("llm_context_tokens"))
-    if configured_limit:
-        return ModelMetadata(configured_limit, "MIRA_LLM_CONTEXT_TOKENS")
+    candidates: list[ModelMetadata] = []
 
     provider = str(config.get("llm_provider") or "").lower()
     if provider == "lmstudio":
         metadata = await infer_lmstudio_metadata(config)
         if metadata.context_tokens:
-            return metadata
+            candidates.append(metadata)
 
-    profile_limit = profile_context_tokens(model)
-    if profile_limit:
-        return ModelMetadata(profile_limit, "model_profile.max_input_tokens")
+    if provider != "lmstudio":
+        profile_limit = profile_context_tokens(model)
+        if profile_limit:
+            candidates.append(ModelMetadata(profile_limit, "model_profile.max_input_tokens"))
 
-    return ModelMetadata()
+    configured_limit = positive_int(config.get("llm_context_tokens")) or DEFAULT_CONTEXT_TOKENS
+    candidates.append(ModelMetadata(configured_limit, "MIRA_LLM_CONTEXT_TOKENS"))
+
+    return minimum_metadata(candidates)
 
 
 def apply_model_metadata(model: Any, metadata: ModelMetadata) -> Any:
@@ -47,6 +50,14 @@ def apply_model_metadata(model: Any, metadata: ModelMetadata) -> Any:
     profile["max_input_tokens"] = metadata.context_tokens
     model.profile = profile
     return model
+
+
+def minimum_metadata(candidates: list[ModelMetadata]) -> ModelMetadata:
+    """Return the smallest positive context limit from candidate metadata."""
+    valid = [candidate for candidate in candidates if positive_int(candidate.context_tokens)]
+    if not valid:
+        return ModelMetadata()
+    return min(valid, key=lambda candidate: positive_int(candidate.context_tokens))
 
 
 async def infer_lmstudio_metadata(config: dict[str, Any]) -> ModelMetadata:

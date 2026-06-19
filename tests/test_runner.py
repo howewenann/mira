@@ -435,7 +435,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(len(agent.payloads), 1)
 
-    async def test_run_turn_marks_truncated_high_context_completion_without_retry(self) -> None:
+    async def test_run_turn_preserves_high_context_completion_without_retry(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(
@@ -457,72 +457,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "answer",
             renderer,
             "thread-1",
-            context_limit_tokens=10000,
-            context_pressure_fraction=0.98,
         )
 
         self.assertEqual(len(agent.payloads), 1)
         self.assertEqual(result.final_text, "Since it")
-        self.assertTrue(result.possibly_truncated)
+        self.assertEqual(result.context_tokens, 9912)
         self.assertNotIn(("discard_last_assistant",), renderer.events)
-
-    async def test_run_turn_keeps_complete_high_context_completion(self) -> None:
-        agent = FakeAgent(
-            [
-                FakeStream(
-                    output={
-                        "messages": [
-                            OutputMessage(
-                                "Complete answer.",
-                                usage_metadata={"input_tokens": 9900, "output_tokens": 12, "total_tokens": 9912},
-                            )
-                        ]
-                    }
-                )
-            ]
-        )
-        renderer = RunTurnRenderer()
-
-        result = await runner.run_turn(
-            agent,
-            "answer",
-            renderer,
-            "thread-1",
-            context_limit_tokens=10000,
-            context_pressure_fraction=0.98,
-        )
-
-        self.assertEqual(len(agent.payloads), 1)
-        self.assertEqual(result.final_text, "Complete answer.")
-
-    async def test_run_turn_keeps_one_word_high_context_completion(self) -> None:
-        agent = FakeAgent(
-            [
-                FakeStream(
-                    output={
-                        "messages": [
-                            OutputMessage(
-                                "Ok",
-                                usage_metadata={"input_tokens": 9900, "output_tokens": 1, "total_tokens": 9901},
-                            )
-                        ]
-                    }
-                )
-            ]
-        )
-        renderer = RunTurnRenderer()
-
-        result = await runner.run_turn(
-            agent,
-            "answer",
-            renderer,
-            "thread-1",
-            context_limit_tokens=10000,
-            context_pressure_fraction=0.98,
-        )
-
-        self.assertEqual(len(agent.payloads), 1)
-        self.assertEqual(result.final_text, "Ok")
 
     async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
         stream = FakeStream(output={"messages": []})
@@ -790,24 +730,21 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 300)
         self.assertEqual(result.usage["output_tokens"], 30)
 
-    def test_commit_loop_usage_uses_request_estimate_above_low_provider_total(self) -> None:
+    def test_commit_loop_usage_uses_provider_total_when_reported(self) -> None:
         result = runner.TurnResult()
 
         usage = result.commit_loop_usage(
             {"messages": [OutputMessage("done", {"input_tokens": 1400, "output_tokens": 67, "total_tokens": 1467})]},
-            context_floor_tokens=10013,
         )
 
         self.assertEqual(usage["input_tokens"], 1400)
         self.assertEqual(usage["output_tokens"], 67)
-        self.assertEqual(usage["context_tokens"], 10013)
-        self.assertEqual(usage["context_floor_tokens"], 10013)
-        self.assertEqual(usage["context_source"], "request_estimate.count_tokens")
+        self.assertEqual(usage["context_tokens"], 1467)
+        self.assertEqual(usage["context_source"], "provider.input_output_tokens")
         self.assertEqual(result.usage["input_tokens"], 1400)
         self.assertEqual(result.usage["output_tokens"], 67)
-        self.assertEqual(result.usage["context_tokens"], 10013)
-        self.assertEqual(result.usage["context_floor_tokens"], 10013)
-        self.assertEqual(result.usage["context_source"], "request_estimate.count_tokens")
+        self.assertEqual(result.usage["context_tokens"], 1467)
+        self.assertEqual(result.usage["context_source"], "provider.input_output_tokens")
 
     def test_commit_loop_usage_uses_provider_pair_above_visible_estimate(self) -> None:
         result = runner.TurnResult()
@@ -826,24 +763,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["output_tokens"], 123)
         self.assertEqual(result.usage["context_tokens"], 9590)
         self.assertEqual(result.usage["context_source"], "provider.input_output_tokens")
-
-    def test_commit_loop_usage_replaces_pre_compaction_context_with_retry_estimate(self) -> None:
-        result = runner.TurnResult()
-
-        result.commit_loop_usage(
-            {"messages": [OutputMessage("before", {"input_tokens": 9467, "output_tokens": 123})]},
-            context_floor_tokens=10013,
-        )
-        result.commit_loop_usage(
-            {"messages": [OutputMessage("after", {"input_tokens": 300, "output_tokens": 20})]},
-            context_floor_tokens=4200,
-        )
-
-        self.assertEqual(result.usage["input_tokens"], 9767)
-        self.assertEqual(result.usage["output_tokens"], 143)
-        self.assertEqual(result.usage["context_tokens"], 4200)
-        self.assertEqual(result.usage["context_floor_tokens"], 4200)
-        self.assertEqual(result.usage["context_source"], "request_estimate.count_tokens")
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""
@@ -903,7 +822,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["output_tokens"], 600)
         self.assertEqual(result.usage["context_tokens"], 10300)
 
-    async def test_run_turn_uses_counter_only_for_context_when_metadata_is_missing(self) -> None:
+    async def test_run_turn_does_not_invent_context_when_usage_is_missing(self) -> None:
         agent = FakeAgent(
             [
                 FakeStream(
@@ -923,13 +842,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "use tokens",
             renderer,
             "thread-1",
-            token_counter=lambda text: len(text.split()),
         )
 
         self.assertEqual(result.usage["input_tokens"], 0)
         self.assertEqual(result.usage["output_tokens"], 0)
-        self.assertEqual(result.usage["context_tokens"], 5)
-        self.assertEqual(result.usage["source"], "langchain_approx.count_tokens")
+        self.assertEqual(result.usage["context_tokens"], 0)
+        self.assertEqual(result.usage["source"], "unknown")
 
     async def test_run_turn_does_not_lower_provider_context_with_visible_text_estimate(self) -> None:
         agent = FakeAgent(
@@ -954,7 +872,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "use tokens",
             renderer,
             "thread-1",
-            token_counter=lambda text: len(text.split()),
         )
 
         self.assertEqual(result.usage["input_tokens"], 5512)

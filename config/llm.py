@@ -10,6 +10,7 @@ DEFAULT_PROVIDER = "lmstudio"
 DEFAULT_MODEL = "local-model"
 DEFAULT_BASE_URL = "http://localhost:1234/v1"
 DEFAULT_API_KEY = "lm-studio"
+DEFAULT_CONTEXT_TOKENS = 32768
 
 CANONICAL_PROVIDER = "MIRA_LLM_PROVIDER"
 CANONICAL_MODEL = "MIRA_LLM_MODEL"
@@ -69,7 +70,7 @@ def _config_for_provider(
         "llm_temperature": _float_value(env, CANONICAL_TEMPERATURE),
         "llm_max_tokens": _int_value(env, CANONICAL_MAX_TOKENS),
         "llm_top_p": _float_value(env, CANONICAL_TOP_P),
-        "llm_context_tokens": _int_value(env, CANONICAL_CONTEXT_TOKENS),
+        "llm_context_tokens": _int_value(env, CANONICAL_CONTEXT_TOKENS) or DEFAULT_CONTEXT_TOKENS,
     }
 
 

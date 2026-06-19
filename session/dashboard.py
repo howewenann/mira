@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
-
-from langchain_core.messages.utils import count_tokens_approximately
 
 from runtime.usage import item_context_source, positive_int, select_context_usage
 
@@ -167,22 +164,6 @@ def update_duration(record: dict[str, Any], now: datetime | None = None) -> int:
     return duration
 
 
-def token_counter_for_model() -> Callable[[str], int]:
-    """Return a model-independent LangChain approximate token counter."""
-
-    def count_tokens(text: str) -> int:
-        if not text:
-            return 0
-        return positive_int(
-            count_tokens_approximately(
-                [{"role": "user", "content": text}],
-                use_usage_metadata_scaling=False,
-            )
-        )
-
-    return count_tokens
-
-
 def result_usage(result: Any) -> dict[str, Any]:
     """Extract normalized usage from a TurnResult-like object."""
     usage = getattr(result, "usage", None)
@@ -193,7 +174,6 @@ def result_usage(result: Any) -> dict[str, Any]:
         "input_tokens": positive_int(getattr(result, "input_tokens", 0)),
         "output_tokens": positive_int(getattr(result, "output_tokens", 0)),
         "context_tokens": positive_int(getattr(result, "context_tokens", 0)),
-        "context_floor_tokens": positive_int(getattr(result, "context_floor_tokens", 0)),
         "context_source": str(getattr(result, "context_source", "unknown") or "unknown"),
         "source": str(getattr(result, "usage_source", "unknown") or "unknown"),
     }

@@ -100,12 +100,19 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(metadata.context_tokens, 4096)
 
-    async def test_configured_context_override_wins(self) -> None:
-        """Manual context overrides should avoid provider metadata calls."""
-        metadata = await infer_model_metadata({**lmstudio_config(), "llm_context_tokens": 8192})
+    async def test_configured_context_caps_provider_metadata(self) -> None:
+        """Manual context limits should cap provider metadata without raising it."""
+        with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
+            metadata = await infer_model_metadata({**lmstudio_config(), "llm_context_tokens": 8192})
 
         self.assertEqual(metadata, ModelMetadata(8192, "MIRA_LLM_CONTEXT_TOKENS"))
-        self.assertEqual(FakeAsyncClient.calls, [])
+
+    async def test_provider_metadata_wins_when_below_configured_cap(self) -> None:
+        """Provider metadata should remain the effective limit when below the env cap."""
+        with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
+            metadata = await infer_model_metadata({**lmstudio_config("other-model"), "llm_context_tokens": 8192})
+
+        self.assertEqual(metadata, ModelMetadata(4096, "lmstudio.api.v1.loaded_instance"))
 
     async def test_unavailable_metadata_returns_unknown(self) -> None:
         """Provider metadata failures should not crash startup or turns."""
@@ -114,15 +121,39 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
         with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
             metadata = await infer_model_metadata(lmstudio_config())
 
-        self.assertEqual(metadata, ModelMetadata())
+        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
 
     async def test_profile_is_used_when_provider_metadata_is_missing(self) -> None:
         """A supplied LangChain profile remains a fallback for non-LM Studio models."""
         model = ProfileModel({"max_input_tokens": 32000})
 
-        metadata = await infer_model_metadata({"llm_provider": "openai"}, model=model)
+        metadata = await infer_model_metadata({"llm_provider": "openai", "llm_context_tokens": 32768}, model=model)
 
         self.assertEqual(metadata, ModelMetadata(32000, "model_profile.max_input_tokens"))
+
+    async def test_configured_context_caps_profile_metadata(self) -> None:
+        """Manual context limits should cap LangChain profile context."""
+        model = ProfileModel({"max_input_tokens": 64000})
+
+        metadata = await infer_model_metadata({"llm_provider": "openai", "llm_context_tokens": 32768}, model=model)
+
+        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+
+    async def test_lmstudio_failure_uses_env_fallback_not_model_profile(self) -> None:
+        """LM Studio should use its API or env/default cap, not an incidental profile."""
+        FakeAsyncClient.error = httpx.ConnectError("offline")
+        model = ProfileModel({"max_input_tokens": 16000})
+
+        with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
+            metadata = await infer_model_metadata({**lmstudio_config(), "llm_context_tokens": 32768}, model=model)
+
+        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+
+    async def test_default_context_is_used_when_env_key_is_missing(self) -> None:
+        """The backend should provide a default profile limit when no source reports one."""
+        metadata = await infer_model_metadata({"llm_provider": "custom"})
+
+        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
 
     def test_apply_metadata_sets_profile_for_deepagents(self) -> None:
         """The model profile should be populated before summarization middleware is built."""

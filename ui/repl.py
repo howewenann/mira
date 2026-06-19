@@ -10,11 +10,9 @@ from typing import Any
 from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 
-from agent.compaction import compact_after_turn
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
-from runtime.runner import TurnResult, context_threshold, run_turn
-from runtime.usage import positive_int
+from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_turn_usage, ensure_dashboard
 from session.context import update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, poll_compactions
@@ -105,11 +103,8 @@ async def run_user_turn(
     model_name: str = "",
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
-    context_pressure_fraction: float = 0.98,
-    token_counter: Any | None = None,
 ) -> TurnResult:
     """Route one submitted user prompt through planning or action mode."""
-    run_kwargs = {"token_counter": token_counter} if token_counter is not None else {}
     live_usage_applied = False
 
     def apply_live_usage(usage: dict[str, Any]) -> None:
@@ -159,9 +154,6 @@ async def run_user_turn(
             renderer=wrapped_renderer,
             thread_id=thread_id,
             usage_callback=apply_live_usage,
-            context_limit_tokens=context_limit_tokens,
-            context_pressure_fraction=context_pressure_fraction,
-            **run_kwargs,
         )
     except asyncio.CancelledError:
         await sync_compaction_safely(recorder, active_agent, thread_id)
@@ -200,15 +192,6 @@ async def run_user_turn(
             context_limit_tokens=context_limit_tokens,
             context_limit_source=context_limit_source,
         )
-    await maybe_compact_after_turn(
-        session=session,
-        agent=active_agent,
-        thread_id=thread_id,
-        recorder=recorder,
-        renderer=renderer,
-        result=result,
-        context_pressure_fraction=context_pressure_fraction,
-    )
     store.save(session)
     return result
 
@@ -217,48 +200,6 @@ async def sync_compaction_safely(recorder: SessionRecorder, agent: Any, thread_i
     """Best-effort compaction sync for exception cleanup paths."""
     with suppress(Exception):
         await recorder.sync_compaction(agent, thread_id)
-
-
-async def maybe_compact_after_turn(
-    *,
-    session: dict[str, Any],
-    agent: Any,
-    thread_id: str,
-    recorder: SessionRecorder,
-    renderer: Any,
-    result: TurnResult,
-    context_pressure_fraction: float,
-) -> bool:
-    """Compact after a completed turn when reported context is near the limit."""
-    if not should_compact_after_turn(session, context_pressure_fraction):
-        return False
-
-    write_line(renderer, "Context is near the limit. Compacting older history for the next turn.", kind="info")
-    recorder.info("Context is near the limit. Compacting older history for the next turn.")
-    outcome = await compact_after_turn(agent, thread_id)
-    if outcome.compacted:
-        await recorder.sync_compaction(agent, thread_id)
-        message = "Context compacted. Future turns will use summarized history."
-        write_line(renderer, message, kind="info")
-        recorder.info(message)
-        return True
-
-    if result.possibly_truncated:
-        message = "Response may have ended early near the context limit. No retry was attempted."
-    else:
-        message = "Context is near the limit, but there was not enough old history to compact."
-    write_line(renderer, message, kind="info")
-    recorder.info(message)
-    return False
-
-
-def should_compact_after_turn(session: dict[str, Any], fraction: float) -> bool:
-    """Return whether persisted context usage is at the post-turn compaction mark."""
-    context = session.get("dashboard", {}).get("context", {})
-    if not isinstance(context, dict):
-        return False
-    threshold = context_threshold(positive_int(context.get("limit_tokens")), fraction)
-    return bool(threshold and positive_int(context.get("used_tokens")) >= threshold)
 
 
 async def handle_command(

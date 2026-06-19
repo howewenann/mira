@@ -90,7 +90,6 @@ class MiraApp(App[None]):
         self.model_name = ""
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
-        self.token_counter: Any | None = None
         self.checkpointer: Any = None
         self.mode: dict[str, Any] = {"planning": False}
         self.ready = False
@@ -169,7 +168,6 @@ class MiraApp(App[None]):
         self.model_name = str(state.get("model_name") or "")
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
-        self.token_counter = state.get("token_counter")
         self.checkpointer = state.get("checkpointer")
         self.mode = initial_mode(self.agent, self.plan_agent)
         self.ready = True
@@ -248,8 +246,6 @@ class MiraApp(App[None]):
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
-                context_pressure_fraction=self.config.get("context_pressure_fraction", 0.98),
-                token_counter=self.token_counter,
             )
             self._refresh_sessions()
             self._set_status(state="ready")
@@ -902,11 +898,14 @@ class MiraApp(App[None]):
         """Refresh model metadata and rebuild agents when context changes."""
         if self.config is None or self.checkpointer is None:
             return
+        if not self.config.get("llm_provider") or not self.config.get("llm_model"):
+            return
 
-        from agent.factory import build_agent, build_plan_agent
-        from config.metadata import infer_model_metadata
+        from agent.llm import get_llm
+        from config.metadata import ModelMetadata, infer_model_metadata
 
-        metadata = await infer_model_metadata(self.config)
+        inspect_model = get_llm(self.config, metadata=ModelMetadata())
+        metadata = await infer_model_metadata(self.config, model=inspect_model)
         if not metadata.context_tokens or metadata.context_tokens == self.context_limit_tokens:
             return
 

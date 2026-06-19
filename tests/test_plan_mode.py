@@ -707,7 +707,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="use tokens",
                 model_name="lmstudio:test",
                 context_limit_tokens=1000,
-                token_counter=lambda text: 900,
             )
 
         self.assertEqual(pre_generation_state["tokens"], {"in": 0, "out": 0})
@@ -811,7 +810,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("model stopped", store.saves[-1]["events"][3]["text"])
 
     async def test_run_user_turn_records_context_overflow_as_info(self) -> None:
-        """Escaped context pressure should persist as info instead of system_error."""
+        """Escaped context overflow should persist as info instead of system_error."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
@@ -825,7 +824,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             thread_id: str,
             **kwargs: Any,
         ) -> runner.TurnResult:
-            raise context_overflow_error("configured context threshold reached", notice)
+            raise context_overflow_error("provider context limit reached", notice)
 
         with patch("ui.repl.run_turn", fake_run_turn):
             with self.assertRaises(ContextOverflowError):
@@ -850,7 +849,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
         mode = repl.initial_mode("action-agent", "plan-agent")
-        notice = "Context reached 98% of 10.0k tokens (9.8k reported). Compacting older context before continuing."
+        notice = "Provider context limit reached. Compacting older context and retrying."
 
         async def fake_run_turn(
             agent: Any,
@@ -890,7 +889,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["events"][-1]["text"], "The story continued.")
         self.assertEqual(session["turns"], 1)
         rendered = "\n".join(renderer.console.lines)
-        self.assertEqual(rendered.count("Context reached 98%"), 1)
+        self.assertEqual(rendered.count("Provider context limit reached"), 1)
         self.assertIn("context compacted", rendered)
 
     async def test_session_command_shows_current_mode(self) -> None:

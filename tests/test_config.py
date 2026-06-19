@@ -18,9 +18,8 @@ from typer.testing import CliRunner
 from agent.llm import get_llm, get_model_name
 from cli import commands
 from cli.main import app as cli_app
-from config.llm import ConfigError, load_llm_config
+from config.llm import ConfigError, DEFAULT_CONTEXT_TOKENS, load_llm_config
 from config.loader import load_config
-from session.dashboard import token_counter_for_model
 
 
 class LLMConfigTests(unittest.TestCase):
@@ -34,6 +33,7 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_model"], "local-model")
         self.assertEqual(config["llm_base_url"], "http://localhost:1234/v1")
         self.assertEqual(config["llm_api_key"], "lm-studio")
+        self.assertEqual(config["llm_context_tokens"], DEFAULT_CONTEXT_TOKENS)
 
     def test_canonical_config_loads_provider_values(self) -> None:
         """Canonical MIRA_LLM_* values should define the provider."""
@@ -90,8 +90,6 @@ class LLMConfigTests(unittest.TestCase):
                         "MIRA_LLM_MODEL=from-dotenv",
                         "MIRA_TOOL_OUTPUT_CHARS=321",
                         "MIRA_LMSTUDIO_METADATA_TIMEOUT=0.5",
-                        "MIRA_CONTEXT_PRESSURE_COMPACTION=false",
-                        "MIRA_CONTEXT_PRESSURE_FRACTION=0.97",
                     ]
                 ),
                 encoding="utf-8",
@@ -103,8 +101,7 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_model"], "from-dotenv")
         self.assertEqual(config["tool_output_chars"], 321)
         self.assertEqual(config["lmstudio_metadata_timeout"], 0.5)
-        self.assertFalse(config["context_pressure_compaction"])
-        self.assertEqual(config["context_pressure_fraction"], 0.97)
+        self.assertEqual(config["llm_context_tokens"], DEFAULT_CONTEXT_TOKENS)
         self.assertEqual(config["session_dir"], str(workspace / ".mira" / "_sessions"))
 
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:
@@ -183,13 +180,6 @@ class LLMConfigTests(unittest.TestCase):
             get_model_name({"llm_provider": "anthropic", "llm_model": "claude-sonnet"}),
             "anthropic:claude-sonnet",
         )
-
-    def test_token_counter_uses_langchain_approximation(self) -> None:
-        """Context estimates should use LangChain's local approximation."""
-        counter = token_counter_for_model()
-
-        self.assertGreater(counter("hello world"), 0)
-
 
 class CLIConfigTests(unittest.TestCase):
     """Tests for user-facing CLI config errors."""
@@ -282,12 +272,10 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             text: str,
             renderer: object,
             thread_id: str,
-            token_counter: object | None = None,
         ) -> None:
             events.append("run_turn")
             self.assertEqual((agent, text, thread_id), ("agent", "hello", "thread-1"))
             self.assertIs(getattr(renderer, "renderer", None), renderer_obj)
-            self.assertIsNone(token_counter)
 
         config_data = config
         renderer_obj = renderer

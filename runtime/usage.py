@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 
@@ -13,7 +12,6 @@ def empty_usage() -> dict[str, Any]:
         "output_tokens": 0,
         "total_tokens": 0,
         "context_tokens": 0,
-        "context_floor_tokens": 0,
         "context_source": "unknown",
         "source": "unknown",
     }
@@ -26,7 +24,7 @@ def has_usage(usage: dict[str, Any]) -> bool:
 
 def has_context_usage(usage: dict[str, Any]) -> bool:
     """Return whether a context token count is present."""
-    return positive_int(usage.get("context_tokens")) > 0 or positive_int(usage.get("context_floor_tokens")) > 0
+    return positive_int(usage.get("context_tokens")) > 0
 
 
 def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
@@ -42,11 +40,6 @@ def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
             merged["context_tokens"],
             positive_int(item.get("context_tokens")),
             context_tokens_from_counts(item),
-            positive_int(item.get("context_floor_tokens")),
-        )
-        merged["context_floor_tokens"] = max(
-            merged["context_floor_tokens"],
-            positive_int(item.get("context_floor_tokens")),
         )
         if item_context_source(item) != "unknown":
             merged["context_source"] = item_context_source(item)
@@ -96,9 +89,6 @@ def usage_from_message(message: Any) -> dict[str, Any]:
     return empty_usage()
 
 
-TokenCounter = Callable[[str], int]
-
-
 def usage_from_output(output: Any) -> dict[str, Any]:
     """Extract usage from a final DeepAgents output payload."""
     if isinstance(output, dict):
@@ -111,29 +101,6 @@ def usage_from_output(output: Any) -> dict[str, Any]:
             return empty_usage()
 
     return usage_from_message(output)
-
-
-def context_from_output(output: Any, token_counter: TokenCounter | None) -> dict[str, Any]:
-    """Count the current message stack with a provider tokenizer."""
-    if token_counter is None:
-        return empty_usage()
-
-    if isinstance(output, dict):
-        messages = output.get("messages")
-        if isinstance(messages, list):
-            return context_from_message_texts(messages, token_counter)
-
-    text = message_text(output).strip()
-    context_tokens = count_text_tokens(token_counter, text)
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "context_tokens": context_tokens,
-        "context_floor_tokens": 0,
-        "context_source": "langchain_approx.count_tokens" if context_tokens else "unknown",
-        "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
-    }
 
 
 def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
@@ -189,7 +156,6 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
                 "total_tokens": total_tokens,
             }
         ),
-        "context_floor_tokens": 0,
         "context_source": context_source_for_mapping(source, total_key, input_tokens, output_tokens, total_tokens),
         "source": source if input_tokens or output_tokens or total_tokens else "unknown",
     }
@@ -207,33 +173,6 @@ def context_tokens_from_counts(value: dict[str, Any]) -> int:
     if input_tokens and output_tokens:
         return input_tokens + output_tokens
     return input_tokens
-
-
-def context_from_message_texts(messages: list[Any], token_counter: TokenCounter | None) -> dict[str, Any]:
-    """Estimate current context from message text without changing In/Out totals."""
-    if token_counter is None or not messages:
-        return empty_usage()
-
-    context_text = "\n".join(role_prefixed_text(message) for message in messages).strip()
-    context_tokens = count_text_tokens(token_counter, context_text)
-    return {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "total_tokens": 0,
-        "context_tokens": context_tokens,
-        "context_floor_tokens": 0,
-        "context_source": "langchain_approx.count_tokens" if context_tokens else "unknown",
-        "source": "langchain_approx.count_tokens" if context_tokens else "unknown",
-    }
-
-
-def role_prefixed_text(message: Any) -> str:
-    """Return text with a lightweight role prefix for fallback token counting."""
-    text = message_text(message).strip()
-    if not text:
-        return ""
-    role = message_role(message) or "message"
-    return f"{role}: {text}"
 
 
 def message_text(message: Any) -> str:
@@ -254,34 +193,6 @@ def message_text(message: Any) -> str:
         return str(text)
 
     return ""
-
-
-def message_role(message: Any) -> str:
-    """Extract a normalized message role from dicts and LangChain messages."""
-    role = field(message, "role") or field(message, "type")
-    if role:
-        return str(role).lower()
-
-    class_name = message.__class__.__name__.lower()
-    if "human" in class_name:
-        return "human"
-    if "ai" in class_name or "assistant" in class_name:
-        return "ai"
-    if "system" in class_name:
-        return "system"
-    if "tool" in class_name:
-        return "tool"
-    return ""
-
-
-def count_text_tokens(token_counter: TokenCounter, text: str) -> int:
-    """Count text tokens while keeping fallback counting best-effort."""
-    if not text:
-        return 0
-    try:
-        return positive_int(token_counter(text))
-    except Exception:
-        return 0
 
 
 def object_mapping(value: Any) -> dict[str, Any] | None:
@@ -363,15 +274,11 @@ def select_context_usage(usage: dict[str, Any]) -> dict[str, Any]:
     output_tokens = positive_int(usage.get("output_tokens"))
     provider_pair = input_tokens + output_tokens
     context_tokens = positive_int(usage.get("context_tokens"))
-    request_estimate = positive_int(usage.get("context_floor_tokens"))
     context_source = item_context_source(usage)
 
     if is_trusted_full_context_source(context_source) and context_tokens:
         selected["context_tokens"] = context_tokens
         selected["context_source"] = context_source
-    elif request_estimate:
-        selected["context_tokens"] = request_estimate
-        selected["context_source"] = "request_estimate.count_tokens"
     elif provider_pair:
         selected["context_tokens"] = provider_pair
         selected["context_source"] = "provider.input_output_tokens"
@@ -391,8 +298,6 @@ def is_trusted_full_context_source(source: str) -> bool:
         "unknown",
         "langchain_approx.count_tokens",
         "provider.input_output_tokens",
-        "request_estimate.count_tokens",
-        "request_floor.count_tokens",
         "usage_metadata",
     }
 
