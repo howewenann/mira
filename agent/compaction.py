@@ -50,7 +50,7 @@ async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionRe
     if not messages:
         return PostTurnCompactionResult(reason="no_messages")
 
-    event = state.get("_summarization_event")
+    event = normalize_summarization_event(state.get("_summarization_event"))
     effective = summarization._apply_event_to_messages(messages, event)
     cutoff = int(summarization._determine_cutoff_index(effective) or 0)
     if cutoff <= 0:
@@ -142,6 +142,15 @@ def mark_summarization_engine(summarization: Any) -> None:
 
         setattr(summarization, "_build_new_messages_with_path", wrapped_build_messages)
 
+    apply_event = getattr(summarization, "_apply_event_to_messages", None)
+    if callable(apply_event):
+
+        @wraps(apply_event)
+        def wrapped_apply_event_to_messages(messages: list[Any], event: Any) -> list[Any]:
+            return apply_event(messages, normalize_summarization_event(event))
+
+        setattr(summarization, "_apply_event_to_messages", wrapped_apply_event_to_messages)
+
     setattr(summarization, "_mira_compaction_marked", True)
 
 
@@ -181,10 +190,30 @@ def normalize_summary_messages(messages: list[Any]) -> list[Any]:
     normalized = []
     for message in messages:
         if is_summary_message(message):
-            normalized.append(HumanMessage(content=visible_text(message)))
+            normalized.append(normalize_summary_message(message))
         else:
             normalized.append(message)
     return normalized
+
+
+def normalize_summarization_event(event: Any) -> Any:
+    """Return a summarization event with a replay-safe summary message."""
+    if not isinstance(event, dict) or "summary_message" not in event:
+        return event
+    normalized = dict(event)
+    normalized["summary_message"] = normalize_summary_message(event.get("summary_message"))
+    return normalized
+
+
+def normalize_summary_message(message: Any) -> HumanMessage:
+    """Convert checkpointed summary messages into provider-safe HumanMessages."""
+    if isinstance(message, str):
+        return HumanMessage(content=message)
+    try:
+        converted = convert_to_messages([message])[0]
+    except Exception:
+        converted = message
+    return HumanMessage(content=visible_text(converted))
 
 
 def visible_text(message: Any) -> str:

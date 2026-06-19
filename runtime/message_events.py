@@ -10,9 +10,6 @@ from runtime.compaction_filter import (
     ReasoningFilter,
     TextFilter,
     call_renderer,
-    is_compaction_reasoning,
-    is_compaction_reasoning_fragment,
-    should_flush_reasoning_probe,
 )
 from runtime.compaction_state import compaction_active
 from runtime.output_events import (
@@ -84,33 +81,12 @@ async def _consume_reasoning(message: Any, renderer: Any) -> bool:
         call_renderer(renderer, "compaction_finished")
         return True
 
-    pending = ""
-    compacting = False
+    reasoning_filter = ReasoningFilter(renderer)
     async for delta in _text_deltas(reasoning):
-        text = str(delta)
-        if compacting:
-            continue
+        reasoning_filter.push(str(delta))
 
-        pending += text
-        if is_compaction_reasoning(pending):
-            compacting = True
-            pending = ""
-            call_renderer(renderer, "compaction_started")
-            continue
-
-        if should_flush_reasoning_probe(pending):
-            renderer.reasoning_delta(pending)
-            pending = ""
-
-    if compacting:
-        call_renderer(renderer, "compaction_finished")
-    elif pending and is_compaction_reasoning_fragment(pending):
-        call_renderer(renderer, "compaction_started")
-        call_renderer(renderer, "compaction_finished")
-        return True
-    elif pending:
-        renderer.reasoning_delta(pending)
-    return compacting
+    reasoning_filter.finish()
+    return reasoning_filter.was_compaction
 
 
 async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:

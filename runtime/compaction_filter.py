@@ -20,14 +20,19 @@ COMPACTION_REASONING_MARKERS = (
 )
 COMPACTION_REASONING_HINTS = (
     "context extraction assistant",
+    "sole objective",
+    "objective_information",
     "extract context from",
     "extract the most important context",
     "extract the most relevant context",
     "extract the highest quality/most relevant context",
     "key information to extract",
+    "messages to summarize",
     "conversation history to replace",
     "conversation history will be replaced",
+    "conversation history below will be replaced",
     "conversation history",
+    "respond only with the extracted context",
     "due to nearing token limits",
     "due to token limits",
     "compact",
@@ -48,25 +53,32 @@ class ReasoningFilter:
     def __init__(self, renderer: Any) -> None:
         self.renderer = renderer
         self.pending = ""
+        self.observed = ""
         self.probing = True
         self.compacting = False
+        self.was_compaction = False
+        self.emitted_reasoning = False
 
     def push(self, delta: str) -> None:
         if not delta or self.compacting:
             return
+        self.observed += delta
         if not self.probing:
+            if is_compaction_reasoning(self.observed):
+                self._start_compaction()
+                return
             self.renderer.reasoning_delta(delta)
+            self.emitted_reasoning = True
             return
 
         self.pending += delta
         if is_compaction_reasoning(self.pending):
-            self.compacting = True
-            self.pending = ""
-            call_renderer(self.renderer, "compaction_started")
+            self._start_compaction()
             return
 
         if not could_be_compaction_reasoning_start(self.pending):
             self.renderer.reasoning_delta(self.pending)
+            self.emitted_reasoning = True
             self.pending = ""
             self.probing = False
 
@@ -74,10 +86,19 @@ class ReasoningFilter:
         if self.compacting:
             call_renderer(self.renderer, "compaction_finished")
         elif self.pending and is_compaction_reasoning_fragment(self.pending):
-            call_renderer(self.renderer, "compaction_started")
+            self._start_compaction()
             call_renderer(self.renderer, "compaction_finished")
         elif self.pending:
             self.renderer.reasoning_delta(self.pending)
+            self.emitted_reasoning = True
+
+    def _start_compaction(self) -> None:
+        self.compacting = True
+        self.was_compaction = True
+        self.pending = ""
+        if self.emitted_reasoning:
+            call_renderer(self.renderer, "discard_reasoning")
+        call_renderer(self.renderer, "compaction_started")
 
 
 class TextFilter:
@@ -137,6 +158,14 @@ def is_compaction_reasoning(text: str) -> bool:
     lowered = text.lower()
     if all(marker in lowered for marker in COMPACTION_REASONING_MARKERS):
         return True
+    if "context extraction assistant" in lowered and "respond only with the extracted context" in lowered:
+        return True
+    if "your sole objective" in lowered and "extract" in lowered and "relevant context" in lowered:
+        return True
+    if "conversation history below will be replaced" in lowered:
+        return True
+    if "messages to summarize" in lowered and "respond only with the extracted context" in lowered:
+        return True
     if "context extraction assistant" in lowered and (
         "conversation history" in lowered or "replace it" in lowered or "token limit" in lowered
     ):
@@ -161,6 +190,8 @@ def is_compaction_reasoning(text: str) -> bool:
         return True
     if "conversation history" in lowered and "key information to extract" in lowered:
         return True
+    if "conversation history" in lowered and "let me structure this properly" in lowered:
+        return True
     if "compact" in lowered and "conversation" in lowered and ("summary" in lowered or "token" in lowered):
         return True
     if "summarization" in lowered and "conversation" in lowered:
@@ -171,6 +202,12 @@ def is_compaction_reasoning(text: str) -> bool:
 def is_compaction_reasoning_fragment(text: str) -> bool:
     """Return whether a partial reasoning chunk is likely compaction internals."""
     lowered = text.lower()
+    if is_compaction_tail_fragment(lowered):
+        return True
+    if "context extraction assistant" in lowered:
+        return True
+    if "respond only with the extracted context" in lowered:
+        return True
     if "conversation history" not in lowered:
         return False
     if (
@@ -179,11 +216,24 @@ def is_compaction_reasoning_fragment(text: str) -> bool:
         or "extract the most relevant context" in lowered
         or "extract the highest quality/most relevant context" in lowered
         or "key information to extract" in lowered
+        or "let me structure this properly" in lowered
+        or "will be replaced" in lowered
     ):
         return True
     if "already been summarized" in lowered and ("meta-task" in lowered or "summary" in lowered):
         return True
     return False
+
+
+def is_compaction_tail_fragment(text: str) -> bool:
+    """Return whether a tiny trailing fragment belongs to hidden compaction reasoning."""
+    stripped = text.strip().lower()
+    return stripped in {
+        ": none - the task is complete",
+        "- next steps: none - the task is complete",
+        "next steps: none - the task is complete",
+        "none - the task is complete",
+    }
 
 
 def should_flush_reasoning_probe(text: str) -> bool:

@@ -559,6 +559,10 @@ class MiraApp(App[None]):
         self._mark_main_stream_active()
         self.query_one(ChatLog).reasoning_delta(delta)
 
+    def discard_reasoning(self) -> None:
+        """Remove streamed reasoning that was later classified as internal."""
+        self.query_one(ChatLog).discard_reasoning()
+
     def text_delta(self, delta: str) -> None:
         """Render streamed assistant text."""
         self.waiting_finished()

@@ -6,6 +6,7 @@ import asyncio
 import unittest
 from typing import Any
 
+from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage
 
 from agent.compaction import mark_summarization_engine, sanitize_messages_for_archive
@@ -264,6 +265,9 @@ class RecordingRenderer:
 
     def reasoning_delta(self, value: str) -> None:
         self.events.append(("reasoning", value))
+
+    def discard_reasoning(self) -> None:
+        self.events.append(("discard_reasoning",))
 
     def text_delta(self, value: str) -> None:
         self.events.append(("text", value))
@@ -1190,6 +1194,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
+    async def test_langchain_default_summary_prompt_reasoning_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "I need to follow the internal instructions.\n\n",
+                            DEFAULT_SUMMARY_PROMPT.split("{messages}", 1)[0],
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("reasoning", "I need to follow the internal instructions.\n\n"),
+                ("discard_reasoning",),
+                ("compaction_started",),
+                ("compaction_finished",),
+            ],
+        )
+
     async def test_explicit_compaction_signal_hides_reasoning_and_text(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
@@ -1386,6 +1417,56 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await consume_messages(messages, renderer)
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_screenshot_style_compaction_reasoning_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            'The user wants me to extract context from the conversation history provided. This is a "context compaction test" ',
+                            "where I need to summarize the most important information so that the conversation history can be replaced with this summary, freeing up token space.\n\n",
+                            "Looking at the conversation:\n1. Human asked for an 800-word plain text field report in chat.\n",
+                            "For context extraction purposes:\n- SESSION INTENT: Write a report.\n- SUMMARY: The task is done.\n",
+                            "- ARTIFACTS: None.\n- NEXT STEPS: None - the task is complete.\n\n",
+                            "Let me structure this properly according to the instructions:",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_late_compaction_detection_discards_visible_reasoning(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "I am reviewing a normal request. " * 50,
+                            "Context Extraction Assistant: your sole objective is to extract the highest quality/most relevant context.",
+                        ]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("reasoning", "I am reviewing a normal request. " * 50),
+                ("discard_reasoning",),
+                ("compaction_started",),
+                ("compaction_finished",),
+            ],
+        )
 
     async def test_most_important_context_compaction_reasoning_is_hidden(self) -> None:
         renderer = RecordingRenderer()

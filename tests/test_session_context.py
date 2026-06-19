@@ -57,7 +57,9 @@ class FakeSummarization:
         return "unset"
 
     def _apply_event_to_messages(self, messages: list[Any], event: Any) -> list[Any]:
-        return messages
+        if event is None:
+            return messages
+        return [event["summary_message"], *messages[int(event["cutoff_index"]) :]]
 
     def _determine_cutoff_index(self, messages: list[Any]) -> int:
         return 1
@@ -450,6 +452,79 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private chain", rendered_archive)
         self.assertNotIn("reasoning_content", rendered_archive)
 
+    def test_checkpointed_summary_event_replays_as_human_message(self) -> None:
+        summarization = FakeSummarization()
+        mark_summarization_engine(summarization)
+        event = {
+            "cutoff_index": 1,
+            "file_path": "/.mira/conversation_history/thread-1.md",
+            "summary_message": {
+                "type": "human",
+                "content": (
+                    "You are in the middle of a conversation that has been summarized.\n\n"
+                    "<summary>\nEarlier context was summarized.\n</summary>"
+                ),
+                "additional_kwargs": {"lc_source": "summarization"},
+                "response_metadata": {},
+                "name": None,
+                "id": None,
+            },
+        }
+
+        effective = summarization._apply_event_to_messages(
+            [HumanMessage(content="old"), HumanMessage(content="recent")],
+            event,
+        )
+
+        self.assertIsInstance(effective[0], HumanMessage)
+        self.assertEqual(effective[0].content, event["summary_message"]["content"])
+        self.assertNotEqual(effective[0].additional_kwargs.get("lc_source"), "summarization")
+        self.assertEqual([message.content for message in effective[1:]], ["recent"])
+
+    def test_openai_style_summary_event_dict_is_normalized(self) -> None:
+        summarization = FakeSummarization()
+        mark_summarization_engine(summarization)
+        event = {
+            "cutoff_index": 0,
+            "summary_message": {
+                "role": "user",
+                "content": "OpenAI-style summary message.",
+                "additional_kwargs": {"lc_source": "summarization"},
+            },
+        }
+
+        effective = summarization._apply_event_to_messages([HumanMessage(content="recent")], event)
+
+        self.assertIsInstance(effective[0], HumanMessage)
+        self.assertEqual(effective[0].content, "OpenAI-style summary message.")
+        self.assertNotEqual(effective[0].additional_kwargs.get("lc_source"), "summarization")
+
+    async def test_post_turn_compaction_accepts_checkpointed_summary_event(self) -> None:
+        summarization = FakeSummarization()
+        mark_summarization_engine(summarization)
+        agent = AgentWithMutableState(
+            {
+                "messages": [HumanMessage(content="old"), HumanMessage(content="recent")],
+                "_summarization_event": {
+                    "cutoff_index": 1,
+                    "summary_message": {
+                        "type": "human",
+                        "content": "Checkpointed summary.",
+                        "additional_kwargs": {"lc_source": "summarization"},
+                    },
+                    "file_path": "/.mira/conversation_history/thread-1.md",
+                },
+            },
+            summarization,
+        )
+
+        result = await compact_after_turn(agent, "thread-1")
+
+        self.assertTrue(result.compacted)
+        rendered_archive = repr(summarization.offloaded[0][0])
+        self.assertIn("Checkpointed summary.", rendered_archive)
+        self.assertNotIn("{'type': 'human'", rendered_archive)
+
     async def test_compaction_sync_scrubs_leaked_reasoning_events(self) -> None:
         record = {
             "events": [
@@ -591,6 +666,17 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         recorder.reasoning_delta("The user wants me to extract context from the conversation history. ")
         recorder.reasoning_delta("Key information to extract: Session intent, Summary, Artifacts, Next Steps.")
+
+        self.assertEqual(record["events"], [])
+        self.assertEqual(store.saved, [])
+
+    def test_recorder_drops_compaction_tail_fragment(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "action")
+
+        recorder.reasoning_delta(": None - the task is complete")
+        recorder.finish_main()
 
         self.assertEqual(record["events"], [])
         self.assertEqual(store.saved, [])

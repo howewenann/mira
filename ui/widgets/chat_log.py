@@ -170,6 +170,14 @@ class ChatLog(VerticalScroll):
         self._reasoning_block = None
         self._reasoning_text = ""
 
+    def discard_reasoning(self) -> None:
+        """Remove the current streamed reasoning block."""
+        if self._reasoning_block is not None:
+            self._reasoning_block.remove()
+        self._reasoning_block = None
+        self._reasoning_text = ""
+        self._scroll_to_end()
+
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Append a system, info, status, warning, or error message."""
         self.hide_model_activity()

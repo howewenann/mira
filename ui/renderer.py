@@ -40,6 +40,10 @@ class Renderer:
         if text:
             self._stream("thinking", text)
 
+    def discard_reasoning(self) -> None:
+        """Terminal output cannot retract already printed reasoning."""
+        return
+
     def text_delta(self, delta: str) -> None:
         """Print streamed assistant text."""
         if delta:

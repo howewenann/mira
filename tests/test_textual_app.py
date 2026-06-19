@@ -411,6 +411,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(first, animated)
             self.assertIn("context compacted", done)
 
+    async def test_discard_reasoning_removes_current_thinking_block(self) -> None:
+        """Late compaction detection should retract already-rendered reasoning."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.reasoning_delta("I am reviewing a normal request.")
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("I am reviewing a normal request.", rendered)
+
+            app.discard_reasoning()
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertNotIn("I am reviewing a normal request.", rendered)
+
     async def test_info_message_renders_as_dedicated_block(self) -> None:
         """Info messages should use the first-class info box."""
         app = make_app()

@@ -10,6 +10,7 @@ from agent.context_overflow import pop_context_overflow_notice
 from runtime.compaction_filter import (
     is_compaction_reasoning,
     is_compaction_reasoning_fragment,
+    is_compaction_tail_fragment,
     should_flush_reasoning_probe,
 )
 from runtime.output_events import normalize_response_delta
@@ -60,6 +61,10 @@ class SessionRecorder:
         if not delta:
             return
         self._reasoning_pending += str(delta)
+        if is_compaction_tail_fragment(self._reasoning_pending):
+            self._reasoning_pending = ""
+            self._delete_reasoning_event()
+            return
         if is_compaction_reasoning(self._reasoning_pending):
             self._reasoning_pending = ""
             self._delete_reasoning_event()
@@ -197,7 +202,9 @@ class SessionRecorder:
 
     def finish_main(self) -> None:
         if self._reasoning_pending:
-            if is_compaction_reasoning_fragment(self._reasoning_pending):
+            if is_compaction_reasoning_fragment(self._reasoning_pending) or is_compaction_tail_fragment(
+                self._reasoning_pending
+            ):
                 self._delete_reasoning_event()
             else:
                 self._append_reasoning(self._reasoning_pending)
@@ -220,6 +227,11 @@ class SessionRecorder:
         self._last_assistant_id = None
         self._assistant_text = ""
         self._assistant_seen = False
+
+    def discard_reasoning(self) -> None:
+        """Remove the currently streamed reasoning block after late compaction detection."""
+        self._reasoning_pending = ""
+        self._delete_reasoning_event()
 
     def _delete_reasoning_event(self) -> None:
         if self._reasoning_id is not None:
@@ -252,6 +264,12 @@ class RecordingRenderer:
     def reasoning_delta(self, delta: str) -> None:
         self.renderer.reasoning_delta(delta)
         self.recorder.reasoning_delta(delta)
+
+    def discard_reasoning(self) -> None:
+        callback = getattr(self.renderer, "discard_reasoning", None)
+        if callable(callback):
+            callback()
+        self.recorder.discard_reasoning()
 
     def text_delta(self, delta: str) -> None:
         self.renderer.text_delta(delta)
