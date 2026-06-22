@@ -651,7 +651,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         subagents = [event for event in context.normalize_events(record["events"]) if event["type"] == "subagent"]
         self.assertEqual(subagents[1]["status"], "DONE")
         self.assertEqual(subagents[1]["task_input"], "summarize README")
+        self.assertEqual(subagents[1]["output"], "done")
         self.assertEqual(subagents[2]["status"], "RUNNING")
+        self.assertEqual(subagents[2]["output"], "")
         self.assertEqual(subagents[3]["status"], "CANCELLED")
         self.assertEqual(subagents[3]["task_input"], "find tests")
 
@@ -668,6 +670,42 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subagents[0]["task_input"], "write scary story")
         self.assertEqual(subagents[1]["status"], "DONE")
         self.assertEqual(subagents[1]["task_input"], "write scary story")
+        self.assertEqual(subagents[1]["output"], "done")
+
+    def test_done_subagent_output_contributes_to_resume_context(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "subagent",
+                    "mode": "action",
+                    "name": "general-purpose [one]",
+                    "status": "RUNNING",
+                    "task_input": "find dead code",
+                    "output": "",
+                },
+                {
+                    "id": 2,
+                    "type": "subagent",
+                    "mode": "action",
+                    "name": "general-purpose [one]",
+                    "status": "DONE",
+                    "task_input": "find dead code",
+                    "output": "No dead code found.",
+                },
+            ]
+        }
+
+        messages = context.normalize_messages(record["events"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "subagent")
+        self.assertIn("general-purpose [one] completed", messages[0]["content"])
+        self.assertIn("Request:\nfind dead code", messages[0]["content"])
+        self.assertIn("Output:\nNo dead code found.", messages[0]["content"])
+
+        resume = context.build_resume_context(record)
+        self.assertIn("subagent (action):", resume)
+        self.assertIn("No dead code found.", resume)
 
     def test_recorder_deduplicates_delegation_events(self) -> None:
         record = {"events": []}

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import unittest
 
+from langchain.agents import create_agent
+from langchain.agents.middleware.human_in_the_loop import HumanInTheLoopMiddleware
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, convert_to_messages
+from langgraph.types import Command
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator
 
-from session.checkpoint import make_checkpointer
+from session.checkpoint import make_checkpointer, sanitize_checkpoint_value
 
 
 class Finding(BaseModel):
@@ -24,10 +28,29 @@ class BrokenDump:
         raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
 
 
+class BrokenAIMessage(AIMessage):
+    """AIMessage test double whose model_dump path fails."""
+
+    def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
+        raise TypeError("broken message dump")
+
+
+class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
+    """Fake chat model that supports tool binding for agent tests."""
+
+    def bind_tools(self, *args: object, **kwargs: object) -> "BindableFakeMessagesListChatModel":
+        return self
+
+
+def toy(command: str) -> str:
+    """Run a toy command."""
+    return f"ran {command}"
+
+
 class CheckpointTests(unittest.TestCase):
     """Tests for checkpoint serialization fallbacks."""
 
-    def test_message_instances_serialize_as_convertible_plain_dicts(self) -> None:
+    def test_message_instances_round_trip_as_messages(self) -> None:
         serde = make_checkpointer().serde
         message = AIMessage(content="hello")
 
@@ -35,9 +58,8 @@ class CheckpointTests(unittest.TestCase):
         value = serde.loads_typed((kind, payload))
 
         self.assertEqual(kind, "msgpack")
-        self.assertIsInstance(value, dict)
-        self.assertEqual(value["type"], "ai")
-        self.assertEqual(value["content"], "hello")
+        self.assertIsInstance(value, AIMessage)
+        self.assertEqual(value.content, "hello")
         self.assertEqual(convert_to_messages([value])[0].content, "hello")
 
     def test_checkpointer_serializes_message_type_markers(self) -> None:
@@ -190,6 +212,72 @@ class CheckpointTests(unittest.TestCase):
 
         self.assertEqual(kind, "msgpack")
         self.assertIn("BrokenDump", value["broken"])
+
+    def test_message_sanitize_fallback_stays_structured(self) -> None:
+        message = BrokenAIMessage(
+            content="hello",
+            tool_calls=[{"name": "toy", "args": {"command": "x"}, "id": "call-1"}],
+        )
+
+        value = sanitize_checkpoint_value(message)
+
+        self.assertEqual(value["type"], "ai")
+        self.assertEqual(value["content"], "hello")
+        self.assertEqual(value["tool_calls"][0]["name"], "toy")
+        self.assertNotIn("AIMessage(content=", str(value))
+
+
+class CheckpointHitlTests(unittest.IsolatedAsyncioTestCase):
+    """Integration coverage for native LangGraph HITL resume with MIRA checkpoints."""
+
+    async def test_native_hitl_resume_preserves_ai_tool_and_final_messages(self) -> None:
+        model = BindableFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "toy",
+                            "args": {"command": "conda env list"},
+                            "id": "call-1",
+                        }
+                    ],
+                ),
+                AIMessage(content="final with joke"),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[toy],
+            middleware=[HumanInTheLoopMiddleware(interrupt_on={"toy": True})],
+            checkpointer=make_checkpointer(),
+        )
+        config = {"configurable": {"thread_id": "checkpoint-hitl"}}
+
+        stream = await graph.astream_events(
+            {"messages": [{"role": "user", "content": "run toy then joke"}]},
+            config=config,
+            version="v3",
+        )
+        await stream.output()
+        self.assertEqual(len(await stream.interrupts()), 1)
+
+        stream = await graph.astream_events(
+            Command(resume={"decisions": [{"type": "approve"}]}),
+            config=config,
+            version="v3",
+        )
+        output = await stream.output()
+
+        messages = output["messages"]
+        self.assertEqual([message.__class__.__name__ for message in messages], [
+            "HumanMessage",
+            "AIMessage",
+            "ToolMessage",
+            "AIMessage",
+        ])
+        self.assertEqual(messages[2].content, "ran conda env list")
+        self.assertEqual(messages[3].content, "final with joke")
 
 
 if __name__ == "__main__":

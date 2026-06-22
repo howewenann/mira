@@ -98,16 +98,38 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
 def normalize_messages(value: Any) -> list[dict[str, Any]]:
     messages = []
     for item in normalize_events(value):
-        if item["type"] not in {"user", "assistant"}:
+        if item["type"] in {"user", "assistant"}:
+            messages.append({
+                "id": item["id"],
+                "role": item["type"],
+                "mode": str(item.get("mode") or "action"),
+                "created_at": item["created_at"],
+                "content": item["text"],
+            })
             continue
-        messages.append({
-            "id": item["id"],
-            "role": item["type"],
-            "mode": str(item.get("mode") or "action"),
-            "created_at": item["created_at"],
-            "content": item["text"],
-        })
+        if item["type"] == "subagent" and item.get("status") == "DONE":
+            output = str(item.get("output") or "").strip()
+            if not output:
+                continue
+            messages.append({
+                "id": item["id"],
+                "role": "subagent",
+                "mode": str(item.get("mode") or "action"),
+                "created_at": item["created_at"],
+                "content": subagent_message_text(item, output),
+            })
     return messages
+
+
+def subagent_message_text(event: dict[str, Any], output: str) -> str:
+    """Return resume-context text for a completed subagent."""
+    name = compact_line(event.get("name") or "subagent")
+    task_input = compact_text(event.get("task_input"))
+    parts = [f"{name} completed."]
+    if task_input:
+        parts.append(f"Request:\n{task_input}")
+    parts.append(f"Output:\n{output}")
+    return "\n".join(parts)
 
 
 def normalize_compactions(value: Any) -> list[dict[str, Any]]:

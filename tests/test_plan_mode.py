@@ -200,8 +200,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent, "agent")
         kwargs = create_deep_agent.call_args.kwargs
         self.assertEqual(kwargs["interrupt_on"], factory._write_interrupts())
-        self.assertIn("respond", kwargs["interrupt_on"]["write_file"]["allowed_decisions"])
-        self.assertIn("respond", kwargs["interrupt_on"]["edit_file"]["allowed_decisions"])
+        self.assertEqual(kwargs["interrupt_on"]["write_file"]["allowed_decisions"], ["approve", "edit", "reject"])
+        self.assertEqual(kwargs["interrupt_on"]["edit_file"]["allowed_decisions"], ["approve", "edit", "reject"])
         self.assertIsNone(kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].paths, ["/mira-defaults/**"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")

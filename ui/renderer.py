@@ -18,7 +18,6 @@ from ui.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
-    response_message,
 )
 from ui.names import generate_slug
 
@@ -138,7 +137,7 @@ class Renderer:
         self._section = ""
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
-        """Ask the user to approve, edit, reject, or respond to interrupted actions."""
+        """Ask the user to approve, edit, or reject interrupted actions."""
         decisions = []
         for interrupt in interrupts:
             for index, action in enumerate(action_requests(interrupt)):
@@ -148,8 +147,6 @@ class Renderer:
                     decisions.append(await self._edit_decision(action))
                 elif answer == "r":
                     decisions.append({"type": "reject"})
-                elif answer == "s":
-                    decisions.append(await self._respond_decision(action))
                 else:
                     decisions.append({"type": "approve"})
         return decisions
@@ -213,11 +210,6 @@ class Renderer:
                 "args": args,
             },
         }
-
-    async def _respond_decision(self, action: Any) -> dict[str, Any]:
-        """Ask for a synthetic successful tool response."""
-        message = await self._input("Tool response to return instead: ")
-        return {"type": "respond", "message": response_message(message, action)}
 
     async def _choice(self, message: str, options: list[tuple[str, str]]) -> str:
         """Prompt until the user chooses one of the given keys."""

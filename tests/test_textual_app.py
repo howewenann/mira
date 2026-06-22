@@ -18,7 +18,7 @@ from textual.widgets import Button, Input, Static, TextArea
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from config.settings import load_settings, tool_always_allow, tool_enabled
-from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
+from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
@@ -362,6 +362,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             renderer.finish_main()
 
         self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
+
+    async def test_terminal_renderer_filters_respond_decision(self) -> None:
+        """One-shot approval prompts should not accept Respond from stale interrupts."""
+        renderer = Renderer()
+        interrupt = {
+            "action_requests": [{"name": "execute", "args": {"command": "conda env list"}}],
+            "review_configs": [
+                {
+                    "action_name": "execute",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+        output = StringIO()
+
+        with patch("builtins.input", side_effect=["s", "r"]) as input_mock, redirect_stdout(output):
+            decisions = await renderer.ask_approvals([interrupt])
+
+        self.assertEqual(decisions, [{"type": "reject"}])
+        prompts = "\n".join(str(call.args[0]) for call in input_mock.call_args_list)
+        self.assertIn("a=Approve (a), e=Edit (e), r=Reject (r)", prompts)
+        self.assertNotIn("Respond", prompts)
 
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
         """Tool-call JSON chunks should show activity instead of silent waiting."""
@@ -914,8 +936,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(decisions, [{"type": "reject"}])
                 self.assertFalse(panel.display)
 
-    async def test_approval_prompt_supports_respond_decision(self) -> None:
-        """Respond decisions should return a synthetic successful tool result."""
+    async def test_approval_prompt_filters_respond_decision(self) -> None:
+        """Respond should not be surfaced even if an interrupt advertises it."""
         app = make_app()
         interrupt = {
             "action_requests": [
@@ -941,21 +963,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             buttons = list(app.query_one(PromptPanel).query(Button))
             self.assertEqual(
                 [button.label.plain for button in buttons],
-                ["Approve (a)", "Edit (e)", "Reject (r)", "Respond (s)"],
+                ["Approve (a)", "Edit (e)", "Reject (r)"],
             )
             self.assertTrue(all(button.variant == "default" for button in buttons))
 
-            await pilot.press("s")
-            await pilot.pause()
-            answer = app.query_one("#prompt-panel-input", Input)
-            self.assertTrue(answer.has_focus)
-            answer.value = "Stop retrying; the file change is not needed."
-            await pilot.press("enter")
+            await pilot.press("r")
 
             self.assertEqual(
                 await asyncio.wait_for(task, timeout=2),
-                [{"type": "respond", "message": "Stop retrying; the file change is not needed."}],
+                [{"type": "reject"}],
             )
+
+    def test_action_choices_filters_respond_decision(self) -> None:
+        """Interrupt helpers should hide stale/upstream respond choices."""
+        interrupt = {
+            "action_requests": [{"name": "execute", "args": {"command": "conda env list"}}],
+            "review_configs": [
+                {
+                    "action_name": "execute",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+
+        choices = action_choices(interrupt, interrupt["action_requests"][0], 0)
+
+        self.assertEqual(choices, [("a", "Approve (a)"), ("e", "Edit (e)"), ("r", "Reject (r)")])
 
     async def test_prompt_box_uses_up_down_history_from_workspace_file(self) -> None:
         """The main prompt should navigate workspace history with Up and Down."""
@@ -1778,6 +1811,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(renderable_plain(block), cancelled)
             self.assertEqual(app.status_state, "cancelling")
+
+    async def test_restore_session_with_subagent_output_keeps_single_subagent_block(self) -> None:
+        """Persisted subagent output should restore inside the existing compact block."""
+        session = {
+            "id": "thread-subagent-output",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 1,
+            "dashboard": {},
+            "events": [
+                {
+                    "id": 1,
+                    "type": "subagent",
+                    "mode": "action",
+                    "name": "general-purpose [one]",
+                    "status": "DONE",
+                    "task_input": "find dead code",
+                    "output": "No dead code found.",
+                }
+            ],
+        }
+        app = make_app(session=session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            subagent_blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
+            self.assertEqual(len(subagent_blocks), 1)
+            rendered = renderable_plain(subagent_blocks[0])
+            self.assertIn("DONE", rendered)
+            self.assertIn("No dead code found.", rendered)
+            duplicate_blocks = [
+                block
+                for block in app.query_one(ChatLog).children
+                if ("assistant" in block.classes or "tool-result" in block.classes)
+                and "No dead code found." in renderable_plain(block)
+            ]
+            self.assertEqual(duplicate_blocks, [])
 
     async def test_ask_user_choice_and_open_text_flow(self) -> None:
         """ask_user should support both concrete choices and open-ended text."""

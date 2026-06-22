@@ -66,10 +66,7 @@ def normalize_checkpoint_value(value: Any) -> Any:
         return serializer_marker(value)
 
     if isinstance(value, BaseMessage):
-        try:
-            return normalize_checkpoint_value(value.model_dump())
-        except Exception:
-            return repr(value)
+        return value
 
     if isinstance(value, type):
         return type_marker(value)
@@ -107,7 +104,7 @@ def sanitize_checkpoint_value(value: Any) -> Any:
         try:
             return sanitize_checkpoint_value(value.model_dump())
         except Exception:
-            return repr(value)
+            return safe_message_dict(value)
 
     if isinstance(value, type):
         return type_marker(value)
@@ -156,6 +153,30 @@ def normalize_mapping_key(value: Any) -> Any:
     if isinstance(value, type):
         return f"{value.__module__}.{value.__qualname__}"
     return str(value)
+
+
+def safe_message_dict(message: BaseMessage) -> dict[str, Any]:
+    """Return a constructor-compatible message dict without using model_dump."""
+    data: dict[str, Any] = {
+        "type": getattr(message, "type", message.__class__.__name__.removesuffix("Message").lower()),
+        "content": sanitize_checkpoint_value(getattr(message, "content", "")),
+    }
+    for key in (
+        "additional_kwargs",
+        "response_metadata",
+        "name",
+        "id",
+        "tool_calls",
+        "invalid_tool_calls",
+        "usage_metadata",
+        "tool_call_id",
+        "artifact",
+        "status",
+    ):
+        value = getattr(message, key, None)
+        if value is not None:
+            data[key] = sanitize_checkpoint_value(value)
+    return data
 
 
 def type_marker(value: type) -> dict[str, str]:

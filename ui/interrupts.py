@@ -15,7 +15,6 @@ DECISION_LABELS = {
     "approve": ("a", "Approve (a)"),
     "edit": ("e", "Edit (e)"),
     "reject": ("r", "Reject (r)"),
-    "respond": ("s", "Respond (s)"),
 }
 
 
@@ -150,16 +149,6 @@ def action_preview(action: Any) -> str:
     lines = [f"{key.ljust(key_width)} {_preview_text(value, limit=ACTION_PREVIEW_VALUE_LIMIT)}" for key, value in rows]
     lines.extend(["", "Press e to inspect or edit full args"])
     return "\n".join(lines)
-
-
-def response_message(message: Any, action: Any) -> str:
-    """Return the synthetic successful tool result for a respond decision."""
-    text = str(message or "").strip()
-    if text:
-        return text
-
-    name = action.get("name") if isinstance(action, dict) else "tool"
-    return f"User responded to `{name}` without running the tool."
 
 
 def _action_header(name: str, args: dict[str, Any]) -> str:

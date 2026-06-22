@@ -227,6 +227,16 @@ class Subagent:
         }
 
 
+class ContentListSubagent:
+    """Fake subagent whose final message stores text in LangChain content blocks."""
+
+    name = "general-purpose [one]"
+    task_input = "find dead code"
+
+    def __init__(self, text: str) -> None:
+        self.output = {"messages": [type("Message", (), {"content": [{"type": "text", "text": text}]})()]}
+
+
 class HangingSubagent:
     """Subagent whose output runs until cancelled."""
 
@@ -375,7 +385,7 @@ class FakeAgent:
 
 
 class FakeBackend:
-    """Minimal backend for approved filesystem fallback tests."""
+    """Minimal backend used to prove runner tests do not execute fallbacks."""
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, str]] = []
@@ -939,8 +949,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             renderer.events,
         )
 
-    async def test_run_turn_reroutes_approved_filesystem_call_to_tools_node(self) -> None:
-        """Approved write calls should go back through the graph tools node first."""
+    async def test_run_turn_native_resume_records_approved_filesystem_result(self) -> None:
+        """Approved write calls should resume natively into tool output and LLM reply."""
         interrupt = {
             "action_requests": [
                 {
@@ -951,31 +961,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "review_configs": [
                 {
                     "action_name": "write_file",
-                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                    "allowed_decisions": ["approve", "edit", "reject"],
                 }
             ],
         }
-        message = AIMessage(
-            content=[
-                {
-                    "type": "tool_call",
-                    "id": "call-write",
-                    "name": "write_file",
-                    "args": {"file_path": "/story.txt", "content": "hello"},
-                },
-            ],
-            tool_calls=[
-                {
-                    "name": "write_file",
-                    "args": {"file_path": "/story.txt", "content": "hello"},
-                    "id": "call-write",
-                }
-            ],
-        )
         agent = FakeAgent(
             [
                 FakeStream(output={"messages": []}, interrupts=[interrupt]),
-                FakeStream(output={"messages": [message]}, interrupts=[]),
                 FakeStream(
                     output={
                         "messages": [
@@ -1001,10 +993,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_text, "Wrote the story.")
         self.assertIn("Successfully wrote to /story.txt", result.tool_results)
         self.assertIn(("tool_result", "write_file", "Successfully wrote to /story.txt", "call-write"), renderer.events)
-        self.assertEqual(agent.payloads[2].goto, "tools")
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertEqual(agent.payloads[1].goto, ())
 
-    async def test_run_turn_reroutes_approved_execute_call_to_tools_node(self) -> None:
-        """Approved execute calls should resume into DeepAgents tools and LLM reply."""
+    async def test_run_turn_native_resume_records_approved_execute_result(self) -> None:
+        """Approved execute calls should resume natively into tool output and LLM reply."""
         interrupt = {
             "action_requests": [
                 {
@@ -1015,31 +1009,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "review_configs": [
                 {
                     "action_name": "execute",
-                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                    "allowed_decisions": ["approve", "edit", "reject"],
                 }
             ],
         }
-        message = AIMessage(
-            content=[
-                {
-                    "type": "tool_call",
-                    "id": "call-execute",
-                    "name": "execute",
-                    "args": {"command": "conda info --envs"},
-                },
-            ],
-            tool_calls=[
-                {
-                    "name": "execute",
-                    "args": {"command": "conda info --envs"},
-                    "id": "call-execute",
-                }
-            ],
-        )
         agent = FakeAgent(
             [
                 FakeStream(output={"messages": []}, interrupts=[interrupt]),
-                FakeStream(output={"messages": [message]}, interrupts=[]),
                 FakeStream(
                     output={
                         "messages": [
@@ -1062,10 +1038,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result.final_text, "env list")
         self.assertIn("env list", result.tool_results)
         self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
-        self.assertEqual(agent.payloads[2].goto, "tools")
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertEqual(agent.payloads[1].goto, ())
 
-    async def test_run_turn_uses_raw_execute_fallback_only_when_continuation_has_no_reply(self) -> None:
-        """Approved execute fallback should copy raw output only if graph continuation is silent."""
+    async def test_run_turn_raises_when_native_resume_returns_unexecuted_approved_tool(self) -> None:
+        """Approved tools should not be manually executed if native resume leaves them pending."""
         interrupt = {"action_requests": [{"name": "execute", "args": {"command": "conda info --envs"}}]}
         message = AIMessage(
             content=[
@@ -1088,22 +1066,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             [
                 FakeStream(output={"messages": []}, interrupts=[interrupt]),
                 FakeStream(output={"messages": [message]}, interrupts=[]),
-                FakeStream(output={"messages": [message]}, interrupts=[]),
-                FakeStream(output={"messages": [OutputMessage("AIMessage(content=[] tool_calls=[...])")]}, interrupts=[]),
             ]
         )
         backend = FakeBackend()
         agent.mira_backend = backend
         renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
 
-        result = await runner.run_turn(agent, "execute", renderer, "thread-1")
+        with self.assertRaisesRegex(RuntimeError, "native HITL resume returned unexecuted tool call") as caught:
+            await runner.run_turn(agent, "execute", renderer, "thread-1")
 
-        self.assertEqual(agent.payloads[2].goto, "tools")
-        self.assertEqual(backend.commands, [("conda info --envs", None)])
-        self.assertEqual(result.final_text, "env list")
-        self.assertIn(("text", "env list"), renderer.events)
+        error_text = str(caught.exception)
+        self.assertIn("diagnostic:", error_text)
+        self.assertIn("interrupted=False", error_text)
+        self.assertIn("stream_tool_calls_observed=False", error_text)
+        self.assertIn("AIMessage", error_text)
+        self.assertIn("execute", error_text)
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertEqual(agent.payloads[1].goto, ())
+        self.assertEqual(backend.commands, [])
 
-    async def test_run_turn_does_not_execute_rejected_execute_fallback(self) -> None:
+    async def test_run_turn_does_not_execute_rejected_execute(self) -> None:
         """Rejected execute calls should remain unexecuted."""
         interrupt = {
             "action_requests": [
@@ -2485,6 +2468,13 @@ Await further instructions.
                 ("subagent_finished", "general-purpose [one]", "final output"),
             ],
         )
+
+    async def test_subagent_result_reads_langchain_content_blocks(self) -> None:
+        renderer = RecordingRenderer()
+
+        await consume_subagent(ContentListSubagent("subagent report"), renderer)
+
+        self.assertIn(("subagent_finished", "general-purpose [one]", "subagent report"), renderer.events)
 
     async def test_two_subagents_print_two_headers(self) -> None:
         renderer = RecordingRenderer()

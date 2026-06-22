@@ -9,7 +9,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from runtime.message_events import consume_messages
@@ -175,16 +174,12 @@ async def run_turn(
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
-    approved_fallback_actions: list[dict[str, Any]] = []
-    approved_result_start = 0
-    fallback_outputs: list[str] = []
-    fallback_waiting_for_reply = False
-    rerouted_after_approval = False
 
     while True:
         stream = await agent.astream_events(payload, config=config, version="v3")
         event_renderer = SubagentRequestRenderer(renderer)
         output: dict[str, Any] = {}
+        tool_call_start = len(result.tool_calls)
         waiting_started = getattr(renderer, "waiting_started", None)
         if callable(waiting_started):
             waiting_started()
@@ -210,39 +205,28 @@ async def run_turn(
         if not interrupts:
             pending_calls = output_tool_calls(output.get("value"))
             leaked_tool_repr = output_has_tool_call_repr(output.get("value"))
-            if fallback_waiting_for_reply:
-                if pending_calls or leaked_tool_repr or not result.final_text:
-                    result.final_text = fallback_final_text(fallback_outputs)
-                    if result.final_text:
-                        event_renderer.text_delta(result.final_text)
-                        event_renderer.finish_main()
-                return result
-
-            if (
-                approved_fallback_actions
-                and len(result.tool_results) == approved_result_start
-                and (pending_calls or leaked_tool_repr)
-            ):
-                if not rerouted_after_approval:
-                    rerouted_after_approval = True
-                    payload = Command(
-                        update={"messages": approved_tool_messages(approved_fallback_actions, pending_calls)},
-                        goto="tools",
-                    )
-                    continue
-                fallback_outputs, fallback_messages = await execute_approved_tool_fallbacks(
-                    agent, approved_fallback_actions, pending_calls, event_renderer, result
-                )
-                approved_fallback_actions = []
-                fallback_waiting_for_reply = True
-                payload = Command(update={"messages": fallback_messages})
-                continue
+            stream_tool_calls_observed = len(result.tool_calls) > tool_call_start
 
             if pending_calls:
-                names = ", ".join(str(call.get("name") or "tool") for call in pending_calls if isinstance(call, dict))
-                raise RuntimeError(f"model returned unexecuted tool call(s): {names or 'tool'}")
+                raise RuntimeError(
+                    await unexecuted_tool_call_error(
+                        stream,
+                        output.get("value"),
+                        pending_calls=pending_calls,
+                        leaked_tool_repr=False,
+                        stream_tool_calls_observed=stream_tool_calls_observed,
+                    )
+                )
             if leaked_tool_repr:
-                raise RuntimeError("model returned unexecuted tool call(s): tool")
+                raise RuntimeError(
+                    await unexecuted_tool_call_error(
+                        stream,
+                        output.get("value"),
+                        pending_calls=[],
+                        leaked_tool_repr=True,
+                        stream_tool_calls_observed=stream_tool_calls_observed,
+                    )
+                )
             return result
 
         ask_user_interrupt = first_ask_user_interrupt(interrupts)
@@ -250,11 +234,6 @@ async def run_turn(
             payload = Command(resume=await renderer.ask_user(ask_user_interrupt))
         else:
             decisions = await renderer.ask_approvals(interrupts)
-            approved_fallback_actions = approved_actions(interrupts, decisions)
-            approved_result_start = len(result.tool_results)
-            fallback_outputs = []
-            fallback_waiting_for_reply = False
-            rerouted_after_approval = False
             payload = Command(resume={"decisions": decisions})
 
 
@@ -274,33 +253,6 @@ def interrupt_value(interrupt: Any) -> Any:
     return getattr(interrupt, "value", interrupt)
 
 
-def approved_actions(interrupts: list[Any], decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return filesystem actions explicitly approved by the user."""
-    actions = []
-    decision_index = 0
-    for interrupt in interrupts:
-        for action in interrupt_actions(interrupt):
-            if decision_index >= len(decisions):
-                return actions
-            decision = decisions[decision_index]
-            decision_index += 1
-            if decision.get("type") == "approve" and isinstance(action, dict):
-                actions.append(action)
-            elif decision.get("type") == "edit":
-                edited = decision.get("edited_action")
-                if isinstance(edited, dict):
-                    actions.append(edited)
-    return actions
-
-
-def interrupt_actions(interrupt: Any) -> list[Any]:
-    """Extract approval action requests from a LangGraph interrupt."""
-    value = interrupt_value(interrupt)
-    if isinstance(value, dict) and value.get("action_requests"):
-        return list(value["action_requests"])
-    return [value]
-
-
 def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -> None:
     """Render tool results that only appear in the final graph output."""
     recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
@@ -315,124 +267,94 @@ def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -
             renderer.tool_result(item["name"], text, call_id=call_id)
 
 
-def approved_tool_messages(actions: list[dict[str, Any]], pending_calls: list[Any]) -> list[AIMessage]:
-    """Build the approved AIMessage shape expected by LangGraph's tools node."""
-    tool_calls = []
-    for index, action in enumerate(actions):
-        name = str(action.get("name") or "")
-        args = action.get("args", {})
-        if not name or not isinstance(args, dict):
-            continue
-        call_id = fallback_call_id(action, pending_calls) or f"mira-approved-{name}-{index}"
-        tool_calls.append({"name": name, "args": args, "id": call_id})
-    if not tool_calls:
-        return []
-    return [AIMessage(content="", tool_calls=tool_calls)]
-
-
-async def execute_approved_tool_fallbacks(
-    agent: Any,
-    actions: list[dict[str, Any]],
+async def unexecuted_tool_call_error(
+    stream: Any,
+    output: Any,
+    *,
     pending_calls: list[Any],
-    renderer: Any,
-    result: TurnResult,
-) -> tuple[list[str], list[ToolMessage]]:
-    """Execute approved built-in actions if HITL resume failed to do so."""
-    backend = getattr(agent, "mira_backend", None)
-    if backend is None:
-        raise RuntimeError("approved action was not executed and no backend fallback is available")
-
-    outputs = []
-    messages = []
-    for action in actions:
-        name = str(action.get("name") or "")
-        args = action.get("args", {})
-        if name not in {"read_file", "write_file", "edit_file", "execute"} or not isinstance(args, dict):
-            continue
-
-        call_id = fallback_call_id(action, pending_calls)
-        result.record_tool_call(name, call_id)
-        renderer.tool_call(name, args, call_id=call_id)
-        output = execute_approved_action(backend, name, args)
-        if result.record_tool_result(output, call_id, name):
-            renderer.tool_result(name, output, call_id=call_id)
-        outputs.append(output)
-        messages.append(ToolMessage(content=output, name=name, tool_call_id=call_id or f"mira-fallback-{name}"))
-    return outputs, messages
-
-
-def fallback_call_id(action: dict[str, Any], pending_calls: list[Any]) -> str:
-    """Return the pending AIMessage tool-call id for an approved fallback action."""
-    explicit = str(action.get("id") or action.get("call_id") or action.get("tool_call_id") or "")
-    if explicit:
-        return explicit
-    name = action.get("name")
-    args = action.get("args")
-    for call in pending_calls:
-        if not isinstance(call, dict):
-            continue
-        if call.get("name") == name and call.get("args") == args:
-            return str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
-    return ""
-
-
-def fallback_final_text(outputs: list[str]) -> str:
-    """Return a visible assistant reply when HITL fallback executed the tool."""
-    if not outputs:
-        return ""
-    if len(outputs) == 1:
-        return outputs[0]
-    return "\n\n".join(outputs)
-
-
-def execute_approved_action(backend: Any, name: str, args: dict[str, Any]) -> str:
-    """Run one approved built-in action against the DeepAgents backend."""
-    if name == "execute":
-        return execute_shell_action(backend, args)
-    return execute_filesystem_action(backend, name, args)
-
-
-def execute_shell_action(backend: Any, args: dict[str, Any]) -> str:
-    """Run one approved execute action against the DeepAgents backend."""
-    timeout = positive_int(args.get("timeout")) or None
-    response = backend.execute(str(args.get("command") or ""), timeout=timeout)
-    output = getattr(response, "output", None) or (response.get("output") if isinstance(response, dict) else None)
-    if output is not None:
-        return str(output)
-    error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
-    return f"Error: {error}" if error else str(response)
-
-
-def execute_filesystem_action(backend: Any, name: str, args: dict[str, Any]) -> str:
-    """Run one approved filesystem action against the DeepAgents backend."""
-    if name == "read_file":
-        response = backend.read(
-            str(args.get("file_path") or args.get("path") or ""),
-            offset=positive_int(args.get("offset")),
-            limit=positive_int(args.get("limit")) or 2000,
-        )
-        error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
-        if error:
-            return f"Error: {error}"
-        file_data = getattr(response, "file_data", None) or (response.get("file_data") if isinstance(response, dict) else None)
-        content = getattr(file_data, "content", None) or (file_data.get("content") if isinstance(file_data, dict) else "")
-        return str(content)
-
-    if name == "write_file":
-        file_path = str(args.get("file_path") or args.get("path") or "")
-        response = backend.write(file_path, str(args.get("content") or ""))
-        error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
-        return f"Error: {error}" if error else f"Successfully wrote to {file_path}"
-
-    file_path = str(args.get("file_path") or args.get("path") or "")
-    response = backend.edit(
-        file_path,
-        str(args.get("old_string") or ""),
-        str(args.get("new_string") or ""),
-        bool(args.get("replace_all", False)),
+    leaked_tool_repr: bool,
+    stream_tool_calls_observed: bool,
+) -> str:
+    """Return a compact diagnostic for a terminal output with pending tool calls."""
+    names = [
+        str(call.get("name") or "tool")
+        for call in pending_calls
+        if isinstance(call, dict)
+    ]
+    name_text = ", ".join(names) or "tool"
+    interrupted = await stream_interrupted(stream)
+    diagnostic = (
+        f"interrupted={interrupted}; "
+        f"stream_tool_calls_observed={stream_tool_calls_observed}; "
+        f"leaked_tool_repr={leaked_tool_repr}; "
+        f"final_messages={output_message_shapes(output)}"
     )
-    error = getattr(response, "error", None) or (response.get("error") if isinstance(response, dict) else None)
-    return f"Error: {error}" if error else f"Successfully edited {file_path}"
+    return f"native HITL resume returned unexecuted tool call(s): {name_text}; diagnostic: {diagnostic}"
+
+
+async def stream_interrupted(stream: Any) -> bool:
+    """Return whether a LangGraph run stream reported an interrupt."""
+    callback = getattr(stream, "interrupted", None)
+    if not callable(callback):
+        return False
+    value = callback()
+    if hasattr(value, "__await__"):
+        value = await value
+    return bool(value)
+
+
+def output_message_shapes(output: Any) -> list[dict[str, Any]] | str:
+    """Return compact final-output message shapes for failure diagnostics."""
+    if not isinstance(output, dict):
+        return type(output).__name__
+    messages = output.get("messages")
+    if not isinstance(messages, list):
+        return []
+    return [message_shape(message) for message in messages[-3:]]
+
+
+def message_shape(message: Any) -> dict[str, Any]:
+    """Return compact class, content, text, and tool-call details for one message."""
+    content = message_value(message, "content")
+    tool_calls = message_value(message, "tool_calls") or []
+    text = message_value(message, "text")
+    shape: dict[str, Any] = {
+        "class": message.__class__.__name__,
+        "content_type": type(content).__name__,
+        "tool_calls": compact_tool_calls(tool_calls),
+    }
+    if isinstance(text, str) and text.strip():
+        shape["text_sample"] = compact_sample(text)
+    elif isinstance(content, str) and content.strip():
+        shape["content_sample"] = compact_sample(content)
+    return shape
+
+
+def compact_tool_calls(tool_calls: Any) -> list[dict[str, str]]:
+    """Return names and ids for compact tool-call diagnostics."""
+    if not isinstance(tool_calls, list):
+        return []
+    compact = []
+    for call in tool_calls[:5]:
+        if isinstance(call, dict):
+            compact.append({
+                "name": str(call.get("name") or "tool"),
+                "id": str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or ""),
+            })
+    return compact
+
+
+def message_value(message: Any, key: str) -> Any:
+    """Read a field from dict-like and object-like message shapes."""
+    if isinstance(message, dict):
+        return message.get(key)
+    return getattr(message, key, None)
+
+
+def compact_sample(value: Any, limit: int = 180) -> str:
+    """Return a single-line diagnostic sample."""
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
 
 
 def task_descriptions(calls: list[Any]) -> list[str]:

@@ -6,6 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import Any
 
+from runtime.output_events import message_text, visible_message_text
 from runtime.tool_events import tool_output_text
 
 
@@ -99,7 +100,10 @@ async def subagent_result(subagent: Any) -> str:
         if not messages:
             return ""
 
-        last = messages[-1]
-        return str(last.text if hasattr(last, "text") else last)
+        for message in reversed(messages):
+            text = visible_message_text(message) or message_text(message)
+            if text:
+                return text
+        return ""
 
     return tool_output_text(output)

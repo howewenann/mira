@@ -177,14 +177,14 @@ def _write_interrupts(
             continue
         if spec.get("always_allow") is True:
             continue
-        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
+        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
     for item in tool_metadata or []:
         name = item.get("name")
         if not name or item.get("source") != "project":
             continue
         if not tool_enabled(config, name) or tool_always_allow(config, name):
             continue
-        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
+        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
     return interrupts
 
 
