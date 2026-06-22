@@ -497,7 +497,7 @@ class MiraApp(App[None]):
                 "Enabling execute switches MIRA to LocalShellBackend.\n"
                 "The agent can run shell commands directly on this machine with your user permissions.\n"
                 "Shell commands are not sandboxed and can access paths outside the workspace.\n"
-                "MIRA passes only PATH by default, not your full environment.\n\n"
+                "MIRA passes only a small OS shell environment allowlist, not your full environment or API keys.\n\n"
                 "Continue?",
                 [("y", "Enable (y)"), ("n", "Cancel (n)")],
             )

@@ -17,6 +17,19 @@ from agent.resources.subagents import load_subagents
 from agent.resources.tools import load_tools, tool_name
 from config.settings import EXECUTE_TOOL, tool_enabled
 
+EXECUTE_ENV_KEYS = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "TEMP",
+    "TMP",
+)
+
 
 @dataclass(frozen=True)
 class ResourceBundle:
@@ -102,7 +115,7 @@ def build_backends(
             root_dir=workspace,
             virtual_mode=True,
             inherit_env=False,
-            env={"PATH": os.environ.get("PATH", "")},
+            env=execute_env(),
         )
         if execute_enabled
         else FilesystemBackend(root_dir=workspace, virtual_mode=True)
@@ -115,3 +128,8 @@ def build_backends(
     )
 
     return ResourceBackends(project=project_backend, combined=combined_backend)
+
+
+def execute_env() -> dict[str, str]:
+    """Return the small host environment exposed to execute commands."""
+    return {key: os.environ[key] for key in EXECUTE_ENV_KEYS if os.environ.get(key)}

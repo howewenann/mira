@@ -12,7 +12,7 @@ from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent import factory
-from agent.resources import build_resources
+from agent.resources import EXECUTE_ENV_KEYS, build_resources, execute_env
 from ui import repl
 
 
@@ -61,7 +61,12 @@ class ResourceDiscoveryTests(unittest.TestCase):
             )
 
             self.assertIsInstance(resources.backend.default, LocalShellBackend)
-            self.assertEqual(resources.backend.default._env, {"PATH": os.environ.get("PATH", "")})
+            self.assertEqual(resources.backend.default._env, execute_env())
+            self.assertLessEqual(set(resources.backend.default._env), set(EXECUTE_ENV_KEYS))
+            if os.environ.get("PATH"):
+                self.assertEqual(resources.backend.default._env["PATH"], os.environ["PATH"])
+            for secret_name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "PASSWORD", "SECRET"):
+                self.assertNotIn(secret_name, resources.backend.default._env)
 
     def test_project_memory_replaces_default_by_filename(self) -> None:
         """A project memory with the same filename should replace the default."""

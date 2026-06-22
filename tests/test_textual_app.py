@@ -1277,7 +1277,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(prompts)
                 self.assertIn("LocalShellBackend", prompts[0])
-                self.assertIn("passes only PATH", prompts[0])
+                self.assertIn("small OS shell environment allowlist", prompts[0])
+                self.assertIn("not your full environment or API keys", prompts[0])
                 self.assertFalse(tool_enabled(load_settings(workspace), "execute"))
                 self.assertEqual(str(panel.query_one("#settings-toggle-enabled-execute", Button).label), "no")
 
