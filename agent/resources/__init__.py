@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from deepagents.backends import CompositeBackend, FilesystemBackend
+from deepagents.backends import CompositeBackend, FilesystemBackend, LocalShellBackend
 
 from agent.resources.memories import load_memories
 from agent.resources.paths import DEFAULT_ROUTE, DEFAULTS_ROOT
@@ -14,7 +15,7 @@ from agent.resources.project_setup import ensure_project_examples
 from agent.resources.skills import load_skills
 from agent.resources.subagents import load_subagents
 from agent.resources.tools import load_tools, tool_name
-from config.settings import tool_enabled
+from config.settings import EXECUTE_TOOL, tool_enabled
 
 
 @dataclass(frozen=True)
@@ -42,13 +43,14 @@ def build_resources(
     *,
     create_examples: bool = True,
     settings: dict[str, Any] | None = None,
+    enable_execute: bool | None = None,
 ) -> ResourceBundle:
     """Build the resources passed into create_deep_agent()."""
     workspace = Path(workspace).expanduser().resolve()
     if create_examples:
         ensure_project_examples(workspace)
 
-    backends = build_backends(workspace)
+    backends = build_backends(workspace, settings=settings, enable_execute=enable_execute)
 
     memories = load_memories(workspace)
     skill_sources, skills = load_skills(workspace)
@@ -88,8 +90,23 @@ def enabled_tools(
     return active
 
 
-def build_backends(workspace: Path) -> ResourceBackends:
-    project_backend = FilesystemBackend(root_dir=workspace, virtual_mode=True)
+def build_backends(
+    workspace: Path,
+    *,
+    settings: dict[str, Any] | None = None,
+    enable_execute: bool | None = None,
+) -> ResourceBackends:
+    execute_enabled = tool_enabled(settings, EXECUTE_TOOL) if enable_execute is None else bool(enable_execute)
+    project_backend = (
+        LocalShellBackend(
+            root_dir=workspace,
+            virtual_mode=True,
+            inherit_env=False,
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        if execute_enabled
+        else FilesystemBackend(root_dir=workspace, virtual_mode=True)
+    )
     defaults_backend = FilesystemBackend(root_dir=DEFAULTS_ROOT, virtual_mode=True)
     combined_backend = CompositeBackend(
         default=project_backend,

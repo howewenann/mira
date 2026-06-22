@@ -22,7 +22,9 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_always_allow(loaded, "edit_file"))
         self.assertFalse(settings.tool_always_allow(loaded, "eval"))
         self.assertFalse(settings.tool_always_allow(loaded, "task"))
+        self.assertFalse(settings.tool_always_allow(loaded, "execute"))
         self.assertTrue(settings.tool_enabled(loaded, "write_file"))
+        self.assertFalse(settings.tool_enabled(loaded, "execute"))
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
 
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
@@ -46,6 +48,11 @@ class SettingsTests(unittest.TestCase):
             self.assertFalse(settings.git_protection_enabled(loaded))
             self.assertTrue(settings.tool_enabled(loaded, "write_file"))
             self.assertTrue(settings.tool_always_allow(loaded, "write_file"))
+
+            updated = settings.set_tool_enabled(loaded, "execute", True)
+            self.assertTrue(settings.tool_enabled(updated, "execute"))
+            updated = settings.set_tool_enabled(updated, "execute", False)
+            self.assertFalse(settings.tool_enabled(updated, "execute"))
 
             path.write_text("hitl: [", encoding="utf-8")
             loaded = settings.load_settings(workspace)

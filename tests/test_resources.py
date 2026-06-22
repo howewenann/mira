@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent import factory
@@ -39,6 +42,26 @@ class ResourceDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(resources.memory, ["/mira-defaults/memories/AGENTS.md"])
             self.assertEqual(resources.metadata["memories"][0]["source"], "default")
+
+    def test_execute_disabled_uses_filesystem_backend(self) -> None:
+        """Disabled execute should keep the normal filesystem backend."""
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+
+            self.assertIsInstance(resources.backend.default, FilesystemBackend)
+            self.assertNotIsInstance(resources.backend.default, LocalShellBackend)
+
+    def test_execute_enabled_uses_local_shell_backend(self) -> None:
+        """Enabled execute should switch the project backend to LocalShellBackend."""
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(
+                Path(directory),
+                create_examples=False,
+                settings={"hitl": {"tools": {"execute": {"enabled": True, "always_allow": False}}}},
+            )
+
+            self.assertIsInstance(resources.backend.default, LocalShellBackend)
+            self.assertEqual(resources.backend.default._env, {"PATH": os.environ.get("PATH", "")})
 
     def test_project_memory_replaces_default_by_filename(self) -> None:
         """A project memory with the same filename should replace the default."""
@@ -420,6 +443,26 @@ def get_tools(project_backend):
         self.assertTrue(any(tool.name == "project_note" for tool in kwargs["tools"]))
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
+        self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
+
+    def test_factory_enables_execute_with_local_shell_backend_without_permissions(self) -> None:
+        """Execute mode should expose execute and avoid incompatible filesystem permissions."""
+        with tempfile.TemporaryDirectory() as directory:
+            agent = type("Agent", (), {})()
+            config = {"settings": {"hitl": {"tools": {"execute": {"enabled": True, "always_allow": False}}}}}
+            with (
+                patch("agent.factory.get_llm", return_value="model"),
+                patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+                patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
+            ):
+                factory.build_agent(config, Path(directory), "checkpointer")
+
+        kwargs = create_deep_agent.call_args.kwargs
+        self.assertEqual(kwargs["permissions"], [])
+        self.assertIsInstance(kwargs["backend"].default, LocalShellBackend)
+        self.assertIn("execute", kwargs["interrupt_on"])
+        self.assertIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
 
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""

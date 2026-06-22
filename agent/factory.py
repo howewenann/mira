@@ -17,7 +17,7 @@ from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOL
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs, tool_name as resource_tool_name
 from config.metadata import ModelMetadata
-from config.settings import hitl_settings, tool_always_allow, tool_enabled
+from config.settings import EXECUTE_TOOL, hitl_settings, tool_always_allow, tool_enabled
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 
@@ -39,6 +39,7 @@ def build_agent(
         permissions=_action_permissions(),
         interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=(),
+        enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
     )
     return agent
 
@@ -60,6 +61,7 @@ def build_plan_agent(
         extra_middleware=[PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)],
         interrupt_on=None,
         excluded_tools=PLAN_PROJECT_WRITE_TOOLS,
+        enable_execute_backend=False,
     )
     return agent
 
@@ -74,6 +76,7 @@ def _build_agent(
     extra_middleware: list[AgentMiddleware] | None = None,
     interrupt_on: dict[str, Any] | str | None = None,
     excluded_tools: tuple[str, ...] = (),
+    enable_execute_backend: bool = False,
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
@@ -82,8 +85,14 @@ def _build_agent(
     control flow.
     """
     model = get_llm(config, metadata=metadata)
-    resources = build_resources(Path(workspace), settings=(config or {}).get("settings"))
+    resources = build_resources(
+        Path(workspace),
+        settings=(config or {}).get("settings"),
+        enable_execute=enable_execute_backend,
+    )
     backend = resources.backend
+    permissions = [] if enable_execute_backend else permissions
+    excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
 
     summarization_middleware = create_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
@@ -164,6 +173,8 @@ def _write_interrupts(
     for name, spec in tools.items():
         if not isinstance(name, str) or not isinstance(spec, dict):
             continue
+        if not tool_enabled(config, name):
+            continue
         if spec.get("always_allow") is True:
             continue
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
@@ -175,6 +186,18 @@ def _write_interrupts(
             continue
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
     return interrupts
+
+
+def effective_excluded_tools(
+    config: dict[str, Any] | None,
+    excluded_tools: tuple[str, ...],
+    enable_execute_backend: bool,
+) -> tuple[str, ...]:
+    """Return tool specs that should be hidden from the UI/model metadata."""
+    blocked = set(excluded_tools)
+    if not enable_execute_backend or not tool_enabled(config, EXECUTE_TOOL):
+        blocked.add(EXECUTE_TOOL)
+    return tuple(blocked)
 
 
 class PlanningToolFilter(AgentMiddleware[Any, Any, Any]):

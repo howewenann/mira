@@ -14,6 +14,7 @@ from textual.events import Key
 from textual.widgets import Button, Static
 
 from config.settings import (
+    EXECUTE_TOOL,
     INBUILT_DANGEROUS_TOOLS,
     git_protection_enabled,
     set_git_protection,
@@ -75,9 +76,13 @@ class SettingsPanel(Vertical):
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
                 yield SettingsHeaderRow("Tool")
                 for tool_name in INBUILT_DANGEROUS_TOOLS:
+                    enabled = tool_enabled(self.settings, tool_name)
                     with Horizontal(classes="settings-row"):
                         yield Static(tool_name, classes="settings-label")
-                        yield self._toggle_button(ToggleCell("enabled", tool_name, locked=True), True)
+                        yield self._toggle_button(
+                            ToggleCell("enabled", tool_name, locked=tool_name != EXECUTE_TOOL),
+                            enabled,
+                        )
                         yield self._toggle_button(
                             ToggleCell("always_allow", tool_name),
                             tool_always_allow(self.settings, tool_name),
@@ -94,7 +99,7 @@ class SettingsPanel(Vertical):
                         yield Static(tool_name, classes="settings-label")
                         yield self._toggle_button(ToggleCell("enabled", tool_name), enabled)
                         yield self._toggle_button(
-                            ToggleCell("always_allow", tool_name, locked=not enabled),
+                            ToggleCell("always_allow", tool_name),
                             tool_always_allow(self.settings, tool_name) if enabled else False,
                         )
 
@@ -121,7 +126,7 @@ class SettingsPanel(Vertical):
         event.stop()
         button = event.button
         cell = self._button_cells.get(button.id or "")
-        if cell is None or cell.locked:
+        if cell is None or self._cell_locked(cell):
             return
         await self._set_cell(cell, not selected_value(self.settings, cell))
 
@@ -136,7 +141,7 @@ class SettingsPanel(Vertical):
         if button is None:
             return
         cell = self._button_cells.get(button.id or "")
-        if cell is None or cell.locked:
+        if cell is None or self._cell_locked(cell):
             return
         await self._set_cell(cell, value)
 
@@ -157,14 +162,15 @@ class SettingsPanel(Vertical):
     def _toggle_button(self, cell: ToggleCell, value: bool) -> Button:
         button_id = button_id_for(cell)
         self._button_cells[button_id] = cell
-        label = button_label(cell, value)
+        locked = self._cell_locked(cell)
+        label = button_label(cell, value, locked=locked, enabled=tool_enabled(self.settings, cell.name))
         button = SettingsToggleButton(
             label,
             panel=self,
             id=button_id,
-            classes=toggle_classes(value, locked=cell.locked),
+            classes=toggle_classes(value, locked=locked),
         )
-        if cell.locked:
+        if locked:
             button.disabled = True
         return button
 
@@ -172,12 +178,17 @@ class SettingsPanel(Vertical):
         for button_id, cell in self._button_cells.items():
             button = self.query_one(f"#{button_id}", Button)
             locked = cell.locked
-            if cell.kind == "always_allow" and not tool_enabled(self.settings, cell.name):
-                locked = True
+            if cell.kind == "always_allow":
+                locked = not tool_enabled(self.settings, cell.name)
             value = selected_value(self.settings, cell)
-            button.label = button_label(cell, value, locked=locked)
+            button.label = button_label(cell, value, locked=locked, enabled=tool_enabled(self.settings, cell.name))
             button.disabled = locked
             button.set_classes(toggle_classes(value, locked=locked))
+
+    def _cell_locked(self, cell: ToggleCell) -> bool:
+        if cell.kind == "always_allow":
+            return not tool_enabled(self.settings, cell.name)
+        return cell.locked
 
     def _set_status(self, message: str) -> None:
         self.query_one("#settings-status", Static).update(message)
@@ -223,9 +234,9 @@ def button_id_for(cell: ToggleCell) -> str:
     return f"settings-toggle-{cell.kind}-{safe_name}"
 
 
-def button_label(cell: ToggleCell, value: bool, *, locked: bool = False) -> str:
+def button_label(cell: ToggleCell, value: bool, *, locked: bool = False, enabled: bool = True) -> str:
     """Return display text for a settings toggle."""
-    if locked and cell.kind == "always_allow":
+    if locked and cell.kind == "always_allow" and cell.name != EXECUTE_TOOL and not enabled:
         return "-"
     return "yes" if value else "no"
 
@@ -254,7 +265,7 @@ class SettingsToggleButton(Button):
         if key in {"y", "n"}:
             event.stop()
             cell = self.panel._button_cells.get(self.id or "")
-            if cell is not None and not cell.locked:
+            if cell is not None and not self.panel._cell_locked(cell):
                 await self.panel._set_cell(cell, key == "y")
 
 

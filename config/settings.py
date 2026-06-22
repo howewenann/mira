@@ -9,7 +9,9 @@ from typing import Any
 import yaml
 
 SETTINGS_FILE = "settings.yml"
-INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task")
+EXECUTE_TOOL = "execute"
+LOCKED_INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task")
+INBUILT_DANGEROUS_TOOLS = (*LOCKED_INBUILT_DANGEROUS_TOOLS, EXECUTE_TOOL)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "hitl": {
@@ -19,6 +21,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "edit_file": {"enabled": True, "always_allow": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
+            "execute": {"enabled": False, "always_allow": False},
         },
     }
 }
@@ -80,7 +83,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 current["enabled"] = enabled
             if isinstance(always_allow, bool):
                 current["always_allow"] = always_allow
-            if name in INBUILT_DANGEROUS_TOOLS:
+            if name in LOCKED_INBUILT_DANGEROUS_TOOLS:
                 current["enabled"] = True
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
@@ -114,7 +117,7 @@ def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str)
 
 def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether a configurable user tool is enabled."""
-    if tool_name in INBUILT_DANGEROUS_TOOLS:
+    if tool_name in LOCKED_INBUILT_DANGEROUS_TOOLS:
         return True
     hitl = hitl_settings(config_or_settings)
     tools = hitl.get("tools", {})
@@ -136,17 +139,17 @@ def set_tool_always_allow(settings: dict[str, Any], tool_name: str, always_allow
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"enabled": True}))
     current["always_allow"] = bool(always_allow)
-    if tool_name in INBUILT_DANGEROUS_TOOLS:
+    if tool_name in LOCKED_INBUILT_DANGEROUS_TOOLS:
         current["enabled"] = True
     updated["hitl"]["tools"][tool_name] = current
     return updated
 
 
 def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) -> dict[str, Any]:
-    """Return settings with one custom tool enabled or disabled."""
+    """Return settings with one configurable tool enabled or disabled."""
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"always_allow": False}))
-    current["enabled"] = True if tool_name in INBUILT_DANGEROUS_TOOLS else bool(enabled)
+    current["enabled"] = True if tool_name in LOCKED_INBUILT_DANGEROUS_TOOLS else bool(enabled)
     current.setdefault("always_allow", False)
     updated["hitl"]["tools"][tool_name] = current
     return updated

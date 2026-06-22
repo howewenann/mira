@@ -1215,7 +1215,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(Button)) >= 8)
+                await wait_until(lambda: len(panel.query(Button)) >= 10)
                 rendered = "\n".join(renderable_plain(child) for child in panel.query(Static))
                 buttons = {button.id: button for button in panel.query(Button)}
 
@@ -1231,20 +1231,86 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("edit_file", rendered)
                 self.assertIn("eval", rendered)
                 self.assertIn("task", rendered)
+                self.assertIn("execute", rendered)
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
+                self.assertIn("settings-toggle-enabled-execute", buttons)
+                self.assertIn("settings-toggle-always_allow-execute", buttons)
                 self.assertIn("settings-close", buttons)
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-enabled-edit_file"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
+                self.assertFalse(buttons["settings-toggle-enabled-execute"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-always_allow-execute"].label), "no")
+                self.assertTrue(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
 
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_confirm_cancel_keeps_execute_disabled(self) -> None:
+        """Cancelling the execute warning should leave settings unchanged."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            prompts: list[str] = []
+
+            async def reject_execute(title: str, message: str, choices: list[tuple[str, str]]) -> str:
+                prompts.append(message)
+                return "n"
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = reject_execute
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: "settings-toggle-enabled-execute" in {button.id for button in panel.query(Button)})
+
+                panel.query_one("#settings-toggle-enabled-execute", Button).press()
+                await pilot.pause()
+
+                self.assertTrue(prompts)
+                self.assertIn("LocalShellBackend", prompts[0])
+                self.assertIn("passes only PATH", prompts[0])
+                self.assertFalse(tool_enabled(load_settings(workspace), "execute"))
+                self.assertEqual(str(panel.query_one("#settings-toggle-enabled-execute", Button).label), "no")
+
+    async def test_settings_panel_confirm_enable_execute_rebuilds_agents(self) -> None:
+        """Accepting the execute warning should save settings and rebuild agents."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls = []
+
+            async def accept_execute(title: str, message: str, choices: list[tuple[str, str]]) -> str:
+                return "y"
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = accept_execute
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: "settings-toggle-enabled-execute" in {button.id for button in panel.query(Button)})
+
+                panel.query_one("#settings-toggle-enabled-execute", Button).press()
+                await pilot.pause()
+
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertTrue(tool_enabled(load_settings(workspace), "execute"))
+                self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "yes")
+                self.assertFalse(buttons["settings-toggle-always_allow-execute"].disabled)
+                self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_can_disable_custom_tools(self) -> None:
         """Custom tools should support enabled toggles and disabled approval cells."""

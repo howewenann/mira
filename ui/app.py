@@ -19,9 +19,11 @@ from textual.widgets import ListView, Static
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from config.settings import (
+    EXECUTE_TOOL,
     git_protection_enabled,
     load_settings,
     save_settings,
+    tool_enabled,
 )
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -464,6 +466,8 @@ class MiraApp(App[None]):
         old_settings = (self.config or {}).get("settings") or load_settings(self.workspace)
         if old_settings == settings:
             return True, "settings unchanged"
+        if await self._execute_enable_cancelled(old_settings, settings):
+            return False, "execute remains disabled"
         old_git_enabled = git_protection_enabled(old_settings)
         new_git_enabled = git_protection_enabled(settings)
         if not save_settings(self.workspace, settings):
@@ -478,6 +482,30 @@ class MiraApp(App[None]):
 
         await self._rebuild_agents()
         return True, "settings saved; agents rebuilt"
+
+    async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
+        """Confirm before switching the agent to LocalShellBackend."""
+        if tool_enabled(old_settings, EXECUTE_TOOL) or not tool_enabled(new_settings, EXECUTE_TOOL):
+            return False
+
+        panel = self._settings_panel
+        if panel is not None and panel.is_mounted:
+            panel.display = False
+        try:
+            answer = await self._prompt_choice(
+                "Enable Execute?",
+                "Enabling execute switches MIRA to LocalShellBackend.\n"
+                "The agent can run shell commands directly on this machine with your user permissions.\n"
+                "Shell commands are not sandboxed and can access paths outside the workspace.\n"
+                "MIRA passes only PATH by default, not your full environment.\n\n"
+                "Continue?",
+                [("y", "Enable (y)"), ("n", "Cancel (n)")],
+            )
+        finally:
+            if panel is not None and panel.is_mounted:
+                panel.display = True
+                panel.focus()
+        return answer != "y"
 
     async def _ensure_git_after_enabling(self) -> tuple[bool, str]:
         """Initialize Git if protection was enabled for an unprotected workspace."""
