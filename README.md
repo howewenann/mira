@@ -220,7 +220,7 @@ your-project/
 MIRA creates the `.mira` resource examples if they are missing and never
 overwrites existing files. `_sessions/` stores durable session JSON, and
 `settings.yml` stores workspace settings such as Git protection and HITL tool
-approvals. Use `/config` in the TUI to change those settings.
+approvals. Use `/settings` in the TUI to change those settings.
 
 Use `.mira/memories/*.md` for always-on project context. The bundled default
 memory is only `AGENTS.md`; `.mira/memories/AGENTS.md` replaces it. Additional

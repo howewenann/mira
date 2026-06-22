@@ -271,6 +271,41 @@ def web_search(query: str) -> str:
                 resources.metadata["tools"],
             )
 
+    def test_disabled_project_tool_stays_in_metadata_but_not_agent_tools(self) -> None:
+        """Disabled project tools should be hidden from the agent while remaining configurable."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "web_search.py").write_text(
+                '''from langchain_core.tools import tool
+
+
+@tool("web_search")
+def web_search(query: str) -> str:
+    """Search the web."""
+    return f"result: {query}"
+''',
+                encoding="utf-8",
+            )
+
+            resources = build_resources(
+                workspace,
+                create_examples=False,
+                settings={"hitl": {"tools": {"web_search": {"enabled": False, "always_allow": False}}}},
+            )
+
+            self.assertNotIn("web_search", [tool.name for tool in resources.tools])
+            self.assertIn(
+                {
+                    "name": "web_search",
+                    "path": "/.mira/tools/web_search.py",
+                    "source": "project",
+                    "replaces": "",
+                },
+                resources.metadata["tools"],
+            )
+
     def test_multiple_decorated_tools_load_from_one_file(self) -> None:
         """All module-level @tool objects in a file should load."""
         with tempfile.TemporaryDirectory() as directory:

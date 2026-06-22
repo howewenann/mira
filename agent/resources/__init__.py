@@ -13,7 +13,8 @@ from agent.resources.paths import DEFAULT_ROUTE, DEFAULTS_ROOT
 from agent.resources.project_setup import ensure_project_examples
 from agent.resources.skills import load_skills
 from agent.resources.subagents import load_subagents
-from agent.resources.tools import load_tools
+from agent.resources.tools import load_tools, tool_name
+from config.settings import tool_enabled
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,12 @@ class ResourceBackends:
     combined: Any
 
 
-def build_resources(workspace: Path, *, create_examples: bool = True) -> ResourceBundle:
+def build_resources(
+    workspace: Path,
+    *,
+    create_examples: bool = True,
+    settings: dict[str, Any] | None = None,
+) -> ResourceBundle:
     """Build the resources passed into create_deep_agent()."""
     workspace = Path(workspace).expanduser().resolve()
     if create_examples:
@@ -48,13 +54,14 @@ def build_resources(workspace: Path, *, create_examples: bool = True) -> Resourc
     skill_sources, skills = load_skills(workspace)
     subagents, subagent_info = load_subagents(workspace)
     tools, tool_info = load_tools(workspace, backends.project)
+    active_tools = enabled_tools(tools, tool_info, settings)
 
     return ResourceBundle(
         backend=backends.combined,
         skills=skill_sources,
         memory=[item["path"] for item in memories],
         subagents=subagents,
-        tools=tools,
+        tools=active_tools,
         metadata={
             "memories": memories,
             "skills": skills,
@@ -62,6 +69,23 @@ def build_resources(workspace: Path, *, create_examples: bool = True) -> Resourc
             "tools": tool_info,
         },
     )
+
+
+def enabled_tools(
+    tools: list[Any],
+    metadata: list[dict[str, str]],
+    settings: dict[str, Any] | None,
+) -> list[Any]:
+    """Return tools that should be exposed to the agent."""
+    metadata_by_name = {item["name"]: item for item in metadata}
+    active = []
+    for tool in tools:
+        name = tool_name(tool)
+        info = metadata_by_name.get(name, {})
+        if info.get("source") == "project" and not tool_enabled(settings, name):
+            continue
+        active.append(tool)
+    return active
 
 
 def build_backends(workspace: Path) -> ResourceBackends:

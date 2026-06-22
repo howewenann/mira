@@ -20,6 +20,9 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.git_protection_enabled(loaded))
         self.assertFalse(settings.tool_always_allow(loaded, "write_file"))
         self.assertFalse(settings.tool_always_allow(loaded, "edit_file"))
+        self.assertFalse(settings.tool_always_allow(loaded, "eval"))
+        self.assertFalse(settings.tool_always_allow(loaded, "task"))
+        self.assertTrue(settings.tool_enabled(loaded, "write_file"))
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
 
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
@@ -28,11 +31,21 @@ class SettingsTests(unittest.TestCase):
             workspace = Path(directory)
             path = settings.settings_path(workspace)
             path.parent.mkdir()
-            path.write_text("hitl:\n  git_protection:\n    enabled: false\n", encoding="utf-8")
+            path.write_text(
+                "hitl:\n"
+                "  git_protection:\n"
+                "    enabled: false\n"
+                "  tools:\n"
+                "    write_file:\n"
+                "      enabled: false\n"
+                "      always_allow: true\n",
+                encoding="utf-8",
+            )
 
             loaded = settings.load_settings(workspace)
             self.assertFalse(settings.git_protection_enabled(loaded))
-            self.assertFalse(settings.tool_always_allow(loaded, "write_file"))
+            self.assertTrue(settings.tool_enabled(loaded, "write_file"))
+            self.assertTrue(settings.tool_always_allow(loaded, "write_file"))
 
             path.write_text("hitl: [", encoding="utf-8")
             loaded = settings.load_settings(workspace)
@@ -45,6 +58,7 @@ class SettingsTests(unittest.TestCase):
             workspace = Path(directory)
             updated = settings.set_git_protection(settings.load_settings(workspace), False)
             updated = settings.set_tool_always_allow(updated, "web_search", False)
+            updated = settings.set_tool_enabled(updated, "web_search", False)
 
             self.assertTrue(settings.save_settings(workspace, updated))
             text = settings.settings_path(workspace).read_text(encoding="utf-8")
@@ -53,8 +67,10 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("settings.yml", str(settings.settings_path(workspace)))
         self.assertIn("git_protection", text)
         self.assertIn("web_search", text)
+        self.assertIn("enabled: false", text)
         self.assertFalse(settings.git_protection_enabled(loaded))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
+        self.assertFalse(settings.tool_enabled(loaded, "web_search"))
 
 
 if __name__ == "__main__":

@@ -16,11 +16,11 @@ from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
-from config.settings import load_settings, tool_always_allow
+from config.settings import load_settings, tool_always_allow, tool_enabled
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
-from ui.widgets import ChatLog, ConfigPanel, PromptBox, PromptPanel, SessionHistory
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel
 from ui.widgets.session_history import session_label
 
 
@@ -1134,7 +1134,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("finish the current turn before clearing history", rendered)
             self.assertEqual(store.saves, [])
 
-    async def test_config_command_toggles_tool_and_rebuilds_agents(self) -> None:
+    async def test_settings_command_toggles_tool_and_rebuilds_agents(self) -> None:
         """Keyboard changes should save settings and rebuild agents."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -1148,10 +1148,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
                 with patch.object(app, "_rebuild_agents", rebuild):
-                    await app.submit_prompt(PromptBox.Submitted(prompt, "/config"))
-                    await wait_until(lambda: len(app.query(ConfigPanel)) > 0)
+                    await app.submit_prompt(PromptBox.Submitted(prompt, "/settings"))
+                    await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                    await wait_until(lambda: len(app.query_one(SettingsPanel).query(Button)) >= 8)
                     self.assertFalse(app.query_one(PromptPanel).display)
-                    app.query_one("#config-toggle-tool-edit_file", Button).focus()
+                    app.query_one("#settings-toggle-always_allow-edit_file", Button).focus()
                     await pilot.press("y")
                     await pilot.pause()
 
@@ -1160,7 +1161,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(calls), 1)
             self.assertTrue(tool_always_allow(calls[0], "edit_file"))
 
-    async def test_config_command_supports_click_toggling(self) -> None:
+    async def test_settings_command_supports_click_toggling(self) -> None:
         """Clicking a toggle button should toggle it in place."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -1173,16 +1174,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     return None
 
                 with patch.object(app, "_rebuild_agents", rebuild):
-                    app._handle_config_command()
-                    await wait_until(lambda: len(app.query(ConfigPanel)) > 0)
-                    panel = app.query_one(ConfigPanel)
+                    app._handle_settings_command()
+                    await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                    panel = app.query_one(SettingsPanel)
                     await wait_until(lambda: len(panel.query(Button)) >= 3)
-                    panel.query_one("#config-toggle-tool-edit_file", Button).press()
+                    panel.query_one("#settings-toggle-always_allow-edit_file", Button).press()
                     await pilot.pause()
 
             self.assertTrue(tool_always_allow(load_settings(workspace), "edit_file"))
 
-    async def test_config_command_disables_git_without_deleting_git_directory(self) -> None:
+    async def test_settings_command_disables_git_without_deleting_git_directory(self) -> None:
         """Turning off Git protection should save settings and leave .git untouched."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -1192,52 +1193,95 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._handle_config_command()
-                await wait_until(lambda: len(app.query(ConfigPanel)) > 0)
-                panel = app.query_one(ConfigPanel)
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query(Button)) >= 3)
-                panel.query_one("#config-toggle-git-git_protection", Button).focus()
+                panel.query_one("#settings-toggle-git-git_protection", Button).focus()
                 await pilot.press("n")
                 await pilot.pause()
 
             self.assertTrue(git_dir.exists())
             self.assertFalse(load_settings(workspace)["hitl"]["git_protection"]["enabled"])
 
-    async def test_config_panel_renders_default_rows_and_closes(self) -> None:
-        """The config panel should include default rows and close with q."""
+    async def test_settings_panel_renders_default_rows_and_closes(self) -> None:
+        """The settings panel should include default rows and close with q."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._handle_config_command()
-                await wait_until(lambda: len(app.query(ConfigPanel)) > 0)
-                panel = app.query_one(ConfigPanel)
-                await wait_until(lambda: len(panel.query(Button)) >= 3)
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query(Button)) >= 8)
                 rendered = "\n".join(renderable_plain(child) for child in panel.query(Static))
                 buttons = {button.id: button for button in panel.query(Button)}
 
                 self.assertNotIn("Config", rendered)
-                self.assertNotIn("Setting", rendered)
-                self.assertNotIn("Enable", rendered)
-                self.assertNotIn("Always Allow", rendered)
+                self.assertIn("Settings", rendered)
+                self.assertIn("enabled", rendered)
+                self.assertIn("always allow", rendered)
                 self.assertIn("System", rendered)
-                self.assertIn("Tools", rendered)
+                self.assertIn("Inbuilt Tools", rendered)
+                self.assertIn("Custom Tools", rendered)
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("write_file", rendered)
                 self.assertIn("edit_file", rendered)
-                self.assertIn("config-toggle-git-git_protection", buttons)
-                self.assertIn("config-toggle-tool-edit_file", buttons)
-                self.assertIn("config-toggle-tool-write_file", buttons)
-                self.assertIn("config-close", buttons)
-                self.assertEqual(str(buttons["config-toggle-git-git_protection"].label), "enabled")
-                self.assertEqual(str(buttons["config-toggle-tool-edit_file"].label), "ask")
-                self.assertEqual(str(buttons["config-toggle-tool-write_file"].label), "ask")
+                self.assertIn("eval", rendered)
+                self.assertIn("task", rendered)
+                self.assertIn("settings-toggle-git-git_protection", buttons)
+                self.assertIn("settings-toggle-enabled-edit_file", buttons)
+                self.assertIn("settings-toggle-always_allow-edit_file", buttons)
+                self.assertIn("settings-toggle-enabled-write_file", buttons)
+                self.assertIn("settings-close", buttons)
+                self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
+                self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-enabled-edit_file"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
 
-                panel.query_one("#config-close", Button).press()
-                await wait_until(lambda: len(app.query(ConfigPanel)) == 0)
+                panel.query_one("#settings-close", Button).press()
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_can_disable_custom_tools(self) -> None:
+        """Custom tools should support enabled toggles and disabled approval cells."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.mode.setdefault("resources", {})["tools"] = [
+                    {
+                        "name": "project_status",
+                        "path": "/.mira/tools/status.py",
+                        "source": "project",
+                        "replaces": "",
+                    }
+                ]
+                calls = []
+
+                async def rebuild() -> None:
+                    calls.append(dict(app.config or {}))
+
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: "settings-toggle-enabled-project_status" in {button.id for button in panel.query(Button)})
+
+                panel.query_one("#settings-toggle-enabled-project_status", Button).press()
+                await pilot.pause()
+
+                loaded = load_settings(workspace)
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertFalse(tool_enabled(loaded, "project_status"))
+                self.assertEqual(str(buttons["settings-toggle-always_allow-project_status"].label), "-")
+                self.assertTrue(buttons["settings-toggle-always_allow-project_status"].disabled)
+                self.assertEqual(len(calls), 1)
 
     def test_action_preview_shows_key_value_rows(self) -> None:
         """Approval previews should show scan-friendly rows with truncated values."""

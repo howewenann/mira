@@ -9,13 +9,16 @@ from typing import Any
 import yaml
 
 SETTINGS_FILE = "settings.yml"
-DEFAULT_APPROVAL_TOOLS = ("write_file", "edit_file")
+INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task")
+DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "hitl": {
         "git_protection": {"enabled": True},
         "tools": {
-            "write_file": {"always_allow": False},
-            "edit_file": {"always_allow": False},
+            "write_file": {"enabled": True, "always_allow": False},
+            "edit_file": {"enabled": True, "always_allow": False},
+            "eval": {"enabled": True, "always_allow": False},
+            "task": {"enabled": True, "always_allow": False},
         },
     }
 }
@@ -66,13 +69,20 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
 
     tools = hitl.get("tools")
     if isinstance(tools, dict):
-        normalized_tools = dict(settings["hitl"]["tools"])
+        normalized_tools = {name: dict(spec) for name, spec in settings["hitl"]["tools"].items()}
         for name, spec in tools.items():
             if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
                 continue
             always_allow = spec.get("always_allow")
+            enabled = spec.get("enabled")
+            current = dict(normalized_tools.get(name, {"enabled": True, "always_allow": False}))
+            if isinstance(enabled, bool):
+                current["enabled"] = enabled
             if isinstance(always_allow, bool):
-                normalized_tools[name] = {"always_allow": always_allow}
+                current["always_allow"] = always_allow
+            if name in INBUILT_DANGEROUS_TOOLS:
+                current["enabled"] = True
+            normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
 
     return settings
@@ -102,6 +112,18 @@ def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str)
     return tool_name not in DEFAULT_APPROVAL_TOOLS
 
 
+def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
+    """Return whether a configurable user tool is enabled."""
+    if tool_name in INBUILT_DANGEROUS_TOOLS:
+        return True
+    hitl = hitl_settings(config_or_settings)
+    tools = hitl.get("tools", {})
+    spec = tools.get(tool_name) if isinstance(tools, dict) else None
+    if isinstance(spec, dict) and isinstance(spec.get("enabled"), bool):
+        return bool(spec["enabled"])
+    return True
+
+
 def set_git_protection(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
     """Return settings with the Git protection toggle updated."""
     updated = normalize_settings(settings)
@@ -112,6 +134,19 @@ def set_git_protection(settings: dict[str, Any], enabled: bool) -> dict[str, Any
 def set_tool_always_allow(settings: dict[str, Any], tool_name: str, always_allow: bool) -> dict[str, Any]:
     """Return settings with one tool approval toggle updated."""
     updated = normalize_settings(settings)
-    updated["hitl"].setdefault("tools", {})[tool_name] = {"always_allow": bool(always_allow)}
+    current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"enabled": True}))
+    current["always_allow"] = bool(always_allow)
+    if tool_name in INBUILT_DANGEROUS_TOOLS:
+        current["enabled"] = True
+    updated["hitl"]["tools"][tool_name] = current
     return updated
 
+
+def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) -> dict[str, Any]:
+    """Return settings with one custom tool enabled or disabled."""
+    updated = normalize_settings(settings)
+    current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"always_allow": False}))
+    current["enabled"] = True if tool_name in INBUILT_DANGEROUS_TOOLS else bool(enabled)
+    current.setdefault("always_allow", False)
+    updated["hitl"]["tools"][tool_name] = current
+    return updated

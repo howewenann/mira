@@ -37,7 +37,7 @@ User request:
 COMMAND_HELP = {
     "/help": "show commands and what they do",
     "/tools": "list tools available in the current mode",
-    "/config": "configure HITL approvals in the TUI",
+    "/settings": "configure tool approvals in the TUI",
     "/memories": "list loaded memory files and replacements",
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
@@ -227,10 +227,6 @@ async def handle_command(
         print_tools(renderer, mode)
         return True
 
-    if text == "/config":
-        write_line(renderer, "/config is available in the Textual app", kind="warning")
-        return True
-
     if text == "/memories":
         print_resources(renderer, "Memories", resources_for(mode, "memories"))
         return True
@@ -393,12 +389,13 @@ def resource_specs(agent: Any) -> dict[str, list[dict[str, str]]]:
     """Extract resource display metadata from an agent-like object."""
     resources = getattr(agent, "mira_resources", None)
     if not isinstance(resources, dict):
-        return {"memories": [], "skills": [], "subagents": []}
+        return {"memories": [], "skills": [], "subagents": [], "tools": []}
 
     return {
         "memories": normalize_resource_items(resources.get("memories", [])),
         "skills": normalize_resource_items(resources.get("skills", [])),
         "subagents": normalize_resource_items(resources.get("subagents", [])),
+        "tools": normalize_resource_items(resources.get("tools", [])),
     }
 
 

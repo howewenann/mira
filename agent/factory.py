@@ -17,7 +17,9 @@ from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOL
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs, tool_name as resource_tool_name
 from config.metadata import ModelMetadata
-from config.settings import hitl_settings
+from config.settings import hitl_settings, tool_always_allow, tool_enabled
+
+SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -35,7 +37,7 @@ def build_agent(
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_action_permissions(),
-        interrupt_on=_write_interrupts(config),
+        interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=(),
     )
     return agent
@@ -70,7 +72,7 @@ def _build_agent(
     permissions: list[FilesystemPermission],
     system_prompt: str | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
-    interrupt_on: dict[str, Any] | None = None,
+    interrupt_on: dict[str, Any] | str | None = None,
     excluded_tools: tuple[str, ...] = (),
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
@@ -80,7 +82,7 @@ def _build_agent(
     control flow.
     """
     model = get_llm(config, metadata=metadata)
-    resources = build_resources(Path(workspace))
+    resources = build_resources(Path(workspace), settings=(config or {}).get("settings"))
     backend = resources.backend
 
     summarization_middleware = create_summarization_tool_middleware(model=model, backend=backend)
@@ -102,7 +104,9 @@ def _build_agent(
         subagents=resources.subagents,
         permissions=permissions,
         system_prompt=system_prompt,
-        interrupt_on=interrupt_on,
+        interrupt_on=_write_interrupts(config, resources.metadata["tools"])
+        if interrupt_on == SETTINGS_INTERRUPTS
+        else interrupt_on,
         checkpointer=checkpointer,
     )
     _attach_tool_specs(
@@ -148,7 +152,10 @@ def _plan_permissions() -> list[FilesystemPermission]:
     ]
 
 
-def _write_interrupts(config: dict[str, Any] | None = None) -> dict[str, dict[str, list[str]]]:
+def _write_interrupts(
+    config: dict[str, Any] | None = None,
+    tool_metadata: list[dict[str, str]] | None = None,
+) -> dict[str, dict[str, list[str]]]:
     """Return human approval policy for action-mode tools."""
     tools = hitl_settings(config).get("tools", {})
     interrupts: dict[str, dict[str, list[str]]] = {}
@@ -158,6 +165,13 @@ def _write_interrupts(config: dict[str, Any] | None = None) -> dict[str, dict[st
         if not isinstance(name, str) or not isinstance(spec, dict):
             continue
         if spec.get("always_allow") is True:
+            continue
+        interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
+    for item in tool_metadata or []:
+        name = item.get("name")
+        if not name or item.get("source") != "project":
+            continue
+        if not tool_enabled(config, name) or tool_always_allow(config, name):
             continue
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject", "respond"]}
     return interrupts

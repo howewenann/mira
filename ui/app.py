@@ -37,7 +37,7 @@ from ui.interrupts import (
     response_message,
 )
 from ui.repl import handle_command, initial_mode, refresh_agent_specs, run_user_turn
-from ui.widgets import ChatLog, ConfigPanel, PromptBox, PromptPanel, SessionHistory, StatusBar
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 
@@ -101,7 +101,7 @@ class MiraApp(App[None]):
         self._waiting_generation = 0
         self._waiting_delay_seconds = 0.8
         self._main_stream_active = False
-        self._config_panel: ConfigPanel | None = None
+        self._settings_panel: SettingsPanel | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -212,8 +212,8 @@ class MiraApp(App[None]):
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
             return
 
-        if text == "/config":
-            self.run_worker(self._run_config_command(), name="config-command", exclusive=False)
+        if text == "/settings":
+            self.run_worker(self._run_settings_command(), name="settings-command", exclusive=False)
             return
 
         if await handle_command(text, self, self.session, self.model_name, self.mode):
@@ -431,35 +431,36 @@ class MiraApp(App[None]):
 
         return False
 
-    async def _run_config_command(self) -> None:
-        """Run the interactive HITL settings menu."""
+    async def _run_settings_command(self) -> None:
+        """Run the interactive settings menu."""
         try:
-            self._handle_config_command()
+            self._handle_settings_command()
             self._set_status(state="ready")
         except Exception as exc:
-            self.system_message(f"config error: {exc}", kind="error")
+            self.system_message(f"settings error: {exc}", kind="error")
             self._set_status(state="error")
 
-    def _handle_config_command(self) -> bool:
-        """Mount the interactive HITL settings panel."""
+    def _handle_settings_command(self) -> bool:
+        """Mount the interactive settings panel."""
         if self.busy:
-            self.system_message("finish the current turn before changing config", kind="warning")
+            self.system_message("finish the current turn before changing settings", kind="warning")
             return True
 
         settings = load_settings(self.workspace)
-        if self._config_panel is not None and self._config_panel.is_mounted:
-            self._config_panel.remove()
-        panel = ConfigPanel(
+        if self._settings_panel is not None and self._settings_panel.is_mounted:
+            self._settings_panel.remove()
+        panel = SettingsPanel(
             settings,
-            apply_change=self._apply_config_settings,
-            close_panel=self._close_config_panel,
+            tool_metadata=self._settings_tool_metadata(),
+            apply_change=self._apply_settings,
+            close_panel=self._close_settings_panel,
         )
-        self._config_panel = panel
-        self.query_one(ChatLog).config_panel(panel)
+        self._settings_panel = panel
+        self.mount(panel)
         return True
 
-    async def _apply_config_settings(self, settings: dict[str, Any]) -> tuple[bool, str]:
-        """Persist config settings and apply any needed runtime changes."""
+    async def _apply_settings(self, settings: dict[str, Any]) -> tuple[bool, str]:
+        """Persist settings and apply any needed runtime changes."""
         old_settings = (self.config or {}).get("settings") or load_settings(self.workspace)
         if old_settings == settings:
             return True, "settings unchanged"
@@ -488,9 +489,15 @@ class MiraApp(App[None]):
             return True, "git protection enabled; repository initialized"
         return True, "git protection enabled, but Git was not initialized"
 
-    def _close_config_panel(self) -> None:
-        """Forget the closed config panel and return focus to the prompt."""
-        self._config_panel = None
+    def _settings_tool_metadata(self) -> list[dict[str, str]]:
+        """Return loaded tool metadata for the settings panel."""
+        resources = self.mode.get("resources") if isinstance(self.mode, dict) else None
+        tools = resources.get("tools") if isinstance(resources, dict) else None
+        return tools if isinstance(tools, list) else []
+
+    def _close_settings_panel(self) -> None:
+        """Forget the closed settings panel and return focus to the prompt."""
+        self._settings_panel = None
         self.action_focus_prompt()
 
     def _clear_current_chat(self) -> None:
