@@ -60,6 +60,8 @@ def is_summarization_metadata_message(message: Any) -> bool:
 
 def visible_message_text(message: Any) -> str:
     """Return visible assistant text, hiding internal compaction summaries."""
+    if is_tool_message(message):
+        return ""
     if is_summarization_metadata_message(message):
         return ""
     text = message_text(message)
@@ -180,6 +182,33 @@ def output_tool_calls(output: Any) -> list[Any]:
         if visible_message_text(message) or field(message, "content"):
             return []
     return []
+
+
+def output_tool_results(output: Any) -> list[dict[str, str]]:
+    """Return tool results found in final output messages."""
+    if not isinstance(output, dict):
+        return []
+
+    results = []
+    for message in output.get("messages") or []:
+        if not is_tool_message(message):
+            continue
+        output_text = message_text(message)
+        if not output_text:
+            continue
+        results.append(
+            {
+                "name": str(field(message, "name") or "tool"),
+                "output": output_text,
+                "call_id": str(field(message, "tool_call_id") or field(message, "id") or ""),
+            }
+        )
+    return results
+
+
+def is_tool_message(message: Any) -> bool:
+    """Return whether a message is a LangChain tool result message."""
+    return field(message, "type") == "tool" or message.__class__.__name__ == "ToolMessage"
 
 
 def output_has_tool_call_repr(output: Any) -> bool:

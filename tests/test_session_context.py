@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
+from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
@@ -609,6 +610,34 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         messages = context.normalize_messages(record["events"])
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "hello")
+
+    def test_recorder_places_recovered_tool_result_before_last_assistant(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.tool_call("execute", {"command": "conda env list"}, call_id="call-execute")
+        recorder.text_delta("The envs are ai_agents and base.")
+        recorder.finish_main()
+        recorder.recovered_tool_result("execute", "env list", call_id="call-execute")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
+        self.assertEqual(events[1]["call_id"], "call-execute")
+
+    def test_recording_renderer_renders_recovered_tool_result(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.tool_call("execute", {"command": "conda env list"}, call_id="call-execute")
+        recording.text_delta("The envs are ai_agents and base.")
+        recording.finish_main()
+        recording.recovered_tool_result("execute", "env list", call_id="call-execute")
+
+        self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
     def test_recorder_preserves_subagent_request_on_terminal_events(self) -> None:
         record = {"events": []}

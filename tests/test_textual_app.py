@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from config.metadata import ModelMetadata
 from config.settings import load_settings, tool_always_allow, tool_enabled
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_preview
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
+from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel
 from ui.widgets.session_history import session_label
@@ -305,6 +307,62 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("working...", rendered)
             app.busy = False
 
+    async def test_whitespace_reasoning_delta_does_not_create_thinking_block(self) -> None:
+        """Whitespace-only reasoning should not render an empty thinking block."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            base_count = len(app.query_one(ChatLog).children)
+            app.reasoning_delta("   \n")
+            await pilot.pause()
+
+            self.assertEqual(len(app.query_one(ChatLog).children), base_count)
+
+    async def test_reasoning_delta_preserves_line_break_chunks_after_text(self) -> None:
+        """TUI thinking blocks should preserve newline chunks once text exists."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.reasoning_delta("The user wants:")
+            app.reasoning_delta("\n")
+            app.reasoning_delta("1. Check envs")
+            app.reasoning_delta("\n")
+            app.reasoning_delta("2. Tell joke")
+            await pilot.pause()
+
+            reasoning_blocks = [block for block in app.query_one(ChatLog).children if "reasoning" in block.classes]
+            self.assertEqual(len(reasoning_blocks), 1)
+            self.assertEqual(renderable_plain(reasoning_blocks[0]), "The user wants:\n1. Check envs\n2. Tell joke")
+
+    def test_terminal_renderer_skips_whitespace_reasoning_delta(self) -> None:
+        """One-shot output should not print blank thinking sections."""
+        renderer = Renderer()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            renderer.reasoning_delta("   \n")
+            renderer.finish_main()
+
+        self.assertEqual(output.getvalue(), "")
+
+    def test_terminal_renderer_preserves_reasoning_line_break_chunks(self) -> None:
+        """One-shot thinking output should preserve newline chunks between text."""
+        renderer = Renderer()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            renderer.reasoning_delta("The user wants:")
+            renderer.reasoning_delta("\n")
+            renderer.reasoning_delta("1. Check envs\n")
+            renderer.reasoning_delta("2. Tell joke")
+            renderer.finish_main()
+
+        self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
+
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
         """Tool-call JSON chunks should show activity instead of silent waiting."""
         app = make_app()
@@ -371,6 +429,30 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             text = renderable_plain(app.query_one(ChatLog).children[-1])
             self.assertEqual(text, "## Summary")
+
+    async def test_restore_session_skips_blank_reasoning_blocks(self) -> None:
+        """Blank persisted reasoning should not render as empty thinking boxes."""
+        session = {
+            "id": "thread-blank-reasoning",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 1,
+            "dashboard": {},
+            "events": [
+                {"id": 1, "type": "user", "mode": "action", "text": "hello"},
+                {"id": 2, "type": "reasoning", "mode": "action", "text": ""},
+                {"id": 3, "type": "reasoning", "mode": "action", "text": "   \n"},
+                {"id": 4, "type": "reasoning", "mode": "action", "text": "real thought"},
+            ],
+        }
+        app = make_app(session=session)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            reasoning_blocks = [block for block in app.query_one(ChatLog).children if "reasoning" in block.classes]
+            self.assertEqual(len(reasoning_blocks), 1)
+            self.assertEqual(renderable_plain(reasoning_blocks[0]), "real thought")
 
     async def test_assistant_text_preserves_internal_markdown_newlines(self) -> None:
         """Assistant text should keep markdown paragraph breaks after visible text starts."""

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from typing import Any
 
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.compaction import mark_summarization_engine, sanitize_messages_for_archive
 from runtime.compaction_state import compaction_active, compaction_scope
@@ -19,6 +21,7 @@ from runtime.tool_events import consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
+from ui.renderer import Renderer
 
 
 class AsyncItems:
@@ -376,10 +379,15 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.writes: list[tuple[str, str]] = []
+        self.commands: list[tuple[str, int | None]] = []
 
     def write(self, file_path: str, content: str) -> object:
         self.writes.append((file_path, content))
         return type("WriteResult", (), {"error": None})()
+
+    def execute(self, command: str, *, timeout: int | None = None) -> object:
+        self.commands.append((command, timeout))
+        return type("ExecuteResult", (), {"output": "env list", "exit_code": 0, "truncated": False})()
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -694,6 +702,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(final_text({"messages": [message]}), "")
 
+    def test_final_text_ignores_tool_messages(self) -> None:
+        """Tool output should not be mistaken for assistant prose."""
+        message = ToolMessage(content="raw tool output", name="execute", tool_call_id="call-execute")
+
+        self.assertEqual(final_text({"messages": [message]}), "")
+
     async def test_run_turn_records_final_message_usage(self) -> None:
         agent = FakeAgent(
             [
@@ -925,8 +939,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             renderer.events,
         )
 
-    async def test_run_turn_executes_approved_filesystem_fallback_when_resume_skips_tool_node(self) -> None:
-        """Approved write calls should execute even if HITL resume returns only the AIMessage."""
+    async def test_run_turn_reroutes_approved_filesystem_call_to_tools_node(self) -> None:
+        """Approved write calls should go back through the graph tools node first."""
         interrupt = {
             "action_requests": [
                 {
@@ -962,6 +976,19 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             [
                 FakeStream(output={"messages": []}, interrupts=[interrupt]),
                 FakeStream(output={"messages": [message]}, interrupts=[]),
+                FakeStream(
+                    output={
+                        "messages": [
+                            ToolMessage(
+                                content="Successfully wrote to /story.txt",
+                                name="write_file",
+                                tool_call_id="call-write",
+                            ),
+                            OutputMessage("Wrote the story."),
+                        ]
+                    },
+                    interrupts=[],
+                ),
             ]
         )
         backend = FakeBackend()
@@ -970,10 +997,153 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         result = await runner.run_turn(agent, "write", renderer, "thread-1")
 
-        self.assertEqual(backend.writes, [("/story.txt", "hello")])
+        self.assertEqual(backend.writes, [])
+        self.assertEqual(result.final_text, "Wrote the story.")
         self.assertIn("Successfully wrote to /story.txt", result.tool_results)
-        self.assertIn(("tool_call", "write_file", {"file_path": "/story.txt", "content": "hello"}, ""), renderer.events)
-        self.assertIn(("tool_result", "write_file", "Successfully wrote to /story.txt", ""), renderer.events)
+        self.assertIn(("tool_result", "write_file", "Successfully wrote to /story.txt", "call-write"), renderer.events)
+        self.assertEqual(agent.payloads[2].goto, "tools")
+
+    async def test_run_turn_reroutes_approved_execute_call_to_tools_node(self) -> None:
+        """Approved execute calls should resume into DeepAgents tools and LLM reply."""
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "execute",
+                    "args": {"command": "conda info --envs"},
+                }
+            ],
+            "review_configs": [
+                {
+                    "action_name": "execute",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ],
+        }
+        message = AIMessage(
+            content=[
+                {
+                    "type": "tool_call",
+                    "id": "call-execute",
+                    "name": "execute",
+                    "args": {"command": "conda info --envs"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "args": {"command": "conda info --envs"},
+                    "id": "call-execute",
+                }
+            ],
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": [message]}, interrupts=[]),
+                FakeStream(
+                    output={
+                        "messages": [
+                            ToolMessage(content="env list", name="execute", tool_call_id="call-execute"),
+                            OutputMessage("The envs are ai_agents and base. Here is a joke."),
+                        ]
+                    },
+                    interrupts=[],
+                ),
+            ]
+        )
+        backend = FakeBackend()
+        agent.mira_backend = backend
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        result = await runner.run_turn(agent, "execute", renderer, "thread-1")
+
+        self.assertEqual(backend.commands, [])
+        self.assertEqual(result.final_text, "The envs are ai_agents and base. Here is a joke.")
+        self.assertNotEqual(result.final_text, "env list")
+        self.assertIn("env list", result.tool_results)
+        self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
+        self.assertEqual(agent.payloads[2].goto, "tools")
+
+    async def test_run_turn_uses_raw_execute_fallback_only_when_continuation_has_no_reply(self) -> None:
+        """Approved execute fallback should copy raw output only if graph continuation is silent."""
+        interrupt = {"action_requests": [{"name": "execute", "args": {"command": "conda info --envs"}}]}
+        message = AIMessage(
+            content=[
+                {
+                    "type": "tool_call",
+                    "id": "call-execute",
+                    "name": "execute",
+                    "args": {"command": "conda info --envs"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "args": {"command": "conda info --envs"},
+                    "id": "call-execute",
+                }
+            ],
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": [message]}, interrupts=[]),
+                FakeStream(output={"messages": [message]}, interrupts=[]),
+                FakeStream(output={"messages": [OutputMessage("AIMessage(content=[] tool_calls=[...])")]}, interrupts=[]),
+            ]
+        )
+        backend = FakeBackend()
+        agent.mira_backend = backend
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        result = await runner.run_turn(agent, "execute", renderer, "thread-1")
+
+        self.assertEqual(agent.payloads[2].goto, "tools")
+        self.assertEqual(backend.commands, [("conda info --envs", None)])
+        self.assertEqual(result.final_text, "env list")
+        self.assertIn(("text", "env list"), renderer.events)
+
+    async def test_run_turn_does_not_execute_rejected_execute_fallback(self) -> None:
+        """Rejected execute calls should remain unexecuted."""
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "execute",
+                    "args": {"command": "conda env list"},
+                }
+            ]
+        }
+        message = AIMessage(
+            content=[
+                {
+                    "type": "tool_call",
+                    "id": "call-execute",
+                    "name": "execute",
+                    "args": {"command": "conda env list"},
+                },
+            ],
+            tool_calls=[
+                {
+                    "name": "execute",
+                    "args": {"command": "conda env list"},
+                    "id": "call-execute",
+                }
+            ],
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": [message]}, interrupts=[]),
+            ]
+        )
+        backend = FakeBackend()
+        agent.mira_backend = backend
+        renderer = RunTurnRenderer(decisions=[{"type": "reject"}])
+
+        with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
+            await runner.run_turn(agent, "execute", renderer, "thread-1")
+
+        self.assertEqual(backend.commands, [])
 
     async def test_run_turn_uses_tool_stream_as_canonical_normal_tool_display(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])
@@ -986,6 +1156,59 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         tool_blocks = [event for event in renderer.events if event[0] == "tool_call" and event[1] == "read_file"]
         self.assertEqual(len(tool_blocks), 1)
         self.assertEqual(result.tool_calls, ["read_file"])
+
+    async def test_run_turn_records_execute_result_from_final_output_tool_message(self) -> None:
+        """Always-allow execute should persist the result even if the tool stream omits output."""
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            ToolMessage(content="env list", name="execute", tool_call_id="call-execute"),
+                            OutputMessage("The envs are ai_agents and base."),
+                        ]
+                    },
+                    interrupts=[],
+                )
+            ]
+        )
+        agent.streams[0].tool_calls = AsyncItems(
+            [IncompleteToolCall("execute", {"command": "conda env list"}, "", "call-execute")]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "execute", renderer, "thread-1")
+
+        self.assertEqual(result.tool_calls, ["execute"])
+        self.assertEqual(result.tool_results, ["env list"])
+        self.assertEqual(result.final_text, "The envs are ai_agents and base.")
+        self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
+
+    async def test_run_turn_deduplicates_tool_stream_and_final_output_results(self) -> None:
+        """Final output ToolMessages should not duplicate already streamed tool results."""
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            ToolMessage(content="env list", name="execute", tool_call_id="call-execute"),
+                            OutputMessage("Done."),
+                        ]
+                    },
+                    interrupts=[],
+                )
+            ]
+        )
+        agent.streams[0].tool_calls = AsyncItems(
+            [ToolCall("execute", {"command": "conda env list"}, "env list", "call-execute")]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "execute", renderer, "thread-1")
+
+        self.assertEqual(result.tool_results, ["env list"])
+        result_events = [event for event in renderer.events if event[:2] == ("tool_result", "execute")]
+        self.assertEqual(result_events, [("tool_result", "execute", "env list", "call-execute")])
 
     async def test_tool_call_stream_accepts_documented_fields(self) -> None:
         renderer = RecordingRenderer()
@@ -2198,6 +2421,31 @@ Await further instructions.
             renderer.events,
             [("reasoning", "Thinking Process:\n\nThe user asked for a greeting, so I can answer briefly.")],
         )
+
+    async def test_terminal_renderer_preserves_hitl_style_reasoning_newline_chunks(self) -> None:
+        renderer = Renderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(
+                        [
+                            "The user wants:",
+                            "\n",
+                            "1. Check envs",
+                            "\n",
+                            "2. Tell joke",
+                        ]
+                    )
+                )
+            ]
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            await consume_messages(messages, renderer)
+            renderer.finish_main()
+
+        self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
 
     async def test_two_task_calls_produce_one_delegation_event(self) -> None:
         renderer = RecordingRenderer()

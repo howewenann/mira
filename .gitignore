@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .mira/
+.agents/
 .env
 .venv/
 dist/

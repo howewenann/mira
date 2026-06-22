@@ -110,7 +110,9 @@ class ChatLog(VerticalScroll):
             elif event_type == "assistant":
                 self.assistant_message(event["text"])
             elif event_type == "reasoning":
-                self._add_block("thinking", Text(event["text"]), "message reasoning")
+                text = str(event.get("text") or "")
+                if text.strip():
+                    self._add_block("thinking", Text(text), "message reasoning")
             elif event_type == "tool_call":
                 self.tool_call(event["name"], event.get("args", {}), call_id=str(event.get("call_id") or ""))
             elif event_type == "tool_result":
@@ -133,7 +135,7 @@ class ChatLog(VerticalScroll):
     def reasoning_delta(self, delta: str) -> None:
         """Append streamed reasoning text to the current reasoning block."""
         cleaned = re.sub(r"</?[^>]+>", "", delta)
-        if not cleaned:
+        if not cleaned.strip() and not self._reasoning_text:
             return
         self.hide_waiting()
         self.hide_model_activity()

@@ -37,9 +37,10 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
 
         if output:
             text = tool_output_text(output)
+            recorded = True
             if result is not None:
-                result.tool_results.append(text)
-            if name != "task":
+                recorded = result.record_tool_result(text, call_id, name)
+            if name != "task" and recorded:
                 renderer.tool_result(name, text, call_id=call_id)
 
 

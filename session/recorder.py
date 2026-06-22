@@ -100,6 +100,15 @@ class SessionRecorder:
         append_event(self.record, event)
         self.save()
 
+    def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> None:
+        """Persist a late-discovered tool result before the last assistant reply."""
+        event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
+        if call_id:
+            event["call_id"] = call_id
+        stored = append_event(self.record, event)
+        self._move_event_before(stored, self._last_assistant_id)
+        self.save()
+
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         calls = self._new_delegation_calls(calls)
         if not calls:
@@ -228,6 +237,22 @@ class SessionRecorder:
         self._assistant_text = ""
         self._assistant_seen = False
 
+    def _move_event_before(self, event: dict[str, Any], before_id: int | None) -> None:
+        if before_id is None:
+            return
+        events = self.record.get("events", [])
+        if not isinstance(events, list):
+            return
+        try:
+            events.remove(event)
+        except ValueError:
+            return
+        for index, item in enumerate(events):
+            if isinstance(item, dict) and int(item.get("id") or 0) == before_id:
+                events.insert(index, event)
+                return
+        events.append(event)
+
     def discard_reasoning(self) -> None:
         """Remove the currently streamed reasoning block after late compaction detection."""
         self._reasoning_pending = ""
@@ -282,6 +307,15 @@ class RecordingRenderer:
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         self.renderer.tool_result(name, result, call_id=call_id)
         self.recorder.tool_result(name, result, call_id=call_id)
+
+    def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        """Render and record a late-discovered tool result."""
+        callback = getattr(self.renderer, "recovered_tool_result", None)
+        if callable(callback):
+            callback(name, result, call_id=call_id)
+        else:
+            self.renderer.tool_result(name, result, call_id=call_id)
+        self.recorder.recovered_tool_result(name, result, call_id=call_id)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.renderer.delegation_started(calls)

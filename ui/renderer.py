@@ -31,22 +31,25 @@ class Renderer:
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
         self.tool_output_chars = tool_output_chars
         self._section = ""
+        self._reasoning_text = ""
         self._subagent_ids = count(1)
         self._subagent_labels: dict[int, str] = {}
 
     def reasoning_delta(self, delta: str) -> None:
-        """Print streamed reasoning text."""
+        """Buffer streamed reasoning text for a clean terminal block."""
         text = re.sub(r"</?[^>]+>", "", delta)
-        if text:
-            self._stream("thinking", text)
+        if text.strip() or self._reasoning_text:
+            self._reasoning_text += text
 
     def discard_reasoning(self) -> None:
-        """Terminal output cannot retract already printed reasoning."""
+        """Discard pending reasoning that has not been printed yet."""
+        self._reasoning_text = ""
         return
 
     def text_delta(self, delta: str) -> None:
         """Print streamed assistant text."""
         if delta:
+            self._flush_reasoning()
             self._stream("mira", delta)
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
@@ -129,6 +132,7 @@ class Renderer:
 
     def finish_main(self) -> None:
         """Finish the current streamed section."""
+        self._flush_reasoning()
         if self._section:
             print()
         self._section = ""
@@ -242,6 +246,18 @@ class Renderer:
         self.finish_main()
         print(f"\n{title}:")
         print(body)
+
+    def _flush_reasoning(self) -> None:
+        """Print buffered reasoning once, preserving internal line breaks."""
+        if not self._reasoning_text.strip():
+            self._reasoning_text = ""
+            return
+        if self._section:
+            print()
+            self._section = ""
+        print("\nthinking:")
+        print(self._reasoning_text, end="" if self._reasoning_text.endswith("\n") else "\n")
+        self._reasoning_text = ""
 
     def _line(self, text: str) -> None:
         """Print one status line."""
