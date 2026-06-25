@@ -34,6 +34,18 @@
 - For streamed turn/HITL behavior, check `runtime/runner.py` and add focused
   runner tests.
 
+## Documentation
+
+- Keep `README.md` focused on user-facing usage, setup, commands, and brief
+  features.
+- Keep `ARCHITECTURE_DECISIONS.md` focused on design rationale, high-level
+  behavior, overwrite/precedence rules, and code pointers.
+- When changing user-visible behavior, CLI flags, settings, project resources,
+  sessions, planning mode, HITL, context handling, or UI behavior, update the
+  relevant sections of both files in the same change.
+- When asked why MIRA behaves a certain way, consult
+  `ARCHITECTURE_DECISIONS.md` first, then verify against the code.
+
 ## Repo Safety
 
 - Respect dirty worktrees. Do not revert or overwrite unrelated user changes.
