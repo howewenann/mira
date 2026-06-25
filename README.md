@@ -81,7 +81,6 @@ from the TUI with `/settings`.
 - Use `/plan` when you want MIRA to think through a change without editing
   files.
 - Use `/act` to return to normal action mode.
-- Use `/plans` to view saved plans from the current TUI session.
 - Use `/reload` after changing project resources to rebuild the active agents
   without restarting the TUI.
 
@@ -144,12 +143,13 @@ what MIRA loaded and which project resources replaced defaults.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval.
-- Planning mode that hides and blocks project write tools.
+- Planning mode that hides and blocks project write tools, with explicit plan
+  bubbles for implementation-ready plans.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display and DeepAgents-backed context compaction.
-- A default regex-capable `grep` tool and an `ask_user` tool for concrete user
-  decisions.
+- Default `grep`, `ask_user`, and `present_plan` tools for search, concrete
+  user decisions, and structured plan review.
 
 ## Sessions
 

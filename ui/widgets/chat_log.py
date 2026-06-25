@@ -11,8 +11,8 @@ from typing import Any
 
 from rich.markup import escape
 from rich.text import Text
-from textual.containers import VerticalScroll
-from textual.widgets import Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
 from session.context import normalize_events
@@ -49,6 +49,7 @@ class ChatLog(VerticalScroll):
         self._compaction_block: Static | None = None
         self._compaction_spinner_index = 0
         self._compaction_running = False
+        self._plan_widgets: dict[str, PlanBubble] = {}
         self._fallback_suffixes = count(1)
         self._waiting_spinner_index = 0
         self._subagent_spinner_index = 0
@@ -156,6 +157,13 @@ class ChatLog(VerticalScroll):
                     self.subagent_started(event["name"], event.get("task_input", ""), created_at=created_at)
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
+            elif event_type == "plan":
+                self.present_plan(
+                    event["plan"],
+                    active=False,
+                    status=str(event.get("status") or "resolved"),
+                    created_at=created_at,
+                )
             elif event_type in {"info", "system_error", "interrupted"}:
                 kind = {"info": "info", "system_error": "error", "interrupted": "warning"}[event_type]
                 self.system_message(event["text"], kind=kind, created_at=created_at)
@@ -478,13 +486,31 @@ class ChatLog(VerticalScroll):
         block["output"] = result
         self._update_subagent(subagent, created_at=created_at)
 
-    def plan(self, plan_id: int, text: str) -> None:
-        """Append a saved planning-mode result."""
-        self._add_block(f"plan #{plan_id}", Text(text), "message plan")
+    def present_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        active: bool,
+        status: str = "pending",
+        created_at: str = "",
+    ) -> None:
+        """Append a structured plan bubble."""
+        self.finish_main()
+        plan_id = str(plan.get("id") or "")
+        bubble = PlanBubble(plan, active=active, status=status)
+        if timestamp := timestamp_text(created_at):
+            bubble.border_subtitle = escape(timestamp)
+        self.mount(bubble)
+        if plan_id:
+            self._plan_widgets[plan_id] = bubble
+        self._scroll_to_end()
 
-    def no_plans(self) -> None:
-        """Append the empty state for saved plans."""
-        self.system_message("no saved plans", kind="muted")
+    def resolve_plan(self, plan_id: str, status: str) -> None:
+        """Mark an existing plan bubble as resolved."""
+        bubble = self._plan_widgets.get(plan_id)
+        if bubble is not None:
+            bubble.resolve(status)
+            self._scroll_to_end()
 
     def clear_log(self) -> None:
         """Remove all chat messages."""
@@ -502,6 +528,7 @@ class ChatLog(VerticalScroll):
         self._compaction_block = None
         self._compaction_spinner_index = 0
         self._compaction_running = False
+        self._plan_widgets = {}
         self._tool_blocks = {}
         self._tool_name_queues = defaultdict(deque)
         self._pending_tool_results_by_id = {}
@@ -866,3 +893,57 @@ def pending_result_text(value: str) -> str:
     if isinstance(payload, dict):
         return str(payload.get("result") or "")
     return value
+
+
+class PlanBubble(Vertical):
+    """Structured plan transcript block with optional action buttons."""
+
+    def __init__(self, plan: dict[str, Any], *, active: bool, status: str = "pending") -> None:
+        super().__init__(classes="message plan")
+        self.plan = plan
+        self.status = status
+        self.active = active
+        self.border_title = "plan" if status == "pending" else f"plan - {status}"
+
+    def compose(self) -> Any:
+        yield Static(self._render_plan(), classes="plan-body")
+        if self.active:
+            with Horizontal(classes="plan-actions"):
+                yield Button("Implement", id=f"plan-implement-{self.plan_id}", classes="plan-action")
+                yield Button("Revise", id=f"plan-revise-{self.plan_id}", classes="plan-action")
+                yield Button("Discard", id=f"plan-discard-{self.plan_id}", classes="plan-action")
+
+    @property
+    def plan_id(self) -> str:
+        return str(self.plan.get("id") or "plan")
+
+    def resolve(self, status: str) -> None:
+        """Disable actions and update the displayed status."""
+        self.status = status
+        self.active = False
+        self.border_title = f"plan - {status}"
+        for button in self.query(Button):
+            button.disabled = True
+            button.display = False
+        body = self.query_one(".plan-body", Static)
+        body.update(self._render_plan())
+
+    def _render_plan(self) -> Text:
+        text = Text()
+        text.append(str(self.plan.get("title") or "Implementation Plan"), style="bold")
+        text.append("\n\n")
+        for heading, key in (
+            ("Summary", "summary"),
+            ("Key Changes", "key_changes"),
+            ("Assumptions", "assumptions"),
+        ):
+            items = self.plan.get(key)
+            if not isinstance(items, list) or not items:
+                continue
+            text.append(f"{heading}\n", style="bold cyan")
+            for item in items:
+                text.append(f"- {item}\n")
+            text.append("\n")
+        if self.status != "pending":
+            text.append(f"Status: {self.status}", style="bold yellow")
+        return text

@@ -54,6 +54,13 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             if not text:
                 continue
             event["text"] = text
+        elif event_type == "plan":
+            plan = item.get("plan")
+            if not isinstance(plan, dict):
+                continue
+            event["plan"] = plan
+            status = compact_line(item.get("status") or "pending")
+            event["status"] = status or "pending"
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
             event["args"] = item.get("args", {})

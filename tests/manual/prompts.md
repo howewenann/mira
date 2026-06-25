@@ -36,38 +36,32 @@ Then enter:
 
 ```text
 /plan
-write a file called test.txt with the content 'hello world'
+discuss how to write a file called test.txt with the content 'hello world'
 ```
 
 Expected:
 
 - MIRA says it is in planning mode.
 - MIRA says write/edit tools are disabled or not allowed.
-- MIRA produces a plan for creating `test.txt`.
-- MIRA saves the clean plan in memory.
+- MIRA discusses the change without editing `test.txt`.
 - MIRA does not write or edit `test.txt`.
 
 Then enter:
 
 ```text
-/plans
+give me the plan
 ```
 
 Expected:
 
-- MIRA shows at least one saved plan in a panel.
-- MIRA does not repeat the same plan as both a list item and plain text.
+- MIRA shows a structured plan bubble with Implement, Revise, and Discard.
+- MIRA does not write or edit `test.txt` until Implement is chosen.
 
-Then enter:
-
-```text
-/act
-write a file called test.txt with the content 'hello world'
-```
+Then choose Implement on the plan bubble.
 
 Expected:
 
-- MIRA leaves planning mode.
+- MIRA resolves the plan bubble as approved for implementation.
 - MIRA shows a `write_file` tool call.
 - MIRA shows an approval prompt.
 - Approving writes `test.txt` with `hello world`.

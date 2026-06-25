@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
+PRESENT_PLAN_TYPE = "present_plan"
 ACTION_TEXT_LIMIT = 220
 ACTION_PREVIEW_VALUE_LIMIT = 68
 ACTION_PREVIEW_KEY_WIDTH = 10
@@ -47,6 +48,45 @@ def ask_user_options(request: dict[str, Any]) -> list[str]:
 
     options.append(ASK_USER_OPEN_OPTION)
     return options
+
+
+def plan_request(interrupt: Any) -> dict[str, Any]:
+    """Extract a structured plan request from a LangGraph interrupt payload."""
+    value = getattr(interrupt, "value", interrupt)
+    return normalize_plan(value if isinstance(value, dict) else {})
+
+
+def normalize_plan(value: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact structured plan from an interrupt payload."""
+    title = compact_text(value.get("title")) or "Implementation Plan"
+    summary = compact_items(value.get("summary"))
+    key_changes = compact_items(value.get("key_changes"))
+    assumptions = compact_items(value.get("assumptions"))
+    return {
+        "title": title,
+        "summary": summary,
+        "key_changes": key_changes,
+        "assumptions": assumptions,
+    }
+
+
+def compact_items(value: Any) -> list[str]:
+    """Return compact non-empty plan list items."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list | tuple):
+        return []
+    items = []
+    for item in value:
+        text = compact_text(item)
+        if text:
+            items.append(text)
+    return items
+
+
+def compact_text(value: Any) -> str:
+    """Collapse whitespace in a display string."""
+    return " ".join(str(value or "").split())
 
 
 def action_requests(interrupt: Any) -> list[Any]:

@@ -170,6 +170,7 @@ description: Project-specific orientation.
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "present_plan" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
                 resources.metadata["tools"],
@@ -177,6 +178,12 @@ description: Project-specific orientation.
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "present_plan",
+                        "path": "/mira-defaults/tools/present_plan.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -241,14 +248,20 @@ def project_status() -> str:
             resources = build_resources(workspace, create_examples=False)
 
             names = [tool.name for tool in resources.tools]
-            self.assertEqual(names, ["ask_user", "grep", "project_status"])
-            self.assertEqual(resources.tools[1].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(names, ["ask_user", "present_plan", "grep", "project_status"])
+            self.assertEqual(resources.tools[2].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "present_plan",
+                        "path": "/mira-defaults/tools/present_plan.py",
                         "source": "default",
                         "replaces": "",
                     },

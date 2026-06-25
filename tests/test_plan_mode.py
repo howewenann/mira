@@ -324,17 +324,17 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
 
-    async def test_act_announces_pending_plan_when_plan_exists(self) -> None:
-        """Leaving planning mode should queue the last saved plan once."""
+    async def test_act_does_not_queue_current_plan(self) -> None:
+        """Leaving planning mode should not queue plan execution."""
         renderer = RecordingRenderer()
-        mode = {"planning": True, "last_plan": "Do the thing", "plan_pending": False}
+        mode = {"planning": True, "current_plan": {"title": "Do the thing"}}
 
         handled = await repl.handle_command("/act", renderer, {}, "model", mode)
 
         self.assertTrue(handled)
         self.assertFalse(mode["planning"])
-        self.assertTrue(mode["plan_pending"])
-        self.assertIn("last plan will be included", renderer.console.lines[-1])
+        self.assertNotIn("approved_plan", mode)
+        self.assertIn("action mode", renderer.console.lines[-1])
 
     async def test_help_includes_plan_commands(self) -> None:
         """The help command should describe available commands."""
@@ -602,15 +602,20 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
 
-    async def test_run_user_turn_injects_valid_plan_once_after_act(self) -> None:
-        """A clean saved plan should be injected into one action request."""
+    async def test_run_user_turn_injects_approved_plan_once(self) -> None:
+        """An explicitly approved plan should be injected into one action request."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
         mode = repl.initial_mode("action-agent", "plan-agent")
+        mode["approved_plan"] = {
+            "title": "Create file",
+            "summary": ["Create test.txt with hello world."],
+            "key_changes": ["Write the file."],
+            "assumptions": [],
+        }
         calls: list[tuple[Any, str, str]] = []
         results = [
-            runner.TurnResult(final_text="Create test.txt with hello world."),
             runner.TurnResult(final_text="done"),
             runner.TurnResult(final_text="done again"),
         ]
@@ -627,17 +632,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             return results.pop(0)
 
         with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.handle_command("/plan", renderer, session, "model", mode)
-            await repl.run_user_turn(
-                agent="action-agent",
-                plan_agent="plan-agent",
-                renderer=renderer,
-                store=store,
-                session=session,
-                mode=mode,
-                text="plan the write",
-            )
-            await repl.handle_command("/act", renderer, session, "model", mode)
             await repl.run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
@@ -657,16 +651,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="do another thing",
             )
 
-        self.assertEqual(calls[0][0], "plan-agent")
-        self.assertIn("User request:\nplan the write", calls[0][1])
-        self.assertEqual(calls[0][2], "thread-1:plan:1")
-        self.assertEqual(calls[1][0], "action-agent")
-        self.assertIn("Previous planning context:", calls[1][1])
-        self.assertIn("Create test.txt with hello world.", calls[1][1])
-        self.assertIn("You are now in action mode.", calls[1][1])
-        self.assertIn("Write/edit tools are available again", calls[1][1])
-        self.assertIn("User request:\ndo it", calls[1][1])
-        self.assertEqual(calls[2], ("action-agent", "do another thing", "thread-1"))
+        self.assertEqual(calls[0][0], "action-agent")
+        self.assertIn("Previous planning context:", calls[0][1])
+        self.assertIn("Create test.txt with hello world.", calls[0][1])
+        self.assertIn("You are now in action mode.", calls[0][1])
+        self.assertIn("Write/edit tools are available again", calls[0][1])
+        self.assertIn("User request:\ndo it", calls[0][1])
+        self.assertEqual(calls[1], ("action-agent", "do another thing", "thread-1"))
 
     async def test_run_user_turn_applies_live_usage_once(self) -> None:
         """Interactive usage callbacks should refresh dashboard without final double-counting."""
@@ -769,7 +760,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="do it",
             )
 
-        self.assertTrue(any("no plan was saved" in line for line in renderer.console.lines))
         self.assertEqual(calls[1], ("action-agent", "do it", "thread-1"))
 
     async def test_run_user_turn_persists_visible_events_before_failure(self) -> None:
@@ -899,30 +889,39 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 3}
 
-        handled = await repl.handle_command("/session", renderer, session, "model", {"planning": True, "plans": []})
+        handled = await repl.handle_command("/session", renderer, session, "model", {"planning": True})
 
         self.assertTrue(handled)
         self.assertEqual(len(renderer.console.lines), 1)
         self.assertIn("session: thread-1", renderer.console.lines[0])
         self.assertIn("mode: planning", renderer.console.lines[0])
-        self.assertIn("saved plans: 0", renderer.console.lines[0])
+        self.assertIn("current plan: no", renderer.console.lines[0])
 
     def test_plan_thread_id_is_separate_from_action_thread(self) -> None:
         """Planning threads should be isolated from action memory."""
         self.assertEqual(repl.plan_thread_id({"id": "thread-1"}), "thread-1:plan")
         self.assertEqual(repl.plan_thread_id({"id": "thread-1"}, 2), "thread-1:plan:2")
 
-    def test_action_request_text_clears_pending_plan(self) -> None:
-        """The saved plan should be consumed only once."""
-        mode = {"planning": False, "last_plan": "Plan text", "plan_pending": True}
+    def test_action_request_text_clears_approved_plan(self) -> None:
+        """The approved plan should be consumed only once."""
+        mode = {
+            "planning": False,
+            "approved_plan": {
+                "title": "Plan text",
+                "summary": ["Do the thing."],
+                "key_changes": [],
+                "assumptions": [],
+            },
+        }
 
         text = repl.action_request_text(mode, "Implement")
 
-        self.assertIn("Previous planning context:\nPlan text", text)
+        self.assertIn("Previous planning context:", text)
+        self.assertIn("Title: Plan text", text)
+        self.assertIn("- Do the thing.", text)
         self.assertIn("Do not assume planning-mode permission errors still apply.", text)
         self.assertIn("User request:\nImplement", text)
-        self.assertEqual(mode["last_plan"], "")
-        self.assertFalse(mode["plan_pending"])
+        self.assertIsNone(mode["approved_plan"])
 
     def test_invalid_plan_result_when_write_tool_was_used(self) -> None:
         """A plan is invalid if the write tool was called."""
@@ -951,38 +950,18 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         text = repl.plan_request_text("write a file")
 
         self.assertIn("You are in planning mode.", text)
-        self.assertIn("Respond only with a concrete plan", text)
+        self.assertIn("Use normal assistant messages", text)
+        self.assertIn("call present_plan", text)
         self.assertIn("User request:\nwrite a file", text)
 
-    def test_save_plan_result_records_memory_plan(self) -> None:
-        """A clean plan should be saved in the interactive mode dictionary."""
-        renderer = RecordingRenderer()
-        mode: dict[str, Any] = {"plans": [], "last_plan": "", "plan_pending": False}
-
-        repl.save_clean_plan(mode, runner.TurnResult(final_text="1. Create test.txt."), renderer)
-
-        self.assertEqual(mode["last_plan"], "1. Create test.txt.")
-        self.assertEqual(mode["plans"], [{"id": 1, "text": "1. Create test.txt."}])
-
-    async def test_plans_command_shows_empty_state(self) -> None:
-        """The plans command should render an empty state when no plans exist."""
+    async def test_plans_command_is_removed(self) -> None:
+        """The old saved-plan command should no longer be handled specially."""
         renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/plans", renderer, {}, "model", {"plans": []})
+        handled = await repl.handle_command("/plans", renderer, {}, "model", {})
 
         self.assertTrue(handled)
-        self.assertTrue(renderer.no_plans_called)
-
-    async def test_plans_command_renders_each_saved_plan_once(self) -> None:
-        """The plans command should render each saved plan exactly once."""
-        renderer = RecordingRenderer()
-        mode = {"plans": [{"id": 1, "text": "First plan\nmore"}, {"id": 2, "text": "Latest plan"}]}
-
-        handled = await repl.handle_command("/plans", renderer, {}, "model", mode)
-
-        self.assertTrue(handled)
-        self.assertEqual(renderer.plan_panels, [(1, "First plan\nmore"), (2, "Latest plan")])
-        self.assertEqual(renderer.console.lines, [])
+        self.assertIn("unknown command: /plans", renderer.console.lines[-1])
 
     def test_plan_policy_drives_prompt_and_repl_validation(self) -> None:
         """The policy constants should appear in the planning prompt."""

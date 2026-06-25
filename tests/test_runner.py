@@ -340,6 +340,7 @@ class RunTurnRenderer(RecordingRenderer):
         self.approvals: list[list[Any]] = []
         self.ask_user_answer = ask_user_answer
         self.ask_user_prompts: list[Any] = []
+        self.plan_prompts: list[Any] = []
 
     def finish_main(self) -> None:
         self.events.append(("finish_main",))
@@ -353,6 +354,11 @@ class RunTurnRenderer(RecordingRenderer):
         self.ask_user_prompts.append(interrupt)
         self.events.append(("ask_user", interrupt))
         return self.ask_user_answer
+
+    async def present_plan(self, interrupt: Any) -> str:
+        self.plan_prompts.append(interrupt)
+        self.events.append(("present_plan", interrupt))
+        return "Plan presented for user review."
 
 
 class FakeStream:
@@ -447,6 +453,29 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.ask_user_prompts, [interrupt])
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(agent.payloads[1].resume, "Use B")
+
+    async def test_run_turn_resumes_present_plan_interrupt(self) -> None:
+        interrupt = {
+            "type": "present_plan",
+            "title": "Plan",
+            "summary": ["Do one thing."],
+            "key_changes": ["Change code."],
+            "assumptions": [],
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(agent, "plan", renderer, "thread-1")
+
+        self.assertEqual(renderer.plan_prompts, [interrupt])
+        self.assertEqual(renderer.ask_user_prompts, [])
+        self.assertEqual(renderer.approvals, [])
+        self.assertEqual(agent.payloads[1].resume, "Plan presented for user review.")
 
     async def test_run_turn_exits_when_stream_has_no_interrupts(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []})])

@@ -18,6 +18,7 @@ from ui.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    plan_request,
 )
 from ui.names import generate_slug
 
@@ -170,6 +171,24 @@ class Renderer:
 
         response = (await self._input(f"{ASK_USER_OPEN_OPTION}: ")).strip()
         return response or ASK_USER_OPEN_OPTION
+
+    async def present_plan(self, interrupt: Any) -> str:
+        """Print a structured plan in one-shot terminal mode."""
+        plan = plan_request(interrupt)
+        lines = [str(plan.get("title") or "Implementation Plan"), ""]
+        for heading, key in (
+            ("Summary", "summary"),
+            ("Key Changes", "key_changes"),
+            ("Assumptions", "assumptions"),
+        ):
+            items = plan.get(key)
+            if not isinstance(items, list) or not items:
+                continue
+            lines.append(heading)
+            lines.extend(f"- {item}" for item in items)
+            lines.append("")
+        self._block("plan", "\n".join(lines).rstrip())
+        return "Plan presented for user review."
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""

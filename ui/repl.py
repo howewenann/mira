@@ -28,8 +28,8 @@ User request:
 PLAN_REQUEST_TEMPLATE = """You are in planning mode.
 Do not call write_file, edit_file, or any other tool that modifies files.
 Do not attempt the requested change.
-Respond only with a concrete plan for how the change should be done later in action mode.
-If the user asks to create, write, edit, or delete files, describe the exact file operation that should happen after /act.
+Use normal assistant messages for discussion and brainstorming.
+If the user explicitly asks for a plan, final review, or implementation-ready proposal, call present_plan.
 
 User request:
 {text}"""
@@ -43,8 +43,7 @@ COMMAND_HELP = {
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
     "/plan": "enter planning mode; write/edit tools are disabled",
-    "/act": "return to action mode; include the latest saved plan once",
-    "/plans": "show saved plans from this session",
+    "/act": "return to action mode",
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
     "/clear": "clear the log",
@@ -58,6 +57,10 @@ DEFAULT_TOOL_SPECS = [
     {
         "name": "ask_user",
         "description": "Ask the user to choose between concrete next steps when MIRA is blocked.",
+    },
+    {
+        "name": "present_plan",
+        "description": "Present a structured implementation plan for explicit user review.",
     },
     {"name": "write_todos", "description": ""},
     {"name": "ls", "description": ""},
@@ -75,9 +78,9 @@ def initial_mode(agent: Any, plan_agent: Any) -> dict[str, Any]:
     """Return the mutable interactive state for one TUI session."""
     return {
         "planning": False,
-        "last_plan": "",
-        "plan_pending": False,
-        "plans": [],
+        "current_plan": None,
+        "approved_plan": None,
+        "plan_counter": 0,
         "plan_runs": 0,
         "action_tools": tool_specs(agent),
         "planning_tools": tool_specs(plan_agent),
@@ -101,6 +104,8 @@ async def run_user_turn(
     session: dict[str, Any],
     mode: dict[str, Any],
     text: str,
+    display_text: str | None = None,
+    record_user: bool = True,
     model_name: str = "",
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
@@ -142,12 +147,19 @@ async def run_user_turn(
         context_limit_source=context_limit_source,
     )
     recorder = SessionRecorder(session, store, mode_name)
-    user_event = recorder.user_message(text)
-    update_title(session)
-    recorder.save()
-    user_renderer = getattr(renderer, "user_message", None)
-    if callable(user_renderer):
-        call_renderer(user_renderer, text, planning=mode_name == "planning", created_at=str(user_event.get("created_at") or ""))
+    visible_text = display_text if display_text is not None else text
+    if record_user:
+        user_event = recorder.user_message(visible_text)
+        update_title(session)
+        recorder.save()
+        user_renderer = getattr(renderer, "user_message", None)
+        if callable(user_renderer):
+            call_renderer(
+                user_renderer,
+                visible_text,
+                planning=mode_name == "planning",
+                created_at=str(user_event.get("created_at") or ""),
+            )
     wrapped_renderer = RecordingRenderer(renderer, recorder)
     poller = asyncio.create_task(poll_compactions(recorder, active_agent, thread_id))
 
@@ -181,8 +193,6 @@ async def run_user_turn(
         with suppress(asyncio.CancelledError):
             await poller
 
-    if mode_name == "planning":
-        save_clean_plan(mode, result, renderer)
     recorder.ensure_assistant(getattr(result, "final_text", ""))
 
     session["turns"] = int(session.get("turns") or 0) + 1
@@ -245,8 +255,6 @@ async def handle_command(
 
     if text == "/plan":
         mode["planning"] = True
-        mode["last_plan"] = ""
-        mode["plan_pending"] = False
         mode["plan_runs"] = mode.get("plan_runs", 0) + 1
         mode["plan_thread_id"] = plan_thread_id(session, mode["plan_runs"])
         write_line(renderer, f"planning mode: {project_write_tools_text()} disabled; use /act to leave", kind="status")
@@ -254,11 +262,7 @@ async def handle_command(
 
     if text == "/act":
         mode["planning"] = False
-        if mode.get("last_plan"):
-            mode["plan_pending"] = True
-            write_line(renderer, "action mode: last plan will be included in your next request", kind="status")
-        else:
-            write_line(renderer, "action mode", kind="status")
+        write_line(renderer, "action mode", kind="status")
         return True
 
     if text == "/clear":
@@ -267,10 +271,6 @@ async def handle_command(
 
     if text in {"/clear-chat", "/clear-all-chats", "/clear-prompts"}:
         write_line(renderer, f"{text} is available in the Textual app with confirmation", kind="warning")
-        return True
-
-    if text == "/plans":
-        print_plans(renderer, mode)
         return True
 
     if text == "/session":
@@ -301,7 +301,7 @@ def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
             f"session: {session['id']}",
             f"title: {session.get('title', 'Untitled session')}",
             f"mode: {'planning' if mode['planning'] else 'action'}",
-            f"saved plans: {len(mode.get('plans', []))}",
+            f"current plan: {'yes' if mode.get('current_plan') else 'no'}",
             f"workspace: {session['workspace']}",
             f"turns: {session['turns']}",
         ]
@@ -510,22 +510,6 @@ def plan_thread_id(session: dict[str, Any], run_id: int | None = None) -> str:
     return f"{session['id']}:plan:{run_id}"
 
 
-def save_clean_plan(mode: dict[str, Any], result: TurnResult, renderer: Any) -> None:
-    """Save a planning result only when it did not try to edit the project."""
-    if not has_clean_plan(result):
-        mode["last_plan"] = ""
-        mode["plan_pending"] = False
-        if write_was_blocked(result) or write_tool_was_used(result):
-            write_line(renderer, "planning mode: write/edit was blocked; no plan was saved", kind="warning")
-        return
-
-    plan_text = result.final_text.strip()
-    plan = {"id": len(mode.setdefault("plans", [])) + 1, "text": plan_text}
-    mode["plans"].append(plan)
-    mode["last_plan"] = plan_text
-    mode["plan_pending"] = False
-
-
 def has_clean_plan(result: TurnResult) -> bool:
     """Return whether a planning result is safe to reuse in action mode."""
     final_text = getattr(result, "final_text", "").strip()
@@ -555,37 +539,34 @@ def write_was_blocked(result: TurnResult) -> bool:
     return any(marker in value.lower() for value in tool_results for marker in PLAN_BLOCKED_RESULT_MARKERS)
 
 
-def print_plans(renderer: Any, mode: dict[str, Any]) -> None:
-    """Print all saved planning-mode responses."""
-    plans = mode.get("plans", [])
-    if not plans:
-        if hasattr(renderer, "no_plans"):
-            renderer.no_plans()
-        else:
-            write_line(renderer, "no saved plans", kind="muted")
-        return
-
-    for plan in plans:
-        if hasattr(renderer, "plan"):
-            renderer.plan(plan["id"], plan["text"])
-        else:
-            write_line(renderer, plan["text"])
-
-
 def plan_request_text(text: str) -> str:
     """Wrap user input in the planning-mode instruction template."""
     return PLAN_REQUEST_TEMPLATE.format(text=text)
 
 
 def action_request_text(mode: dict[str, Any], text: str) -> str:
-    """Inject the latest saved plan into the next action-mode request once."""
-    if not mode.get("plan_pending") or not mode.get("last_plan"):
+    """Inject an explicitly approved plan into one action-mode request."""
+    plan = mode.get("approved_plan")
+    if not isinstance(plan, dict):
         return text
 
-    plan = mode["last_plan"]
-    mode["last_plan"] = ""
-    mode["plan_pending"] = False
-    return PLAN_CONTEXT_TEMPLATE.format(plan=plan, text=text)
+    mode["approved_plan"] = None
+    return PLAN_CONTEXT_TEMPLATE.format(plan=plan_text(plan), text=text)
+
+
+def plan_text(plan: dict[str, Any]) -> str:
+    """Return structured plan text for action-mode injection."""
+    lines = [f"Title: {plan.get('title') or 'Implementation Plan'}"]
+    for heading, key in (
+        ("Summary", "summary"),
+        ("Key Changes", "key_changes"),
+        ("Assumptions", "assumptions"),
+    ):
+        items = plan.get(key)
+        if isinstance(items, list) and items:
+            lines.extend(["", f"{heading}:"])
+            lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
 
 
 def write_line(renderer: Any, text: str, *, kind: str = "system") -> None:

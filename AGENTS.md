@@ -33,6 +33,9 @@
 - For one-shot terminal output, check `ui/renderer.py` behavior.
 - For streamed turn/HITL behavior, check `runtime/runner.py` and add focused
   runner tests.
+- For behavior that needs user-driven manual verification, add or update
+  prompts and expected results in `tests/manual/prompts.md` so the user can
+  run the manual checks.
 
 ## Documentation
 

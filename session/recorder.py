@@ -463,6 +463,17 @@ def update_event_field(record: dict[str, Any], event_id: int, key: str, value: A
             return
 
 
+def update_plan_event_status(record: dict[str, Any], plan_id: str, status: str) -> None:
+    """Update the persisted status for a visible plan event."""
+    for event in record.get("events", []):
+        if not isinstance(event, dict) or event.get("type") != "plan":
+            continue
+        plan = event.get("plan")
+        if isinstance(plan, dict) and str(plan.get("id") or "") == plan_id:
+            event["status"] = status
+            return
+
+
 def event_created_at(event: dict[str, Any] | None) -> str:
     if not isinstance(event, dict):
         return ""

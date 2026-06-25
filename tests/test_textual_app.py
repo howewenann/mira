@@ -2080,6 +2080,39 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(open_task, timeout=2), "Try the safer patch")
 
+    async def test_present_plan_bubble_discards_to_inactive_history(self) -> None:
+        """Structured plans should render with real buttons and resolve in place."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Ephemeral Structured Planning",
+            "summary": ["Use a temporary plan bubble."],
+            "key_changes": ["Add present_plan.", "Remove /plans."],
+            "assumptions": ["No test plan section."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            self.assertEqual(await app.present_plan(interrupt), "Plan presented for user review.")
+            await pilot.pause()
+
+            self.assertIsNotNone(app.mode["current_plan"])
+            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
+            self.assertIn("Ephemeral Structured Planning", rendered)
+            self.assertIn("Summary", rendered)
+            self.assertIn("Key Changes", rendered)
+            self.assertIn("Assumptions", rendered)
+            self.assertEqual(len(app.query(".plan-action")), 3)
+
+            app.query_one("#plan-discard-plan-1", Button).press()
+            await pilot.pause()
+
+            self.assertIsNone(app.mode["current_plan"])
+            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
+            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
+            self.assertIn("Status: discarded", rendered)
+
     async def test_git_prompt_booleans_use_in_window_choices(self) -> None:
         """Startup Git prompts should keep returning the expected booleans."""
         app = make_app()

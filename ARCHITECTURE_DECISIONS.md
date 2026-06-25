@@ -158,17 +158,20 @@ settings-panel tool behavior changes.
 ## Planning Mode
 
 **Decision:** Planning mode has a separate agent with project write tools hidden
-from the model and blocked by filesystem permissions as a backstop.
+from the model and blocked by filesystem permissions as a backstop. Structured
+plans are created only through the `present_plan` tool and shown as ephemeral
+plan bubbles with explicit Implement, Revise, and Discard actions.
 
 **Why:** Users need a mode where MIRA can reason about a change without editing
 files. Hiding write tools improves model behavior; permissions provide a safety
-fallback.
+fallback. Plan execution should be an explicit user action, not an automatic
+side effect of leaving planning mode.
 
 **Where to check:** `agent/factory.py`, `agent/plan_policy.py`, `ui/repl.py`,
 `tests/test_plan_mode.py`.
 
-**Update this when:** Planning mode gains or loses tools, changes how saved
-plans are passed into action mode, or changes its filesystem permissions.
+**Update this when:** Planning mode gains or loses tools, changes how plan
+bubbles are presented or resolved, or changes its filesystem permissions.
 
 ## Textual TUI And One-Shot Output
 

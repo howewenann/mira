@@ -168,8 +168,9 @@ async def run_turn(
     DeepAgents exposes separate async event streams for messages, tool calls,
     subagents, and final output. MIRA consumes them concurrently so the terminal
     can update as soon as each event arrives. If LangGraph interrupts for a
-    write approval or ask_user prompt, this function asks the renderer for the
-    needed input and resumes the same thread with a ``Command`` payload.
+    write approval, ask_user prompt, or structured planning prompt, this
+    function asks the renderer for the needed input and resumes the same thread
+    with a ``Command`` payload.
     """
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
     config = {"configurable": {"thread_id": thread_id}}
@@ -229,8 +230,11 @@ async def run_turn(
                 )
             return result
 
-        ask_user_interrupt = first_ask_user_interrupt(interrupts)
-        if ask_user_interrupt is not None:
+        plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
+        ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
+        if plan_interrupt is not None:
+            payload = Command(resume=await renderer.present_plan(plan_interrupt))
+        elif ask_user_interrupt is not None:
             payload = Command(resume=await renderer.ask_user(ask_user_interrupt))
         else:
             decisions = await renderer.ask_approvals(interrupts)
@@ -241,9 +245,14 @@ async def run_turn(
 
 def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:
     """Return the first ask_user interrupt payload, if present."""
+    return first_typed_interrupt(interrupts, "ask_user")
+
+
+def first_typed_interrupt(interrupts: list[Any], interrupt_type: str) -> Any | None:
+    """Return the first interrupt payload with the requested type."""
     for interrupt in interrupts:
         value = interrupt_value(interrupt)
-        if isinstance(value, dict) and value.get("type") == "ask_user":
+        if isinstance(value, dict) and value.get("type") == interrupt_type:
             return interrupt
     return None
 

@@ -15,7 +15,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import ListView, Static
+from textual.widgets import Button, ListView, Static
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from config.settings import (
@@ -27,6 +27,8 @@ from config.settings import (
 )
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
+from session.context import append_event
+from session.recorder import update_plan_event_status
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -36,8 +38,9 @@ from ui.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    plan_request,
 )
-from ui.repl import handle_command, initial_mode, refresh_agent_specs, run_user_turn
+from ui.repl import handle_command, initial_mode, plan_thread_id, refresh_agent_specs, run_user_turn
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
@@ -279,6 +282,105 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
+    @on(Button.Pressed, ".plan-action")
+    def press_plan_action(self, event: Button.Pressed) -> None:
+        """Handle structured plan bubble actions."""
+        event.stop()
+        button_id = event.button.id or ""
+        for action in ("implement", "revise", "discard"):
+            prefix = f"plan-{action}-"
+            if button_id.startswith(prefix):
+                self.run_worker(
+                    self._handle_plan_action(action, button_id[len(prefix):]),
+                    name=f"plan-{action}",
+                    exclusive=False,
+                )
+                return
+
+    async def _handle_plan_action(self, action: str, plan_id: str) -> None:
+        """Resolve the active structured plan."""
+        plan = self.mode.get("current_plan")
+        if not isinstance(plan, dict) or str(plan.get("id") or "") != plan_id:
+            self.system_message("that plan is no longer active", kind="warning")
+            return
+        if self.busy:
+            self.system_message("finish the current turn before resolving the plan", kind="warning")
+            return
+
+        if action == "discard":
+            self._resolve_current_plan("discarded")
+            self.system_message(f"discarded plan \"{plan_title(plan)}\"", kind="muted")
+            return
+
+        if action == "revise":
+            self._resolve_current_plan("revision requested")
+            self.mode["planning"] = True
+            self.mode["plan_runs"] = self.mode.get("plan_runs", 0) + 1
+            self.mode["plan_thread_id"] = plan_thread_id(self.session, self.mode["plan_runs"])
+            self.system_message(f"revision requested for plan \"{plan_title(plan)}\"", kind="status")
+            self.action_focus_prompt()
+            return
+
+        if action == "implement":
+            self._resolve_current_plan("approved for implementation")
+            self.mode["planning"] = False
+            self.mode["approved_plan"] = plan
+            self.system_message(f"implementing plan \"{plan_title(plan)}\"", kind="status")
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            self.query_one(PromptBox).disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_turn_for_plan(plan),
+                name="plan-implementation",
+                exclusive=True,
+            )
+
+    async def _run_turn_for_plan(self, plan: dict[str, Any]) -> None:
+        """Run action mode from an approved structured plan."""
+        try:
+            await self._refresh_model_metadata()
+            await run_user_turn(
+                agent=self.agent,
+                plan_agent=self.plan_agent,
+                renderer=self,
+                store=self.store,
+                session=self.session,
+                mode=self.mode,
+                text="Implement the approved plan.",
+                display_text=f"Implement plan: {plan_title(plan)}",
+                record_user=False,
+                model_name=self.model_name,
+                context_limit_tokens=self.context_limit_tokens,
+                context_limit_source=self.context_limit_source,
+            )
+            self._refresh_sessions()
+            self._set_status(state="ready")
+        except Exception as exc:
+            self.subagents_cancelled()
+            self.waiting_finished()
+            self.system_message(f"error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            self.subagents_cancelled()
+            self.waiting_finished()
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    def _resolve_current_plan(self, status: str) -> None:
+        """Mark the active plan as resolved and clear live state."""
+        plan = self.mode.get("current_plan")
+        if not isinstance(plan, dict):
+            return
+        plan_id = str(plan.get("id") or "")
+        self.mode["current_plan"] = None
+        self.query_one(ChatLog).resolve_plan(plan_id, status)
+        update_plan_event_status(self.session, plan_id, status)
+        self.store.save(self.session)
+
     def action_interrupt_or_quit(self) -> None:
         """Confirm before cancelling a turn or quitting the app."""
         if self.confirming_interrupt:
@@ -349,6 +451,30 @@ class MiraApp(App[None]):
         """Write command output to the chat log."""
         self.waiting_finished()
         self.query_one(ChatLog).command_output(renderable)
+
+    async def present_plan(self, interrupt: Any) -> str:
+        """Render a structured plan for explicit user review."""
+        self.waiting_finished()
+        plan = plan_request(interrupt)
+        self.mode["plan_counter"] = int(self.mode.get("plan_counter") or 0) + 1
+        plan = {**plan, "id": f"plan-{self.mode['plan_counter']}"}
+
+        current = self.mode.get("current_plan")
+        if isinstance(current, dict):
+            current_id = str(current.get("id") or "")
+            self.query_one(ChatLog).resolve_plan(current_id, "superseded")
+            update_plan_event_status(self.session, current_id, "superseded")
+
+        self.mode["current_plan"] = plan
+        event = append_event(self.session, {"type": "plan", "mode": "planning", "plan": plan, "status": "pending"})
+        self.store.save(self.session)
+        self.query_one(ChatLog).present_plan(
+            plan,
+            active=True,
+            status="pending",
+            created_at=str(event.get("created_at") or ""),
+        )
+        return "Plan presented for user review."
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
@@ -608,14 +734,6 @@ class MiraApp(App[None]):
         )
         chat.restore_session(self.session)
         self._refresh_sessions()
-
-    def plan(self, plan_id: int, text: str) -> None:
-        """Display a saved plan."""
-        self.query_one(ChatLog).plan(plan_id, text)
-
-    def no_plans(self) -> None:
-        """Display the empty saved-plan state."""
-        self.query_one(ChatLog).no_plans()
 
     def reasoning_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed reasoning text."""
@@ -1035,8 +1153,8 @@ class MiraApp(App[None]):
         """Return the compact mode label shown in the status line."""
         if self.mode.get("planning"):
             return "Plan"
-        if self.mode.get("plan_pending"):
-            return "Action + Plan"
+        if self.mode.get("current_plan"):
+            return "Plan Ready"
         return "Action"
 
     def _record_prompt_history(self, text: str) -> None:
@@ -1089,3 +1207,8 @@ def append_prompt_history(path: Path, text: str) -> None:
 def is_compaction_notice(text: str) -> bool:
     """Return whether an info notice is really leaked compaction reasoning."""
     return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
+
+
+def plan_title(plan: dict[str, Any]) -> str:
+    """Return a compact plan title for status text."""
+    return str(plan.get("title") or "Implementation Plan")
