@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from inspect import Parameter, signature
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
@@ -40,13 +41,14 @@ class SessionRecorder:
     def save(self) -> None:
         self.store.save(self.record)
 
-    def user_message(self, text: str) -> None:
-        append_event(self.record, {"type": "user", "mode": self.mode, "text": text})
+    def user_message(self, text: str) -> dict[str, Any]:
+        return append_event(self.record, {"type": "user", "mode": self.mode, "text": text})
 
-    def text_delta(self, delta: str) -> None:
+    def text_delta(self, delta: str) -> dict[str, Any] | None:
         delta = normalize_response_delta(self._assistant_text, delta)
         if not delta:
-            return
+            return None
+        event = None
         if self._assistant_id is None:
             event = append_event(self.record, {"type": "assistant", "mode": self.mode, "text": ""})
             self._assistant_id = int(event["id"])
@@ -56,26 +58,28 @@ class SessionRecorder:
         self._assistant_text += str(delta)
         update_event_text(self.record, self._assistant_id, self._assistant_text)
         self.save()
+        return event
 
-    def reasoning_delta(self, delta: str) -> None:
+    def reasoning_delta(self, delta: str) -> dict[str, Any] | None:
         if not delta:
-            return
+            return None
         self._reasoning_pending += str(delta)
         if is_compaction_tail_fragment(self._reasoning_pending):
             self._reasoning_pending = ""
             self._delete_reasoning_event()
-            return
+            return None
         if is_compaction_reasoning(self._reasoning_pending):
             self._reasoning_pending = ""
             self._delete_reasoning_event()
-            return
+            return None
         if not should_flush_reasoning_probe(self._reasoning_pending):
-            return
+            return None
         delta = self._reasoning_pending
         self._reasoning_pending = ""
-        self._append_reasoning(delta)
+        return self._append_reasoning(delta)
 
-    def _append_reasoning(self, delta: str) -> None:
+    def _append_reasoning(self, delta: str) -> dict[str, Any] | None:
+        event = None
         if self._reasoning_id is None:
             event = append_event(self.record, {"type": "reasoning", "mode": self.mode, "text": ""})
             self._reasoning_id = int(event["id"])
@@ -83,24 +87,27 @@ class SessionRecorder:
         self._reasoning_text += str(delta)
         update_event_text(self.record, self._reasoning_id, self._reasoning_text)
         self.save()
+        return event
 
-    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "") -> dict[str, Any]:
         self.finish_main()
         event = {"type": "tool_call", "mode": self.mode, "name": name, "args": json_value(args)}
         if call_id:
             event["call_id"] = call_id
-        append_event(self.record, event)
+        stored = append_event(self.record, event)
         self.save()
+        return stored
 
-    def tool_result(self, name: str, output: Any, call_id: str = "") -> None:
+    def tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
         self.finish_main()
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
             event["call_id"] = call_id
-        append_event(self.record, event)
+        stored = append_event(self.record, event)
         self.save()
+        return stored
 
-    def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> None:
+    def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
         """Persist a late-discovered tool result before the last assistant reply."""
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
@@ -108,14 +115,16 @@ class SessionRecorder:
         stored = append_event(self.record, event)
         self._move_event_before(stored, self._last_assistant_id)
         self.save()
+        return stored
 
-    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+    def delegation_started(self, calls: list[dict[str, Any]]) -> dict[str, Any] | None:
         calls = self._new_delegation_calls(calls)
         if not calls:
-            return
+            return None
         self.finish_main()
-        append_event(self.record, {"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
+        stored = append_event(self.record, {"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
         self.save()
+        return stored
 
     def _new_delegation_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return only task calls that have not already been recorded."""
@@ -128,7 +137,7 @@ class SessionRecorder:
             new_calls.append(call)
         return new_calls
 
-    def subagent_started(self, name: str, task_input: str = "") -> None:
+    def subagent_started(self, name: str, task_input: str = "") -> dict[str, Any]:
         self.finish_main()
         self._running_subagents[name] = task_input
         event = append_event(
@@ -137,6 +146,7 @@ class SessionRecorder:
         )
         self._running_subagent_event_ids[name] = int(event["id"])
         self.save()
+        return event
 
     def subagent_request_updated(self, name: str, task_input: str) -> None:
         if not task_input:
@@ -147,10 +157,10 @@ class SessionRecorder:
             update_event_field(self.record, event_id, "task_input", task_input)
             self.save()
 
-    def subagent_finished(self, name: str, output: str = "") -> None:
+    def subagent_finished(self, name: str, output: str = "") -> dict[str, Any]:
         task_input = self._running_subagents.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
-        append_event(
+        stored = append_event(
             self.record,
             {
                 "type": "subagent",
@@ -162,11 +172,12 @@ class SessionRecorder:
             },
         )
         self.save()
+        return stored
 
-    def subagent_cancelled(self, name: str, output: str = "") -> None:
+    def subagent_cancelled(self, name: str, output: str = "") -> dict[str, Any]:
         task_input = self._running_subagents.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
-        append_event(
+        stored = append_event(
             self.record,
             {
                 "type": "subagent",
@@ -178,24 +189,28 @@ class SessionRecorder:
             },
         )
         self.save()
+        return stored
 
     def subagents_cancelled(self) -> None:
         for name in list(self._running_subagents):
             self.subagent_cancelled(name)
 
-    def system_error(self, text: str) -> None:
-        append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
+    def system_error(self, text: str) -> dict[str, Any]:
+        stored = append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
         self.save()
+        return stored
 
-    def info(self, text: str) -> None:
+    def info(self, text: str) -> dict[str, Any] | None:
         if is_compaction_notice(text):
-            return
-        append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
+            return None
+        stored = append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
         self.save()
+        return stored
 
-    def interrupted(self, text: str) -> None:
-        append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
+    def interrupted(self, text: str) -> dict[str, Any]:
+        stored = append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
         self.save()
+        return stored
 
     def ensure_assistant(self, text: str) -> None:
         text = text.strip()
@@ -287,8 +302,8 @@ class RecordingRenderer:
         return getattr(self.renderer, name)
 
     def reasoning_delta(self, delta: str) -> None:
-        self.renderer.reasoning_delta(delta)
-        self.recorder.reasoning_delta(delta)
+        event = self.recorder.reasoning_delta(delta)
+        call_renderer(self.renderer.reasoning_delta, delta, created_at=event_created_at(event))
 
     def discard_reasoning(self) -> None:
         callback = getattr(self.renderer, "discard_reasoning", None)
@@ -297,29 +312,30 @@ class RecordingRenderer:
         self.recorder.discard_reasoning()
 
     def text_delta(self, delta: str) -> None:
-        self.renderer.text_delta(delta)
-        self.recorder.text_delta(delta)
+        event = self.recorder.text_delta(delta)
+        call_renderer(self.renderer.text_delta, delta, created_at=event_created_at(event))
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
-        self.renderer.tool_call(name, args, call_id=call_id)
-        self.recorder.tool_call(name, args, call_id=call_id)
+        event = self.recorder.tool_call(name, args, call_id=call_id)
+        call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
-        self.renderer.tool_result(name, result, call_id=call_id)
-        self.recorder.tool_result(name, result, call_id=call_id)
+        event = self.recorder.tool_result(name, result, call_id=call_id)
+        call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
 
     def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render and record a late-discovered tool result."""
         callback = getattr(self.renderer, "recovered_tool_result", None)
+        event = self.recorder.recovered_tool_result(name, result, call_id=call_id)
         if callable(callback):
-            callback(name, result, call_id=call_id)
+            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
         else:
-            self.renderer.tool_result(name, result, call_id=call_id)
-        self.recorder.recovered_tool_result(name, result, call_id=call_id)
+            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
-        self.renderer.delegation_started(calls)
-        self.recorder.delegation_started(calls)
+        event = self.recorder.delegation_started(calls)
+        if event is not None:
+            call_renderer(self.renderer.delegation_started, calls, created_at=event_created_at(event))
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
         callback = getattr(self.renderer, "delegation_delta", None)
@@ -340,8 +356,8 @@ class RecordingRenderer:
             activity()
 
     def subagent_started(self, subagent: str, task_input: str = "") -> None:
-        self.renderer.subagent_started(subagent, task_input)
-        self.recorder.subagent_started(subagent, task_input)
+        event = self.recorder.subagent_started(subagent, task_input)
+        call_renderer(self.renderer.subagent_started, subagent, task_input, created_at=event_created_at(event))
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         callback = getattr(self.renderer, "subagent_request_updated", None)
@@ -350,14 +366,14 @@ class RecordingRenderer:
         self.recorder.subagent_request_updated(subagent, task_input)
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
-        self.renderer.subagent_finished(subagent, result)
-        self.recorder.subagent_finished(subagent, result)
+        event = self.recorder.subagent_finished(subagent, result)
+        call_renderer(self.renderer.subagent_finished, subagent, result, created_at=event_created_at(event))
 
     def subagent_cancelled(self, subagent: str, result: str = "") -> None:
         callback = getattr(self.renderer, "subagent_cancelled", None)
+        event = self.recorder.subagent_cancelled(subagent, result)
         if callable(callback):
-            callback(subagent, result)
-        self.recorder.subagent_cancelled(subagent, result)
+            call_renderer(callback, subagent, result, created_at=event_created_at(event))
 
     def subagents_cancelled(self) -> None:
         callback = getattr(self.renderer, "subagents_cancelled", None)
@@ -368,11 +384,15 @@ class RecordingRenderer:
     def system_message(self, text: str, *, kind: str = "system") -> None:
         callback = getattr(self.renderer, "system_message", None)
         if callable(callback):
-            callback(text, kind=kind)
+            if kind == "info":
+                event = self.recorder.info(text)
+                call_renderer(callback, text, kind=kind, created_at=event_created_at(event))
+            else:
+                callback(text, kind=kind)
         elif hasattr(self.renderer, "console"):
             self.renderer.console.print(text)
-        if kind == "info":
-            self.recorder.info(text)
+            if kind == "info":
+                self.recorder.info(text)
 
     def compaction_started(self) -> None:
         notice = pop_context_overflow_notice()
@@ -441,6 +461,28 @@ def update_event_field(record: dict[str, Any], event_id: int, key: str, value: A
         if isinstance(event, dict) and int(event.get("id") or 0) == event_id:
             event[key] = value
             return
+
+
+def event_created_at(event: dict[str, Any] | None) -> str:
+    if not isinstance(event, dict):
+        return ""
+    return str(event.get("created_at") or "")
+
+
+def call_renderer(callback: Any, *args: Any, created_at: str = "", **kwargs: Any) -> Any:
+    if created_at and accepts_created_at(callback):
+        kwargs["created_at"] = created_at
+    return callback(*args, **kwargs)
+
+
+def accepts_created_at(callback: Any) -> bool:
+    try:
+        parameters = signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == "created_at" for parameter in parameters
+    )
 
 
 def delegation_key(call: Any) -> tuple[str, str]:

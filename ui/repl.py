@@ -15,7 +15,7 @@ from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TO
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_turn_usage, ensure_dashboard
 from session.context import update_title, with_resume_context
-from session.recorder import RecordingRenderer, SessionRecorder, poll_compactions
+from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -141,9 +141,12 @@ async def run_user_turn(
         context_limit_source=context_limit_source,
     )
     recorder = SessionRecorder(session, store, mode_name)
-    recorder.user_message(text)
+    user_event = recorder.user_message(text)
     update_title(session)
     recorder.save()
+    user_renderer = getattr(renderer, "user_message", None)
+    if callable(user_renderer):
+        call_renderer(user_renderer, text, planning=mode_name == "planning", created_at=str(user_event.get("created_at") or ""))
     wrapped_renderer = RecordingRenderer(renderer, recorder)
     poller = asyncio.create_task(poll_compactions(recorder, active_agent, thread_id))
 

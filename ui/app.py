@@ -225,7 +225,6 @@ class MiraApp(App[None]):
                 self.action_focus_prompt()
             return
 
-        self.query_one(ChatLog).user_message(text, planning=bool(self.mode.get("planning")))
         self.busy = True
         self._main_stream_active = False
         self._set_status(state="running")
@@ -331,10 +330,14 @@ class MiraApp(App[None]):
         except NoMatches:
             return
 
-    def system_message(self, text: str, *, kind: str = "system") -> None:
+    def user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
+        """Write a submitted user message to the chat log."""
+        self.query_one(ChatLog).timestamped_user_message(text, planning=planning, created_at=created_at)
+
+    def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Write a command or status message to the chat log."""
         self.waiting_finished()
-        self.query_one(ChatLog).system_message(text, kind=kind)
+        self.query_one(ChatLog).system_message(text, kind=kind, created_at=created_at)
         detail = text if kind in {"status", "info", "warning"} else ""
         self._set_status(state="ready" if not self.busy else "running", detail=detail)
 
@@ -587,21 +590,21 @@ class MiraApp(App[None]):
         """Display the empty saved-plan state."""
         self.query_one(ChatLog).no_plans()
 
-    def reasoning_delta(self, delta: str) -> None:
+    def reasoning_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed reasoning text."""
         self.waiting_finished()
         self._mark_main_stream_active()
-        self.query_one(ChatLog).reasoning_delta(delta)
+        self.query_one(ChatLog).reasoning_delta(delta, created_at=created_at)
 
     def discard_reasoning(self) -> None:
         """Remove streamed reasoning that was later classified as internal."""
         self.query_one(ChatLog).discard_reasoning()
 
-    def text_delta(self, delta: str) -> None:
+    def text_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed assistant text."""
         self.waiting_finished()
         self._mark_main_stream_active()
-        self.query_one(ChatLog).text_delta(delta)
+        self.query_one(ChatLog).text_delta(delta, created_at=created_at)
 
     def model_activity(self) -> None:
         """Render transient activity for streamed non-text model output."""
@@ -629,25 +632,25 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).delegation_delta(calls)
         self._set_status(state="running", detail="preparing subagent request...")
 
-    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool call in transcript order."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_call(name, args, call_id=call_id)
+        self.query_one(ChatLog).tool_call(name, args, call_id=call_id, created_at=created_at)
         self._rearm_waiting_if_busy()
 
-    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool result in transcript order."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_result(name, result, call_id=call_id)
+        self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
         self._rearm_waiting_if_busy()
 
-    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+    def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Render task delegation summary."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).delegation_started(calls)
+        self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def start_subagent_live(self) -> None:
@@ -670,11 +673,11 @@ class MiraApp(App[None]):
         """Return a stable display label for a subagent."""
         return self.query_one(ChatLog).subagent_label(subagent)
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+    def subagent_started(self, subagent: str, task_input: str = "", *, created_at: str = "") -> None:
         """Render a subagent start."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_started(subagent, task_input)
+        self.query_one(ChatLog).subagent_started(subagent, task_input, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
@@ -682,18 +685,18 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
 
-    def subagent_finished(self, subagent: str, result: str = "") -> None:
+    def subagent_finished(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
         """Render a subagent finish."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_finished(subagent, result)
+        self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
         self._rearm_waiting_if_busy()
 
-    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+    def subagent_cancelled(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
         """Render a subagent cancellation."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_cancelled(subagent, result)
+        self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""

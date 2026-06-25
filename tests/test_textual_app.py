@@ -830,6 +830,139 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("make a plan", rendered)
             self.assertIn("plan saved", rendered)
 
+    async def test_restore_session_timestamps_all_persisted_bubble_titles(self) -> None:
+        """Persisted session events should replay with JSON-backed timestamp titles."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-06-24T09:00:00+08:00",
+            "turns": 1,
+            "events": [
+                {
+                    "id": 1,
+                    "type": "user",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:01:00+08:00",
+                    "text": "hello",
+                },
+                {
+                    "id": 2,
+                    "type": "user",
+                    "mode": "planning",
+                    "created_at": "2026-06-24T09:02:00+08:00",
+                    "text": "plan it",
+                },
+                {
+                    "id": 3,
+                    "type": "assistant",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:03:00+08:00",
+                    "text": "hi",
+                },
+                {
+                    "id": 4,
+                    "type": "reasoning",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:04:00+08:00",
+                    "text": "thinking",
+                },
+                {
+                    "id": 5,
+                    "type": "info",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:05:00+08:00",
+                    "text": "info",
+                },
+                {
+                    "id": 6,
+                    "type": "system_error",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:06:00+08:00",
+                    "text": "broken",
+                },
+                {
+                    "id": 7,
+                    "type": "interrupted",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:07:00+08:00",
+                    "text": "stopped",
+                },
+                {
+                    "id": 8,
+                    "type": "tool_call",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:08:00+08:00",
+                    "name": "read_file",
+                    "args": {"path": "README.md"},
+                    "call_id": "call-1",
+                },
+                {
+                    "id": 9,
+                    "type": "tool_result",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:09:00+08:00",
+                    "name": "read_file",
+                    "output": "contents",
+                    "call_id": "call-1",
+                },
+                {
+                    "id": 10,
+                    "type": "delegation",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:10:00+08:00",
+                    "calls": [
+                        {
+                            "name": "task",
+                            "args": {"description": "check timestamps", "subagent_type": "general-purpose"},
+                        }
+                    ],
+                },
+                {
+                    "id": 11,
+                    "type": "subagent",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:11:00+08:00",
+                    "name": "general-purpose [luna]",
+                    "status": "DONE",
+                    "task_input": "check timestamps",
+                    "output": "done",
+                },
+                {
+                    "id": 12,
+                    "type": "compaction",
+                    "mode": "action",
+                    "created_at": "2026-06-24T09:12:00+08:00",
+                    "summary": "older context",
+                    "file_path": ".mira/conversation_history/thread.md",
+                    "cutoff_index": 3,
+                },
+            ],
+        }
+        app = make_app(session=session)
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            blocks = list(app.query_one(ChatLog).children)
+            titles = [str(getattr(block, "border_title", "")).replace("\\", "") for block in blocks]
+            subtitles = [str(getattr(block, "border_subtitle", "")) for block in blocks]
+
+            self.assertIn("you", titles)
+            self.assertIn("you (plan)", titles)
+            self.assertIn("mira", titles)
+            self.assertIn("thinking", titles)
+            self.assertIn("info", titles)
+            self.assertIn("error", titles)
+            self.assertIn("warning", titles)
+            self.assertIn("tool - read_file", titles)
+            self.assertIn("task", titles)
+            self.assertIn("subagent - general-purpose [luna]", titles)
+            self.assertIn("session compacted", titles)
+            for minute in range(1, 13):
+                if minute == 9:
+                    continue
+                self.assertIn(f"2026-06-24 09:{minute:02d}", subtitles)
+
     async def test_unchanged_context_metadata_does_not_rebuild_agents(self) -> None:
         """A matching refreshed context window should avoid rebuilding both agents."""
         app = make_app(config={"llm_provider": "lmstudio", "llm_model": "local-model"})

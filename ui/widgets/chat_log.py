@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict, deque
+from datetime import datetime
 from itertools import count
 from typing import Any
 
@@ -96,43 +97,70 @@ class ChatLog(VerticalScroll):
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
-    def assistant_message(self, text: str) -> None:
+    def timestamped_user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
+        """Append a persisted user message with its session timestamp."""
+        self._reset_delegation_group()
+        title = "you (plan)" if planning else "you"
+        self._add_block(title, Text(text), "message user", created_at=created_at)
+
+    def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
-        self._add_block("mira", Text(text), "message assistant")
+        self._add_block("mira", Text(text), "message assistant", created_at=created_at)
 
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""
         self.finish_main()
         for event in normalize_events(session.get("events")):
             event_type = event["type"]
+            created_at = str(event.get("created_at") or "")
             if event_type == "user":
-                self.user_message(event["text"], planning=event.get("mode") == "planning")
+                self.timestamped_user_message(event["text"], planning=event.get("mode") == "planning", created_at=created_at)
             elif event_type == "assistant":
-                self.assistant_message(event["text"])
+                self.assistant_message(event["text"], created_at=created_at)
             elif event_type == "reasoning":
                 text = str(event.get("text") or "")
                 if text.strip():
-                    self._add_block("thinking", Text(text), "message reasoning")
+                    self._add_block("thinking", Text(text), "message reasoning", created_at=created_at)
             elif event_type == "tool_call":
-                self.tool_call(event["name"], event.get("args", {}), call_id=str(event.get("call_id") or ""))
+                self.tool_call(
+                    event["name"],
+                    event.get("args", {}),
+                    call_id=str(event.get("call_id") or ""),
+                    created_at=created_at,
+                )
             elif event_type == "tool_result":
-                self.tool_result(event["name"], event["output"], call_id=str(event.get("call_id") or ""))
+                self.tool_result(
+                    event["name"],
+                    event["output"],
+                    call_id=str(event.get("call_id") or ""),
+                    created_at=created_at,
+                )
             elif event_type == "delegation":
-                self.delegation_started(event["calls"])
+                self.delegation_started(event["calls"], created_at=created_at)
             elif event_type == "subagent":
                 if event.get("status") == "DONE":
-                    self.subagent_finished(event["name"], event.get("output", ""), event.get("task_input", ""))
+                    self.subagent_finished(
+                        event["name"],
+                        event.get("output", ""),
+                        event.get("task_input", ""),
+                        created_at=created_at,
+                    )
                 elif event.get("status") == "CANCELLED":
-                    self.subagent_cancelled(event["name"], event.get("output", ""), event.get("task_input", ""))
+                    self.subagent_cancelled(
+                        event["name"],
+                        event.get("output", ""),
+                        event.get("task_input", ""),
+                        created_at=created_at,
+                    )
                 else:
-                    self.subagent_started(event["name"], event.get("task_input", ""))
+                    self.subagent_started(event["name"], event.get("task_input", ""), created_at=created_at)
             elif event_type == "compaction":
-                self._add_block("session compacted", self._compaction_text(event), "message summary")
+                self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type in {"info", "system_error", "interrupted"}:
                 kind = {"info": "info", "system_error": "error", "interrupted": "warning"}[event_type]
-                self.system_message(event["text"], kind=kind)
+                self.system_message(event["text"], kind=kind, created_at=created_at)
 
-    def reasoning_delta(self, delta: str) -> None:
+    def reasoning_delta(self, delta: str, *, created_at: str = "") -> None:
         """Append streamed reasoning text to the current reasoning block."""
         cleaned = re.sub(r"</?[^>]+>", "", delta)
         if not cleaned.strip() and not self._reasoning_text:
@@ -142,13 +170,15 @@ class ChatLog(VerticalScroll):
 
         if self._reasoning_block is None:
             self._reasoning_text = ""
-            self._reasoning_block = self._add_block("thinking", Text(""), "message reasoning")
+            self._reasoning_block = self._add_block("thinking", Text(""), "message reasoning", created_at=created_at)
+        elif created_at:
+            self._style_block(self._reasoning_block, title="thinking", classes="message reasoning", created_at=created_at)
 
         self._reasoning_text += cleaned
         self._reasoning_block.update(Text(self._reasoning_text))
         self._scroll_to_end()
 
-    def text_delta(self, delta: str) -> None:
+    def text_delta(self, delta: str, *, created_at: str = "") -> None:
         """Append streamed assistant text to the current response block."""
         delta = normalize_response_delta(self._assistant_text, delta)
         if not delta:
@@ -158,7 +188,7 @@ class ChatLog(VerticalScroll):
 
         if self._assistant_block is None:
             self._assistant_text = ""
-            self._assistant_block = self._add_block("mira", Text(""), "message assistant")
+            self._assistant_block = self._add_block("mira", Text(""), "message assistant", created_at=created_at)
 
         self._assistant_text += delta
         self._assistant_block.update(Text(self._assistant_text))
@@ -180,11 +210,11 @@ class ChatLog(VerticalScroll):
         self._reasoning_text = ""
         self._scroll_to_end()
 
-    def system_message(self, text: str, *, kind: str = "system") -> None:
+    def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Append a system, info, status, warning, or error message."""
         self.hide_model_activity()
         title = "mira" if kind == "startup" else kind
-        self._add_block(title, Text(text), f"message {kind}")
+        self._add_block(title, Text(text), f"message {kind}", created_at=created_at)
 
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
@@ -221,7 +251,7 @@ class ChatLog(VerticalScroll):
         self._compaction_block.update(self._render_compaction())
         self._scroll_to_end()
 
-    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Append a coordinator-level tool call in transcript order."""
         self.hide_waiting()
         self.hide_model_activity()
@@ -229,7 +259,7 @@ class ChatLog(VerticalScroll):
         key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
         if block is None:
-            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
+            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call", created_at=created_at)
             block = {"name": name, "args": args, "result": "", "widget": widget, "draft": False}
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
@@ -261,7 +291,7 @@ class ChatLog(VerticalScroll):
             block["draft"] = True
         self._update_tool_block(key)
 
-    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Append a coordinator-level tool result in transcript order."""
         if not result:
             return
@@ -270,13 +300,13 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         key = self._resolve_tool_key(name, call_id)
         if key is None:
-            self._queue_pending_tool_result(name, result, call_id)
+            self._queue_pending_tool_result(name, result, call_id, created_at=created_at)
             return
         block = self._tool_blocks[key]
         block["result"] = result
         self._update_tool_block(key)
 
-    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+    def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Append a compact task delegation summary."""
         new_calls = self._new_delegation_calls(calls)
         if not new_calls:
@@ -299,7 +329,7 @@ class ChatLog(VerticalScroll):
             self._delegation_block.update(text)
             self._scroll_to_end()
             return
-        self._delegation_block = self._add_block("task", text, "message delegation")
+        self._delegation_block = self._add_block("task", text, "message delegation", created_at=created_at)
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
         """Create or update a live draft of streamed task delegation input."""
@@ -366,7 +396,7 @@ class ChatLog(VerticalScroll):
             self._subagent_labels[key] = f"{name} [{self._next_suffix()}]"
         return self._subagent_labels[key]
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+    def subagent_started(self, subagent: str, task_input: str = "", *, created_at: str = "") -> None:
         """Create or replace the block for a running subagent."""
         self.hide_waiting()
         self.hide_model_activity()
@@ -377,7 +407,12 @@ class ChatLog(VerticalScroll):
             "status": "RUNNING",
             "output": "",
         }
-        widget = self._add_block(f"subagent - {subagent}", self._render_subagent(subagent), "message subagent")
+        widget = self._add_block(
+            f"subagent - {subagent}",
+            self._render_subagent(subagent),
+            "message subagent",
+            created_at=created_at,
+        )
         self._subagent_widgets[subagent] = widget
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
@@ -393,7 +428,14 @@ class ChatLog(VerticalScroll):
         block["request"] = task_input
         self._update_subagent(subagent)
 
-    def subagent_finished(self, subagent: str, result: str = "", task_input: str = "") -> None:
+    def subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        task_input: str = "",
+        *,
+        created_at: str = "",
+    ) -> None:
         """Mark a subagent block as done and attach its final output."""
         self.hide_waiting()
         subagent = self._subagent_display_label(subagent)
@@ -409,9 +451,16 @@ class ChatLog(VerticalScroll):
             block["request"] = task_input
         block["status"] = "DONE"
         block["output"] = result
-        self._update_subagent(subagent)
+        self._update_subagent(subagent, created_at=created_at)
 
-    def subagent_cancelled(self, subagent: str, result: str = "", task_input: str = "") -> None:
+    def subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        task_input: str = "",
+        *,
+        created_at: str = "",
+    ) -> None:
         """Mark a subagent block as cancelled."""
         self.hide_waiting()
         subagent = self._subagent_display_label(subagent)
@@ -427,7 +476,7 @@ class ChatLog(VerticalScroll):
             block["request"] = task_input
         block["status"] = "CANCELLED"
         block["output"] = result
-        self._update_subagent(subagent)
+        self._update_subagent(subagent, created_at=created_at)
 
     def plan(self, plan_id: int, text: str) -> None:
         """Append a saved planning-mode result."""
@@ -531,17 +580,21 @@ class ChatLog(VerticalScroll):
             return text
         return text[: self.tool_output_chars].rstrip() + "\n... truncated ..."
 
-    def _add_block(self, title: str, renderable: Any, classes: str) -> Static:
+    def _add_block(self, title: str, renderable: Any, classes: str, *, created_at: str = "") -> Static:
         """Mount one bordered transcript block."""
         block = Static(renderable, classes=classes)
         block.border_title = escape(title)
+        if timestamp := timestamp_text(created_at):
+            block.border_subtitle = escape(timestamp)
         self.mount(block)
         self._scroll_to_end()
         return block
 
-    def _style_block(self, block: Static, *, title: str, classes: str) -> None:
+    def _style_block(self, block: Static, *, title: str, classes: str, created_at: str = "") -> None:
         """Update a transcript block's title and style classes in place."""
         block.border_title = escape(title)
+        if timestamp := timestamp_text(created_at):
+            block.border_subtitle = escape(timestamp)
         block.set_classes(classes)
 
     def _scroll_to_end(self) -> None:
@@ -675,13 +728,20 @@ class ChatLog(VerticalScroll):
 
         return text
 
-    def _update_subagent(self, label: str) -> None:
+    def _update_subagent(self, label: str, *, created_at: str = "") -> None:
         """Update an existing subagent widget."""
         widget = self._subagent_widgets.get(label)
         if widget is None:
-            widget = self._add_block(f"subagent - {label}", self._render_subagent(label), "message subagent")
+            widget = self._add_block(
+                f"subagent - {label}",
+                self._render_subagent(label),
+                "message subagent",
+                created_at=created_at,
+            )
             self._subagent_widgets[label] = widget
             return
+        if timestamp := timestamp_text(created_at):
+            widget.border_subtitle = escape(timestamp)
         widget.update(self._render_subagent(label))
         self._scroll_to_end()
 
@@ -748,21 +808,22 @@ class ChatLog(VerticalScroll):
                 return key
         return None
 
-    def _queue_pending_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def _queue_pending_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+        value = json.dumps({"result": result, "created_at": created_at})
         if call_id:
-            self._pending_tool_results_by_id[call_id] = result
+            self._pending_tool_results_by_id[call_id] = value
             return
-        self._pending_tool_results_by_name[name].append(result)
+        self._pending_tool_results_by_name[name].append(value)
 
     def _take_pending_tool_result(self, name: str, call_id: str = "") -> str:
         if call_id:
             result = self._pending_tool_results_by_id.pop(call_id, "")
             if result:
-                return result
+                return pending_result_text(result)
         queue = self._pending_tool_results_by_name.get(name)
         if not queue:
             return ""
-        return queue.popleft()
+        return pending_result_text(queue.popleft())
 
     def _remove_tool_queue_key(self, name: str, key: str) -> None:
         queue = self._tool_name_queues.get(name)
@@ -783,3 +844,25 @@ class ChatLog(VerticalScroll):
             text.append(self.truncate_multiline(block["result"]), style="dim")
         block["widget"].update(text)
         self._scroll_to_end()
+
+
+def timestamp_text(value: Any) -> str:
+    """Format a persisted event timestamp for chat bubble titles."""
+    text = str(value or "")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return ""
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def pending_result_text(value: str) -> str:
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if isinstance(payload, dict):
+        return str(payload.get("result") or "")
+    return value
