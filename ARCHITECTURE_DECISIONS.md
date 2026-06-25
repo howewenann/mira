@@ -161,17 +161,29 @@ settings-panel tool behavior changes.
 from the model and blocked by filesystem permissions as a backstop. Structured
 plans are created only through the `present_plan` tool and shown as ephemeral
 plan bubbles with explicit Implement, Revise, and Discard actions.
+Every structured plan includes Summary, Key Changes, Test Plan, and
+Assumptions. Test Plan should describe tests/checks to create or run; when
+execute is unavailable, MIRA still plans the test artifacts and says the tests
+were not run.
+Revise opens a focused feedback prompt, then sends the previous structured plan
+and the user's feedback through planning mode so the replacement plan keeps
+context. Resolved plan bubbles remain inactive transcript history; only the
+newest unresolved plan is actionable.
+Recent structured plan events are included in lightweight model resume context
+so mode switches and resumed sessions can answer plan follow-ups. Raw reasoning,
+tool-call, and tool-result events remain excluded from normal model history.
 
 **Why:** Users need a mode where MIRA can reason about a change without editing
 files. Hiding write tools improves model behavior; permissions provide a safety
 fallback. Plan execution should be an explicit user action, not an automatic
 side effect of leaving planning mode.
 
-**Where to check:** `agent/factory.py`, `agent/plan_policy.py`, `ui/repl.py`,
-`tests/test_plan_mode.py`.
+**Where to check:** `agent/factory.py`, `agent/plan_policy.py`, `ui/app.py`,
+`ui/repl.py`, `tests/test_plan_mode.py`, `tests/test_textual_app.py`.
 
 **Update this when:** Planning mode gains or loses tools, changes how plan
-bubbles are presented or resolved, or changes its filesystem permissions.
+bubbles are presented, resolved, or replayed into model context, or changes its
+filesystem permissions.
 
 ## Textual TUI And One-Shot Output
 

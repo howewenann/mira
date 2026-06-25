@@ -14,6 +14,7 @@ UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
 RESUME_MESSAGE_LIMIT = 20
+RESUME_PLAN_LIMIT = 3
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 
@@ -160,6 +161,30 @@ def normalize_compactions(value: Any) -> list[dict[str, Any]]:
     return compactions
 
 
+def normalize_plans(value: Any) -> list[dict[str, Any]]:
+    """Return compact structured plan events for model resume context."""
+    plans = []
+    for item in normalize_events(value):
+        if item["type"] != "plan":
+            continue
+        plan = item.get("plan")
+        if not isinstance(plan, dict):
+            continue
+        plans.append(
+            {
+                "id": compact_line(plan.get("id") or f"plan-{item['id']}"),
+                "status": compact_line(item.get("status") or "pending"),
+                "title": compact_line(plan.get("title") or "Implementation Plan"),
+                "summary": compact_items(plan.get("summary")),
+                "key_changes": compact_items(plan.get("key_changes")),
+                "test_plan": compact_items(plan.get("test_plan")),
+                "assumptions": compact_items(plan.get("assumptions")),
+                "created_at": item["created_at"],
+            }
+        )
+    return plans
+
+
 def append_event(record: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     events = record.setdefault("events", [])
     next_id = max((int(item.get("id", 0)) for item in events if isinstance(item, dict)), default=0) + 1
@@ -278,8 +303,9 @@ def scrub_compaction_reasoning_events(record: dict[str, Any]) -> bool:
 
 def build_resume_context(record: dict[str, Any]) -> str:
     compactions = normalize_compactions(record.get("events"))
+    plans = normalize_plans(record.get("events"))[-RESUME_PLAN_LIMIT:]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    if not compactions and not messages:
+    if not compactions and not plans and not messages:
         return ""
 
     parts = ["Previous MIRA session context:"]
@@ -290,6 +316,10 @@ def build_resume_context(record: dict[str, Any]) -> str:
             parts.append(latest["summary"])
         if latest["file_path"]:
             parts.append(f"Evicted conversation archive: {latest['file_path']}")
+    if plans:
+        parts.append("Recent structured plans:")
+        for plan in plans:
+            parts.append(plan_context_text(plan))
     if messages:
         parts.append("Recent visible transcript:")
         for message in messages:
@@ -310,7 +340,9 @@ def with_resume_context(session: dict[str, Any], text: str) -> str:
 
 def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> None:
     record["resume_context_pending"] = resumed and (
-        bool(normalize_compactions(record.get("events"))) or bool(normalize_messages(record.get("events")))
+        bool(normalize_compactions(record.get("events")))
+        or bool(normalize_plans(record.get("events")))
+        or bool(normalize_messages(record.get("events")))
     )
 
 
@@ -328,6 +360,37 @@ def compact_line(value: Any) -> str:
 def compact_text(value: Any) -> str:
     lines = [compact_line(line) for line in str(value or "").splitlines()]
     return "\n".join(line for line in lines if line)
+
+
+def compact_items(value: Any) -> list[str]:
+    """Return compact non-empty list items for stored structured fields."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list | tuple):
+        return []
+    items = []
+    for item in value:
+        text = compact_line(item)
+        if text:
+            items.append(text)
+    return items
+
+
+def plan_context_text(plan: dict[str, Any]) -> str:
+    """Return one structured plan block for resume context."""
+    lines = [f"{plan['id']} ({plan['status']}): {plan['title']}"]
+    for heading, key in (
+        ("Summary", "summary"),
+        ("Key Changes", "key_changes"),
+        ("Test Plan", "test_plan"),
+        ("Assumptions", "assumptions"),
+    ):
+        items = plan.get(key)
+        if not isinstance(items, list) or not items:
+            continue
+        lines.append(f"{heading}:")
+        lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
 
 
 def now_iso() -> str:

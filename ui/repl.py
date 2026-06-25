@@ -11,10 +11,10 @@ from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
-from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
+from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, project_write_tools_text
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_turn_usage, ensure_dashboard
-from session.context import update_title, with_resume_context
+from session.context import mark_resume_context_pending, update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
@@ -25,6 +25,16 @@ You are now in action mode. Write/edit tools are available again, subject to nor
 User request:
 {text}"""
 
+PLAN_REVISION_TEMPLATE = """Revise this structured plan.
+
+Current plan:
+{plan}
+
+User feedback:
+{feedback}
+
+Create a revised plan using present_plan when ready. Preserve the existing intent unless the feedback explicitly changes it."""
+
 PLAN_REQUEST_TEMPLATE = """You are in planning mode.
 Do not call write_file, edit_file, or any other tool that modifies files.
 Do not attempt the requested change.
@@ -32,6 +42,8 @@ Use normal assistant messages for discussion and brainstorming.
 If the user explicitly asks for a plan, final review, or implementation-ready proposal, call present_plan.
 You may also proactively call present_plan when the user is clearly asking for implementation work and you have enough context to propose a useful implementation plan.
 Do not call present_plan for early brainstorming, ambiguous intent, or minor follow-up discussion.
+Fill every present_plan section: Title, Summary, Key Changes, Test Plan, and Assumptions.
+If execute is unavailable, still include test scripts/checks to create or run, skip running tests, and tell the user tests were not run because execute is unavailable.
 
 User request:
 {text}"""
@@ -259,6 +271,7 @@ async def handle_command(
         mode["planning"] = True
         mode["plan_runs"] = mode.get("plan_runs", 0) + 1
         mode["plan_thread_id"] = plan_thread_id(session, mode["plan_runs"])
+        mark_resume_context_pending(session, resumed=True)
         write_line(renderer, f"planning mode: {project_write_tools_text()} disabled; use /act to leave", kind="status")
         return True
 
@@ -381,9 +394,10 @@ def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, s
         return normalize_tool_specs(tools)
 
     if not planning:
-        return DEFAULT_TOOL_SPECS.copy()
+        blocked = {PRESENT_PLAN_TOOL}
+        return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
-    blocked = set(PLAN_PROJECT_WRITE_TOOLS)
+    blocked = {*PLAN_PROJECT_WRITE_TOOLS, "execute"}
     return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
 
@@ -546,6 +560,11 @@ def plan_request_text(text: str) -> str:
     return PLAN_REQUEST_TEMPLATE.format(text=text)
 
 
+def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:
+    """Return a planning-mode request that keeps revision context explicit."""
+    return PLAN_REVISION_TEMPLATE.format(plan=plan_text(plan), feedback=feedback.strip())
+
+
 def action_request_text(mode: dict[str, Any], text: str) -> str:
     """Inject an explicitly approved plan into one action-mode request."""
     plan = mode.get("approved_plan")
@@ -562,6 +581,7 @@ def plan_text(plan: dict[str, Any]) -> str:
     for heading, key in (
         ("Summary", "summary"),
         ("Key Changes", "key_changes"),
+        ("Test Plan", "test_plan"),
         ("Assumptions", "assumptions"),
     ):
         items = plan.get(key)

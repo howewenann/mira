@@ -59,29 +59,33 @@ def plan_request(interrupt: Any) -> dict[str, Any]:
 def normalize_plan(value: dict[str, Any]) -> dict[str, Any]:
     """Return a compact structured plan from an interrupt payload."""
     title = compact_text(value.get("title")) or "Implementation Plan"
-    summary = compact_items(value.get("summary"))
-    key_changes = compact_items(value.get("key_changes"))
-    assumptions = compact_items(value.get("assumptions"))
+    summary = compact_items(value.get("summary"), fallback="Summarize the intended change before implementation.")
+    key_changes = compact_items(value.get("key_changes"), fallback="List the key implementation changes.")
+    test_plan = compact_items(value.get("test_plan"), fallback="Describe the tests or checks to create.")
+    assumptions = compact_items(value.get("assumptions"), fallback="No additional assumptions identified.")
     return {
         "title": title,
         "summary": summary,
         "key_changes": key_changes,
+        "test_plan": test_plan,
         "assumptions": assumptions,
     }
 
 
-def compact_items(value: Any) -> list[str]:
+def compact_items(value: Any, *, fallback: str = "") -> list[str]:
     """Return compact non-empty plan list items."""
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, list | tuple):
-        return []
+        value = []
     items = []
     for item in value:
         text = compact_text(item)
         if text:
             items.append(text)
-    return items
+    if items:
+        return items
+    return [fallback] if fallback else []
 
 
 def compact_text(value: Any) -> str:

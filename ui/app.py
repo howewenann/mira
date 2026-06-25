@@ -40,7 +40,7 @@ from ui.interrupts import (
     ask_user_request,
     plan_request,
 )
-from ui.repl import handle_command, initial_mode, plan_thread_id, refresh_agent_specs, run_user_turn
+from ui.repl import handle_command, initial_mode, plan_revision_text, plan_thread_id, refresh_agent_specs, run_user_turn
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
@@ -313,12 +313,26 @@ class MiraApp(App[None]):
             return
 
         if action == "revise":
+            feedback = await self._prompt_text("Revise Plan", "What should MIRA change about this plan?")
+            feedback = (feedback or "").strip()
+            if not feedback:
+                self.system_message(f"kept plan \"{plan_title(plan)}\" active", kind="muted")
+                self.action_focus_prompt()
+                return
             self._resolve_current_plan("revision requested")
             self.mode["planning"] = True
             self.mode["plan_runs"] = self.mode.get("plan_runs", 0) + 1
             self.mode["plan_thread_id"] = plan_thread_id(self.session, self.mode["plan_runs"])
-            self.system_message(f"revision requested for plan \"{plan_title(plan)}\"", kind="status")
-            self.action_focus_prompt()
+            self.system_message(f"revising plan \"{plan_title(plan)}\"", kind="status")
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            self.query_one(PromptBox).disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_turn_for_plan_revision(plan, feedback),
+                name="plan-revision",
+                exclusive=True,
+            )
             return
 
         if action == "implement":
@@ -350,6 +364,40 @@ class MiraApp(App[None]):
                 text="Implement the approved plan.",
                 display_text=f"Implement plan: {plan_title(plan)}",
                 record_user=False,
+                model_name=self.model_name,
+                context_limit_tokens=self.context_limit_tokens,
+                context_limit_source=self.context_limit_source,
+            )
+            self._refresh_sessions()
+            self._set_status(state="ready")
+        except Exception as exc:
+            self.subagents_cancelled()
+            self.waiting_finished()
+            self.system_message(f"error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            self.subagents_cancelled()
+            self.waiting_finished()
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _run_turn_for_plan_revision(self, plan: dict[str, Any], feedback: str) -> None:
+        """Run planning mode with the current plan and revision feedback."""
+        try:
+            await self._refresh_model_metadata()
+            await run_user_turn(
+                agent=self.agent,
+                plan_agent=self.plan_agent,
+                renderer=self,
+                store=self.store,
+                session=self.session,
+                mode=self.mode,
+                text=plan_revision_text(plan, feedback),
+                display_text=f"Revise plan: {feedback}",
+                record_user=True,
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,

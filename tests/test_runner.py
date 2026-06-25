@@ -465,7 +465,8 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "title": "Plan",
             "summary": ["Do one thing."],
             "key_changes": ["Change code."],
-            "assumptions": [],
+            "test_plan": ["Run focused checks."],
+            "assumptions": ["Execute is available."],
         }
         agent = FakeAgent(
             [

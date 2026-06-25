@@ -270,6 +270,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("write_file", names)
         self.assertIn("edit_file", names)
         self.assertIn("grep", names)
+        self.assertNotIn("present_plan", names)
         grep = next(tool for tool in agent.mira_tool_specs if tool["name"] == "grep")
         self.assertEqual(grep["source"], "default")
         self.assertEqual(grep["replaces"], "built-in")
@@ -286,9 +287,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         names = [tool["name"] for tool in agent.mira_tool_specs]
         self.assertIn("ask_user", names)
+        self.assertIn("present_plan", names)
         self.assertIn("read_file", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
+        self.assertNotIn("execute", names)
 
     def test_plan_tool_filter_hides_write_tools_from_model(self) -> None:
         """PlanningToolFilter should remove write/edit tools from requests."""
@@ -307,6 +310,31 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         names = [tool_name(tool) for tool in filtered.tools]
         self.assertEqual(names, ["read_file", "grep"])
 
+    def test_action_tool_filter_hides_present_plan_from_model(self) -> None:
+        """The action agent should not expose the structured planning tool."""
+        middleware = factory.PlanningToolFilter(factory.ACTION_EXCLUDED_TOOLS)
+        request = FakeModelRequest(
+            [
+                {"name": "read_file"},
+                {"name": "present_plan"},
+                {"name": "write_file"},
+            ]
+        )
+
+        filtered = middleware._filter_request(request)
+
+        names = [tool_name(tool) for tool in filtered.tools]
+        self.assertEqual(names, ["read_file", "write_file"])
+
+    def test_available_tools_are_mode_specific_for_present_plan_and_execute(self) -> None:
+        """Fallback tool display should keep plan-only and execute-only boundaries."""
+        action_names = [tool["name"] for tool in repl.available_tools({}, planning=False)]
+        planning_names = [tool["name"] for tool in repl.available_tools({}, planning=True)]
+
+        self.assertNotIn("present_plan", action_names)
+        self.assertIn("present_plan", planning_names)
+        self.assertNotIn("execute", planning_names)
+
     async def test_plan_and_act_commands_toggle_mode(self) -> None:
         """Slash commands should switch between planning and action modes."""
         renderer = RecordingRenderer()
@@ -323,6 +351,62 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
+
+    async def test_plan_command_primes_resume_context_for_saved_plans(self) -> None:
+        """Starting a fresh planning thread should carry recent plan context."""
+        renderer = RecordingRenderer()
+        mode: dict[str, Any] = {"planning": False}
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "turns": 1,
+            "events": [
+                {
+                    "id": 1,
+                    "type": "plan",
+                    "status": "approved for implementation",
+                    "plan": {
+                        "id": "plan-1",
+                        "title": "Palindrome Plan",
+                        "summary": ["Create palindrome.py."],
+                        "key_changes": ["Add is_palindrome."],
+                        "test_plan": ["Run python palindrome.py."],
+                        "assumptions": ["Use Python."],
+                    },
+                }
+            ],
+        }
+        calls: list[str] = []
+
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
+            calls.append(text)
+            return runner.TurnResult(final_text="done")
+
+        handled = await repl.handle_command("/plan", renderer, session, "model", mode)
+        self.assertTrue(handled)
+        self.assertTrue(session["resume_context_pending"])
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="show me the previous plan",
+            )
+
+        self.assertIn("Recent structured plans:", calls[0])
+        self.assertIn("plan-1 (approved for implementation): Palindrome Plan", calls[0])
+        self.assertIn("Current user request:", calls[0])
+        self.assertFalse(session.get("resume_context_pending"))
 
     async def test_act_does_not_queue_current_plan(self) -> None:
         """Leaving planning mode should not queue plan execution."""
@@ -612,7 +696,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             "title": "Create file",
             "summary": ["Create test.txt with hello world."],
             "key_changes": ["Write the file."],
-            "assumptions": [],
+            "test_plan": ["Run the focused file creation check."],
+            "assumptions": ["Use the root directory."],
         }
         calls: list[tuple[Any, str, str]] = []
         results = [
@@ -909,8 +994,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             "approved_plan": {
                 "title": "Plan text",
                 "summary": ["Do the thing."],
-                "key_changes": [],
-                "assumptions": [],
+                "key_changes": ["Update the implementation."],
+                "test_plan": ["Run focused checks."],
+                "assumptions": ["No extra assumptions."],
             },
         }
 
@@ -919,6 +1005,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Previous planning context:", text)
         self.assertIn("Title: Plan text", text)
         self.assertIn("- Do the thing.", text)
+        self.assertIn("Test Plan:\n- Run focused checks.", text)
         self.assertIn("Do not assume planning-mode permission errors still apply.", text)
         self.assertIn("User request:\nImplement", text)
         self.assertIsNone(mode["approved_plan"])
@@ -955,6 +1042,30 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("early brainstorming", text)
         self.assertIn("call present_plan", text)
         self.assertIn("User request:\nwrite a file", text)
+        self.assertIn("Fill every present_plan section", text)
+        self.assertIn("If execute is unavailable", text)
+
+    def test_plan_revision_text_includes_old_plan_and_feedback(self) -> None:
+        """Revision requests should not depend on planning-thread memory."""
+        text = repl.plan_revision_text(
+            {
+                "title": "Palindrome Plan",
+                "summary": ["Create a helper."],
+                "key_changes": ["Add palindrome.py."],
+                "test_plan": ["Add unit tests."],
+                "assumptions": ["Use Python."],
+            },
+            "include a testing plan",
+        )
+
+        self.assertIn("Revise this structured plan.", text)
+        self.assertIn("Title: Palindrome Plan", text)
+        self.assertIn("Summary:\n- Create a helper.", text)
+        self.assertIn("Key Changes:\n- Add palindrome.py.", text)
+        self.assertIn("Test Plan:\n- Add unit tests.", text)
+        self.assertIn("Assumptions:\n- Use Python.", text)
+        self.assertIn("User feedback:\ninclude a testing plan", text)
+        self.assertIn("Create a revised plan using present_plan", text)
 
     async def test_plans_command_is_removed(self) -> None:
         """The old saved-plan command should no longer be handled specially."""
@@ -973,6 +1084,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(tool, prompt)
 
         self.assertIn("Never call disabled tools", prompt)
+        self.assertIn("Test Plan bullets", prompt)
+        self.assertIn("If execute is unavailable", prompt)
 
 
 if __name__ == "__main__":

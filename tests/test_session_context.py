@@ -667,7 +667,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                         "title": "Plan",
                         "summary": ["One."],
                         "key_changes": ["Two."],
-                        "assumptions": [],
+                        "test_plan": ["Three."],
+                        "assumptions": ["Four."],
                     },
                 },
             ]
@@ -969,6 +970,108 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/.mira/conversation_history/thread-1.md", first)
         self.assertIn("recent request", first)
         self.assertEqual(second, "another request")
+
+    def test_resume_context_includes_recent_structured_plans(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "tool_call",
+                    "mode": "planning",
+                    "name": "present_plan",
+                    "args": {"title": "hidden"},
+                },
+                {
+                    "id": 2,
+                    "type": "tool_result",
+                    "mode": "planning",
+                    "name": "present_plan",
+                    "output": "interrupt",
+                },
+                {
+                    "id": 3,
+                    "type": "plan",
+                    "mode": "planning",
+                    "status": "revision requested",
+                    "plan": {
+                        "id": "plan-1",
+                        "title": "Original Palindrome Plan",
+                        "summary": ["Create palindrome.py."],
+                        "key_changes": ["Add is_palindrome."],
+                        "test_plan": ["Run python palindrome.py."],
+                        "assumptions": ["Use Python."],
+                    },
+                },
+                {
+                    "id": 4,
+                    "type": "plan",
+                    "mode": "planning",
+                    "status": "approved for implementation",
+                    "plan": {
+                        "id": "plan-2",
+                        "title": "Revised Palindrome Plan",
+                        "summary": ["Create palindrome.py with docs."],
+                        "key_changes": ["Add type hints.", "Add a docstring."],
+                        "test_plan": ["Run python palindrome.py.", "Verify Racecar is true."],
+                        "assumptions": ["Use the project root."],
+                    },
+                },
+            ],
+        }
+
+        plans = context.normalize_plans(record["events"])
+        resume = context.build_resume_context(record)
+
+        self.assertEqual([plan["id"] for plan in plans], ["plan-1", "plan-2"])
+        self.assertIn("Recent structured plans:", resume)
+        self.assertIn("plan-1 (revision requested): Original Palindrome Plan", resume)
+        self.assertIn("plan-2 (approved for implementation): Revised Palindrome Plan", resume)
+        self.assertIn("Summary:\n- Create palindrome.py with docs.", resume)
+        self.assertIn("Key Changes:\n- Add type hints.\n- Add a docstring.", resume)
+        self.assertIn("Test Plan:\n- Run python palindrome.py.\n- Verify Racecar is true.", resume)
+        self.assertIn("Assumptions:\n- Use the project root.", resume)
+        self.assertNotIn("tool_call", resume)
+        self.assertNotIn("interrupt", resume)
+
+    def test_resume_context_limits_recent_structured_plans(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": index,
+                    "type": "plan",
+                    "status": "discarded" if index == 2 else "pending",
+                    "plan": {
+                        "id": f"plan-{index}",
+                        "title": f"Plan {index}",
+                        "summary": [f"Summary {index}."],
+                    },
+                }
+                for index in range(1, 5)
+            ],
+        }
+
+        resume = context.build_resume_context(record)
+
+        self.assertNotIn("plan-1 (pending): Plan 1", resume)
+        self.assertIn("plan-2 (discarded): Plan 2", resume)
+        self.assertIn("plan-3 (pending): Plan 3", resume)
+        self.assertIn("plan-4 (pending): Plan 4", resume)
+
+    def test_resume_context_pending_when_only_plan_events_exist(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "plan",
+                    "status": "discarded",
+                    "plan": {"id": "plan-1", "title": "Saved Plan", "summary": ["Do it."]},
+                }
+            ]
+        }
+
+        context.mark_resume_context_pending(record, resumed=True)
+
+        self.assertTrue(record["resume_context_pending"])
 
 
 if __name__ == "__main__":

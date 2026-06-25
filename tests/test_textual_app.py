@@ -19,7 +19,7 @@ from textual.widgets import Button, Input, Static, TextArea
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from config.settings import load_settings, tool_always_allow, tool_enabled
-from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview
+from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
@@ -2118,7 +2118,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "title": "Ephemeral Structured Planning",
             "summary": ["Use a temporary plan bubble."],
             "key_changes": ["Add present_plan.", "Remove /plans."],
-            "assumptions": ["No test plan section."],
+            "test_plan": ["Verify the plan bubble controls."],
+            "assumptions": ["Plans are temporary UI artifacts."],
         }
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -2132,16 +2133,117 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Ephemeral Structured Planning", rendered)
             self.assertIn("Summary", rendered)
             self.assertIn("Key Changes", rendered)
+            self.assertIn("Test Plan", rendered)
             self.assertIn("Assumptions", rendered)
             self.assertEqual(len(app.query(".plan-action")), 3)
 
             app.query_one("#plan-discard-plan-1", Button).press()
-            await pilot.pause()
+            await wait_until(lambda: app.mode["current_plan"] is None)
 
             self.assertIsNone(app.mode["current_plan"])
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Status: discarded", rendered)
+
+    def test_normalize_plan_fills_all_structured_sections(self) -> None:
+        """Partial plan payloads should not drop sections in logs or replay."""
+        plan = normalize_plan({"title": "Partial", "summary": ["One."]})
+
+        self.assertEqual(plan["summary"], ["One."])
+        self.assertEqual(plan["key_changes"], ["List the key implementation changes."])
+        self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
+        self.assertEqual(plan["assumptions"], ["No additional assumptions identified."])
+
+    async def test_present_plan_revise_cancel_keeps_plan_active(self) -> None:
+        """Cancelling a revision prompt should leave the current plan actionable."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Palindrome Plan",
+            "summary": ["Create a palindrome helper."],
+            "key_changes": ["Add palindrome.py."],
+            "test_plan": ["Add unit tests for palindrome inputs."],
+            "assumptions": ["Use Python."],
+        }
+
+        with patch.object(app, "_prompt_text", return_value=None):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app.present_plan(interrupt)
+                await pilot.pause()
+                await app._handle_plan_action("revise", "plan-1")
+                await pilot.pause()
+
+                self.assertIsNotNone(app.mode["current_plan"])
+                self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+                rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
+                self.assertNotIn("Status: revision requested", rendered)
+
+    async def test_present_plan_revise_runs_planning_turn_with_plan_context(self) -> None:
+        """Submitted revision feedback should become a visible planning turn with old-plan context."""
+        app = make_app()
+        calls: list[dict[str, Any]] = []
+        interrupt = {
+            "type": "present_plan",
+            "title": "Palindrome Plan",
+            "summary": ["Create a palindrome helper."],
+            "key_changes": ["Add palindrome.py."],
+            "test_plan": ["Add unit tests for palindrome inputs."],
+            "assumptions": ["Use Python."],
+        }
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            calls.append(kwargs)
+
+        with (
+            patch.object(app, "_prompt_text", return_value="include a testing plan"),
+            patch("ui.app.run_user_turn", fake_run_user_turn),
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app.present_plan(interrupt)
+                await pilot.pause()
+                await app._handle_plan_action("revise", "plan-1")
+                await wait_until(lambda: len(calls) == 1)
+
+                self.assertIsNone(app.mode["current_plan"])
+                self.assertTrue(app.mode["planning"])
+                self.assertEqual(calls[0]["display_text"], "Revise plan: include a testing plan")
+                self.assertTrue(calls[0]["record_user"])
+                self.assertIn("Revise this structured plan.", calls[0]["text"])
+                self.assertIn("Title: Palindrome Plan", calls[0]["text"])
+                self.assertIn("- Add palindrome.py.", calls[0]["text"])
+                self.assertIn("Test Plan:\n- Add unit tests for palindrome inputs.", calls[0]["text"])
+                self.assertIn("User feedback:\ninclude a testing plan", calls[0]["text"])
+                rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
+                self.assertIn("Status: revision requested", rendered)
+
+    async def test_present_plan_revise_button_opens_feedback_prompt(self) -> None:
+        """The Revise button should ask for feedback before resolving the plan."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Palindrome Plan",
+            "summary": ["Create a palindrome helper."],
+            "key_changes": ["Add palindrome.py."],
+            "test_plan": ["Add unit tests for palindrome inputs."],
+            "assumptions": ["Use Python."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            await app.present_plan(interrupt)
+            await pilot.pause()
+            app.query_one("#plan-revise-plan-1", Button).press()
+            await wait_until(lambda: app.query_one(PromptPanel).display)
+
+            self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Revise Plan")
+            self.assertIn("What should MIRA change", renderable_plain(app.query_one("#prompt-panel-message", Static)))
+            app.query_one("#prompt-cancel", Button).press()
+            await wait_until(lambda: not app.query_one(PromptPanel).display)
 
     async def test_git_prompt_booleans_use_in_window_choices(self) -> None:
         """Startup Git prompts should keep returning the expected booleans."""

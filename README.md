@@ -80,6 +80,13 @@ from the TUI with `/settings`.
 - Use `/help` in the TUI to see commands.
 - Use `/plan` when you want MIRA to think through a change without editing
   files.
+  Implementation-ready planning turns appear as plan bubbles. Use Implement to
+  run the plan, Revise to give targeted feedback with the previous plan kept in
+  context, or Discard to close it. Plan bubbles include Summary, Key Changes,
+  Test Plan, and Assumptions; if execute is unavailable, MIRA should still plan
+  test files/checks and say they were not run. Recent plan bubbles are included
+  in lightweight resume context so MIRA can answer follow-ups like "show me the
+  previous plan" after switching modes or resuming a session.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
   active agents without restarting the TUI.
@@ -144,7 +151,8 @@ what MIRA loaded and which project resources replaced defaults.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval.
 - Planning mode that hides and blocks project write tools, with explicit plan
-  bubbles for implementation-ready plans.
+  bubbles for implementation-ready plans. Resolved plan bubbles stay as inactive
+  history; only the newest unresolved plan is actionable.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display and DeepAgents-backed context compaction.
@@ -161,6 +169,8 @@ local timestamp and timezone offset so they sort by creation time, for example:
 ```
 
 MIRA keeps replayable user and assistant messages for the chat history UI.
+Recent structured plan bubbles are also included in model resume context as
+compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA
 records visible compaction markers and archive paths in the session file.
 

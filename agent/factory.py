@@ -13,13 +13,15 @@ from langchain_quickjs import CodeInterpreterMiddleware
 from agent.compaction import create_mira_summarization_tool_middleware as create_summarization_tool_middleware
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.llm import get_llm
-from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, plan_system_prompt
+from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, plan_system_prompt
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs, tool_name as resource_tool_name
 from config.metadata import ModelMetadata
 from config.settings import EXECUTE_TOOL, hitl_settings, tool_always_allow, tool_enabled
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
+ACTION_EXCLUDED_TOOLS = (PRESENT_PLAN_TOOL,)
+PLAN_EXCLUDED_TOOLS = (*PLAN_PROJECT_WRITE_TOOLS, EXECUTE_TOOL)
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -37,8 +39,9 @@ def build_agent(
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_action_permissions(),
+        extra_middleware=[PlanningToolFilter(ACTION_EXCLUDED_TOOLS)],
         interrupt_on=SETTINGS_INTERRUPTS,
-        excluded_tools=(),
+        excluded_tools=ACTION_EXCLUDED_TOOLS,
         enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
     )
     return agent
@@ -58,9 +61,9 @@ def build_plan_agent(
         metadata=metadata,
         permissions=_plan_permissions(),
         system_prompt=PLAN_SYSTEM_PROMPT,
-        extra_middleware=[PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)],
+        extra_middleware=[PlanningToolFilter(PLAN_EXCLUDED_TOOLS)],
         interrupt_on=None,
-        excluded_tools=PLAN_PROJECT_WRITE_TOOLS,
+        excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
     )
     return agent

@@ -88,8 +88,8 @@ Screen {
 
 #prompt-panel {
     height: auto;
-    max-height: 14;
-    padding: 1 1 0 1;
+    max-height: 18;
+    padding: 1;
     background: #11181b;
     border: solid #d2a957;
 }
@@ -132,14 +132,16 @@ Screen {
 }
 
 #prompt-panel-buttons {
-    height: auto;
-    margin-top: 0;
+    height: 3;
+    margin-top: 1;
+    align: left middle;
 }
 
 .prompt-panel-button {
     min-width: 12;
-    width: auto;
-    margin-right: 1;
+    width: 12;
+    height: 3;
+    margin: 0 1 0 0;
 }
 
 .message {

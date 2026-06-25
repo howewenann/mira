@@ -462,6 +462,7 @@ def get_tools(project_backend):
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
+        self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
 
     def test_factory_enables_execute_with_local_shell_backend_without_permissions(self) -> None:
         """Execute mode should expose execute and avoid incompatible filesystem permissions."""
@@ -481,6 +482,7 @@ def get_tools(project_backend):
         self.assertIsInstance(kwargs["backend"].default, LocalShellBackend)
         self.assertIn("execute", kwargs["interrupt_on"])
         self.assertIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
+        self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
 
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""

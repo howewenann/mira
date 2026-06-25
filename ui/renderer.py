@@ -179,6 +179,7 @@ class Renderer:
         for heading, key in (
             ("Summary", "summary"),
             ("Key Changes", "key_changes"),
+            ("Test Plan", "test_plan"),
             ("Assumptions", "assumptions"),
         ):
             items = plan.get(key)
