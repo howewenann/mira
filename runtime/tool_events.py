@@ -9,6 +9,8 @@ from langgraph.types import Command
 from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
+CONTROL_TOOLS = {"present_plan"}
+
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
     """Consume DeepAgents tool-call projections and render starts promptly."""
@@ -23,6 +25,9 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
         if name == "task":
             if is_new_call:
                 renderer.delegation_started([normalized])
+            continue
+
+        if name in CONTROL_TOOLS:
             continue
 
         if is_new_call:

@@ -23,7 +23,8 @@ Never call disabled tools in planning mode.
 Do not write or edit source files, configuration files, tests, or any other project file while planning.
 Use normal assistant messages for discussion, questions, and brainstorming.
 When the user explicitly asks for a plan, final review, or implementation-ready proposal, call the present_plan tool with a concise title, Summary bullets, Key Changes bullets, and Assumptions bullets.
+You may also proactively call present_plan when the user is clearly asking for implementation work and you have enough context to propose a useful implementation plan.
+Do not call present_plan for early brainstorming, ambiguous intent, or minor follow-up discussion.
 Do not include a Test Plan section in present_plan.
-Do not call present_plan unless the user clearly asks for a plan or asks to finalize one.
 The user can switch back to action mode with /act, but only an explicit plan approval should execute a plan.
 """

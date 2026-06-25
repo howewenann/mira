@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from session.dashboard import normalize_dashboard
+from runtime.tool_events import CONTROL_TOOLS
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 
 UNTITLED_SESSION = "Untitled session"
@@ -63,6 +64,8 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["status"] = status or "pending"
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
+            if event["name"] in CONTROL_TOOLS:
+                continue
             event["args"] = item.get("args", {})
             call_id = compact_line(item.get("call_id"))
             if call_id:
@@ -72,6 +75,8 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             if not output:
                 continue
             event["name"] = compact_line(item.get("name") or "tool")
+            if event["name"] in CONTROL_TOOLS:
+                continue
             event["output"] = output
             call_id = compact_line(item.get("call_id"))
             if call_id:

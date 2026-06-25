@@ -951,6 +951,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("You are in planning mode.", text)
         self.assertIn("Use normal assistant messages", text)
+        self.assertIn("proactively call present_plan", text)
+        self.assertIn("early brainstorming", text)
         self.assertIn("call present_plan", text)
         self.assertIn("User request:\nwrite a file", text)
 

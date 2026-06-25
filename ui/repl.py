@@ -30,6 +30,8 @@ Do not call write_file, edit_file, or any other tool that modifies files.
 Do not attempt the requested change.
 Use normal assistant messages for discussion and brainstorming.
 If the user explicitly asks for a plan, final review, or implementation-ready proposal, call present_plan.
+You may also proactively call present_plan when the user is clearly asking for implementation work and you have enough context to propose a useful implementation plan.
+Do not call present_plan for early brainstorming, ambiguous intent, or minor follow-up discussion.
 
 User request:
 {text}"""

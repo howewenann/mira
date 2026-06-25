@@ -15,6 +15,7 @@ from runtime.compaction_filter import (
     should_flush_reasoning_probe,
 )
 from runtime.output_events import normalize_response_delta
+from runtime.tool_events import CONTROL_TOOLS
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 
 COMPACTION_POLL_SECONDS = 10.0
@@ -90,6 +91,8 @@ class SessionRecorder:
         return event
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> dict[str, Any]:
+        if name in CONTROL_TOOLS:
+            return {}
         self.finish_main()
         event = {"type": "tool_call", "mode": self.mode, "name": name, "args": json_value(args)}
         if call_id:
@@ -99,6 +102,8 @@ class SessionRecorder:
         return stored
 
     def tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
+        if name in CONTROL_TOOLS:
+            return {}
         self.finish_main()
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
@@ -109,6 +114,8 @@ class SessionRecorder:
 
     def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
         """Persist a late-discovered tool result before the last assistant reply."""
+        if name in CONTROL_TOOLS:
+            return {}
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
             event["call_id"] = call_id
@@ -316,15 +323,21 @@ class RecordingRenderer:
         call_renderer(self.renderer.text_delta, delta, created_at=event_created_at(event))
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+        if name in CONTROL_TOOLS:
+            return
         event = self.recorder.tool_call(name, args, call_id=call_id)
         call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        if name in CONTROL_TOOLS:
+            return
         event = self.recorder.tool_result(name, result, call_id=call_id)
         call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
 
     def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render and record a late-discovered tool result."""
+        if name in CONTROL_TOOLS:
+            return
         callback = getattr(self.renderer, "recovered_tool_result", None)
         event = self.recorder.recovered_tool_result(name, result, call_id=call_id)
         if callable(callback):

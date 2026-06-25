@@ -22,7 +22,7 @@ from runtime.output_events import (
 )
 from runtime.subagent_events import consume_subagents
 from runtime.tool_call_args import tool_call_args
-from runtime.tool_events import consume_tool_calls
+from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
 from runtime.usage import (
     empty_usage,
     has_context_usage,
@@ -204,7 +204,11 @@ async def run_turn(
         interrupts = await collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
-            pending_calls = output_tool_calls(output.get("value"))
+            pending_calls = [
+                call
+                for call in output_tool_calls(output.get("value"))
+                if str(call.get("name") or "tool") not in CONTROL_TOOLS
+            ]
             leaked_tool_repr = output_has_tool_call_repr(output.get("value"))
             stream_tool_calls_observed = len(result.tool_calls) > tool_call_start
 
@@ -233,7 +237,9 @@ async def run_turn(
         plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
         if plan_interrupt is not None:
-            payload = Command(resume=await renderer.present_plan(plan_interrupt))
+            await renderer.present_plan(plan_interrupt)
+            result.final_text = ""
+            return result
         elif ask_user_interrupt is not None:
             payload = Command(resume=await renderer.ask_user(ask_user_interrupt))
         else:
@@ -266,6 +272,8 @@ def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -
     """Render tool results that only appear in the final graph output."""
     recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
     for item in output_tool_results(output):
+        if item["name"] in CONTROL_TOOLS:
+            continue
         text = item["output"]
         call_id = item["call_id"]
         if not result.record_tool_result(text, call_id, item["name"]):

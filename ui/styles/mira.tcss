@@ -194,8 +194,13 @@ Screen {
 }
 
 .message.plan {
+    height: auto;
     border: solid #A0B86B;
     color: #EEF5D8;
+}
+
+.plan-body {
+    height: auto;
 }
 
 .plan-actions {

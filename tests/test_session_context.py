@@ -639,6 +639,44 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
+    def test_present_plan_tool_events_are_not_persisted_or_rendered(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "planning")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.tool_call("present_plan", {"title": "Plan"}, call_id="call-plan")
+        recording.tool_result("present_plan", "interrupt", call_id="call-plan")
+        recording.recovered_tool_result("present_plan", "interrupt", call_id="call-plan")
+
+        self.assertEqual(renderer.events, [])
+        self.assertEqual(context.normalize_events(record["events"]), [])
+
+    def test_normalize_events_hides_legacy_present_plan_tool_events(self) -> None:
+        record = {
+            "events": [
+                {"id": 1, "type": "tool_call", "mode": "planning", "name": "present_plan", "args": {}},
+                {"id": 2, "type": "tool_result", "mode": "planning", "name": "present_plan", "output": "interrupt"},
+                {
+                    "id": 3,
+                    "type": "plan",
+                    "mode": "planning",
+                    "status": "pending",
+                    "plan": {
+                        "id": "plan-1",
+                        "title": "Plan",
+                        "summary": ["One."],
+                        "key_changes": ["Two."],
+                        "assumptions": [],
+                    },
+                },
+            ]
+        }
+
+        events = context.normalize_events(record["events"])
+
+        self.assertEqual([event["type"] for event in events], ["plan"])
+
     def test_recorder_preserves_subagent_request_on_terminal_events(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

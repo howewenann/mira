@@ -364,9 +364,14 @@ class RunTurnRenderer(RecordingRenderer):
 class FakeStream:
     """Fake DeepAgents stream with the channels the runner consumes."""
 
-    def __init__(self, output: Any = None, interrupts: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        output: Any = None,
+        interrupts: list[Any] | None = None,
+        tool_calls: list[Any] | None = None,
+    ) -> None:
         self.messages = AsyncItems([])
-        self.tool_calls = AsyncItems([])
+        self.tool_calls = AsyncItems(tool_calls or [])
         self.subagents = AsyncItems([])
         self.output_value = output or {}
         self.interrupt_values = interrupts or []
@@ -454,7 +459,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(agent.payloads[1].resume, "Use B")
 
-    async def test_run_turn_resumes_present_plan_interrupt(self) -> None:
+    async def test_run_turn_presents_plan_interrupt_as_terminal_turn(self) -> None:
         interrupt = {
             "type": "present_plan",
             "title": "Plan",
@@ -465,17 +470,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         agent = FakeAgent(
             [
                 FakeStream(output={"messages": []}, interrupts=[interrupt]),
-                FakeStream(output={"messages": []}),
             ]
         )
         renderer = RunTurnRenderer()
 
-        await runner.run_turn(agent, "plan", renderer, "thread-1")
+        result = await runner.run_turn(agent, "plan", renderer, "thread-1")
 
         self.assertEqual(renderer.plan_prompts, [interrupt])
         self.assertEqual(renderer.ask_user_prompts, [])
         self.assertEqual(renderer.approvals, [])
-        self.assertEqual(agent.payloads[1].resume, "Plan presented for user review.")
+        self.assertEqual(len(agent.payloads), 1)
+        self.assertEqual(result.final_text, "")
+
+    async def test_present_plan_tool_stream_is_not_rendered(self) -> None:
+        call = {
+            "name": "present_plan",
+            "id": "call-plan",
+            "args": {"title": "Plan"},
+            "completed": True,
+            "output": "interrupt",
+        }
+        agent = FakeAgent([FakeStream(output={"messages": []}, tool_calls=[call])])
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(agent, "plan", renderer, "thread-1")
+
+        self.assertNotIn(("tool_call", "present_plan", {"title": "Plan"}, "call-plan"), renderer.events)
+        self.assertNotIn(("tool_result", "present_plan", "interrupt", "call-plan"), renderer.events)
 
     async def test_run_turn_exits_when_stream_has_no_interrupts(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []})])
