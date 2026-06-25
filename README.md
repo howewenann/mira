@@ -89,6 +89,10 @@ On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent runs. If you choose to
 continue without Git, that choice is remembered for the workspace.
 
+When you approve repository creation, MIRA runs `git init <workspace>` directly
+from startup code before building the agent. It does not use the agent's shell
+tool approval flow, and it does not stage files or create an initial commit.
+
 ## Project Resources
 
 MIRA ships small default resources, then layers project resources from `.mira/`

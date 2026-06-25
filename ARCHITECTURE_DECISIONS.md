@@ -45,6 +45,15 @@ one-shot renderer.
 guard runs before sessions and agents so MIRA does not begin work in an
 unprotected workspace by accident.
 
+**Git guard behavior:** When Git protection is enabled, startup first checks
+the resolved workspace with `git -C <workspace> rev-parse
+--is-inside-work-tree`, with a parent `.git` marker check as a fallback. If the
+workspace is not covered by Git and the user approves initialization, MIRA runs
+`git init <workspace>` directly through `subprocess.run(...)` in
+`cli/git_guard.py`. This happens before agent construction, so it is outside
+the normal agent tool/HITL approval path. The initializer only creates the
+repository; it does not stage files or create an initial commit.
+
 **Where to check:** `cli/main.py`, `cli/commands.py`, `cli/git_guard.py`,
 `config/loader.py`, `config/metadata.py`.
 
