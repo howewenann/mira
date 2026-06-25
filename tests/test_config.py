@@ -104,6 +104,26 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(config["llm_context_tokens"], DEFAULT_CONTEXT_TOKENS)
         self.assertEqual(config["session_dir"], str(workspace / ".mira" / "_sessions"))
 
+    def test_load_config_can_override_loaded_environment_from_dotenv(self) -> None:
+        """Explicit reloads should let workspace .env replace existing process values."""
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            workspace = Path(directory)
+            (workspace / ".env").write_text(
+                "\n".join(
+                    [
+                        "MIRA_LLM_PROVIDER=lmstudio",
+                        "MIRA_LLM_MODEL=from-dotenv",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.environ["MIRA_LLM_PROVIDER"] = "lmstudio"
+            os.environ["MIRA_LLM_MODEL"] = "already-loaded"
+
+            config = load_config(workspace, override_dotenv=True)
+
+        self.assertEqual(config["llm_model"], "from-dotenv")
+
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:
         """The LangChain model should be created from normalized LLM keys."""
         config = {

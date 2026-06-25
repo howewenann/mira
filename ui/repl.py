@@ -40,7 +40,7 @@ COMMAND_HELP = {
     "/help": "show commands and what they do",
     "/tools": "list tools available in the current mode",
     "/settings": "configure tool approvals in the TUI",
-    "/reload": "reload project resources and rebuild agents in the TUI",
+    "/reload": "reload .env/project resources and rebuild agents in the TUI",
     "/memories": "list loaded memory files and replacements",
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",

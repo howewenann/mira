@@ -591,8 +591,9 @@ class MiraApp(App[None]):
             self.system_message("finish the current turn before reloading agents", kind="warning")
             return True
 
-        self.config = dict(self.config or {})
-        self.config["settings"] = load_settings(self.workspace)
+        from config.loader import load_config
+
+        self.config = load_config(self.workspace, override_dotenv=True)
         await self._rebuild_agents()
         self.system_message("agents reloaded", kind="info")
         return True

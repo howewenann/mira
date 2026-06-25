@@ -184,8 +184,8 @@ stays simpler for scripts and quick prompts.
 
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
-`/reload` reloads current settings and rebuilds agents without restarting the
-session.
+`/reload` reloads `.env`, current settings, and project resources before
+rebuilding agents without restarting the session.
 
 **Where to check:** `ui/app.py`, `ui/widgets/`, `ui/renderer.py`,
 `runtime/*_events.py`, `tests/test_textual_app.py`.

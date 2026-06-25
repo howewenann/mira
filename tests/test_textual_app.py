@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -1072,6 +1073,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.mode["action_tools"], [{"name": "fresh_tool", "description": "Fresh."}])
             self.assertEqual(app.mode["planning_tools"], [{"name": "plan_tool", "description": "Plan."}])
             self.assertIn("agents reloaded", rendered)
+
+    async def test_reload_command_reload_dotenv_with_override(self) -> None:
+        """The reload command should let edited .env values replace loaded env values."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
+            workspace = Path(directory)
+            (workspace / ".env").write_text(
+                "\n".join(
+                    [
+                        "MIRA_LLM_PROVIDER=lmstudio",
+                        "MIRA_LLM_MODEL=from-env-file",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.environ["MIRA_LLM_PROVIDER"] = "lmstudio"
+            os.environ["MIRA_LLM_MODEL"] = "already-loaded"
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async def rebuild(**kwargs: Any) -> None:
+                return None
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+
+                await app._handle_reload_command()
+
+            self.assertEqual(app.config["llm_model"], "from-env-file")
+            self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")
 
     async def test_reload_command_is_refused_while_busy(self) -> None:
         """The reload command should not rebuild agents during an active turn."""

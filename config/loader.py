@@ -24,13 +24,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-def load_config(workspace: Path) -> dict[str, Any]:
+def load_config(workspace: Path, *, override_dotenv: bool = False) -> dict[str, Any]:
     """Load all runtime configuration from the environment and defaults."""
     dotenv_path = workspace / ".env"
     if dotenv_path.exists():
-        load_dotenv(dotenv_path)
+        load_dotenv(dotenv_path, override=override_dotenv)
     else:
-        load_dotenv()
+        load_dotenv(override=override_dotenv)
 
     return {
         "workspace": str(workspace),
