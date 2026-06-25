@@ -82,6 +82,8 @@ from the TUI with `/settings`.
   files.
 - Use `/act` to return to normal action mode.
 - Use `/plans` to view saved plans from the current TUI session.
+- Use `/reload` after changing project resources to rebuild the active agents
+  without restarting the TUI.
 
 On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent runs. If you choose to

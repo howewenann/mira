@@ -38,6 +38,7 @@ COMMAND_HELP = {
     "/help": "show commands and what they do",
     "/tools": "list tools available in the current mode",
     "/settings": "configure tool approvals in the TUI",
+    "/reload": "reload project resources and rebuild agents in the TUI",
     "/memories": "list loaded memory files and replacements",
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
@@ -273,12 +274,11 @@ async def handle_command(
         return True
 
     if text == "/session":
-        write_line(renderer, f"session: {session['id']}")
-        write_line(renderer, f"title: {session.get('title', 'Untitled session')}")
-        write_line(renderer, f"mode: {'planning' if mode['planning'] else 'action'}")
-        write_line(renderer, f"saved plans: {len(mode.get('plans', []))}")
-        write_line(renderer, f"workspace: {session['workspace']}")
-        write_line(renderer, f"turns: {session['turns']}")
+        write_line(renderer, session_summary_text(session, mode))
+        return True
+
+    if text == "/reload":
+        write_line(renderer, "/reload is available in the Textual app", kind="warning")
         return True
 
     if text == "/model":
@@ -292,6 +292,20 @@ async def handle_command(
 def print_help(renderer: Any) -> None:
     """Print command descriptions."""
     write_renderable(renderer, help_table())
+
+
+def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
+    """Return session details as one command output block."""
+    return "\n".join(
+        [
+            f"session: {session['id']}",
+            f"title: {session.get('title', 'Untitled session')}",
+            f"mode: {'planning' if mode['planning'] else 'action'}",
+            f"saved plans: {len(mode.get('plans', []))}",
+            f"workspace: {session['workspace']}",
+            f"turns: {session['turns']}",
+        ]
+    )
 
 
 def help_table() -> Table:

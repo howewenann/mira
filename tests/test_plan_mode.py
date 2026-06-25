@@ -352,6 +352,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("return to action mode", output)
         self.assertIn("/tools", output)
         self.assertIn("/settings", output)
+        self.assertIn("/reload", output)
         self.assertNotIn("/config", output)
         self.assertIn("list tools", output)
         self.assertIn("/memories", output)
@@ -901,9 +902,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         handled = await repl.handle_command("/session", renderer, session, "model", {"planning": True, "plans": []})
 
         self.assertTrue(handled)
-        self.assertIn("session: thread-1", renderer.console.lines)
-        self.assertIn("mode: planning", renderer.console.lines)
-        self.assertIn("saved plans: 0", renderer.console.lines)
+        self.assertEqual(len(renderer.console.lines), 1)
+        self.assertIn("session: thread-1", renderer.console.lines[0])
+        self.assertIn("mode: planning", renderer.console.lines[0])
+        self.assertIn("saved plans: 0", renderer.console.lines[0])
 
     def test_plan_thread_id_is_separate_from_action_thread(self) -> None:
         """Planning threads should be isolated from action memory."""

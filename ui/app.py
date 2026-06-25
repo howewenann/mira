@@ -217,6 +217,10 @@ class MiraApp(App[None]):
             self.run_worker(self._run_settings_command(), name="settings-command", exclusive=False)
             return
 
+        if text == "/reload":
+            self.run_worker(self._run_reload_command(), name="reload-command", exclusive=False)
+            return
+
         if await handle_command(text, self, self.session, self.model_name, self.mode):
             self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -443,6 +447,29 @@ class MiraApp(App[None]):
         except Exception as exc:
             self.system_message(f"settings error: {exc}", kind="error")
             self._set_status(state="error")
+
+    async def _run_reload_command(self) -> None:
+        """Reload project resources and rebuild agents."""
+        try:
+            if await self._handle_reload_command():
+                self._set_status(state="ready")
+        except Exception as exc:
+            self.system_message(f"reload error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.action_focus_prompt()
+
+    async def _handle_reload_command(self) -> bool:
+        """Rebuild agents from current workspace resources and settings."""
+        if self.busy:
+            self.system_message("finish the current turn before reloading agents", kind="warning")
+            return True
+
+        self.config = dict(self.config or {})
+        self.config["settings"] = load_settings(self.workspace)
+        await self._rebuild_agents()
+        self.system_message("agents reloaded", kind="info")
+        return True
 
     def _handle_settings_command(self) -> bool:
         """Mount the interactive settings panel."""

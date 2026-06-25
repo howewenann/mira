@@ -1028,6 +1028,71 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/help", output)
             self.assertIn("/subagents", output)
 
+    async def test_session_command_renders_as_one_status_bubble(self) -> None:
+        """The session command should group its details into one chat block."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/session"))
+            await pilot.pause()
+
+            system_blocks = [child for child in app.query_one(ChatLog).children if "system" in child.classes]
+            self.assertEqual(len(system_blocks), 1)
+            output = renderable_plain(system_blocks[0])
+            self.assertIn("session: thread-1", output)
+            self.assertIn("mode: action", output)
+            self.assertIn("turns: 0", output)
+
+    async def test_reload_command_rebuilds_agents(self) -> None:
+        """The reload command should rebuild agents and refresh command metadata."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
+            plan_agent = type("PlanAgent", (), {"mira_tool_specs": [{"name": "plan_tool", "description": "Plan."}]})()
+
+            with (
+                patch("agent.factory.build_agent", return_value=action_agent) as build_agent,
+                patch("agent.factory.build_plan_agent", return_value=plan_agent) as build_plan_agent,
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    prompt = app.query_one(PromptBox)
+
+                    await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
+                    await wait_until(lambda: app.agent is action_agent)
+                    rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+            self.assertIs(app.plan_agent, plan_agent)
+            self.assertEqual(build_agent.call_count, 1)
+            self.assertEqual(build_plan_agent.call_count, 1)
+            self.assertEqual(app.mode["action_tools"], [{"name": "fresh_tool", "description": "Fresh."}])
+            self.assertEqual(app.mode["planning_tools"], [{"name": "plan_tool", "description": "Plan."}])
+            self.assertIn("agents reloaded", rendered)
+
+    async def test_reload_command_is_refused_while_busy(self) -> None:
+        """The reload command should not rebuild agents during an active turn."""
+        app = make_app()
+        calls: list[str] = []
+
+        async def rebuild(**kwargs: Any) -> None:
+            calls.append("rebuild")
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._rebuild_agents = rebuild
+            app.busy = True
+
+            handled = await app._handle_reload_command()
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+        self.assertTrue(handled)
+        self.assertEqual(calls, [])
+        self.assertIn("finish the current turn before reloading agents", rendered)
+
     async def test_approval_prompt_uses_in_window_panel_with_arrow_keys(self) -> None:
         """Approval prompts should stay in the app layout and accept arrow keys."""
         app = make_app()
