@@ -6,10 +6,19 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
-from deepagents.middleware.summarization import create_summarization_tool_middleware
+from deepagents.middleware.summarization import create_summarization_middleware, create_summarization_tool_middleware
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 
+from runtime.context_usage import record_deepagents_context_tokens
 from runtime.compaction_state import compaction_scope
+
+
+def create_mira_summarization_middleware(model: Any, backend: Any) -> Any:
+    """Create DeepAgents auto-summarization with an observed count hook."""
+    middleware = create_summarization_middleware(model=model, backend=backend)
+    mark_summarization_engine(middleware)
+    observe_summarization_counts(middleware)
+    return middleware
 
 
 def create_mira_summarization_tool_middleware(model: Any, backend: Any) -> Any:
@@ -154,6 +163,28 @@ def mark_summarization_engine(summarization: Any) -> None:
     setattr(summarization, "_mira_compaction_marked", True)
 
 
+def observe_summarization_counts(summarization: Any) -> None:
+    """Observe DeepAgents' own context count without changing it."""
+    if summarization is None or getattr(summarization, "_mira_count_observed", False):
+        return
+
+    count_tokens = getattr(summarization, "_count_tokens", None)
+    if not callable(count_tokens):
+        return
+
+    @wraps(count_tokens)
+    def wrapped_count_tokens(*args: Any, **kwargs: Any) -> int:
+        total = count_tokens(*args, **kwargs)
+        try:
+            record_deepagents_context_tokens(int(total))
+        except Exception:
+            pass
+        return total
+
+    setattr(summarization, "_count_tokens", wrapped_count_tokens)
+    setattr(summarization, "_mira_count_observed", True)
+
+
 def sanitize_messages_for_archive(messages: list[Any]) -> list[Any]:
     """Return visible-only messages for DeepAgents conversation-history archives."""
     sanitized = []
@@ -276,7 +307,9 @@ def field(value: Any, name: str) -> Any:
 __all__ = [
     "PostTurnCompactionResult",
     "compact_after_turn",
+    "create_mira_summarization_middleware",
     "create_mira_summarization_tool_middleware",
     "mark_summarization_engine",
+    "observe_summarization_counts",
     "sanitize_messages_for_archive",
 ]

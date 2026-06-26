@@ -441,6 +441,7 @@ def get_tools(project_backend):
             with (
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.factory.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+                patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
                 patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
@@ -451,6 +452,8 @@ def get_tools(project_backend):
         self.assertEqual(code_middleware.call_args.kwargs["ptc"], ["task"])
         self.assertIsNotNone(code_middleware.call_args.kwargs["skills_backend"])
         kwargs = create_deep_agent.call_args.kwargs
+        self.assertIn("auto-summary", kwargs["middleware"])
+        self.assertIn("summary", kwargs["middleware"])
         self.assertTrue(any(isinstance(middleware, ProviderContextOverflowMiddleware) for middleware in kwargs["middleware"]))
         self.assertIn("/mira-defaults/skills", kwargs["skills"])
         self.assertIn("/.mira/skills", kwargs["skills"])
@@ -472,6 +475,7 @@ def get_tools(project_backend):
             with (
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
                 patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
@@ -483,6 +487,20 @@ def get_tools(project_backend):
         self.assertIn("execute", kwargs["interrupt_on"])
         self.assertIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
+
+    def test_factory_registers_specific_and_provider_summarization_exclusions(self) -> None:
+        """DeepAgents should exclude its hidden default summarization for resolved models."""
+        model = type("Model", (), {})()
+        with (
+            patch("agent.factory.register_harness_profile") as register,
+            patch("deepagents._models.get_model_provider", return_value="anyllm"),
+            patch("deepagents._models.get_model_identifier", return_value="google/gemma"),
+            patch.object(factory, "_REGISTERED_SUMMARIZATION_PROFILE_KEYS", set()),
+        ):
+            factory._register_summarization_exclusion({"llm_provider": "openai", "llm_model": "gpt-test"}, model)
+
+        keys = [call.args[0] for call in register.call_args_list]
+        self.assertEqual(keys, ["openai:gpt-test", "openai", "anyllm:google/gemma", "anyllm"])
 
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""

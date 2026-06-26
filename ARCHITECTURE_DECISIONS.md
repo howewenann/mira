@@ -208,11 +208,13 @@ tool/subagent events are projected differently.
 ## Sessions And Compaction
 
 **Decision:** MIRA stores durable session JSON for replayable UI history, while
-DeepAgents handles runtime context compaction.
+DeepAgents handles runtime context counting and compaction.
 
 **Why:** Session files should be stable user-facing history after restart.
-Runtime compaction is agent-execution behavior and belongs to DeepAgents; MIRA
-records visible markers and archive paths so the UI can explain what happened.
+Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
+observes the token count returned by DeepAgents' summarization middleware so the
+UI can show context pressure, but MIRA does not compute token counts or decide
+when to compact.
 
 **Where to check:** `session/store.py`, `session/context.py`,
 `session/recorder.py`, `session/dashboard.py`, `runtime/compaction_filter.py`.
@@ -223,10 +225,13 @@ or replay context starts depending on a new source of truth.
 ## Context Metadata
 
 **Decision:** MIRA resolves model context metadata before turns, sets the
-DeepAgents context profile, and shows context pressure in the UI.
+DeepAgents context profile, and shows observed DeepAgents context pressure in
+the UI.
 
 **Why:** Providers expose context limits differently. MIRA normalizes the
 effective limit so the model profile, dashboard, and overflow handling agree.
+Provider `In` and `Out` usage are cumulative session totals and are not used as
+current-context occupancy.
 
 **Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/app.py`,
 `agent/context_overflow.py`.

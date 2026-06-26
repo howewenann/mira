@@ -12,8 +12,9 @@ from rich.table import Table
 
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, project_write_tools_text
+from runtime.context_usage import context_usage_scope
 from runtime.runner import TurnResult, run_turn
-from session.dashboard import apply_turn_usage, ensure_dashboard
+from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.context import mark_resume_context_pending, update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
 
@@ -142,6 +143,20 @@ async def run_user_turn(
         if callable(usage_updated):
             usage_updated()
 
+    def apply_deepagents_context_usage(usage: dict[str, Any]) -> None:
+        apply_context_usage(
+            session,
+            usage.get("context_tokens", 0),
+            model_name=model_name,
+            context_limit_tokens=context_limit_tokens,
+            context_limit_source=context_limit_source,
+            source=str(usage.get("context_source") or "unknown"),
+        )
+        store.save(session)
+        usage_updated = getattr(renderer, "usage_updated", None)
+        if callable(usage_updated):
+            usage_updated()
+
     if mode["planning"]:
         active_agent = plan_agent
         thread_id = mode["plan_thread_id"]
@@ -178,13 +193,14 @@ async def run_user_turn(
     poller = asyncio.create_task(poll_compactions(recorder, active_agent, thread_id))
 
     try:
-        result = await run_turn(
-            agent=active_agent,
-            text=request_text,
-            renderer=wrapped_renderer,
-            thread_id=thread_id,
-            usage_callback=apply_live_usage,
-        )
+        with context_usage_scope(apply_deepagents_context_usage):
+            result = await run_turn(
+                agent=active_agent,
+                text=request_text,
+                renderer=wrapped_renderer,
+                thread_id=thread_id,
+                usage_callback=apply_live_usage,
+            )
     except asyncio.CancelledError:
         await sync_compaction_safely(recorder, active_agent, thread_id)
         recorder.interrupted("turn interrupted before completion")

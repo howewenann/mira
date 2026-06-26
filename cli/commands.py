@@ -89,7 +89,8 @@ async def _run(
 async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     """Run one prompt and persist the visible transcript."""
     from runtime.runner import run_turn
-    from session.dashboard import apply_turn_usage
+    from runtime.context_usage import context_usage_scope
+    from session.dashboard import apply_context_usage, apply_turn_usage
     from session.context import sync_deepagents_compaction, update_title, with_resume_context
     from session.recorder import RecordingRenderer, SessionRecorder
     from agent.context_overflow import (
@@ -105,13 +106,25 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     update_title(app["session"])
     recorder.save()
     renderer = RecordingRenderer(app["renderer"], recorder)
-    try:
-        result = await run_turn(
-            agent=app["agent"],
-            text=request_text,
-            renderer=renderer,
-            thread_id=app["session"]["id"],
+
+    def apply_deepagents_context_usage(usage: dict[str, Any]) -> None:
+        apply_context_usage(
+            app["session"],
+            usage.get("context_tokens", 0),
+            model_name=app.get("model_name", ""),
+            context_limit_tokens=app.get("context_limit_tokens"),
+            context_limit_source=app.get("context_limit_source", "unknown"),
+            source=str(usage.get("context_source") or "unknown"),
         )
+
+    try:
+        with context_usage_scope(apply_deepagents_context_usage):
+            result = await run_turn(
+                agent=app["agent"],
+                text=request_text,
+                renderer=renderer,
+                thread_id=app["session"]["id"],
+            )
     except ContextOverflowError as exc:
         with suppress(Exception):
             await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"])

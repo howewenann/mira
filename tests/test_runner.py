@@ -11,7 +11,8 @@ from typing import Any
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.compaction import mark_summarization_engine, sanitize_messages_for_archive
+from agent.compaction import mark_summarization_engine, observe_summarization_counts, sanitize_messages_for_archive
+from runtime.context_usage import context_usage_scope
 from runtime.compaction_state import compaction_active, compaction_scope
 from runtime import runner
 from runtime.message_events import consume_messages
@@ -534,7 +535,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(agent.payloads), 1)
         self.assertEqual(result.final_text, "Since it")
-        self.assertEqual(result.context_tokens, 9912)
+        self.assertEqual(result.context_tokens, 0)
         self.assertNotIn(("discard_last_assistant",), renderer.events)
 
     async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
@@ -790,7 +791,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
-        self.assertEqual(result.usage["context_tokens"], 5603)
+        self.assertEqual(result.usage["context_tokens"], 0)
 
     def test_commit_loop_usage_returns_per_loop_delta(self) -> None:
         result = runner.TurnResult()
@@ -818,12 +819,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(usage["input_tokens"], 1400)
         self.assertEqual(usage["output_tokens"], 67)
-        self.assertEqual(usage["context_tokens"], 1467)
-        self.assertEqual(usage["context_source"], "provider.input_output_tokens")
+        self.assertEqual(usage["context_tokens"], 0)
+        self.assertEqual(usage["context_source"], "unknown")
         self.assertEqual(result.usage["input_tokens"], 1400)
         self.assertEqual(result.usage["output_tokens"], 67)
-        self.assertEqual(result.usage["context_tokens"], 1467)
-        self.assertEqual(result.usage["context_source"], "provider.input_output_tokens")
+        self.assertEqual(result.usage["context_tokens"], 0)
+        self.assertEqual(result.usage["context_source"], "unknown")
 
     def test_commit_loop_usage_uses_provider_pair_above_visible_estimate(self) -> None:
         result = runner.TurnResult()
@@ -840,8 +841,34 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.usage["input_tokens"], 9467)
         self.assertEqual(result.usage["output_tokens"], 123)
-        self.assertEqual(result.usage["context_tokens"], 9590)
-        self.assertEqual(result.usage["context_source"], "provider.input_output_tokens")
+        self.assertEqual(result.usage["context_tokens"], 0)
+        self.assertEqual(result.usage["context_source"], "unknown")
+
+    def test_observed_summarization_count_returns_original_value_once(self) -> None:
+        calls = []
+
+        class Summarization:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def _count_tokens(self, *args: Any, **kwargs: Any) -> int:
+                self.calls += 1
+                return 1234
+
+        summarization = Summarization()
+
+        observe_summarization_counts(summarization)
+        first_wrapper = summarization._count_tokens
+        observe_summarization_counts(summarization)
+
+        with context_usage_scope(calls.append):
+            total = summarization._count_tokens(["message"], tools=[])
+
+        self.assertEqual(total, 1234)
+        self.assertEqual(summarization.calls, 1)
+        self.assertIs(summarization._count_tokens, first_wrapper)
+        self.assertEqual(calls[0]["context_tokens"], 1234)
+        self.assertEqual(calls[0]["context_source"], "deepagents.summarization._count_tokens")
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""
@@ -857,7 +884,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(usage["input_tokens"], 9200)
         self.assertEqual(usage["output_tokens"], 200)
-        self.assertEqual(usage["context_tokens"], 9400)
+        self.assertEqual(usage["context_tokens"], 0)
 
     async def test_run_turn_does_not_sum_historical_final_message_usage(self) -> None:
         """Cumulative usage should add one current call per turn, not all state messages."""
@@ -899,7 +926,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.usage["input_tokens"], 27000)
         self.assertEqual(result.usage["output_tokens"], 600)
-        self.assertEqual(result.usage["context_tokens"], 10300)
+        self.assertEqual(result.usage["context_tokens"], 0)
 
     async def test_run_turn_does_not_invent_context_when_usage_is_missing(self) -> None:
         agent = FakeAgent(
@@ -956,7 +983,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["input_tokens"], 5512)
         self.assertEqual(result.usage["output_tokens"], 91)
         self.assertEqual(result.usage["total_tokens"], 5603)
-        self.assertEqual(result.usage["context_tokens"], 5603)
+        self.assertEqual(result.usage["context_tokens"], 0)
 
     async def test_run_turn_records_tool_calls_and_results(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []}, interrupts=[])])

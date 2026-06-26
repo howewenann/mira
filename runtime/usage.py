@@ -36,11 +36,8 @@ def merge_usage(*items: dict[str, Any]) -> dict[str, Any]:
         merged["input_tokens"] += positive_int(item.get("input_tokens"))
         merged["output_tokens"] += positive_int(item.get("output_tokens"))
         merged["total_tokens"] += positive_int(item.get("total_tokens"))
-        merged["context_tokens"] = max(
-            merged["context_tokens"],
-            positive_int(item.get("context_tokens")),
-            context_tokens_from_counts(item),
-        )
+        selected = select_context_usage(item)
+        merged["context_tokens"] = max(merged["context_tokens"], positive_int(selected.get("context_tokens")))
         if item_context_source(item) != "unknown":
             merged["context_source"] = item_context_source(item)
         if merged["source"] == "unknown" and item.get("source"):
@@ -149,13 +146,7 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens or input_tokens + output_tokens,
-        "context_tokens": context_tokens_from_counts(
-            {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-            }
-        ),
+        "context_tokens": context_tokens_for_mapping(source, total_key, total_tokens),
         "context_source": context_source_for_mapping(source, total_key, input_tokens, output_tokens, total_tokens),
         "source": source if input_tokens or output_tokens or total_tokens else "unknown",
     }
@@ -163,16 +154,20 @@ def usage_from_mapping(value: Any, source: str) -> dict[str, Any]:
 
 
 def context_tokens_from_counts(value: dict[str, Any]) -> int:
-    """Return current context occupancy from normalized provider counts."""
+    """Return current context occupancy from trusted full-context counts."""
     total_tokens = positive_int(value.get("total_tokens"))
-    if total_tokens:
+    source = item_context_source(value)
+    if total_tokens and is_trusted_full_context_source(source):
         return total_tokens
+    return 0
 
-    input_tokens = positive_int(value.get("input_tokens"))
-    output_tokens = positive_int(value.get("output_tokens"))
-    if input_tokens and output_tokens:
-        return input_tokens + output_tokens
-    return input_tokens
+
+def context_tokens_for_mapping(source: str, total_key: str, total_tokens: int) -> int:
+    """Return context occupancy only for provider fields known to mean full context."""
+    context_source = context_source_for_mapping(source, total_key, 0, 0, total_tokens)
+    if is_trusted_full_context_source(context_source):
+        return positive_int(total_tokens)
+    return 0
 
 
 def message_text(message: Any) -> str:
@@ -270,19 +265,10 @@ def item_context_source(usage: dict[str, Any]) -> str:
 def select_context_usage(usage: dict[str, Any]) -> dict[str, Any]:
     """Select current-context occupancy by source precedence."""
     selected = dict(usage)
-    input_tokens = positive_int(usage.get("input_tokens"))
-    output_tokens = positive_int(usage.get("output_tokens"))
-    provider_pair = input_tokens + output_tokens
     context_tokens = positive_int(usage.get("context_tokens"))
     context_source = item_context_source(usage)
 
     if is_trusted_full_context_source(context_source) and context_tokens:
-        selected["context_tokens"] = context_tokens
-        selected["context_source"] = context_source
-    elif provider_pair:
-        selected["context_tokens"] = provider_pair
-        selected["context_source"] = "provider.input_output_tokens"
-    elif context_tokens:
         selected["context_tokens"] = context_tokens
         selected["context_source"] = context_source
     else:

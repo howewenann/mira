@@ -5,12 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deepagents import FilesystemPermission, create_deep_agent
+from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
 from langchain_core.messages import AIMessage
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
-from agent.compaction import create_mira_summarization_tool_middleware as create_summarization_tool_middleware
+from agent.compaction import (
+    create_mira_summarization_middleware as create_summarization_middleware,
+)
+from agent.compaction import (
+    create_mira_summarization_tool_middleware as create_summarization_tool_middleware,
+)
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.llm import get_llm
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, plan_system_prompt
@@ -22,6 +27,7 @@ from config.settings import EXECUTE_TOOL, hitl_settings, tool_always_allow, tool
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 ACTION_EXCLUDED_TOOLS = (PRESENT_PLAN_TOOL,)
 PLAN_EXCLUDED_TOOLS = (*PLAN_PROJECT_WRITE_TOOLS, EXECUTE_TOOL)
+_REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 
@@ -97,12 +103,15 @@ def _build_agent(
     permissions = [] if enable_execute_backend else permissions
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
 
-    summarization_middleware = create_summarization_tool_middleware(model=model, backend=backend)
+    _register_summarization_exclusion(config, model)
+    summarization_middleware = create_summarization_middleware(model=model, backend=backend)
+    summarization_tool_middleware = create_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
+        summarization_middleware,
         FilesystemToolArgNormalizer(Path(workspace)),
         ProviderContextOverflowMiddleware(),
         CodeInterpreterMiddleware(ptc=["task"], skills_backend=backend),
-        summarization_middleware,
+        summarization_tool_middleware,
     ]
     middleware.extend(extra_middleware or [])
 
@@ -133,8 +142,56 @@ def _build_agent(
     )
     _attach_resources(agent, resources.metadata)
     _attach_backend(agent, backend)
-    _attach_summarization(agent, getattr(summarization_middleware, "_summarization", None))
+    _attach_summarization(agent, summarization_middleware)
     return agent
+
+
+def _register_summarization_exclusion(config: dict[str, Any] | None, model: Any | None = None) -> None:
+    """Ask DeepAgents not to auto-add a second summarization middleware."""
+    keys = _summarization_profile_keys(config, model)
+
+    for key in keys:
+        if key in _REGISTERED_SUMMARIZATION_PROFILE_KEYS:
+            continue
+        register_harness_profile(
+            key,
+            HarnessProfile(excluded_middleware=frozenset({"SummarizationMiddleware"})),
+        )
+        _REGISTERED_SUMMARIZATION_PROFILE_KEYS.add(key)
+
+
+def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None = None) -> list[str]:
+    """Return DeepAgents harness profile keys that may match this model."""
+    candidates: list[str] = []
+
+    provider = str((config or {}).get("llm_provider") or "").strip().lower()
+    model_name = str((config or {}).get("llm_model") or "").strip()
+    if provider and model_name:
+        candidates.append(f"{provider}:{model_name}")
+    if provider:
+        candidates.append(provider)
+
+    try:
+        from deepagents._models import get_model_identifier, get_model_provider
+
+        resolved_provider = str(get_model_provider(model) or "").strip()
+        identifier = str(get_model_identifier(model) or "").strip()
+    except Exception:
+        resolved_provider = ""
+        identifier = ""
+
+    if resolved_provider and identifier and ":" not in identifier:
+        candidates.append(f"{resolved_provider}:{identifier}")
+    if identifier and ":" in identifier:
+        candidates.append(identifier)
+    if resolved_provider:
+        candidates.append(resolved_provider)
+
+    keys: list[str] = []
+    for key in candidates:
+        if key and key not in keys:
+            keys.append(key)
+    return keys
 
 
 def _action_permissions() -> list[FilesystemPermission]:

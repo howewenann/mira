@@ -230,8 +230,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(normalized["dashboard"]["model"], "lmstudio:gemma")
         self.assertEqual(normalized["dashboard"]["tokens"], {"in": 5512, "out": 91})
-        self.assertEqual(normalized["dashboard"]["context"]["used_tokens"], 5603)
-        self.assertEqual(normalized["dashboard"]["context"]["percent"], 68.4)
+        self.assertEqual(normalized["dashboard"]["context"]["used_tokens"], 0)
+        self.assertEqual(normalized["dashboard"]["context"]["percent"], 0.0)
 
     def test_dashboard_context_uses_total_tokens_without_changing_token_totals(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -275,9 +275,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         apply_turn_usage(record, result, model_name="lmstudio:qwen3.5-27b-mtp", context_limit_tokens=12000)
 
         self.assertEqual(record["dashboard"]["tokens"], {"in": 1400, "out": 67})
-        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 1467)
-        self.assertEqual(record["dashboard"]["context"]["percent"], 12.2)
-        self.assertEqual(record["dashboard"]["context"]["source"], "provider.input_output_tokens")
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 0)
+        self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
+        self.assertEqual(record["dashboard"]["context"]["source"], "unknown")
 
     def test_dashboard_context_uses_provider_pair_above_visible_estimate(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -299,10 +299,10 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         apply_turn_usage(record, result, model_name="lmstudio:qwen3.5-27b-mtp", context_limit_tokens=10000)
 
         self.assertEqual(record["dashboard"]["tokens"], {"in": 9467, "out": 123})
-        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 9590)
-        self.assertEqual(record["dashboard"]["context"]["source"], "provider.input_output_tokens")
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 0)
+        self.assertEqual(record["dashboard"]["context"]["source"], "unknown")
 
-    def test_dashboard_estimate_does_not_lower_provider_context_usage(self) -> None:
+    def test_dashboard_context_comes_from_deepagents_count(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
         provider_result = type(
             "Result",
@@ -317,32 +317,20 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )()
-        compacted_result = type(
-            "Result",
-            (),
-            {
-                "usage": {
-                    "input_tokens": 8200,
-                    "output_tokens": 100,
-                    "total_tokens": 8300,
-                    "context_tokens": 8300,
-                    "source": "usage_metadata",
-                }
-            },
-        )()
 
         apply_turn_usage(record, provider_result, model_name="lmstudio:qwen", context_limit_tokens=10000)
+        self.assertEqual(record["dashboard"]["tokens"], {"in": 8400, "out": 1400})
+        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 0)
+
         apply_context_usage(
             record,
-            7,
+            9800,
             model_name="lmstudio:qwen",
             context_limit_tokens=10000,
-            source="langchain_approx.count_tokens",
+            source="deepagents.summarization._count_tokens",
         )
         self.assertEqual(record["dashboard"]["context"]["used_tokens"], 9800)
-
-        apply_turn_usage(record, compacted_result, model_name="lmstudio:qwen", context_limit_tokens=10000)
-        self.assertEqual(record["dashboard"]["context"]["used_tokens"], 8300)
+        self.assertEqual(record["dashboard"]["context"]["source"], "deepagents.summarization._count_tokens")
 
     def test_dashboard_limit_source_does_not_claim_context_usage(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))

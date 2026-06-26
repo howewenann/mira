@@ -66,6 +66,9 @@ MIRA_TOOL_OUTPUT_CHARS=240
 Common `MIRA_LLM_PROVIDER` values include `lmstudio`, `ollama`, `openai`,
 `anthropic`, `gemini`, `groq`, and `openrouter`. Optional generation settings
 include `MIRA_LLM_TEMPERATURE`, `MIRA_LLM_MAX_TOKENS`, and `MIRA_LLM_TOP_P`.
+`MIRA_LLM_CONTEXT_TOKENS` is the configured context-window cap; MIRA uses LM
+Studio's loaded context when available and otherwise applies provider profile
+limits or this configured cap to DeepAgents.
 
 MIRA does not create or overwrite `.env`. Workspace settings such as Git
 protection and tool approval behavior live in `.mira/settings.yml`; change them
@@ -155,7 +158,8 @@ what MIRA loaded and which project resources replaced defaults.
   history; only the newest unresolved plan is actionable.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
-- Context pressure display and DeepAgents-backed context compaction.
+- Context pressure display from DeepAgents' own summarization count, plus
+  DeepAgents-backed context compaction.
 - Default `grep`, `ask_user`, and `present_plan` tools for search, concrete
   user decisions, and structured plan review.
 
@@ -172,7 +176,10 @@ MIRA keeps replayable user and assistant messages for the chat history UI.
 Recent structured plan bubbles are also included in model resume context as
 compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA
-records visible compaction markers and archive paths in the session file.
+records visible compaction markers and archive paths in the session file. The
+status line's `Ctx` value is the latest DeepAgents summarization count MIRA has
+observed; `In` and `Out` are cumulative provider usage totals across the
+session.
 
 ## Development
 

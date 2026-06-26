@@ -17,6 +17,7 @@ from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text
 from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
 from runtime import runner
+from runtime.context_usage import record_deepagents_context_tokens
 from ui import repl
 
 
@@ -174,6 +175,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
@@ -192,6 +194,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
@@ -226,6 +229,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
@@ -244,21 +248,25 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value=model) as get_llm,
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary") as auto_summary,
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary") as summary,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer", metadata=metadata)
 
         get_llm.assert_called_once_with({}, metadata=metadata)
+        auto_summary.assert_called_once()
         summary.assert_called_once()
+        self.assertIs(auto_summary.call_args.kwargs["model"], model)
         self.assertIs(summary.call_args.kwargs["model"], model)
-        self.assertEqual(summary.call_args.kwargs["model"].profile["max_input_tokens"], 10000)
+        self.assertEqual(auto_summary.call_args.kwargs["model"].profile["max_input_tokens"], 10000)
 
     def test_agent_build_attaches_tool_metadata(self) -> None:
         """Built agents should expose tool metadata for the UI."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
@@ -280,6 +288,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
             patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
@@ -770,6 +779,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             }
             if usage_callback is not None:
                 usage_callback(usage)
+            record_deepagents_context_tokens(9624)
             result = runner.TurnResult()
             result.add_usage(usage)
             return result
@@ -793,7 +803,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["dashboard"]["tokens"], {"in": 8200, "out": 1424})
         self.assertEqual(session["dashboard"]["context"]["used_tokens"], 9624)
         self.assertEqual(session["turns"], 1)
-        self.assertEqual(renderer.usage_updates, 1)
+        self.assertEqual(renderer.usage_updates, 2)
         self.assertEqual(store.saves[-1]["turns"], 1)
 
     async def test_run_user_turn_does_not_save_blocked_plan(self) -> None:
