@@ -212,13 +212,16 @@ DeepAgents handles runtime context counting and compaction.
 
 **Why:** Session files should be stable user-facing history after restart.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
-observes the token count returned by DeepAgents' summarization middleware so the
-UI can show context pressure, but MIRA does not compute token counts or decide
-when to compact. Provider `In` and `Out` usage are cumulative per-call totals,
-not current context occupancy.
+installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
+summarization defaults, then observes that middleware's `_count_tokens` result
+so the UI can show context pressure. MIRA does not run a parallel dashboard
+counter, compute provider prompt tokens, or decide when to compact. Provider
+`In` and `Out` usage are cumulative per-call totals, not current context
+occupancy.
 
-**Where to check:** `session/store.py`, `session/context.py`,
-`session/recorder.py`, `session/dashboard.py`, `runtime/compaction_filter.py`.
+**Where to check:** `agent/compaction.py`, `session/store.py`,
+`session/context.py`, `session/recorder.py`, `session/dashboard.py`,
+`runtime/context_usage.py`, `runtime/compaction_filter.py`.
 
 **Update this when:** Session JSON shape changes, compaction ownership changes,
 or replay context starts depending on a new source of truth.
