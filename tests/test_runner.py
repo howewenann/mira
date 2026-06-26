@@ -11,7 +11,12 @@ from typing import Any
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
 
-from agent.compaction import mark_summarization_engine, observe_summarization_counts, sanitize_messages_for_archive
+from agent.compaction import (
+    MiraSummarizationMiddleware,
+    mark_summarization_engine,
+    observe_summarization_counts,
+    sanitize_messages_for_archive,
+)
 from runtime.context_usage import context_usage_scope
 from runtime.compaction_state import compaction_active, compaction_scope
 from runtime import runner
@@ -869,6 +874,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(summarization._count_tokens, first_wrapper)
         self.assertEqual(calls[0]["context_tokens"], 1234)
         self.assertEqual(calls[0]["context_source"], "deepagents.summarization._count_tokens")
+
+    def test_mira_summarization_middleware_has_distinct_exclusion_name(self) -> None:
+        """DeepAgents should not remove MIRA's observed summarizer with its default one."""
+        middleware = object.__new__(MiraSummarizationMiddleware)
+
+        self.assertEqual(middleware.name, "MiraSummarizationMiddleware")
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""

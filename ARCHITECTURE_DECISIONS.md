@@ -214,7 +214,8 @@ DeepAgents handles runtime context counting and compaction.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 observes the token count returned by DeepAgents' summarization middleware so the
 UI can show context pressure, but MIRA does not compute token counts or decide
-when to compact.
+when to compact. Provider `In` and `Out` usage are cumulative per-call totals,
+not current context occupancy.
 
 **Where to check:** `session/store.py`, `session/context.py`,
 `session/recorder.py`, `session/dashboard.py`, `runtime/compaction_filter.py`.
@@ -231,7 +232,8 @@ the UI.
 **Why:** Providers expose context limits differently. MIRA normalizes the
 effective limit so the model profile, dashboard, and overflow handling agree.
 Provider `In` and `Out` usage are cumulative session totals and are not used as
-current-context occupancy.
+current-context occupancy; after multiple turns they include repeated
+conversation history and are not expected to add up to the latest `Ctx` value.
 
 **Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/app.py`,
 `agent/context_overflow.py`.

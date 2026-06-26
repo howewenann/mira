@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
-from deepagents.middleware.summarization import create_summarization_middleware, create_summarization_tool_middleware
+from deepagents.middleware.summarization import (
+    DEFAULT_SUMMARY_PROMPT,
+    SummarizationMiddleware,
+    compute_summarization_defaults,
+    count_tokens_approximately,
+    create_summarization_tool_middleware,
+)
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 
 from runtime.context_usage import record_deepagents_context_tokens
@@ -15,7 +21,17 @@ from runtime.compaction_state import compaction_scope
 
 def create_mira_summarization_middleware(model: Any, backend: Any) -> Any:
     """Create DeepAgents auto-summarization with an observed count hook."""
-    middleware = create_summarization_middleware(model=model, backend=backend)
+    defaults = compute_summarization_defaults(model)
+    middleware = MiraSummarizationMiddleware(
+        model=model,
+        backend=backend,
+        trigger=defaults["trigger"],
+        keep=defaults["keep"],
+        token_counter=count_tokens_approximately,
+        summary_prompt=DEFAULT_SUMMARY_PROMPT,
+        trim_tokens_to_summarize=None,
+        truncate_args_settings=defaults["truncate_args_settings"],
+    )
     mark_summarization_engine(middleware)
     observe_summarization_counts(middleware)
     return middleware
@@ -26,6 +42,10 @@ def create_mira_summarization_tool_middleware(model: Any, backend: Any) -> Any:
     middleware = create_summarization_tool_middleware(model=model, backend=backend)
     mark_summarization_engine(getattr(middleware, "_summarization", None))
     return middleware
+
+
+class MiraSummarizationMiddleware(SummarizationMiddleware):
+    """Named DeepAgents summarization middleware that survives profile exclusion."""
 
 
 @dataclass(frozen=True)

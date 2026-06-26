@@ -159,7 +159,8 @@ what MIRA loaded and which project resources replaced defaults.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display from DeepAgents' own summarization count, plus
-  DeepAgents-backed context compaction.
+  DeepAgents-backed context compaction. `In` and `Out` are cumulative provider
+  token totals; `Ctx` is the latest DeepAgents context estimate.
 - Default `grep`, `ask_user`, and `present_plan` tools for search, concrete
   user decisions, and structured plan review.
 
@@ -178,8 +179,9 @@ compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA
 records visible compaction markers and archive paths in the session file. The
 status line's `Ctx` value is the latest DeepAgents summarization count MIRA has
-observed; `In` and `Out` are cumulative provider usage totals across the
-session.
+observed. `In` and `Out` are cumulative provider usage totals across every
+model call in the session, including repeated conversation history, so `In +
+Out` is not expected to equal current context after multiple turns.
 
 ## Development
 
