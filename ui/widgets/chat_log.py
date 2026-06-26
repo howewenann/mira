@@ -43,6 +43,7 @@ class ChatLog(VerticalScroll):
         self._startup_state = "starting"
         self._startup_workspace = ""
         self._startup_spinner_index = 0
+        self._startup_loading = False
         self._subagent_labels: dict[int, str] = {}
         self._subagent_blocks: dict[str, dict[str, str]] = {}
         self._subagent_widgets: dict[str, Static] = {}
@@ -62,15 +63,18 @@ class ChatLog(VerticalScroll):
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""
-        self._startup_block = None
-        self._add_block(
-            "mira",
-            splash_text(model_name=model_name, session_id=session_id, workspace=workspace),
-            "message startup",
-        )
+        self._startup_loading = False
+        text = splash_text(model_name=model_name, session_id=session_id, workspace=workspace)
+        if self._startup_block is None:
+            self._startup_block = self._add_block("mira", text, "message startup")
+            return
+        self._style_block(self._startup_block, title="mira", classes="message startup")
+        self._startup_block.update(text)
+        self._scroll_to_end()
 
     def startup_loading(self, *, workspace: str, state: str = "starting") -> None:
         """Show a startup splash before the session is ready."""
+        self._startup_loading = True
         self._startup_workspace = workspace
         self._startup_state = state
         text = loading_splash_text(
@@ -522,6 +526,7 @@ class ChatLog(VerticalScroll):
         self._startup_state = "starting"
         self._startup_workspace = ""
         self._startup_spinner_index = 0
+        self._startup_loading = False
         self._subagent_labels = {}
         self._subagent_blocks = {}
         self._subagent_widgets = {}
@@ -581,7 +586,7 @@ class ChatLog(VerticalScroll):
 
     def tick_startup(self) -> None:
         """Advance the spinner on the startup splash."""
-        if self._startup_block is None:
+        if self._startup_block is None or not self._startup_loading:
             return
         self._startup_spinner_index = (self._startup_spinner_index + 1) % len(SPINNER_FRAMES)
         self._startup_block.update(

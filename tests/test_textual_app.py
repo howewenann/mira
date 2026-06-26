@@ -24,7 +24,7 @@ from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, 
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
 from ui.widgets.session_history import session_label
 
 
@@ -1049,14 +1049,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("turns: 0", output)
 
     async def test_reload_command_rebuilds_agents(self) -> None:
-        """The reload command should rebuild agents and refresh command metadata."""
-        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+        """The reload command should rebuild agents and refresh visible metadata."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
+            (workspace / ".env").write_text(
+                "\n".join(
+                    [
+                        "MIRA_LLM_PROVIDER=lmstudio",
+                        "MIRA_LLM_MODEL=visual-model",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
             action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
             plan_agent = type("PlanAgent", (), {"mira_tool_specs": [{"name": "plan_tool", "description": "Plan."}]})()
 
+            async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
+                return ModelMetadata(10000, "reload-test")
+
             with (
+                patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
+                patch("config.metadata.infer_model_metadata", infer_metadata),
                 patch("agent.factory.build_agent", return_value=action_agent) as build_agent,
                 patch("agent.factory.build_plan_agent", return_value=plan_agent) as build_plan_agent,
             ):
@@ -1066,13 +1080,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
                     await wait_until(lambda: app.agent is action_agent)
+                    await pilot.pause(0.3)
                     rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                    status = renderable_plain(app.query_one(StatusBar))
+                    startup_blocks = [child for child in app.query_one(ChatLog).children if "startup" in child.classes]
 
             self.assertIs(app.plan_agent, plan_agent)
+            self.assertEqual(app.model_name, "lmstudio:visual-model")
+            self.assertEqual(app.context_limit_tokens, 10000)
+            self.assertEqual(app.context_limit_source, "reload-test")
             self.assertEqual(build_agent.call_count, 1)
             self.assertEqual(build_plan_agent.call_count, 1)
             self.assertEqual(app.mode["action_tools"], [{"name": "fresh_tool", "description": "Fresh."}])
             self.assertEqual(app.mode["planning_tools"], [{"name": "plan_tool", "description": "Plan."}])
+            self.assertEqual(len(startup_blocks), 1)
+            self.assertIn("model     lmstudio:visual-model", rendered)
+            self.assertNotIn("model     loading", rendered)
+            self.assertNotIn("- starting", rendered)
+            self.assertIn("lmstudio:visual-model", status)
             self.assertIn("agents reloaded", rendered)
 
     async def test_reload_command_reload_dotenv_with_override(self) -> None:
@@ -1095,11 +1120,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async def rebuild(**kwargs: Any) -> None:
                 return None
 
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app._rebuild_agents = rebuild
+            async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
+                return ModelMetadata(8192, "reload-test")
 
-                await app._handle_reload_command()
+            with (
+                patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
+                patch("config.metadata.infer_model_metadata", infer_metadata),
+            ):
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    app._rebuild_agents = rebuild
+
+                    await app._handle_reload_command()
 
             self.assertEqual(app.config["llm_model"], "from-env-file")
             self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")

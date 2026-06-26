@@ -634,17 +634,50 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
 
     async def _handle_reload_command(self) -> bool:
-        """Rebuild agents from current workspace resources and settings."""
+        """Reload config, UI metadata, and agents from current workspace state."""
         if self.busy:
             self.system_message("finish the current turn before reloading agents", kind="warning")
             return True
 
-        from config.loader import load_config
-
-        self.config = load_config(self.workspace, override_dotenv=True)
-        await self._rebuild_agents()
+        await self._reload_runtime()
         self.system_message("agents reloaded", kind="info")
         return True
+
+    async def _reload_runtime(self) -> None:
+        """Reload dotenv/config, model metadata, visible chrome, and agents."""
+        from agent.llm import get_llm, get_model_name
+        from config.loader import load_config
+        from config.metadata import ModelMetadata, infer_model_metadata
+
+        self.config = load_config(self.workspace, override_dotenv=True)
+        inspect_model = get_llm(self.config, metadata=ModelMetadata())
+        metadata = await infer_model_metadata(self.config, model=inspect_model)
+        self.config["llm_inferred_context_tokens"] = metadata.context_tokens
+        self.config["llm_context_source"] = metadata.context_source
+        self.model_name = get_model_name(self.config)
+        self.context_limit_tokens = metadata.context_tokens
+        self.context_limit_source = metadata.context_source
+        await self._rebuild_agents(metadata=metadata)
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        if self.store is not None:
+            self.store.save(self.session)
+        self._refresh_startup_splash()
+        self._set_status(state=self.status_state)
+
+    def _refresh_startup_splash(self) -> None:
+        """Refresh the visible startup metadata block after runtime changes."""
+        if not self.is_mounted:
+            return
+        self.query_one(ChatLog).startup(
+            model_name=self.model_name,
+            session_id=self.session["id"],
+            workspace=str(self.session["workspace"]),
+        )
 
     def _handle_settings_command(self) -> bool:
         """Mount the interactive settings panel."""
