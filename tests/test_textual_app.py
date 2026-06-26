@@ -14,11 +14,12 @@ from unittest.mock import patch
 
 from pyfiglet import Figlet
 from rich.console import Console
+from textual.containers import VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
-from config.settings import load_settings, tool_always_allow, tool_enabled
+from config.settings import execute_env_settings, load_settings, tool_always_allow, tool_enabled
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -1568,6 +1569,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("always allow", rendered)
                 self.assertIn("System", rendered)
                 self.assertIn("Inbuilt Tools", rendered)
+                self.assertIn("Execute Environment", rendered)
+                self.assertIn("Run commands in", rendered)
+                self.assertIn("Press Enter/click to change", rendered)
+                self.assertIn("Additional env var names", rendered)
+                self.assertIn("Examples only. Use comma-separated names.", rendered)
                 self.assertIn("Custom Tools", rendered)
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("write_file", rendered)
@@ -1581,7 +1587,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
                 self.assertIn("settings-toggle-enabled-execute", buttons)
                 self.assertIn("settings-toggle-always_allow-execute", buttons)
+                self.assertIn("settings-execute-env-mode", buttons)
                 self.assertIn("settings-close", buttons)
+                self.assertEqual(str(buttons["settings-execute-env-mode"].label), "system shell >")
+                self.assertEqual(panel.query_one("#settings-execute-env-allow", Input).value, "")
+                self.assertEqual(
+                    panel.query_one("#settings-execute-env-allow", Input).placeholder,
+                    "<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
+                )
+                self.assertTrue(panel.query_one("#settings-execute-env-allow", Input).display)
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-enabled-edit_file"].disabled)
@@ -1595,6 +1609,83 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_execute_env_cycle_preserves_scroll(self) -> None:
+        """Changing execute env mode should not jump the settings body back to the top."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 18)) as pilot:
+                await pilot.pause()
+                async def rebuild() -> None:
+                    return None
+
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
+                body = panel.query_one("#settings-body", VerticalScroll)
+                original_panel = panel
+                original_body = body
+                body.set_scroll(None, 5)
+                await pilot.pause()
+                before = body.scroll_y
+
+                panel.query_one("#settings-execute-env-mode", Button).press()
+                await wait_until(lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_name")
+                await pilot.pause()
+
+                panel = app.query_one(SettingsPanel)
+                body = panel.query_one("#settings-body", VerticalScroll)
+                self.assertIs(panel, original_panel)
+                self.assertIs(body, original_body)
+                self.assertGreater(before, 0)
+                self.assertGreater(body.scroll_y, 0)
+                self.assertTrue(panel.query_one("#settings-execute-env-name-row").display)
+                self.assertEqual(str(panel.query_one("#settings-execute-env-mode", Button).label), "conda env name >")
+                self.assertTrue(panel.query_one("#settings-execute-env-mode", Button).has_focus)
+
+    async def test_settings_panel_saves_execute_env_fields_without_placeholders(self) -> None:
+        """Execute env fields should save explicit values and leave examples inert."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls = []
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
+
+                panel.query_one("#settings-execute-env-mode", Button).press()
+                await wait_until(lambda: len(panel.query("#settings-execute-env-name")) > 0)
+                name_input = panel.query_one("#settings-execute-env-name", Input)
+                self.assertEqual(name_input.value, "")
+                self.assertEqual(name_input.placeholder, "<my_project_env>")
+                name_input.value = "orbit_wars"
+                await panel.submit_execute_env_input(Input.Submitted(name_input, "orbit_wars"))
+                await wait_until(lambda: execute_env_settings(load_settings(workspace))["name"] == "orbit_wars")
+
+                panel = app.query_one(SettingsPanel)
+                allow_input = panel.query_one("#settings-execute-env-allow", Input)
+                allow_input.value = "CUDA_HOME, HF_HOME, TOKEN=value"
+                await panel.submit_execute_env_input(Input.Submitted(allow_input, "CUDA_HOME, HF_HOME, TOKEN=value"))
+                await wait_until(lambda: execute_env_settings(load_settings(workspace))["allow"] == ["CUDA_HOME", "HF_HOME"])
+
+            saved = execute_env_settings(load_settings(workspace))
+            self.assertEqual(saved["mode"], "conda_name")
+            self.assertEqual(saved["name"], "orbit_wars")
+            self.assertEqual(saved["allow"], ["CUDA_HOME", "HF_HOME"])
+            self.assertNotIn("my_project_env", str(saved))
+            self.assertGreaterEqual(len(calls), 2)
 
     async def test_settings_panel_confirm_cancel_keeps_execute_disabled(self) -> None:
         """Cancelling the execute warning should leave settings unchanged."""

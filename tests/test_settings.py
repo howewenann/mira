@@ -26,6 +26,54 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tool_enabled(loaded, "write_file"))
         self.assertFalse(settings.tool_enabled(loaded, "execute"))
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
+        self.assertEqual(
+            settings.execute_env_settings(loaded),
+            {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
+        )
+
+    def test_execute_env_settings_normalize_supported_modes(self) -> None:
+        """Execute environment settings should keep names, paths, and allowlists only."""
+        loaded = settings.normalize_settings(
+            {
+                "hitl": {
+                    "execute_env": {
+                        "mode": "conda_name",
+                        "name": "project_env",
+                        "prefix": r"C:\Users\me\.conda\envs\ignored",
+                        "path": ".venv",
+                        "allow": ["CUDA_HOME", "HF_HOME", "CUDA_HOME", "BAD=VALUE", "*", "bad-name"],
+                    }
+                }
+            }
+        )
+
+        execute_env = settings.execute_env_settings(loaded)
+        self.assertEqual(execute_env["mode"], "conda_name")
+        self.assertEqual(execute_env["name"], "project_env")
+        self.assertEqual(execute_env["prefix"], r"C:\Users\me\.conda\envs\ignored")
+        self.assertEqual(execute_env["path"], ".venv")
+        self.assertEqual(execute_env["allow"], ["CUDA_HOME", "HF_HOME"])
+
+        self.assertEqual(
+            settings.execute_env_settings({"hitl": {"execute_env": {"mode": "conda_prefix", "prefix": "C:/env"}}})[
+                "mode"
+            ],
+            "conda_prefix",
+        )
+        self.assertEqual(
+            settings.execute_env_settings({"hitl": {"execute_env": {"mode": "venv", "path": ".venv"}}})["mode"],
+            "venv",
+        )
+
+    def test_execute_env_allow_accepts_comma_separated_names(self) -> None:
+        """The UI helper should save env var names without saving values."""
+        updated = settings.set_execute_env_allow(
+            settings.DEFAULT_SETTINGS,
+            "CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE, TOKEN=value",
+        )
+
+        execute_env = settings.execute_env_settings(updated)
+        self.assertEqual(execute_env["allow"], ["CUDA_HOME", "HF_HOME", "REQUESTS_CA_BUNDLE"])
 
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
         """Partial settings should merge with defaults; malformed YAML should not crash."""

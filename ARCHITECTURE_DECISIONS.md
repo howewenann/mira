@@ -79,11 +79,20 @@ new provider variables are introduced, or `/settings` changes what it controls.
 
 **Decision:** `execute` is special. When enabled, MIRA switches the project
 backend from `FilesystemBackend` to `LocalShellBackend`; when disabled, MIRA
-uses the filesystem backend.
+uses the filesystem backend. MIRA keeps `inherit_env=False` and provides a small
+allowlisted host environment. Project settings can select the system shell, a
+Conda env name, a Conda env prefix, or a venv for `execute` commands without
+persisting host env values.
 
 **Why:** Shell execution changes the capability surface of the project backend.
 Keeping it behind a setting and HITL approval preserves the normal safer path
-while allowing trusted local workflows.
+while allowing trusted local workflows. The allowlist gives Windows tools enough
+path context for standard locations such as `%SystemDrive%`, `%ProgramData%`,
+`%AppData%`, and `%LocalAppData%`, but avoids exposing the full user environment
+or secrets. Extra variables in `.mira/settings.yml` are names only; values are
+read from the current process environment at runtime. Conda modes wrap commands
+with `conda run`, and venv mode prepares `PATH` and `VIRTUAL_ENV` for the local
+shell backend.
 
 **Where to check:** `agent/resources/__init__.py`, `config/settings.py`,
 `agent/factory.py`, `ui/app.py`.

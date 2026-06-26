@@ -74,6 +74,18 @@ MIRA does not create or overwrite `.env`. Workspace settings such as Git
 protection and tool approval behavior live in `.mira/settings.yml`; change them
 from the TUI with `/settings`.
 
+MIRA's own Python runtime can be different from the environment used by the
+agent's `execute` tool. In `/settings`, the Execute Environment section lets a
+project run shell commands through the system shell, a Conda env name, a Conda
+env path, or a venv path. Venv paths can point at the venv folder or its Python
+executable, such as `.venv`, `.venv\Scripts\python.exe`, or `.venv/bin/python`.
+
+The additional env var field stores variable names only, not host values. Enter
+comma-separated names such as `CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE` when a
+project tool needs them. Empty fields mean no extra names are allowed, and muted
+placeholder examples in `/settings` are never saved or applied automatically.
+MIRA intentionally does not support "inherit all environment" for `execute`.
+
 ## Everyday Use
 
 - Chat in the TUI by running `mira`.
@@ -153,6 +165,8 @@ what MIRA loaded and which project resources replaced defaults.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval.
+- Project-specific `execute` environment selection for system shell, Conda, or
+  venv commands without saving host env values.
 - Planning mode that hides and blocks project write tools, with explicit plan
   bubbles for implementation-ready plans. Resolved plan bubbles stay as inactive
   history; only the newest unresolved plan is actionable.

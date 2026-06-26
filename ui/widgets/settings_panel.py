@@ -11,12 +11,17 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 
 from config.settings import (
     EXECUTE_TOOL,
+    EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    execute_env_settings,
     git_protection_enabled,
+    set_execute_env_allow,
+    set_execute_env_mode,
+    set_execute_env_value,
     set_git_protection,
     set_tool_always_allow,
     set_tool_enabled,
@@ -25,6 +30,17 @@ from config.settings import (
 )
 
 ToggleKind = Literal["git", "enabled", "always_allow"]
+EXECUTE_ENV_LABELS = {
+    "system": "system shell",
+    "conda_name": "conda env name",
+    "conda_prefix": "conda env path",
+    "venv": "venv path",
+}
+EXECUTE_ENV_FIELDS = {
+    "conda_name": ("name", "Conda env name", "my_project_env"),
+    "conda_prefix": ("prefix", "Conda env path", r"C:\Users\me\.conda\envs\my_project_env"),
+    "venv": ("path", "Venv location", r".venv or .venv\Scripts\python.exe"),
+}
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
 CloseCallback = Callable[[], None]
 
@@ -88,6 +104,46 @@ class SettingsPanel(Vertical):
                             tool_always_allow(self.settings, tool_name),
                         )
 
+                yield Static("Execute Environment", classes="settings-section execute-env")
+                execute_env = execute_env_settings(self.settings)
+                execute_env_mode = str(execute_env.get("mode") or "system")
+                with Horizontal(classes="settings-row settings-wide-row"):
+                    yield Static("Run commands in", classes="settings-label")
+                    yield Button(
+                        execute_env_mode_label(execute_env_mode),
+                        id="settings-execute-env-mode",
+                        classes="settings-value-button",
+                    )
+                yield Static("Press Enter/click to change", classes="settings-help")
+
+                for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
+                    with Horizontal(id=f"settings-execute-env-{key}-row", classes="settings-row settings-wide-row") as row:
+                        row.display = execute_env_mode == mode
+                        yield Static(label, classes="settings-label")
+                        yield Input(
+                            value=str(execute_env.get(key) or ""),
+                            placeholder=f"<{placeholder}>",
+                            id=f"settings-execute-env-{key}",
+                            classes="settings-input",
+                        )
+                preview = Static(
+                    execute_env_preview(execute_env),
+                    id="settings-execute-env-preview",
+                    classes="settings-help",
+                )
+                preview.display = execute_env_mode in EXECUTE_ENV_FIELDS
+                yield preview
+
+                with Horizontal(classes="settings-row settings-wide-row"):
+                    yield Static("Additional env var names", classes="settings-label")
+                    yield Input(
+                        value=", ".join(execute_env.get("allow") or []),
+                        placeholder="<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
+                        id="settings-execute-env-allow",
+                        classes="settings-input",
+                    )
+                yield Static("Examples only. Use comma-separated names.", classes="settings-help")
+
                 yield Static("Custom Tools", classes="settings-section custom")
                 yield SettingsHeaderRow("Tool")
                 custom_names = custom_tool_names(self.tool_metadata)
@@ -129,6 +185,38 @@ class SettingsPanel(Vertical):
         if cell is None or self._cell_locked(cell):
             return
         await self._set_cell(cell, not selected_value(self.settings, cell))
+
+    @on(Button.Pressed, "#settings-execute-env-mode")
+    async def press_execute_env_mode(self, event: Button.Pressed) -> None:
+        """Cycle the execute environment mode."""
+        event.stop()
+        current = execute_env_settings(self.settings).get("mode", "system")
+        modes = list(EXECUTE_ENV_MODES)
+        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else "system"
+        updated = set_execute_env_mode(self.settings, next_mode)
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+            self._refresh_execute_env_section("settings-execute-env-mode")
+
+    @on(Input.Submitted, ".settings-input")
+    async def submit_execute_env_input(self, event: Input.Submitted) -> None:
+        """Save execute environment text fields on Enter."""
+        event.stop()
+        input_id = event.input.id or ""
+        value = event.value
+        if input_id == "settings-execute-env-allow":
+            updated = set_execute_env_allow(self.settings, value)
+        elif input_id.startswith("settings-execute-env-"):
+            updated = set_execute_env_value(self.settings, input_id.removeprefix("settings-execute-env-"), value)
+        else:
+            return
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+            self._refresh_execute_env_section(input_id)
 
     @on(Button.Pressed, "#settings-close")
     def press_close(self, event: Button.Pressed) -> None:
@@ -193,6 +281,23 @@ class SettingsPanel(Vertical):
     def _set_status(self, message: str) -> None:
         self.query_one("#settings-status", Static).update(message)
 
+    def _refresh_execute_env_section(self, focus_id: str | None = None) -> None:
+        execute_env = execute_env_settings(self.settings)
+        mode = str(execute_env.get("mode") or "system")
+        self.query_one("#settings-execute-env-mode", Button).label = execute_env_mode_label(mode)
+        for field_mode, (key, _, _) in EXECUTE_ENV_FIELDS.items():
+            self.query_one(f"#settings-execute-env-{key}-row", Horizontal).display = mode == field_mode
+            self.query_one(f"#settings-execute-env-{key}", Input).value = str(execute_env.get(key) or "")
+        preview = self.query_one("#settings-execute-env-preview", Static)
+        preview.update(execute_env_preview(execute_env))
+        preview.display = mode in EXECUTE_ENV_FIELDS
+        self.query_one("#settings-execute-env-allow", Input).value = ", ".join(execute_env.get("allow") or [])
+        if focus_id is not None:
+            try:
+                self.query_one(f"#{focus_id}", Button).focus(scroll_visible=False)
+            except Exception:
+                pass
+
     def _focused_toggle(self) -> Button | None:
         for button in self.query(Button):
             if button.has_focus and "settings-toggle" in button.classes:
@@ -217,6 +322,29 @@ class SettingsPanel(Vertical):
 def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:
     """Return project tool names shown in the custom tools section."""
     return sorted({item["name"] for item in metadata if item.get("source") == "project" and item.get("name")})
+
+
+def execute_env_mode_label(mode: str) -> str:
+    """Return a discoverable label for the execute environment mode control."""
+    return f"{EXECUTE_ENV_LABELS.get(mode, 'system shell')} >"
+
+
+def execute_env_preview(settings: dict[str, Any]) -> str:
+    """Return preview or validation text for the current execute environment mode."""
+    mode = str(settings.get("mode") or "system")
+    if mode == "conda_name" and settings.get("name"):
+        return f"Preview: conda run -n {settings['name']} <command>"
+    if mode == "conda_name":
+        return "Conda env name required before commands are wrapped."
+    if mode == "conda_prefix" and settings.get("prefix"):
+        return f"Preview: conda run -p {settings['prefix']} <command>"
+    if mode == "conda_prefix":
+        return "Conda env path required before commands are wrapped."
+    if mode == "venv" and settings.get("path"):
+        return f"Preview: {settings['path']}"
+    if mode == "venv":
+        return "Venv location required before PATH is adjusted."
+    return "Placeholder examples are not saved or applied."
 
 
 def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:

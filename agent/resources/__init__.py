@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,20 +16,25 @@ from agent.resources.project_setup import ensure_project_examples
 from agent.resources.skills import load_skills
 from agent.resources.subagents import load_subagents
 from agent.resources.tools import load_tools, tool_name
-from config.settings import EXECUTE_TOOL, tool_enabled
+from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
-EXECUTE_ENV_KEYS = (
+DEFAULT_EXECUTE_ENV_KEYS = (
     "PATH",
     "PATHEXT",
     "SYSTEMROOT",
     "WINDIR",
     "COMSPEC",
+    "SYSTEMDRIVE",
+    "PROGRAMDATA",
+    "APPDATA",
+    "LOCALAPPDATA",
     "USERPROFILE",
     "HOMEDRIVE",
     "HOMEPATH",
     "TEMP",
     "TMP",
 )
+EXECUTE_ENV_KEYS = DEFAULT_EXECUTE_ENV_KEYS
 
 
 @dataclass(frozen=True)
@@ -111,11 +117,13 @@ def build_backends(
 ) -> ResourceBackends:
     execute_enabled = tool_enabled(settings, EXECUTE_TOOL) if enable_execute is None else bool(enable_execute)
     project_backend = (
-        LocalShellBackend(
+        ProjectShellBackend(
             root_dir=workspace,
             virtual_mode=True,
             inherit_env=False,
-            env=execute_env(),
+            env=execute_env(settings=settings, workspace=workspace),
+            execute_env_settings=execute_env_settings(settings),
+            workspace=workspace,
         )
         if execute_enabled
         else FilesystemBackend(root_dir=workspace, virtual_mode=True)
@@ -130,6 +138,92 @@ def build_backends(
     return ResourceBackends(project=project_backend, combined=combined_backend)
 
 
-def execute_env() -> dict[str, str]:
+def execute_env(
+    *,
+    settings: dict[str, Any] | None = None,
+    workspace: Path | None = None,
+) -> dict[str, str]:
     """Return the small host environment exposed to execute commands."""
-    return {key: os.environ[key] for key in EXECUTE_ENV_KEYS if os.environ.get(key)}
+    env_settings = execute_env_settings(settings)
+    names = [*DEFAULT_EXECUTE_ENV_KEYS, *env_settings.get("allow", [])]
+    env = {key: os.environ[key] for key in names if os.environ.get(key)}
+    if env_settings.get("mode") == "venv":
+        apply_venv_env(env, env_settings, workspace)
+    return env
+
+
+class ProjectShellBackend(LocalShellBackend):
+    """Local shell backend with project execute environment selection."""
+
+    def __init__(
+        self,
+        *args: Any,
+        execute_env_settings: dict[str, Any] | None = None,
+        workspace: Path | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._execute_env_settings = execute_env_settings or {}
+        self._workspace = Path(workspace or ".").expanduser().resolve()
+
+    def execute(self, command: str, *, timeout: int | None = None) -> Any:
+        """Execute a command through the configured project environment."""
+        return super().execute(wrap_execute_command(command, self._execute_env_settings), timeout=timeout)
+
+
+def wrap_execute_command(command: str, settings: dict[str, Any] | None) -> str:
+    """Return a shell command wrapped for the configured execute environment."""
+    env_settings = execute_env_settings({"hitl": {"execute_env": settings or {}}})
+    mode = env_settings.get("mode")
+    if mode == "conda_name" and env_settings.get("name"):
+        return f"conda run -n {shell_arg(env_settings['name'])} {shell_command(command)}"
+    if mode == "conda_prefix" and env_settings.get("prefix"):
+        return f"conda run -p {shell_arg(env_settings['prefix'])} {shell_command(command)}"
+    return command
+
+
+def apply_venv_env(env: dict[str, str], settings: dict[str, Any], workspace: Path | None) -> None:
+    """Apply venv PATH and VIRTUAL_ENV entries to an execute environment."""
+    raw_path = str(settings.get("path") or "").strip()
+    if not raw_path:
+        return
+    workspace = Path(workspace or ".").expanduser().resolve()
+    venv_root, bin_dir = resolve_venv_paths(workspace, raw_path)
+    if not bin_dir:
+        return
+
+    env["VIRTUAL_ENV"] = str(venv_root)
+    current_path = env.get("PATH", "")
+    separator = os.pathsep
+    env["PATH"] = str(bin_dir) if not current_path else f"{bin_dir}{separator}{current_path}"
+
+
+def resolve_venv_paths(workspace: Path, value: str) -> tuple[Path, Path | None]:
+    """Return the venv root and executable directory for a path or python executable."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    path = path.resolve()
+
+    lowered = path.name.lower()
+    if lowered in {"python", "python.exe"} and path.parent.name.lower() in {"scripts", "bin"}:
+        return path.parent.parent, path.parent
+
+    scripts = path / ("Scripts" if os.name == "nt" else "bin")
+    return path, scripts
+
+
+def shell_arg(value: str) -> str:
+    """Quote one argument for the current platform shell."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([value])
+    import shlex
+
+    return shlex.quote(value)
+
+
+def shell_command(command: str) -> str:
+    """Return a shell invocation that keeps compound commands inside wrappers."""
+    if os.name == "nt":
+        return f"cmd /d /s /c {shell_arg(command)}"
+    return f"sh -lc {shell_arg(command)}"

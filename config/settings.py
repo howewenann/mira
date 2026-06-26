@@ -10,12 +10,20 @@ import yaml
 
 SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
+EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 LOCKED_INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task")
 INBUILT_DANGEROUS_TOOLS = (*LOCKED_INBUILT_DANGEROUS_TOOLS, EXECUTE_TOOL)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "hitl": {
         "git_protection": {"enabled": True},
+        "execute_env": {
+            "mode": "system",
+            "name": "",
+            "prefix": "",
+            "path": "",
+            "allow": [],
+        },
         "tools": {
             "write_file": {"enabled": True, "always_allow": False},
             "edit_file": {"enabled": True, "always_allow": False},
@@ -70,6 +78,10 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     if isinstance(git_protection, dict) and isinstance(git_protection.get("enabled"), bool):
         settings["hitl"]["git_protection"]["enabled"] = git_protection["enabled"]
 
+    execute_env = hitl.get("execute_env")
+    if isinstance(execute_env, dict):
+        settings["hitl"]["execute_env"] = normalize_execute_env(execute_env)
+
     tools = hitl.get("tools")
     if isinstance(tools, dict):
         normalized_tools = {name: dict(spec) for name, spec in settings["hitl"]["tools"].items()}
@@ -91,12 +103,58 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     return settings
 
 
+def normalize_execute_env(raw: Any) -> dict[str, Any]:
+    """Return normalized project execute environment settings."""
+    current = deepcopy(DEFAULT_SETTINGS["hitl"]["execute_env"])
+    if not isinstance(raw, dict):
+        return current
+
+    mode = str(raw.get("mode") or "").strip()
+    if mode in EXECUTE_ENV_MODES:
+        current["mode"] = mode
+    for key in ("name", "prefix", "path"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            current[key] = value.strip()
+
+    allow = raw.get("allow")
+    if isinstance(allow, str):
+        values = allow.split(",")
+    elif isinstance(allow, list):
+        values = allow
+    else:
+        values = []
+    current["allow"] = normalize_env_names(values)
+    return current
+
+
+def normalize_env_names(values: list[Any]) -> list[str]:
+    """Return unique environment variable names, dropping values and wildcards."""
+    names: list[str] = []
+    for value in values:
+        name = str(value or "").strip()
+        if not name or "=" in name or name == "*":
+            continue
+        if not all(char.isalnum() or char == "_" for char in name):
+            continue
+        name = name.upper()
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def hitl_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
     """Extract the HITL section from a runtime config or settings object."""
     if not isinstance(config_or_settings, dict):
         return deepcopy(DEFAULT_SETTINGS["hitl"])
     settings = config_or_settings.get("settings", config_or_settings)
     return normalize_settings(settings).get("hitl", deepcopy(DEFAULT_SETTINGS["hitl"]))
+
+
+def execute_env_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Return normalized execute environment settings."""
+    hitl = hitl_settings(config_or_settings)
+    return normalize_execute_env(hitl.get("execute_env"))
 
 
 def git_protection_enabled(config_or_settings: dict[str, Any] | None) -> bool:
@@ -152,4 +210,34 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
     current["enabled"] = True if tool_name in LOCKED_INBUILT_DANGEROUS_TOOLS else bool(enabled)
     current.setdefault("always_allow", False)
     updated["hitl"]["tools"][tool_name] = current
+    return updated
+
+
+def set_execute_env_mode(settings: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Return settings with the execute environment mode updated."""
+    updated = normalize_settings(settings)
+    current = execute_env_settings(updated)
+    if mode in EXECUTE_ENV_MODES:
+        current["mode"] = mode
+    updated["hitl"]["execute_env"] = current
+    return updated
+
+
+def set_execute_env_value(settings: dict[str, Any], key: str, value: str) -> dict[str, Any]:
+    """Return settings with one execute environment selector value updated."""
+    updated = normalize_settings(settings)
+    current = execute_env_settings(updated)
+    if key in {"name", "prefix", "path"}:
+        current[key] = str(value or "").strip()
+    updated["hitl"]["execute_env"] = current
+    return updated
+
+
+def set_execute_env_allow(settings: dict[str, Any], value: str | list[Any]) -> dict[str, Any]:
+    """Return settings with additional execute environment variable names updated."""
+    updated = normalize_settings(settings)
+    current = execute_env_settings(updated)
+    values = value.split(",") if isinstance(value, str) else value
+    current["allow"] = normalize_env_names(list(values))
+    updated["hitl"]["execute_env"] = current
     return updated

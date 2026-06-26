@@ -12,7 +12,13 @@ from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent import factory
-from agent.resources import EXECUTE_ENV_KEYS, build_resources, execute_env
+from agent.resources import (
+    EXECUTE_ENV_KEYS,
+    ProjectShellBackend,
+    build_resources,
+    execute_env,
+    wrap_execute_command,
+)
 from ui import repl
 
 
@@ -61,12 +67,68 @@ class ResourceDiscoveryTests(unittest.TestCase):
             )
 
             self.assertIsInstance(resources.backend.default, LocalShellBackend)
-            self.assertEqual(resources.backend.default._env, execute_env())
+            self.assertIsInstance(resources.backend.default, ProjectShellBackend)
+            self.assertEqual(resources.backend.default._env, execute_env(settings=resources.backend.default._execute_env_settings))
             self.assertLessEqual(set(resources.backend.default._env), set(EXECUTE_ENV_KEYS))
             if os.environ.get("PATH"):
                 self.assertEqual(resources.backend.default._env["PATH"], os.environ["PATH"])
             for secret_name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "PASSWORD", "SECRET"):
                 self.assertNotIn(secret_name, resources.backend.default._env)
+
+    def test_execute_env_includes_safe_windows_path_vars_when_present(self) -> None:
+        """Execute env should include safe OS paths without inheriting secrets."""
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": "C:\\Tools",
+                "SYSTEMDRIVE": "C:",
+                "PROGRAMDATA": "C:\\ProgramData",
+                "APPDATA": "C:\\Users\\me\\AppData\\Roaming",
+                "LOCALAPPDATA": "C:\\Users\\me\\AppData\\Local",
+                "OPENAI_API_KEY": "secret",
+            },
+            clear=True,
+        ):
+            env = execute_env()
+
+        self.assertEqual(env["SYSTEMDRIVE"], "C:")
+        self.assertEqual(env["PROGRAMDATA"], "C:\\ProgramData")
+        self.assertEqual(env["APPDATA"], "C:\\Users\\me\\AppData\\Roaming")
+        self.assertEqual(env["LOCALAPPDATA"], "C:\\Users\\me\\AppData\\Local")
+        self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_execute_env_additional_allowlist_reads_current_host_value_only(self) -> None:
+        """User allowlists should include present names and ignore missing names."""
+        settings = {"hitl": {"execute_env": {"allow": ["CUDA_HOME", "MISSING_LOCAL_VAR"]}}}
+        with patch.dict(os.environ, {"CUDA_HOME": "C:\\CUDA"}, clear=True):
+            env = execute_env(settings=settings)
+
+        self.assertEqual(env["CUDA_HOME"], "C:\\CUDA")
+        self.assertNotIn("MISSING_LOCAL_VAR", env)
+
+    def test_execute_env_venv_mode_sets_virtual_env_and_path(self) -> None:
+        """Venv mode should prepare PATH from either a venv folder or executable path."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            settings = {"hitl": {"execute_env": {"mode": "venv", "path": ".venv"}}}
+            with patch.dict(os.environ, {"PATH": "C:\\Tools"}, clear=True):
+                env = execute_env(settings=settings, workspace=workspace)
+
+        self.assertEqual(env["VIRTUAL_ENV"], str((workspace / ".venv").resolve()))
+        self.assertTrue(env["PATH"].startswith(str((workspace / ".venv" / "Scripts").resolve())))
+        self.assertIn(os.pathsep + "C:\\Tools", env["PATH"])
+
+    def test_execute_env_conda_modes_wrap_commands(self) -> None:
+        """Conda modes should run the full shell command through conda run."""
+        by_name = wrap_execute_command("python -V && echo ok", {"mode": "conda_name", "name": "project_env"})
+        by_prefix = wrap_execute_command("python -V", {"mode": "conda_prefix", "prefix": r"C:\envs\project env"})
+
+        self.assertTrue(by_name.startswith("conda run -n project_env "))
+        self.assertIn("python -V", by_name)
+        self.assertIn("echo ok", by_name)
+        self.assertTrue(by_prefix.startswith("conda run -p "))
+        self.assertIn("project env", by_prefix)
+        self.assertIn("python -V", by_prefix)
 
     def test_project_memory_replaces_default_by_filename(self) -> None:
         """A project memory with the same filename should replace the default."""
