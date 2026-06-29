@@ -85,6 +85,9 @@ comma-separated names such as `CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE` when a
 project tool needs them. Empty fields mean no extra names are allowed, and muted
 placeholder examples in `/settings` are never saved or applied automatically.
 MIRA intentionally does not support "inherit all environment" for `execute`.
+When running files created through MIRA's file tools, `execute` uses the project
+workspace as its shell working directory, so virtual paths such as `/tmp.py`
+should be run as workspace-relative paths such as `python tmp.py`.
 
 ## Everyday Use
 

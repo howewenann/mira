@@ -134,3 +134,64 @@ Expected:
 - MIRA includes the plan status such as discarded, revision requested, or approved for implementation.
 
 Use the ask_user tool to ask me which implementation path to take: minimal change, full refactor, or planning only. Do not proceed until I choose.
+
+## Execute Virtual Workspace Paths
+
+Use a disposable workspace. In the TUI, enable `execute` from `/settings`
+before running these checks.
+
+```powershell
+mira --workspace .tmp_execute_manual
+```
+
+Then enter:
+
+```text
+write a Python file at /tmp.py that prints "mira execute path ok", then run it
+```
+
+Expected:
+
+- MIRA writes the file using the virtual file-tool path `/tmp.py`.
+- MIRA shows an `execute` approval prompt.
+- The proposed shell command runs the workspace file as `python tmp.py`,
+  `python .\tmp.py`, or an equivalent workspace-relative command.
+- The proposed shell command does not run `python /tmp.py`.
+- Approving the command prints `mira execute path ok`.
+
+Then try the one-shot surface in a disposable Git-initialized workspace with
+`execute` already enabled in that workspace's `.mira/settings.yml`:
+
+```powershell
+conda run -n ai_agents python -m cli.main --workspace .tmp_execute_manual -p "Create a Python file at /tmp.py that prints exactly EXECUTE_PATH_OK, then run it with execute and report the output."
+```
+
+Expected:
+
+- One-shot output shows the write and execute flow.
+- The `execute` command uses a workspace-relative script path, not `/tmp.py`.
+- The `execute` command uses `python tmp.py`, `python .\tmp.py`, or an
+  equivalent workspace-relative command.
+- The final output includes `EXECUTE_PATH_OK`.
+
+## Execute Nested Workspace Paths
+
+Use a disposable workspace with `execute` enabled.
+
+```powershell
+mira --workspace .tmp_execute_manual
+```
+
+Then enter:
+
+```text
+create /scripts/check_path.py that prints "nested path ok", then run it
+```
+
+Expected:
+
+- MIRA writes `/scripts/check_path.py`.
+- The `execute` command uses `python scripts/check_path.py`,
+  `python .\scripts\check_path.py`, or an equivalent workspace-relative path.
+- The `execute` command does not use `python /scripts/check_path.py`.
+- Approving the command prints `nested path ok`.

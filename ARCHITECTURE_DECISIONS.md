@@ -92,10 +92,12 @@ path context for standard locations such as `%SystemDrive%`, `%ProgramData%`,
 or secrets. Extra variables in `.mira/settings.yml` are names only; values are
 read from the current process environment at runtime. Conda modes wrap commands
 with `conda run`, and venv mode prepares `PATH` and `VIRTUAL_ENV` for the local
-shell backend.
+shell backend. MIRA adds custom execute-tool prompt guidance so file-tool
+virtual paths such as `/tmp.py` are run from the project shell as
+workspace-relative paths instead of host-root absolute paths.
 
 **Where to check:** `agent/resources/__init__.py`, `config/settings.py`,
-`agent/factory.py`, `ui/app.py`.
+`agent/factory.py`, `agent/middleware.py`, `ui/app.py`.
 
 **Update this when:** `execute` is exposed by a different backend, default
 approval behavior changes, or shell environment inheritance changes.

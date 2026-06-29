@@ -11,7 +11,8 @@ from deepagents import FilesystemPermission, create_deep_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
-from agent.factory import FilesystemToolArgNormalizer, _write_interrupts
+from agent.factory import _write_interrupts
+from agent.middleware import FilesystemToolCallArgsMiddleware
 from agent.resources import build_resources
 from runtime.runner import run_turn
 from session.checkpoint import make_checkpointer
@@ -65,7 +66,7 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-            update = FilesystemToolArgNormalizer(workspace).after_model({"messages": [message]}, None)
+            update = FilesystemToolCallArgsMiddleware(workspace).after_model({"messages": [message]}, None)
 
             self.assertIsNotNone(update)
             self.assertEqual(message.tool_calls[0]["args"], {"content": "hello", "file_path": "/nested/note.txt"})
@@ -111,7 +112,7 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
             agent = create_deep_agent(
                 model=model,
                 backend=resources.backend,
-                middleware=[FilesystemToolArgNormalizer(workspace)],
+                middleware=[FilesystemToolCallArgsMiddleware(workspace)],
                 tools=resources.tools,
                 skills=resources.skills,
                 memory=resources.memory,

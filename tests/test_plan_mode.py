@@ -13,6 +13,7 @@ from rich.console import Console
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
+from agent.middleware import ModelToolVisibilityMiddleware
 from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
 from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
@@ -112,7 +113,7 @@ class RecordingRenderer:
 
 
 class FakeModelRequest:
-    """Small request object used to test PlanningToolFilter."""
+    """Small request object used to test ModelToolVisibilityMiddleware."""
 
     def __init__(self, tools: list[Any]) -> None:
         """Store the available tools on the request test double."""
@@ -174,9 +175,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The planning agent should hide writes instead of requesting approval."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -187,15 +188,15 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("planning mode", kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].operations, ["write"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")
-        self.assertTrue(any(isinstance(item, factory.PlanningToolFilter) for item in kwargs["middleware"]))
+        self.assertTrue(any(isinstance(item, ModelToolVisibilityMiddleware) for item in kwargs["middleware"]))
 
     def test_action_agent_keeps_write_interrupts(self) -> None:
         """The action agent should keep write approval interrupts enabled."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -228,9 +229,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -247,9 +248,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value=model) as get_llm,
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary") as auto_summary,
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary") as summary,
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary") as auto_summary,
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary") as summary,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer", metadata=metadata)
@@ -265,9 +266,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Built agents should expose tool metadata for the UI."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -287,9 +288,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Plan agents should expose only planning-available tool metadata."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.factory.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.factory.create_summarization_middleware", return_value="auto-summary"),
-            patch("agent.factory.create_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -303,8 +304,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("execute", names)
 
     def test_plan_tool_filter_hides_write_tools_from_model(self) -> None:
-        """PlanningToolFilter should remove write/edit tools from requests."""
-        middleware = factory.PlanningToolFilter(PLAN_PROJECT_WRITE_TOOLS)
+        """ModelToolVisibilityMiddleware should remove write/edit tools from requests."""
+        middleware = ModelToolVisibilityMiddleware(PLAN_PROJECT_WRITE_TOOLS)
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
@@ -321,7 +322,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_action_tool_filter_hides_present_plan_from_model(self) -> None:
         """The action agent should not expose the structured planning tool."""
-        middleware = factory.PlanningToolFilter(factory.ACTION_EXCLUDED_TOOLS)
+        middleware = ModelToolVisibilityMiddleware(factory.ACTION_EXCLUDED_TOOLS)
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
