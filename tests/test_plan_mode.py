@@ -1018,6 +1018,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("- Do the thing.", text)
         self.assertIn("Test Plan:\n- Run focused checks.", text)
         self.assertIn("Do not assume planning-mode permission errors still apply.", text)
+        self.assertIn("Use a todo/checklist", text)
+        self.assertIn("Run every feasible Test Plan command/check after implementation.", text)
+        self.assertIn("state exactly which one was skipped and why", text)
         self.assertIn("User request:\nImplement", text)
         self.assertIsNone(mode["approved_plan"])
 
@@ -1054,6 +1057,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("call present_plan", text)
         self.assertIn("User request:\nwrite a file", text)
         self.assertIn("Fill every present_plan section", text)
+        self.assertIn("Use this exact content template when calling present_plan", text)
+        self.assertIn("Goal: the user-visible outcome", text)
+        self.assertIn("Run: exact command/check to execute after implementation.", text)
+        self.assertIn("Do not use vague Test Plan items", text)
         self.assertIn("If execute is unavailable", text)
 
     def test_plan_revision_text_includes_old_plan_and_feedback(self) -> None:
@@ -1096,6 +1103,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Never call disabled tools", prompt)
         self.assertIn("Test Plan bullets", prompt)
+        self.assertIn("Use this exact content template when calling present_plan", prompt)
+        self.assertIn("Success criteria", prompt)
+        self.assertIn("Run: exact command/check to execute after implementation.", prompt)
+        self.assertIn("Do not use vague Test Plan items", prompt)
         self.assertIn("If execute is unavailable", prompt)
 
 

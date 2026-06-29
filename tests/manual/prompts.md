@@ -56,6 +56,7 @@ Expected:
 
 - MIRA shows a structured plan bubble with Implement, Revise, and Discard.
 - The plan bubble includes Summary, Key Changes, Test Plan, and Assumptions.
+- The Test Plan names an exact command/check to run and an expected result.
 - MIRA does not write or edit `test.txt` until Implement is chosen.
 
 Then choose Revise on the plan bubble and enter:
@@ -78,6 +79,8 @@ Expected:
 - MIRA resolves the plan bubble as approved for implementation.
 - MIRA shows a `write_file` tool call.
 - MIRA shows an approval prompt.
+- After implementation, MIRA runs the planned check or names the skipped check
+  and explains why it could not be run.
 - Approving writes `test.txt` with `hello world`.
 
 Then enter:
@@ -134,6 +137,25 @@ Expected:
 - MIRA includes the plan status such as discarded, revision requested, or approved for implementation.
 
 Use the ask_user tool to ask me which implementation path to take: minimal change, full refactor, or planning only. Do not proceed until I choose.
+
+## One-Shot Implementation Runs Planned Checks
+
+Use a disposable workspace with `execute` enabled and always-allowed in that
+workspace's `.mira/settings.yml`.
+
+```powershell
+conda run -n ai_agents python -m cli.main --workspace .tmp_plan_followthrough_manual -p "Create hello_check.py that defines greet(name) returning 'hello, ' plus the name. After creating it, run python -m py_compile hello_check.py. In your final answer, report whether the check ran."
+```
+
+Expected:
+
+- One-shot output shows a `write_file` tool call for `hello_check.py`.
+- One-shot output shows an `execute` tool call for
+  `python -m py_compile hello_check.py`.
+- The final answer reports that the check ran successfully.
+- If the check cannot run, the final answer names
+  `python -m py_compile hello_check.py` and explains why it was skipped or
+  failed.
 
 ## Execute Virtual Workspace Paths
 

@@ -173,9 +173,16 @@ from the model and blocked by filesystem permissions as a backstop. Structured
 plans are created only through the `present_plan` tool and shown as ephemeral
 plan bubbles with explicit Implement, Revise, and Discard actions.
 Every structured plan includes Summary, Key Changes, Test Plan, and
-Assumptions. Test Plan should describe tests/checks to create or run; when
-execute is unavailable, MIRA still plans the test artifacts and says the tests
-were not run.
+Assumptions. Planning prompts include an exact content template so Summary names
+goal, context, and success criteria; Key Changes name concrete implementation
+steps; Test Plan names exact test artifacts, commands/checks, and expected
+results; and Assumptions records explicit defaults. When an approved plan is
+implemented, MIRA treats the Test Plan as required follow-through: feasible
+checks should run after building, while skipped checks must be named with a
+reason. Todo/checklist use is encouraged during implementation for multi-step
+plans, but it does not replace running the planned checks. When execute is
+unavailable, MIRA still plans the test artifacts and says the tests were not
+run.
 Revise opens a focused feedback prompt, then sends the previous structured plan
 and the user's feedback through planning mode so the replacement plan keeps
 context. Resolved plan bubbles remain inactive transcript history; only the

@@ -101,7 +101,10 @@ should be run as workspace-relative paths such as `python tmp.py`.
   Implementation-ready planning turns appear as plan bubbles. Use Implement to
   run the plan, Revise to give targeted feedback with the previous plan kept in
   context, or Discard to close it. Plan bubbles include Summary, Key Changes,
-  Test Plan, and Assumptions; if execute is unavailable, MIRA should still plan
+  Test Plan, and Assumptions. Test Plan items should name the exact tests or
+  checks to create/run and expected results. When a plan is implemented, MIRA
+  should run the feasible planned checks after building, or say exactly why a
+  check was skipped. If execute is unavailable, MIRA should still plan
   test files/checks and say they were not run. Recent plan bubbles are included
   in lightweight resume context so MIRA can answer follow-ups like "show me the
   previous plan" after switching modes or resuming a session.

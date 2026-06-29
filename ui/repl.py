@@ -11,7 +11,14 @@ from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
-from agent.plan_policy import PLAN_BLOCKED_RESULT_MARKERS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, project_write_tools_text
+from agent.plan_policy import (
+    APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+    PLAN_BLOCKED_RESULT_MARKERS,
+    PLAN_OUTPUT_TEMPLATE,
+    PLAN_PROJECT_WRITE_TOOLS,
+    PRESENT_PLAN_TOOL,
+    project_write_tools_text,
+)
 from runtime.context_usage import context_usage_scope
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
@@ -22,6 +29,7 @@ PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
 
 You are now in action mode. Write/edit tools are available again, subject to normal approval prompts. Do not assume planning-mode permission errors still apply.
+{execution_instructions}
 
 User request:
 {text}"""
@@ -44,6 +52,7 @@ If the user explicitly asks for a plan, final review, or implementation-ready pr
 You may also proactively call present_plan when the user is clearly asking for implementation work and you have enough context to propose a useful implementation plan.
 Do not call present_plan for early brainstorming, ambiguous intent, or minor follow-up discussion.
 Fill every present_plan section: Title, Summary, Key Changes, Test Plan, and Assumptions.
+{plan_template}
 If execute is unavailable, still include test scripts/checks to create or run, skip running tests, and tell the user tests were not run because execute is unavailable.
 
 User request:
@@ -573,7 +582,7 @@ def write_was_blocked(result: TurnResult) -> bool:
 
 def plan_request_text(text: str) -> str:
     """Wrap user input in the planning-mode instruction template."""
-    return PLAN_REQUEST_TEMPLATE.format(text=text)
+    return PLAN_REQUEST_TEMPLATE.format(plan_template=PLAN_OUTPUT_TEMPLATE, text=text)
 
 
 def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:
@@ -588,7 +597,11 @@ def action_request_text(mode: dict[str, Any], text: str) -> str:
         return text
 
     mode["approved_plan"] = None
-    return PLAN_CONTEXT_TEMPLATE.format(plan=plan_text(plan), text=text)
+    return PLAN_CONTEXT_TEMPLATE.format(
+        plan=plan_text(plan),
+        execution_instructions=APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+        text=text,
+    )
 
 
 def plan_text(plan: dict[str, Any]) -> str:
