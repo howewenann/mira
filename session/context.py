@@ -92,6 +92,9 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["status"] = compact_line(item.get("status") or "RUNNING")
             event["task_input"] = str(item.get("task_input") or "")
             event["output"] = str(item.get("output") or "")
+            origin = compact_line(item.get("origin"))
+            if origin:
+                event["origin"] = origin
         elif event_type == "compaction":
             summary = compact_text(item.get("summary"))
             file_path = compact_line(item.get("file_path"))

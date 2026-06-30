@@ -94,7 +94,7 @@ class AgentWithFailingState(FakeAgent):
 
 
 class AgentWithFailingTurn:
-    async def astream_events(self, payload: Any, config: dict[str, Any], version: str) -> FakeStream:
+    async def astream_events(self, payload: Any, config: dict[str, Any], version: str, **kwargs: Any) -> FakeStream:
         raise RuntimeError("main turn failed")
 
     async def aget_state(self, config: dict[str, Any]) -> Snapshot:
@@ -698,6 +698,29 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subagents[1]["status"], "DONE")
         self.assertEqual(subagents[1]["task_input"], "write scary story")
         self.assertEqual(subagents[1]["output"], "done")
+
+    def test_recorder_preserves_dynamic_subagent_origin(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
+        recorder.subagent_finished("general-purpose [one]", "done")
+
+        subagents = [event for event in context.normalize_events(record["events"]) if event["type"] == "subagent"]
+        self.assertEqual(subagents[0]["origin"], "dynamic_tool_subagent")
+        self.assertEqual(subagents[1]["origin"], "dynamic_tool_subagent")
+
+    def test_recorder_clears_dynamic_origin_when_task_request_arrives_late(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
+        recorder.subagent_request_updated("general-purpose [one]", "write scary story")
+        recorder.subagent_finished("general-purpose [one]", "done")
+
+        subagents = [event for event in context.normalize_events(record["events"]) if event["type"] == "subagent"]
+        self.assertNotIn("origin", subagents[0])
+        self.assertNotIn("origin", subagents[1])
 
     def test_done_subagent_output_contributes_to_resume_context(self) -> None:
         record = {

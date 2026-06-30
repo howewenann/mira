@@ -222,9 +222,16 @@ class BlockingReasoning:
 class Subagent:
     """Fake subagent with a final message shaped like DeepAgents output."""
 
-    def __init__(self, name: str, tool_calls: list[ToolCall], task_input: str = "look around") -> None:
+    def __init__(
+        self,
+        name: str,
+        tool_calls: list[ToolCall],
+        task_input: str = "look around",
+        path: list[str] | None = None,
+    ) -> None:
         self.name = name
         self.task_input = task_input
+        self.path = path or []
         self.tool_calls = AsyncItems(tool_calls)
         self.output = {
             "messages": [
@@ -318,8 +325,11 @@ class RecordingRenderer:
     def subagent_label(self, subagent: Any) -> str:
         return subagent.name
 
-    def subagent_started(self, name: str, task_input: str = "") -> None:
-        self.events.append(("subagent_started", name, task_input))
+    def subagent_started(self, name: str, task_input: str = "", *, origin: str = "") -> None:
+        event = ("subagent_started", name, task_input)
+        if origin:
+            event = (*event, origin)
+        self.events.append(event)
 
     def subagent_request_updated(self, name: str, task_input: str) -> None:
         self.events.append(("subagent_request_updated", name, task_input))
@@ -375,10 +385,12 @@ class FakeStream:
         output: Any = None,
         interrupts: list[Any] | None = None,
         tool_calls: list[Any] | None = None,
+        custom_events: list[Any] | None = None,
     ) -> None:
         self.messages = AsyncItems([])
         self.tool_calls = AsyncItems(tool_calls or [])
         self.subagents = AsyncItems([])
+        self.custom = AsyncItems(custom_events or [])
         self.output_value = output or {}
         self.interrupt_values = interrupts or []
 
@@ -396,7 +408,7 @@ class FakeAgent:
         self.streams = list(streams)
         self.payloads: list[Any] = []
 
-    async def astream_events(self, payload: Any, config: dict[str, Any], version: str) -> FakeStream:
+    async def astream_events(self, payload: Any, config: dict[str, Any], version: str, **kwargs: Any) -> FakeStream:
         self.payloads.append(payload)
         return self.streams.pop(0)
 
@@ -568,6 +580,94 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
 
         self.assertIn(("subagent_started", "general-purpose [one]", "find the README"), renderer.events)
+
+    async def test_run_turn_hides_tool_namespace_subagent_without_task(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.subagents = AsyncItems(
+            [
+                Subagent(
+                    "general-purpose [one]",
+                    [ToolCall("noop", {}, "one")],
+                    task_input="",
+                    path=["tools:eval-call"],
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate via eval", renderer, "thread-1")
+
+        self.assertNotIn(("subagent_started", "general-purpose [one]", ""), renderer.events)
+        self.assertNotIn(("subagent_finished", "general-purpose [one]", "one"), renderer.events)
+
+    async def test_run_turn_renders_eval_custom_subagents(self) -> None:
+        stream = FakeStream(
+            output={"messages": []},
+            custom_events=[
+                {
+                    "type": "subagent",
+                    "phase": "start",
+                    "id": "ptc_task_one",
+                    "eval_id": "eval-1",
+                    "subagent_type": "general-purpose",
+                    "label": "satire",
+                    "description": "tell a satire joke",
+                },
+                {
+                    "type": "subagent",
+                    "phase": "start",
+                    "id": "ptc_task_two",
+                    "eval_id": "eval-1",
+                    "subagent_type": "general-purpose",
+                    "label": "knock-knock",
+                    "description": "tell a knock-knock joke",
+                },
+                {"type": "subagent", "phase": "complete", "id": "ptc_task_two"},
+                {"type": "subagent", "phase": "complete", "id": "ptc_task_one"},
+            ],
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate via eval", renderer, "thread-1")
+
+        self.assertIn(("subagent_started", "general-purpose [satire]", "tell a satire joke", "eval_subagent"), renderer.events)
+        self.assertIn(
+            ("subagent_started", "general-purpose [knock-knock]", "tell a knock-knock joke", "eval_subagent"),
+            renderer.events,
+        )
+        self.assertIn(("subagent_finished", "general-purpose [satire]", ""), renderer.events)
+        self.assertIn(("subagent_finished", "general-purpose [knock-knock]", ""), renderer.events)
+
+    async def test_run_turn_keeps_tool_namespace_subagent_with_task_request_ordinary(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.tool_calls = AsyncItems(
+            [
+                DocumentedToolCall(
+                    "task",
+                    {"description": "tell a pun"},
+                    call_id="task-1",
+                )
+            ]
+        )
+        stream.subagents = AsyncItems(
+            [
+                Subagent(
+                    "general-purpose [one]",
+                    [ToolCall("noop", {}, "one")],
+                    task_input="",
+                    path=["tools:task-call"],
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        self.assertIn(("subagent_started", "general-purpose [one]", "tell a pun"), renderer.events)
+        self.assertNotIn(
+            ("subagent_started", "general-purpose [one]", "tell a pun", "dynamic_tool_subagent"),
+            renderer.events,
+        )
 
     async def test_run_turn_maps_multiple_task_requests_to_subagents_in_order(self) -> None:
         stream = FakeStream(output={"messages": []})
@@ -2518,6 +2618,19 @@ Await further instructions.
             renderer.finish_main()
 
         self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
+
+    def test_terminal_renderer_keeps_dynamic_subagent_origin_quiet(self) -> None:
+        renderer = Renderer()
+        output = StringIO()
+
+        with redirect_stdout(output):
+            renderer.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
+
+        text = output.getvalue()
+        self.assertIn("subagent - general-purpose [one]:", text)
+        self.assertNotIn("from eval/tool", text)
+        self.assertNotIn("eval/tool-created subagent", text)
+        self.assertNotIn("\ntask:\n", text)
 
     async def test_two_task_calls_produce_one_delegation_event(self) -> None:
         renderer = RecordingRenderer()

@@ -87,7 +87,7 @@ class RecordingRenderer:
         """Record delegation."""
         self.console.print(str(calls))
 
-    def subagent_started(self, name: str, task_input: str = "") -> None:
+    def subagent_started(self, name: str, task_input: str = "", *, origin: str = "") -> None:
         """Record subagent start."""
         self.console.print(f"{name}: {task_input}")
 

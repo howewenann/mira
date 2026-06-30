@@ -148,6 +148,7 @@ class ChatLog(VerticalScroll):
                         event["name"],
                         event.get("output", ""),
                         event.get("task_input", ""),
+                        origin=str(event.get("origin") or ""),
                         created_at=created_at,
                     )
                 elif event.get("status") == "CANCELLED":
@@ -155,10 +156,16 @@ class ChatLog(VerticalScroll):
                         event["name"],
                         event.get("output", ""),
                         event.get("task_input", ""),
+                        origin=str(event.get("origin") or ""),
                         created_at=created_at,
                     )
                 else:
-                    self.subagent_started(event["name"], event.get("task_input", ""), created_at=created_at)
+                    self.subagent_started(
+                        event["name"],
+                        event.get("task_input", ""),
+                        origin=str(event.get("origin") or ""),
+                        created_at=created_at,
+                    )
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type == "plan":
@@ -409,7 +416,14 @@ class ChatLog(VerticalScroll):
             self._subagent_labels[key] = f"{name} [{self._next_suffix()}]"
         return self._subagent_labels[key]
 
-    def subagent_started(self, subagent: str, task_input: str = "", *, created_at: str = "") -> None:
+    def subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        origin: str = "",
+        created_at: str = "",
+    ) -> None:
         """Create or replace the block for a running subagent."""
         self.hide_waiting()
         self.hide_model_activity()
@@ -419,9 +433,10 @@ class ChatLog(VerticalScroll):
             "request": task_input,
             "status": "RUNNING",
             "output": "",
+            "origin": origin,
         }
         widget = self._add_block(
-            f"subagent - {subagent}",
+            self._subagent_title(subagent),
             self._render_subagent(subagent),
             "message subagent",
             created_at=created_at,
@@ -439,6 +454,7 @@ class ChatLog(VerticalScroll):
         if block.get("request"):
             return
         block["request"] = task_input
+        block["origin"] = ""
         self._update_subagent(subagent)
 
     def subagent_finished(
@@ -447,6 +463,7 @@ class ChatLog(VerticalScroll):
         result: str = "",
         task_input: str = "",
         *,
+        origin: str = "",
         created_at: str = "",
     ) -> None:
         """Mark a subagent block as done and attach its final output."""
@@ -458,10 +475,13 @@ class ChatLog(VerticalScroll):
                 "request": task_input,
                 "status": "RUNNING",
                 "output": "",
+                "origin": origin,
             },
         )
         if task_input and not block.get("request"):
             block["request"] = task_input
+        if origin and not block.get("origin"):
+            block["origin"] = origin
         block["status"] = "DONE"
         block["output"] = result
         self._update_subagent(subagent, created_at=created_at)
@@ -472,6 +492,7 @@ class ChatLog(VerticalScroll):
         result: str = "",
         task_input: str = "",
         *,
+        origin: str = "",
         created_at: str = "",
     ) -> None:
         """Mark a subagent block as cancelled."""
@@ -483,10 +504,13 @@ class ChatLog(VerticalScroll):
                 "request": task_input,
                 "status": "RUNNING",
                 "output": "",
+                "origin": origin,
             },
         )
         if task_input and not block.get("request"):
             block["request"] = task_input
+        if origin and not block.get("origin"):
+            block["origin"] = origin
         block["status"] = "CANCELLED"
         block["output"] = result
         self._update_subagent(subagent, created_at=created_at)
@@ -766,7 +790,7 @@ class ChatLog(VerticalScroll):
         widget = self._subagent_widgets.get(label)
         if widget is None:
             widget = self._add_block(
-                f"subagent - {label}",
+                self._subagent_title(label),
                 self._render_subagent(label),
                 "message subagent",
                 created_at=created_at,
@@ -775,6 +799,7 @@ class ChatLog(VerticalScroll):
             return
         if timestamp := timestamp_text(created_at):
             widget.border_subtitle = escape(timestamp)
+        widget.border_title = escape(self._subagent_title(label))
         widget.update(self._render_subagent(label))
         self._scroll_to_end()
 
@@ -837,6 +862,10 @@ class ChatLog(VerticalScroll):
     def _has_subagent_suffix(self, label: str) -> bool:
         """Return whether a subagent label already includes a generated suffix."""
         return bool(re.search(r"\[[^\]]+\]\s*$", label))
+
+    def _subagent_title(self, label: str) -> str:
+        """Return a visible title for a subagent block."""
+        return f"subagent - {label}"
 
     def _render_waiting(self) -> Text:
         text = Text()

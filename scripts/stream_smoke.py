@@ -90,12 +90,12 @@ class SmokeRenderer:
             self._subagent_labels[key] = f"{name} [{len(self._subagent_labels) + 1}]"
         return self._subagent_labels[key]
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
         if not task_input:
             self._blank_subagent_starts.append(subagent)
         else:
             self._subagent_requests[subagent] = task_input
-        self._record("subagent_started", name=subagent, request=task_input)
+        self._record("subagent_started", name=subagent, request=task_input, origin=origin)
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         if task_input:

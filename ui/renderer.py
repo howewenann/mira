@@ -34,6 +34,7 @@ class Renderer:
         self._reasoning_text = ""
         self._subagent_ids = count(1)
         self._subagent_labels: dict[int, str] = {}
+        self._subagent_origins: dict[str, str] = {}
 
     def reasoning_delta(self, delta: str) -> None:
         """Buffer streamed reasoning text for a clean terminal block."""
@@ -102,29 +103,35 @@ class Renderer:
             self._subagent_labels[key] = f"{name} [{self._next_suffix()}]"
         return self._subagent_labels[key]
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
         """Print a subagent start."""
-        details = f"request: {self.truncate(task_input)}" if task_input else "running"
-        self._block(f"subagent - {subagent}", details)
+        if origin:
+            self._subagent_origins[subagent] = origin
+        details = []
+        details.append(f"request: {self.truncate(task_input)}" if task_input else "running")
+        self._block(subagent_title(subagent, origin), "\n".join(details))
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Print a late-arriving request for an already-started subagent."""
         if task_input:
-            self._block(f"subagent - {subagent}", f"request: {self.truncate(task_input)}")
+            self._subagent_origins.pop(subagent, None)
+            self._block(subagent_title(subagent), f"request: {self.truncate(task_input)}")
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Print a subagent finish."""
+        origin = self._subagent_origins.pop(subagent, "")
         details = "done"
         if result:
             details += f"\noutput: {self.truncate(result)}"
-        self._block(f"subagent - {subagent}", details)
+        self._block(subagent_title(subagent, origin), details)
 
     def subagent_cancelled(self, subagent: str, result: str = "") -> None:
         """Print a subagent cancellation."""
+        origin = self._subagent_origins.pop(subagent, "")
         details = "cancelled"
         if result:
             details += f"\noutput: {self.truncate(result)}"
-        self._block(f"subagent - {subagent}", details)
+        self._block(subagent_title(subagent, origin), details)
 
     def subagents_cancelled(self) -> None:
         """No-op for non-live terminal output."""
@@ -284,3 +291,8 @@ class Renderer:
 def is_compaction_notice(text: str) -> bool:
     """Return whether an info notice is really leaked compaction reasoning."""
     return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
+
+
+def subagent_title(subagent: str, origin: str = "") -> str:
+    """Return the terminal title for a subagent block."""
+    return f"subagent - {subagent}"

@@ -36,6 +36,7 @@ class SessionRecorder:
         self._reasoning_text = ""
         self._reasoning_pending = ""
         self._running_subagents: dict[str, str] = {}
+        self._running_subagent_origins: dict[str, str] = {}
         self._running_subagent_event_ids: dict[str, int] = {}
         self._delegation_keys: set[tuple[str, str]] = set()
 
@@ -144,13 +145,14 @@ class SessionRecorder:
             new_calls.append(call)
         return new_calls
 
-    def subagent_started(self, name: str, task_input: str = "") -> dict[str, Any]:
+    def subagent_started(self, name: str, task_input: str = "", *, origin: str = "") -> dict[str, Any]:
         self.finish_main()
         self._running_subagents[name] = task_input
-        event = append_event(
-            self.record,
-            {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input},
-        )
+        self._running_subagent_origins[name] = origin
+        payload = {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input}
+        if origin:
+            payload["origin"] = origin
+        event = append_event(self.record, payload)
         self._running_subagent_event_ids[name] = int(event["id"])
         self.save()
         return event
@@ -159,42 +161,46 @@ class SessionRecorder:
         if not task_input:
             return
         self._running_subagents[name] = task_input
+        self._running_subagent_origins[name] = ""
         event_id = self._running_subagent_event_ids.get(name)
         if event_id is not None:
             update_event_field(self.record, event_id, "task_input", task_input)
+            update_event_field(self.record, event_id, "origin", "")
             self.save()
 
     def subagent_finished(self, name: str, output: str = "") -> dict[str, Any]:
         task_input = self._running_subagents.pop(name, "")
+        origin = self._running_subagent_origins.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
-        stored = append_event(
-            self.record,
-            {
-                "type": "subagent",
-                "mode": self.mode,
-                "name": name,
-                "status": "DONE",
-                "task_input": task_input,
-                "output": output,
-            },
-        )
+        payload = {
+            "type": "subagent",
+            "mode": self.mode,
+            "name": name,
+            "status": "DONE",
+            "task_input": task_input,
+            "output": output,
+        }
+        if origin:
+            payload["origin"] = origin
+        stored = append_event(self.record, payload)
         self.save()
         return stored
 
     def subagent_cancelled(self, name: str, output: str = "") -> dict[str, Any]:
         task_input = self._running_subagents.pop(name, "")
+        origin = self._running_subagent_origins.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
-        stored = append_event(
-            self.record,
-            {
-                "type": "subagent",
-                "mode": self.mode,
-                "name": name,
-                "status": "CANCELLED",
-                "task_input": task_input,
-                "output": output,
-            },
-        )
+        payload = {
+            "type": "subagent",
+            "mode": self.mode,
+            "name": name,
+            "status": "CANCELLED",
+            "task_input": task_input,
+            "output": output,
+        }
+        if origin:
+            payload["origin"] = origin
+        stored = append_event(self.record, payload)
         self.save()
         return stored
 
@@ -368,9 +374,9 @@ class RecordingRenderer:
         if callable(activity):
             activity()
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
-        event = self.recorder.subagent_started(subagent, task_input)
-        call_renderer(self.renderer.subagent_started, subagent, task_input, created_at=event_created_at(event))
+    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
+        event = self.recorder.subagent_started(subagent, task_input, origin=origin)
+        call_renderer(self.renderer.subagent_started, subagent, task_input, origin=origin, created_at=event_created_at(event))
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         callback = getattr(self.renderer, "subagent_request_updated", None)

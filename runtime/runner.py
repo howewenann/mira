@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langgraph.types import Command
+from langgraph.stream.transformers import CustomTransformer
 
 from runtime.message_events import consume_messages
 from runtime.output_events import (
@@ -20,7 +21,7 @@ from runtime.output_events import (
     output_tool_calls,
     output_tool_results,
 )
-from runtime.subagent_events import consume_subagents
+from runtime.subagent_events import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
 from runtime.tool_call_args import tool_call_args
 from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
 from runtime.usage import (
@@ -134,6 +135,7 @@ class SubagentRequestRenderer:
         self.renderer = renderer
         self._pending_requests: deque[str] = deque()
         self._pending_subagents: deque[str] = deque()
+        self._hidden_subagents: set[str] = set()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
@@ -148,12 +150,82 @@ class SubagentRequestRenderer:
                 self._pending_requests.append(description)
         self.renderer.delegation_started(calls)
 
-    def subagent_started(self, subagent: str, task_input: str = "") -> None:
+    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
         request = task_input or queued_request
-        self.renderer.subagent_started(subagent, request)
+        if origin == DYNAMIC_TOOL_SUBAGENT and not request:
+            self._hidden_subagents.add(subagent)
+            return
+        display_origin = "" if queued_request else origin
+        self.renderer.subagent_started(subagent, request, origin=display_origin)
         if not request:
             self._pending_subagents.append(subagent)
+
+    def subagent_finished(self, subagent: str, result: str = "") -> None:
+        if subagent in self._hidden_subagents:
+            self._hidden_subagents.remove(subagent)
+            return
+        self.renderer.subagent_finished(subagent, result)
+
+    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+        if subagent in self._hidden_subagents:
+            self._hidden_subagents.remove(subagent)
+            return
+        callback = getattr(self.renderer, "subagent_cancelled", None)
+        if callable(callback):
+            callback(subagent, result)
+
+
+class EvalSubagentRenderer:
+    """Render QuickJS eval-internal subagent lifecycle events."""
+
+    def __init__(self, renderer: Any) -> None:
+        self.renderer = renderer
+        self._labels: dict[str, str] = {}
+
+    def handle(self, event: dict[str, Any]) -> None:
+        phase = str(event.get("phase") or "")
+        subagent_id = str(event.get("id") or "")
+        if not subagent_id:
+            return
+        if phase == "start":
+            name = eval_subagent_name(event)
+            self._labels[subagent_id] = name
+            self.renderer.subagent_started(
+                name,
+                str(event.get("description") or ""),
+                origin=EVAL_SUBAGENT,
+            )
+        elif phase == "complete":
+            name = self._labels.pop(subagent_id, eval_subagent_name(event))
+            self.renderer.subagent_finished(name)
+        elif phase == "error":
+            name = self._labels.pop(subagent_id, eval_subagent_name(event))
+            self.renderer.subagent_cancelled(name, str(event.get("error") or "error"))
+
+
+async def consume_custom_events(stream: Any, renderer: Any) -> None:
+    """Consume raw custom events emitted by eval-internal subagent dispatch."""
+    eval_renderer = EvalSubagentRenderer(renderer)
+    async for event in stream:
+        if custom_event_data(event) is not None:
+            eval_renderer.handle(event)
+
+
+def custom_event_data(event: Any) -> dict[str, Any] | None:
+    """Return a QuickJS eval subagent custom payload, if this is one."""
+    if isinstance(event, dict) and event.get("type") == "subagent":
+        return event
+    return None
+
+
+def eval_subagent_name(event: dict[str, Any]) -> str:
+    """Build a stable visible label for one eval-internal subagent."""
+    subagent_type = str(event.get("subagent_type") or "subagent")
+    label = str(event.get("label") or "").strip()
+    if not label:
+        label = str(event.get("id") or "")[-8:] or "eval"
+    return f"{subagent_type} [{label}]"
 
 
 async def run_turn(
@@ -177,7 +249,12 @@ async def run_turn(
     result = TurnResult()
 
     while True:
-        stream = await agent.astream_events(payload, config=config, version="v3")
+        stream = await agent.astream_events(
+            payload,
+            config=config,
+            version="v3",
+            transformers=[CustomTransformer],
+        )
         event_renderer = SubagentRequestRenderer(renderer)
         output: dict[str, Any] = {}
         tool_call_start = len(result.tool_calls)
@@ -186,6 +263,7 @@ async def run_turn(
             waiting_started()
 
         await asyncio.gather(
+            consume_custom_events(stream.custom, event_renderer),
             consume_messages(stream.messages, event_renderer, result, render_normal_tools=False),
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),

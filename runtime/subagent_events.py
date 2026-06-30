@@ -9,6 +9,9 @@ from typing import Any
 from runtime.output_events import message_text, visible_message_text
 from runtime.tool_events import tool_output_text
 
+DYNAMIC_TOOL_SUBAGENT = "dynamic_tool_subagent"
+EVAL_SUBAGENT = "eval_subagent"
+
 
 async def consume_subagents(subagents: Any, renderer: Any) -> None:
     """Consume subagent streams while the status animation is active."""
@@ -71,7 +74,9 @@ async def animate_subagents(renderer: Any) -> None:
 async def consume_subagent(subagent: Any, renderer: Any) -> None:
     """Render one subagent lifecycle and capture its final answer text."""
     name = renderer.subagent_label(subagent)
-    renderer.subagent_started(name, getattr(subagent, "task_input", ""))
+    task_input = getattr(subagent, "task_input", "")
+    origin = subagent_origin(subagent)
+    renderer.subagent_started(name, task_input, origin=origin)
 
     try:
         result = await subagent_result(subagent)
@@ -79,6 +84,14 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         result = f"error: {exc}"
 
     renderer.subagent_finished(name, result=str(result))
+
+
+def subagent_origin(subagent: Any) -> str:
+    """Return an origin hint for subagents created from a tool namespace."""
+    path = getattr(subagent, "path", None)
+    if isinstance(path, list | tuple) and any(str(item).startswith("tools:") for item in path):
+        return DYNAMIC_TOOL_SUBAGENT
+    return ""
 
 
 async def subagent_result(subagent: Any) -> str:

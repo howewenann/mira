@@ -2085,6 +2085,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("request:", text)
             self.assertIn("write scary story", text)
 
+    async def test_dynamic_subagent_origin_is_quiet(self) -> None:
+        """Origin metadata should not be shown as user-visible classification."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
+            await pilot.pause()
+
+            block = app.query_one(ChatLog).children[-1]
+            title = str(getattr(block, "border_title", "")).replace("\\", "")
+            text = renderable_plain(block)
+
+            self.assertEqual(title, "subagent - general-purpose [one]")
+            self.assertNotIn("source:", text)
+            self.assertNotIn("eval/tool-created subagent", text)
+            self.assertNotEqual(title, "task")
+
+    async def test_late_subagent_request_clears_dynamic_origin(self) -> None:
+        """A late top-level task request should restore ordinary subagent display."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+
+            app.subagent_request_updated("general-purpose [one]", "write scary story")
+            await pilot.pause()
+
+            title = str(getattr(block, "border_title", "")).replace("\\", "")
+            text = renderable_plain(block)
+
+            self.assertEqual(title, "subagent - general-purpose [one]")
+            self.assertNotIn("eval/tool-created subagent", text)
+            self.assertIn("write scary story", text)
+
     async def test_tool_result_waits_for_call_and_then_attaches(self) -> None:
         """Out-of-order tool results should attach once the tool call is rendered."""
         app = make_app()

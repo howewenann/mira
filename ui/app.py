@@ -909,11 +909,18 @@ class MiraApp(App[None]):
         """Return a stable display label for a subagent."""
         return self.query_one(ChatLog).subagent_label(subagent)
 
-    def subagent_started(self, subagent: str, task_input: str = "", *, created_at: str = "") -> None:
+    def subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        origin: str = "",
+        created_at: str = "",
+    ) -> None:
         """Render a subagent start."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_started(subagent, task_input, created_at=created_at)
+        self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
