@@ -2157,6 +2157,59 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("output:", done)
             self.assertIn("README.md", done)
 
+    async def test_repeated_unsuffixed_subagents_get_separate_blocks(self) -> None:
+        """Concurrent subagents with the same base name should not share one bubble."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose", "inspect README")
+            app.subagent_started("general-purpose", "inspect pyproject")
+            await pilot.pause()
+
+            blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
+            titles = [str(getattr(block, "border_title", "")).replace("\\", "") for block in blocks]
+            rendered = [renderable_plain(block) for block in blocks]
+
+            self.assertEqual(len(blocks), 2)
+            self.assertNotEqual(titles[0], titles[1])
+            self.assertIn("inspect README", rendered[0])
+            self.assertIn("inspect pyproject", rendered[1])
+            self.assertIn("RUNNING", rendered[0])
+            self.assertIn("RUNNING", rendered[1])
+
+    async def test_repeated_unsuffixed_subagent_errors_update_matching_blocks(self) -> None:
+        """Error-like subagent output should finish only the matching active bubble."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose", "inspect README")
+            app.subagent_started("general-purpose", "inspect pyproject")
+            await pilot.pause()
+            blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
+
+            app.subagent_finished("general-purpose", "error: subagent_type: Field required")
+            await pilot.pause()
+            first = renderable_plain(blocks[0])
+            second = renderable_plain(blocks[1])
+
+            self.assertIn("DONE", first)
+            self.assertIn("error: subagent_type: Field required", first)
+            self.assertIn("RUNNING", second)
+            self.assertNotIn("subagent_type: Field required", second)
+
+            app.subagent_finished("general-purpose", "pyproject summary")
+            await pilot.pause()
+            second_done = renderable_plain(blocks[1])
+
+            self.assertIn("DONE", second_done)
+            self.assertIn("pyproject summary", second_done)
+
     async def test_cancelled_subagent_blocks_stop_animating(self) -> None:
         """Cancelling a turn should leave active subagents in a terminal state."""
         app = make_app()

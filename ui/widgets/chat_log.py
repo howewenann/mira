@@ -59,7 +59,7 @@ class ChatLog(VerticalScroll):
         self._tool_name_queues: dict[str, deque[str]] = defaultdict(deque)
         self._pending_tool_results_by_id: dict[str, str] = {}
         self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
-        self._subagent_aliases: dict[str, str] = {}
+        self._subagent_aliases: dict[str, deque[str]] = {}
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""
@@ -373,6 +373,7 @@ class ChatLog(VerticalScroll):
         """Reset subagent state for a new delegation group."""
         self._subagent_blocks = {}
         self._subagent_widgets = {}
+        self._subagent_aliases = {}
 
     def stop_subagent_live(self) -> None:
         """Finalize subagent display."""
@@ -413,7 +414,7 @@ class ChatLog(VerticalScroll):
         self.hide_waiting()
         self.hide_model_activity()
         self.finish_main()
-        subagent = self._subagent_display_label(subagent)
+        subagent = self._new_subagent_display_label(subagent)
         self._subagent_blocks[subagent] = {
             "request": task_input,
             "status": "RUNNING",
@@ -431,7 +432,7 @@ class ChatLog(VerticalScroll):
         """Fill request text into an existing running subagent block."""
         if not task_input:
             return
-        subagent = self._subagent_display_label(subagent)
+        subagent = self._resolve_subagent_display_label(subagent, prefer_blank_request=True)
         block = self._subagent_blocks.get(subagent)
         if block is None:
             return
@@ -450,7 +451,7 @@ class ChatLog(VerticalScroll):
     ) -> None:
         """Mark a subagent block as done and attach its final output."""
         self.hide_waiting()
-        subagent = self._subagent_display_label(subagent)
+        subagent = self._resolve_subagent_display_label(subagent, consume=True, create=True)
         block = self._subagent_blocks.setdefault(
             subagent,
             {
@@ -475,7 +476,7 @@ class ChatLog(VerticalScroll):
     ) -> None:
         """Mark a subagent block as cancelled."""
         self.hide_waiting()
-        subagent = self._subagent_display_label(subagent)
+        subagent = self._resolve_subagent_display_label(subagent, consume=True, create=True)
         block = self._subagent_blocks.setdefault(
             subagent,
             {
@@ -781,13 +782,61 @@ class ChatLog(VerticalScroll):
         """Return a short cute suffix for delegated workers."""
         return generate_slug(fallback=self._fallback_suffixes)
 
-    def _subagent_display_label(self, label: str) -> str:
-        """Return a stable label, adding a nickname if the caller omitted one."""
-        if "[" in label and "]" in label:
+    def _new_subagent_display_label(self, label: str, *, track: bool = True) -> str:
+        """Return a fresh visible label for a newly started subagent."""
+        if self._has_subagent_suffix(label):
             return label
-        if label not in self._subagent_aliases:
-            self._subagent_aliases[label] = f"{label} [{self._next_suffix()}]"
-        return self._subagent_aliases[label]
+        display = f"{label} [{self._next_suffix()}]"
+        if track:
+            self._subagent_aliases.setdefault(label, deque()).append(display)
+        return display
+
+    def _resolve_subagent_display_label(
+        self,
+        label: str,
+        *,
+        consume: bool = False,
+        create: bool = False,
+        prefer_blank_request: bool = False,
+    ) -> str:
+        """Resolve an unsuffixed lifecycle update to its active display label."""
+        if self._has_subagent_suffix(label):
+            return label
+
+        queue = self._subagent_aliases.get(label)
+        if queue:
+            fallback = ""
+            for candidate in list(queue):
+                block = self._subagent_blocks.get(candidate)
+                if block is None:
+                    continue
+                if block.get("status") != "RUNNING":
+                    continue
+                if prefer_blank_request and block.get("request"):
+                    fallback = fallback or candidate
+                    continue
+                if consume:
+                    self._remove_subagent_alias(label, candidate)
+                return candidate
+            if fallback:
+                return fallback
+
+        if label in self._subagent_blocks:
+            return label
+        if create:
+            return self._new_subagent_display_label(label, track=False)
+        return label
+
+    def _remove_subagent_alias(self, label: str, display: str) -> None:
+        """Forget a consumed display label from an unsuffixed subagent queue."""
+        queue = self._subagent_aliases.get(label)
+        if not queue:
+            return
+        self._subagent_aliases[label] = deque(candidate for candidate in queue if candidate != display)
+
+    def _has_subagent_suffix(self, label: str) -> bool:
+        """Return whether a subagent label already includes a generated suffix."""
+        return bool(re.search(r"\[[^\]]+\]\s*$", label))
 
     def _render_waiting(self) -> Text:
         text = Text()
