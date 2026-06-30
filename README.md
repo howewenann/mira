@@ -80,6 +80,12 @@ project run shell commands through the system shell, a Conda env name, a Conda
 env path, or a venv path. Venv paths can point at the venv folder or its Python
 executable, such as `.venv`, `.venv\Scripts\python.exe`, or `.venv/bin/python`.
 
+When `MIRA_LLM_PROVIDER=lmstudio`, MIRA keeps the UI/provider identity as
+`lmstudio:<model>` but sends chat turns through LM Studio's OpenAI-compatible
+`/v1` endpoint so DeepAgents can use normal LangChain tool calling. Reasoning
+blocks still depend on the fields emitted by the loaded LM Studio model through
+that endpoint.
+
 The additional env var field stores variable names only, not host values. Enter
 comma-separated names such as `CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE` when a
 project tool needs them. Empty fields mean no extra names are allowed, and muted
@@ -171,6 +177,9 @@ what MIRA loaded and which project resources replaced defaults.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval.
+- QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
+  `glob`, and `grep` through PTC; subagent delegation uses QuickJS' top-level
+  `task()` helper, and write/edit/shell tools stay outside that bridge.
 - Project-specific `execute` environment selection for system shell, Conda, or
   venv commands without saving host env values.
 - Planning mode that hides and blocks project write tools, with explicit plan

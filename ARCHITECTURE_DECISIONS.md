@@ -64,12 +64,16 @@ protection is moved later in the flow.
 
 **Decision:** Provider configuration comes from environment variables and
 workspace `.env`; user-facing workspace settings live in `.mira/settings.yml`.
+LM Studio remains the default user-facing provider, but MIRA constructs its
+LangChain chat model through AnyLLM's OpenAI-compatible transport so DeepAgents
+tool calls use LM Studio's `/v1` server path instead of the native
+`lmstudio-python` SDK path. The display identity remains `lmstudio:<model>`.
 
 **Why:** LLM provider details are environment-specific, while Git protection and
 tool approval choices are workspace behavior. Keeping these separate makes
 settings easier to inspect and safer to change from the TUI.
 
-**Where to check:** `config/loader.py`, `config/llm.py`,
+**Where to check:** `config/loader.py`, `config/llm.py`, `agent/llm.py`,
 `config/settings.py`, `ui/widgets/settings_panel.py`.
 
 **Update this when:** A setting moves between `.env` and `.mira/settings.yml`,
@@ -153,7 +157,10 @@ supported export shapes change.
 
 **Decision:** Dangerous built-in tools require approval by default. Project
 tools can be enabled or disabled through settings and remain visible in
-metadata even when disabled.
+metadata even when disabled. QuickJS programmatic tool calling is limited to
+`ls`, `read_file`, `glob`, and `grep`; subagent delegation uses QuickJS'
+top-level `task()` helper, while destructive file tools, shell execution, and
+interrupt/control-flow tools stay outside that bridge.
 
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project
@@ -161,7 +168,8 @@ tools in metadata lets the settings UI manage them without exposing them to the
 model.
 
 **Where to check:** `config/settings.py`, `agent/factory.py`,
-`agent/resources/__init__.py`, `ui/interrupts.py`, `runtime/runner.py`.
+`agent/middleware.py`, `agent/resources/__init__.py`, `ui/interrupts.py`,
+`runtime/runner.py`.
 
 **Update this when:** Approval defaults, interrupt payload handling, or
 settings-panel tool behavior changes.

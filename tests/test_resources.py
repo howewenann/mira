@@ -12,7 +12,7 @@ from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent import factory
 from agent.context_overflow import ProviderContextOverflowMiddleware
-from agent.middleware import ExecuteToolPromptMiddleware
+from agent.middleware import ExecuteToolPromptMiddleware, QUICKJS_PTC_TOOLS
 from agent.resources import (
     EXECUTE_ENV_KEYS,
     ProjectShellBackend,
@@ -512,8 +512,8 @@ def get_tools(project_backend):
 
         self.assertIs(built, agent)
         code_middleware.assert_called_once()
-        self.assertEqual(code_middleware.call_args.kwargs["ptc"], ["task"])
-        self.assertIsNotNone(code_middleware.call_args.kwargs["skills_backend"])
+        self.assertEqual(code_middleware.call_args.kwargs["ptc"], list(QUICKJS_PTC_TOOLS))
+        self.assertNotIn("skills_backend", code_middleware.call_args.kwargs)
         kwargs = create_deep_agent.call_args.kwargs
         self.assertIn("auto-summary", kwargs["middleware"])
         self.assertIn("summary", kwargs["middleware"])
@@ -551,6 +551,13 @@ def get_tools(project_backend):
         self.assertIn("execute", kwargs["interrupt_on"])
         self.assertIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
+
+    def test_quickjs_ptc_tools_include_only_safe_project_exploration(self) -> None:
+        """QuickJS PTC should expose read-only exploration tools, not writes or interrupts."""
+        ptc_tools = set(QUICKJS_PTC_TOOLS)
+
+        self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep"})
+        self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "present_plan"} & ptc_tools)
 
     def test_factory_registers_specific_and_provider_summarization_exclusions(self) -> None:
         """DeepAgents should exclude its hidden default summarization for resolved models."""

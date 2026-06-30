@@ -9,14 +9,12 @@ from langchain_anyllm import ChatAnyLLM
 from config.metadata import ModelMetadata, apply_model_metadata
 
 STREAM_USAGE_PROVIDERS = {"lmstudio"}
+OPENAI_COMPAT_TRANSPORT_PROVIDERS = {"lmstudio"}
 
 
 def get_llm(config: dict[str, Any], metadata: ModelMetadata | None = None) -> ChatAnyLLM:
     """Create the LangChain chat model from MIRA's config dictionary."""
-    kwargs: dict[str, Any] = {
-        "model": config["llm_model"],
-        "provider": config["llm_provider"],
-    }
+    kwargs = chat_anyllm_transport_kwargs(config)
 
     optional_values = {
         "api_base": config.get("llm_base_url"),
@@ -41,6 +39,16 @@ def get_llm(config: dict[str, Any], metadata: ModelMetadata | None = None) -> Ch
         return apply_model_metadata(model, metadata)
     fallback = config.get("llm_inferred_context_tokens") or config.get("llm_context_tokens")
     return apply_model_metadata(model, ModelMetadata(context_tokens=fallback))
+
+
+def chat_anyllm_transport_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    """Return ChatAnyLLM transport kwargs while preserving MIRA provider identity."""
+    provider = str(config["llm_provider"]).lower()
+    transport_provider = "openai" if provider in OPENAI_COMPAT_TRANSPORT_PROVIDERS else config["llm_provider"]
+    return {
+        "model": config["llm_model"],
+        "provider": transport_provider,
+    }
 
 
 def get_model_name(config: dict[str, Any]) -> str:

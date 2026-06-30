@@ -26,6 +26,44 @@ Expected:
 - The subagents inspect or locate the README file.
 - MIRA finishes with a joke after the README task.
 
+## LM Studio Tool Calling And Reasoning
+
+Use LM Studio with a loaded reasoning-capable model and the OpenAI-compatible
+server enabled at `MIRA_LLM_BASE_URL`, usually `http://localhost:1234/v1`.
+
+```powershell
+conda run -n ai_agents python -m cli.main -p "Use a tool to inspect README.md, then answer briefly with the project name."
+```
+
+Expected:
+
+- MIRA starts with the model displayed as `lmstudio:<model>`.
+- MIRA shows a filesystem search/read tool call such as `read_file`, `glob`,
+  or `grep`.
+- MIRA answers briefly using information from `README.md`.
+- The turn does not fail with an LM Studio native SDK tool-calling error.
+
+Then run an interactive reasoning check:
+
+```powershell
+mira
+```
+
+Enter:
+
+```text
+Think briefly about whether README.md describes MIRA as educational, inspect README.md if needed, then answer yes or no.
+```
+
+Expected:
+
+- A `thinking` block appears if the loaded model emits reasoning through LM
+  Studio's OpenAI-compatible endpoint.
+- MIRA can still use read-only tools.
+- If no `thinking` block appears but tool calling works, record the model name
+  and LM Studio version; that model/server path is not emitting reasoning
+  fields through the OpenAI-compatible endpoint.
+
 ## Planning Mode Blocks Writes
 
 ```powershell

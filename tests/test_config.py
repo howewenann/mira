@@ -15,7 +15,7 @@ import typer
 from langchain_anyllm import ChatAnyLLM
 from typer.testing import CliRunner
 
-from agent.llm import get_llm, get_model_name
+from agent.llm import chat_anyllm_transport_kwargs, get_llm, get_model_name
 from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, DEFAULT_CONTEXT_TOKENS, load_llm_config
@@ -150,7 +150,7 @@ class LLMConfigTests(unittest.TestCase):
         )
 
     def test_get_llm_requests_lmstudio_stream_usage(self) -> None:
-        """LM Studio streaming should ask for final usage chunks."""
+        """LM Studio should use OpenAI-compatible transport and request final usage chunks."""
         config = {
             "llm_provider": "lmstudio",
             "llm_model": "gemma-4-e4b",
@@ -163,11 +163,25 @@ class LLMConfigTests(unittest.TestCase):
 
         chat.assert_called_once_with(
             model="gemma-4-e4b",
-            provider="lmstudio",
+            provider="openai",
             api_base="http://localhost:1234/v1",
             api_key="lm-studio",
             stream_options={"include_usage": True},
         )
+
+    def test_lmstudio_transport_preserves_config_identity(self) -> None:
+        """LM Studio should keep MIRA identity while using OpenAI-compatible transport."""
+        config = {
+            "llm_provider": "lmstudio",
+            "llm_model": "gemma-4-e4b",
+        }
+
+        self.assertEqual(config["llm_provider"], "lmstudio")
+        self.assertEqual(
+            chat_anyllm_transport_kwargs(config),
+            {"model": "gemma-4-e4b", "provider": "openai"},
+        )
+        self.assertEqual(get_model_name(config), "lmstudio:gemma-4-e4b")
 
     def test_get_llm_direct_uses_anyllm_client_args(self) -> None:
         """Direct mode should use AnyLLM client_args with a direct async HTTPX client."""
@@ -183,6 +197,8 @@ class LLMConfigTests(unittest.TestCase):
         client: httpx.AsyncClient | None = None
         try:
             self.assertIsInstance(llm, ChatAnyLLM)
+            self.assertEqual(llm.provider, "openai")
+            self.assertEqual(get_model_name({"llm_provider": "lmstudio", "llm_model": "gemma-4-e4b"}), "lmstudio:gemma-4-e4b")
             client = llm.model_kwargs["client_args"]["http_client"]
             self.assertIsInstance(client, httpx.AsyncClient)
             self.assertFalse(client.trust_env)

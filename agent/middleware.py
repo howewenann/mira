@@ -18,6 +18,8 @@ from agent.compaction import (
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.tools.specs import tool_name as resource_tool_name
 
+QUICKJS_PTC_TOOLS = ("ls", "read_file", "glob", "grep")
+
 MIRA_EXECUTE_TOOL_DESCRIPTION = """Executes a shell command with proper handling and security measures.
 
 Usage:
@@ -122,7 +124,7 @@ def build_agent_middleware(
         summarization_middleware,
         FilesystemToolCallArgsMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
-        CodeInterpreterMiddleware(ptc=["task"], skills_backend=backend),
+        CodeInterpreterMiddleware(ptc=list(QUICKJS_PTC_TOOLS)),
         summarization_tool_middleware,
         ExecuteToolPromptMiddleware(),
     ]
@@ -298,6 +300,7 @@ __all__ = [
     "FilesystemToolCallArgsMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
     "ModelToolVisibilityMiddleware",
+    "QUICKJS_PTC_TOOLS",
     "build_agent_middleware",
     "execute_tool_with_mira_description",
 ]
