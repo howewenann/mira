@@ -10,11 +10,15 @@ import yaml
 
 SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
+DYNAMIC_SUBAGENTS = "dynamic_subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 LOCKED_INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task")
 INBUILT_DANGEROUS_TOOLS = (*LOCKED_INBUILT_DANGEROUS_TOOLS, EXECUTE_TOOL)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "system": {
+        DYNAMIC_SUBAGENTS: {"enabled": False},
+    },
     "hitl": {
         "git_protection": {"enabled": True},
         "execute_env": {
@@ -69,6 +73,12 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     settings = deepcopy(DEFAULT_SETTINGS)
     if not isinstance(raw, dict):
         return settings
+
+    system = raw.get("system")
+    if isinstance(system, dict):
+        dynamic_subagents = system.get(DYNAMIC_SUBAGENTS)
+        if isinstance(dynamic_subagents, dict) and isinstance(dynamic_subagents.get("enabled"), bool):
+            settings["system"][DYNAMIC_SUBAGENTS]["enabled"] = dynamic_subagents["enabled"]
 
     hitl = raw.get("hitl")
     if not isinstance(hitl, dict):
@@ -161,6 +171,22 @@ def git_protection_enabled(config_or_settings: dict[str, Any] | None) -> bool:
     """Return whether startup Git protection is enabled."""
     hitl = hitl_settings(config_or_settings)
     return bool(hitl.get("git_protection", {}).get("enabled", True))
+
+
+def dynamic_subagents_enabled(config_or_settings: dict[str, Any] | None) -> bool:
+    """Return whether eval may spawn dynamic subagents."""
+    if not isinstance(config_or_settings, dict):
+        return False
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return bool(normalized.get("system", {}).get(DYNAMIC_SUBAGENTS, {}).get("enabled", False))
+
+
+def set_dynamic_subagents(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Return settings with dynamic eval subagents enabled or disabled."""
+    updated = normalize_settings(settings)
+    updated["system"][DYNAMIC_SUBAGENTS]["enabled"] = bool(enabled)
+    return updated
 
 
 def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:

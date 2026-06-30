@@ -19,7 +19,7 @@ from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
-from config.settings import execute_env_settings, load_settings, tool_always_allow, tool_enabled
+from config.settings import dynamic_subagents_enabled, execute_env_settings, load_settings, tool_always_allow, tool_enabled
 from config.version import display_version
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
@@ -1621,7 +1621,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Settings", rendered)
                 self.assertIn("enabled", rendered)
                 self.assertIn("always allow", rendered)
-                self.assertIn("System", rendered)
+                self.assertIn("System Settings", rendered)
                 self.assertIn("Inbuilt Tools", rendered)
                 self.assertIn("Execute Environment", rendered)
                 self.assertIn("Run commands in", rendered)
@@ -1630,12 +1630,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Examples only. Use comma-separated names.", rendered)
                 self.assertIn("Custom Tools", rendered)
                 self.assertIn("Git Protection", rendered)
+                self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("write_file", rendered)
                 self.assertIn("edit_file", rendered)
                 self.assertIn("eval", rendered)
                 self.assertIn("task", rendered)
                 self.assertIn("execute", rendered)
                 self.assertIn("settings-toggle-git-git_protection", buttons)
+                self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
@@ -1651,6 +1653,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(panel.query_one("#settings-execute-env-allow", Input).display)
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
+                self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -1663,6 +1666,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_toggles_dynamic_subagents(self) -> None:
+        """Dynamic subagents should save as a system setting and rebuild agents."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls = []
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: "settings-toggle-system-dynamic_subagents" in {button.id for button in panel.query(Button)})
+
+                panel.query_one("#settings-toggle-system-dynamic_subagents", Button).press()
+                await wait_until(lambda: dynamic_subagents_enabled(load_settings(workspace)))
+
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "yes")
+                self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_execute_env_cycle_preserves_scroll(self) -> None:
         """Changing execute env mode should not jump the settings body back to the top."""

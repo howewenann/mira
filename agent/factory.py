@@ -100,6 +100,7 @@ def _build_agent(
         model=model,
         backend=backend,
         workspace=Path(workspace),
+        settings=(config or {}).get("settings"),
         extra_middleware=extra_middleware,
     )
 

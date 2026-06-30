@@ -241,6 +241,34 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("edit_file", interrupts)
         self.assertIn("web_search", interrupts)
 
+    def test_action_agent_disables_dynamic_subagents_by_default(self) -> None:
+        """QuickJS should not expose eval-internal task() unless the setting is enabled."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value="agent"),
+        ):
+            factory.build_agent({}, ".", "checkpointer")
+
+        self.assertFalse(code_middleware.call_args.kwargs["subagents"])
+
+    def test_action_agent_enables_dynamic_subagents_from_settings(self) -> None:
+        """The system setting should pass through to CodeInterpreterMiddleware."""
+        config = {"settings": {"system": {"dynamic_subagents": {"enabled": True}}}}
+
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value="agent"),
+        ):
+            factory.build_agent(config, ".", "checkpointer")
+
+        self.assertTrue(code_middleware.call_args.kwargs["subagents"])
+
     def test_agent_build_passes_metadata_before_summarization_middleware(self) -> None:
         """Model metadata should be applied before DeepAgents summarization middleware is created."""
         metadata = ModelMetadata(10000, "test")

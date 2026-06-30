@@ -25,6 +25,7 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_always_allow(loaded, "execute"))
         self.assertTrue(settings.tool_enabled(loaded, "write_file"))
         self.assertFalse(settings.tool_enabled(loaded, "execute"))
+        self.assertFalse(settings.dynamic_subagents_enabled(loaded))
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
@@ -75,6 +76,18 @@ class SettingsTests(unittest.TestCase):
         execute_env = settings.execute_env_settings(updated)
         self.assertEqual(execute_env["allow"], ["CUDA_HOME", "HF_HOME", "REQUESTS_CA_BUNDLE"])
 
+    def test_dynamic_subagents_setting_defaults_off_and_can_toggle(self) -> None:
+        """Dynamic eval subagents should be disabled unless explicitly enabled."""
+        loaded = settings.normalize_settings({})
+
+        self.assertFalse(settings.dynamic_subagents_enabled(loaded))
+
+        updated = settings.set_dynamic_subagents(loaded, True)
+        self.assertTrue(settings.dynamic_subagents_enabled(updated))
+
+        updated = settings.set_dynamic_subagents(updated, False)
+        self.assertFalse(settings.dynamic_subagents_enabled(updated))
+
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
         """Partial settings should merge with defaults; malformed YAML should not crash."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -82,6 +95,9 @@ class SettingsTests(unittest.TestCase):
             path = settings.settings_path(workspace)
             path.parent.mkdir()
             path.write_text(
+                "system:\n"
+                "  dynamic_subagents:\n"
+                "    enabled: true\n"
                 "hitl:\n"
                 "  git_protection:\n"
                 "    enabled: false\n"
@@ -93,6 +109,7 @@ class SettingsTests(unittest.TestCase):
             )
 
             loaded = settings.load_settings(workspace)
+            self.assertTrue(settings.dynamic_subagents_enabled(loaded))
             self.assertFalse(settings.git_protection_enabled(loaded))
             self.assertTrue(settings.tool_enabled(loaded, "write_file"))
             self.assertTrue(settings.tool_always_allow(loaded, "write_file"))

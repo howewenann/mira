@@ -14,11 +14,14 @@ from textual.events import Key
 from textual.widgets import Button, Input, Static
 
 from config.settings import (
+    DYNAMIC_SUBAGENTS,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    dynamic_subagents_enabled,
     execute_env_settings,
     git_protection_enabled,
+    set_dynamic_subagents,
     set_execute_env_allow,
     set_execute_env_mode,
     set_execute_env_value,
@@ -29,7 +32,7 @@ from config.settings import (
     tool_enabled,
 )
 
-ToggleKind = Literal["git", "enabled", "always_allow"]
+ToggleKind = Literal["git", "system", "enabled", "always_allow"]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
     "conda_name": "conda env name",
@@ -82,11 +85,17 @@ class SettingsPanel(Vertical):
                 yield Static("Settings", classes="settings-title")
                 yield SettingsCloseButton("x", panel=self, id="settings-close", classes="settings-close")
             with VerticalScroll(id="settings-body"):
-                yield Static("System", classes="settings-section system")
-                yield SettingsHeaderRow("Setting")
+                yield Static("System Settings", classes="settings-section system")
                 with Horizontal(classes="settings-row"):
                     yield Static("Git Protection", classes="settings-label")
                     yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
+                    yield Static("-", classes="settings-placeholder")
+                with Horizontal(classes="settings-row"):
+                    yield Static("Dynamic subagents", classes="settings-label")
+                    yield self._toggle_button(
+                        ToggleCell("system", DYNAMIC_SUBAGENTS),
+                        dynamic_subagents_enabled(self.settings),
+                    )
                     yield Static("-", classes="settings-placeholder")
 
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
@@ -236,6 +245,8 @@ class SettingsPanel(Vertical):
     async def _set_cell(self, cell: ToggleCell, value: bool) -> None:
         if cell.kind == "git":
             updated = set_git_protection(self.settings, value)
+        elif cell.kind == "system":
+            updated = set_dynamic_subagents(self.settings, value)
         elif cell.kind == "enabled":
             updated = set_tool_enabled(self.settings, cell.name, value)
         else:
@@ -351,6 +362,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
     """Return the boolean value for a settings cell."""
     if cell.kind == "git":
         return git_protection_enabled(settings)
+    if cell.kind == "system":
+        return dynamic_subagents_enabled(settings)
     if cell.kind == "enabled":
         return tool_enabled(settings, cell.name)
     return tool_always_allow(settings, cell.name)

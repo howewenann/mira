@@ -70,7 +70,10 @@ tool calls use LM Studio's `/v1` server path instead of the native
 `lmstudio-python` SDK path. The display identity remains `lmstudio:<model>`.
 
 **Why:** LLM provider details are environment-specific, while Git protection and
-tool approval choices are workspace behavior. Keeping these separate makes
+tool approval choices are workspace behavior. Dynamic eval subagents are also
+workspace behavior: they let JavaScript eval spawn subagents through
+QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
+requires an explicit System Settings toggle. Keeping these separate makes
 settings easier to inspect and safer to change from the TUI.
 
 **Where to check:** `config/loader.py`, `config/llm.py`, `agent/llm.py`,
@@ -158,9 +161,10 @@ supported export shapes change.
 **Decision:** Dangerous built-in tools require approval by default. Project
 tools can be enabled or disabled through settings and remain visible in
 metadata even when disabled. QuickJS programmatic tool calling is limited to
-`ls`, `read_file`, `glob`, and `grep`; subagent delegation uses QuickJS'
-top-level `task()` helper, while destructive file tools, shell execution, and
-interrupt/control-flow tools stay outside that bridge.
+`ls`, `read_file`, `glob`, and `grep`; dynamic subagent delegation uses
+QuickJS' top-level `task()` helper only when the System Settings toggle is
+enabled, while destructive file tools, shell execution, and interrupt/control
+flow tools stay outside that bridge.
 
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project

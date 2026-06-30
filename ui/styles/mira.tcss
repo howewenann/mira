@@ -287,8 +287,12 @@ Screen {
 .settings-section {
     height: 1;
     margin: 2 0 1 0;
+    width: 1fr;
+    padding: 0 1;
     text-style: bold;
     content-align: left middle;
+    background: #151a1d;
+    border-left: solid #56616a;
 }
 
 .settings-section.system {
@@ -296,7 +300,9 @@ Screen {
 }
 
 .settings-section.system {
-    color: #7ce3dc;
+    color: #e8fffb;
+    background: #14524f;
+    border-left: solid #5bb8b1;
 }
 
 .settings-section.inbuilt {

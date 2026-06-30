@@ -17,6 +17,7 @@ from agent.compaction import (
 )
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.tools.specs import tool_name as resource_tool_name
+from config.settings import dynamic_subagents_enabled
 
 QUICKJS_PTC_TOOLS = ("ls", "read_file", "glob", "grep")
 
@@ -115,6 +116,7 @@ def build_agent_middleware(
     model: Any,
     backend: Any,
     workspace: Path,
+    settings: dict[str, Any] | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
 ) -> AgentMiddlewareStack:
     """Build MIRA's user middleware stack for DeepAgents."""
@@ -124,7 +126,10 @@ def build_agent_middleware(
         summarization_middleware,
         FilesystemToolCallArgsMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
-        CodeInterpreterMiddleware(ptc=list(QUICKJS_PTC_TOOLS)),
+        CodeInterpreterMiddleware(
+            ptc=list(QUICKJS_PTC_TOOLS),
+            subagents=dynamic_subagents_enabled(settings),
+        ),
         summarization_tool_middleware,
         ExecuteToolPromptMiddleware(),
     ]

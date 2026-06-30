@@ -71,8 +71,10 @@ Studio's loaded context when available and otherwise applies provider profile
 limits or this configured cap to DeepAgents.
 
 MIRA does not create or overwrite `.env`. Workspace settings such as Git
-protection and tool approval behavior live in `.mira/settings.yml`; change them
-from the TUI with `/settings`.
+protection, dynamic eval subagents, and tool approval behavior live in
+`.mira/settings.yml`; change them from the TUI with `/settings`. Dynamic
+subagents are disabled by default, so QuickJS eval does not expose its
+top-level `task()` helper unless enabled in System Settings.
 
 MIRA's own Python runtime can be different from the environment used by the
 agent's `execute` tool. In `/settings`, the Execute Environment section lets a
@@ -178,8 +180,9 @@ what MIRA loaded and which project resources replaced defaults.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
-  `glob`, and `grep` through PTC; subagent delegation uses QuickJS' top-level
-  `task()` helper, and write/edit/shell tools stay outside that bridge.
+  `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
+  QuickJS' top-level `task()` helper when enabled in `/settings`, and
+  write/edit/shell tools stay outside that bridge.
 - Project-specific `execute` environment selection for system shell, Conda, or
   venv commands without saving host env values.
 - Planning mode that hides and blocks project write tools, with explicit plan
