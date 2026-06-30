@@ -1,6 +1,6 @@
 [project]
 name = "mira"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Minimal Iterative Reasoning Agent"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,3 +33,6 @@ packages = ["agent", "cli", "config", "runtime", "session", "ui"]
 "agent/default_resources" = "agent/default_resources"
 "ui/styles/mira.tcss" = "ui/styles/mira.tcss"
 ".env.example" = ".env.example"
+
+[tool.hatch.version]
+path = "config/version.py"

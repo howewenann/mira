@@ -1,6 +1,6 @@
 # MIRA
 
-Minimal Iterative Reasoning Agent v1.0.0.
+Minimal Iterative Reasoning Agent.
 
 MIRA is an educational Python CLI coding agent. It is intentionally small and
 direct so you can use it, inspect it, and adapt it without wading through a

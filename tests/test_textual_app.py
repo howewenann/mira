@@ -20,6 +20,7 @@ from textual.widgets import Button, Input, Static, TextArea
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from config.settings import execute_env_settings, load_settings, tool_always_allow, tool_enabled
+from config.version import display_version
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -148,6 +149,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("model     lmstudio:test-model", plain)
         self.assertIn("workspace D:\\Projects\\mira", plain)
         self.assertIn(HINTS, plain)
+
+    def test_splash_version_uses_central_project_version(self) -> None:
+        """The splash version should come from the central package version."""
+        self.assertEqual(VERSION, display_version())
 
     def test_session_label_shows_latest_prompt_preview_and_timestamp(self) -> None:
         """Sidebar rows should preview the latest user prompt instead of generated titles."""
