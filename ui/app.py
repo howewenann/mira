@@ -11,6 +11,7 @@ from typing import Any
 
 from langchain_core.exceptions import ContextOverflowError
 from textual import on
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -57,8 +58,8 @@ class MiraApp(App[None]):
 
     CSS_PATH = "styles/mira.tcss"
     BINDINGS = [
-        Binding("ctrl+c", "interrupt_or_quit", "Cancel/Quit", priority=True),
-        Binding("ctrl+q", "quit", "Quit"),
+        Binding("ctrl+c", "copy", "Copy", priority=True),
+        Binding("alt+q", "interrupt_or_quit", "Cancel/Quit", priority=True),
         Binding("ctrl+l", "clear_log", "Clear"),
         Binding("escape", "focus_prompt", "Prompt"),
     ]
@@ -439,7 +440,7 @@ class MiraApp(App[None]):
         self.run_worker(self._confirm_interrupt_or_quit(), name="confirm-interrupt", exclusive=False)
 
     async def _confirm_interrupt_or_quit(self) -> None:
-        """Ask for confirmation before handling Ctrl+C."""
+        """Ask for confirmation before handling the cancel/quit shortcut."""
         self.confirming_interrupt = True
         try:
             if self.busy and self.turn_worker is not None:
@@ -474,6 +475,14 @@ class MiraApp(App[None]):
         """Clear chat and tool output."""
         self.clear_log()
         self._set_status(state="ready")
+
+    def action_copy(self) -> None:
+        """Copy the current widget selection without treating it as interrupt."""
+        focused = self.focused
+        copy_action = getattr(focused, "action_copy", None)
+        if copy_action is None:
+            raise SkipAction()
+        copy_action()
 
     def action_focus_prompt(self) -> None:
         """Focus the prompt input."""

@@ -686,8 +686,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertTrue(app.ready)
 
-    async def test_ctrl_c_action_cancels_running_turn(self) -> None:
-        """The VS Code-friendly interrupt binding should confirm before cancelling."""
+    async def test_alt_q_cancels_running_turn(self) -> None:
+        """Alt+Q should confirm before cancelling a running turn."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -696,7 +696,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = True
             app.turn_worker = worker
 
-            app.action_interrupt_or_quit()
+            await pilot.press("alt+q")
             await pilot.pause()
             self.assertFalse(worker.cancelled)
             self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Cancel Turn?")
@@ -705,7 +705,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(worker.cancelled)
 
-            app.action_interrupt_or_quit()
+            await pilot.press("alt+q")
             await pilot.pause()
             await pilot.press("y")
             await pilot.pause()
@@ -713,14 +713,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(worker.cancelled)
             self.assertEqual(app.status_state, "cancelling")
 
-    async def test_ctrl_c_action_confirms_idle_exit(self) -> None:
-        """Ctrl+C should not quit an idle app without confirmation."""
+    async def test_alt_q_confirms_idle_exit(self) -> None:
+        """Alt+Q should not quit an idle app without confirmation."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             with patch.object(app, "exit") as exit_app:
-                app.action_interrupt_or_quit()
+                await pilot.press("alt+q")
                 await pilot.pause()
                 self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Exit MIRA?")
 
@@ -728,14 +728,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 exit_app.assert_not_called()
 
-                app.action_interrupt_or_quit()
+                await pilot.press("alt+q")
                 await pilot.pause()
                 await pilot.press("y")
                 await pilot.pause()
                 exit_app.assert_called_once()
 
-    async def test_ctrl_c_action_cancels_running_turn_during_prompt(self) -> None:
-        """Ctrl+C should still cancel when another in-window prompt is active."""
+    async def test_ctrl_c_copies_prompt_selection(self) -> None:
+        """Ctrl+C should copy focused text instead of interrupting."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            prompt.value = "copy this"
+            prompt.select_all()
+
+            with patch.object(app, "action_interrupt_or_quit") as interrupt:
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+            self.assertEqual(getattr(app, "_clipboard", ""), "copy this")
+            interrupt.assert_not_called()
+
+    async def test_alt_q_cancels_running_turn_during_prompt(self) -> None:
+        """Alt+Q should still cancel when another in-window prompt is active."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -750,7 +767,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.turn_worker = worker
 
             with patch.object(app, "exit") as exit_app:
-                app.action_interrupt_or_quit()
+                await pilot.press("alt+q")
                 await pilot.pause()
 
                 self.assertTrue(worker.cancelled)
