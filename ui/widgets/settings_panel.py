@@ -86,17 +86,16 @@ class SettingsPanel(Vertical):
                 yield SettingsCloseButton("x", panel=self, id="settings-close", classes="settings-close")
             with VerticalScroll(id="settings-body"):
                 yield Static("System Settings", classes="settings-section system")
+                yield SettingsHeaderRow("", show_always=False)
                 with Horizontal(classes="settings-row"):
                     yield Static("Git Protection", classes="settings-label")
                     yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
-                    yield Static("-", classes="settings-placeholder")
                 with Horizontal(classes="settings-row"):
                     yield Static("Dynamic subagents", classes="settings-label")
                     yield self._toggle_button(
                         ToggleCell("system", DYNAMIC_SUBAGENTS),
                         dynamic_subagents_enabled(self.settings),
                     )
-                    yield Static("-", classes="settings-placeholder")
 
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
                 yield SettingsHeaderRow("Tool")
@@ -413,14 +412,16 @@ class SettingsToggleButton(Button):
 class SettingsHeaderRow(Horizontal):
     """Column header row for settings tables."""
 
-    def __init__(self, name_label: str) -> None:
+    def __init__(self, name_label: str, *, show_always: bool = True) -> None:
         super().__init__(classes="settings-row settings-header-row")
         self.name_label = name_label
+        self.show_always = show_always
 
     def compose(self) -> ComposeResult:
         yield Static(self.name_label, classes="settings-column-label name")
-        yield Static("enabled", classes="settings-column-label enabled")
-        yield Static("always allow", classes="settings-column-label always")
+        yield Static("enable", classes="settings-column-label enabled")
+        if self.show_always:
+            yield Static("always allow", classes="settings-column-label always")
 
 
 class SettingsCloseButton(Button):

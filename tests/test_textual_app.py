@@ -1619,7 +1619,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertNotIn("Config", rendered)
                 self.assertIn("Settings", rendered)
-                self.assertIn("enabled", rendered)
+                self.assertIn("enable", rendered)
                 self.assertIn("always allow", rendered)
                 self.assertIn("System Settings", rendered)
                 self.assertIn("Inbuilt Tools", rendered)
