@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from pyfiglet import Figlet
 from rich.console import Console
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -1198,6 +1198,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 panel = app.query_one(PromptPanel)
+                await wait_until(lambda: len(list(panel.query(Button))) == 3)
+                await wait_until(
+                    lambda: len(list(panel.query(Button))) == 3 and list(panel.query(Button))[0].has_focus
+                )
                 buttons = list(panel.query(Button))
                 self.assertTrue(panel.display)
                 self.assertEqual(len(buttons), 3)
@@ -1457,6 +1461,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await asyncio.wait_for(task, timeout=2)
 
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) == 2)
             buttons = list(app.query_one(PromptPanel).query(Button))
             self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
 
@@ -1482,6 +1487,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await asyncio.wait_for(task, timeout=2)
 
+                await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) == 2)
                 buttons = list(app.query_one(PromptPanel).query(Button))
                 message = renderable_plain(app.query_one("#prompt-panel-message", Static))
                 self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
@@ -1939,8 +1945,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(app.edit_decision(action))
             await pilot.pause()
             editor = app.query_one("#prompt-panel-editor", TextArea)
+            await wait_until(lambda: editor.has_focus)
             self.assertTrue(editor.has_focus)
             editor.text = '{"file_path": "test.txt", "content": "bye"}'
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-save"))) > 0)
             app.query_one("#prompt-save", Button).press()
             decision = await asyncio.wait_for(task, timeout=2)
 
@@ -1958,6 +1966,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             invalid_task = asyncio.create_task(app.edit_decision(action))
             await pilot.pause()
             app.query_one("#prompt-panel-editor", TextArea).text = "{bad json"
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-save"))) > 0)
             app.query_one("#prompt-save", Button).press()
             self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject"})
 
@@ -2368,13 +2377,100 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             open_task = asyncio.create_task(app.ask_user(open_interrupt))
             await pilot.pause()
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) >= 2)
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertTrue(str(buttons[-1].label).startswith("2 Tell MIRA"))
             await pilot.press("2")
             await pilot.pause()
             answer = app.query_one("#prompt-panel-input", Input)
+            await wait_until(lambda: answer.has_focus)
             self.assertTrue(answer.has_focus)
             answer.value = "Try the safer patch"
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(open_task, timeout=2), "Try the safer patch")
+
+    async def test_choice_prompt_buttons_wrap_in_narrow_viewports(self) -> None:
+        """Shared choice dialogs should wrap options instead of hiding later buttons."""
+        app = make_app()
+        choices = [(str(index), f"{index} Option {index}") for index in range(1, 9)]
+
+        async with app.run_test(size=(80, 40)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app._prompt_choice("Choices", "Pick one.", choices))
+            await pilot.pause()
+
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == len(choices))
+            await wait_until(
+                lambda: len({row.region.y for row in panel.query(".prompt-panel-button-row")}) > 1
+            )
+            rows = list(panel.query(".prompt-panel-button-row"))
+            buttons = list(panel.query(Button))
+            row_positions = {row.region.y for row in rows}
+            panel_right = panel.region.x + panel.region.width
+            self.assertGreater(len(rows), 1)
+            self.assertGreater(len(row_positions), 1, [row.region for row in rows])
+            self.assertEqual(str(buttons[-1].label), "8 Option 8")
+            self.assertTrue(
+                all(button.region.x + button.region.width <= panel_right for button in buttons),
+                {
+                    "panel": panel.region,
+                    "rows": [row.region for row in rows],
+                    "buttons": [(button.region, str(button.label)) for button in buttons],
+                },
+            )
+
+            await pilot.press("8")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "8")
+
+    async def test_choice_prompt_reflows_to_use_wide_viewports(self) -> None:
+        """Choice rows should be based on measured width, not a static row guess."""
+        choices = [(str(index), f"{index} Option {index}") for index in range(1, 9)]
+
+        async def row_count(width: int) -> int:
+            app = make_app()
+            async with app.run_test(size=(width, 40)) as pilot:
+                await pilot.pause()
+                task = asyncio.create_task(app._prompt_choice("Choices", "Pick one.", choices))
+                await pilot.pause()
+                panel = app.query_one(PromptPanel)
+                await wait_until(lambda: len(list(panel.query(Button))) == len(choices))
+                count = len(list(panel.query(".prompt-panel-button-row")))
+                await pilot.press("8")
+                self.assertEqual(await asyncio.wait_for(task, timeout=2), "8")
+                return count
+
+        narrow_rows = await row_count(80)
+        wide_rows = await row_count(140)
+        self.assertLess(wide_rows, narrow_rows)
+
+    async def test_wrapped_choice_prompt_down_arrow_moves_between_rows(self) -> None:
+        """Arrow navigation should understand wrapped prompt button rows."""
+        app = make_app()
+        choices = [(letter, f"{letter} Choice") for letter in ("a", "b", "c", "d", "e", "f")]
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app._prompt_choice("Choices", "Pick one.", choices))
+            await pilot.pause()
+
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == len(choices))
+            await wait_until(lambda: any(button.has_focus for button in panel.query(Button)))
+            rows = list(panel.query(Horizontal))
+            self.assertGreaterEqual(len(rows), 2)
+            first_row_buttons = list(rows[0].query(Button))
+            second_row_buttons = list(rows[1].query(Button))
+            self.assertTrue(first_row_buttons[0].has_focus)
+
+            await pilot.press("down")
+            await pilot.pause()
+            self.assertTrue(second_row_buttons[0].has_focus)
+
+            await pilot.press("enter")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "c")
 
     async def test_present_plan_bubble_discards_to_inactive_history(self) -> None:
         """Structured plans should render with real buttons and resolve in place."""
@@ -2508,8 +2604,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Revise Plan")
             self.assertIn("What should MIRA change", renderable_plain(app.query_one("#prompt-panel-message", Static)))
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-cancel"))) > 0)
             app.query_one("#prompt-cancel", Button).press()
             await wait_until(lambda: not app.query_one(PromptPanel).display)
+            await wait_until(
+                lambda: "kept plan" in "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            )
 
     async def test_git_prompt_booleans_use_in_window_choices(self) -> None:
         """Startup Git prompts should keep returning the expected booleans."""
