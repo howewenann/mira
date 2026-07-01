@@ -218,7 +218,9 @@ filesystem permissions.
 ## Textual TUI And One-Shot Output
 
 **Decision:** The Textual TUI is the primary interactive experience. One-shot
-terminal output uses a separate renderer.
+terminal output uses a separate renderer. One-shot mode accepts literal prompt
+text through `--prompt/-p` or explicit Markdown prompt files through
+`--file/-f`.
 
 **Why:** The TUI can preserve chat order, tool calls, tool results, subagent
 progress, settings, and session history in one place. The one-shot renderer

@@ -227,11 +227,24 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("-d", result.output)
         self.assertIn("--direct", result.output)
+        self.assertIn("-f", result.output)
+        self.assertIn("--file", result.output)
         self.assertIn("-h", result.output)
         self.assertIn("--help", result.output)
         self.assertIn("-w", result.output)
         self.assertIn("--workspace", result.output)
         self.assertNotIn("[default: ", result.output)
+
+    def test_cli_file_options_pass_prompt_file_to_run(self) -> None:
+        """The public file options should map to the internal prompt_file argument."""
+        for option in ("--file", "-f"):
+            with self.subTest(option=option), patch("cli.main.run") as run:
+                result = CliRunner().invoke(cli_app, [option, "prompt.markdown"])
+
+                self.assertEqual(result.exit_code, 0)
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["prompt"], None)
+                self.assertEqual(run.call_args.kwargs["prompt_file"], Path("prompt.markdown"))
 
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
@@ -249,6 +262,60 @@ class CLIConfigTests(unittest.TestCase):
 
 class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
     """Tests for startup ordering around the Git safety guard."""
+
+    async def _captured_one_shot_text(
+        self,
+        *,
+        prompt: str | None = None,
+        prompt_file: Path | None = None,
+        workspace: Path,
+    ) -> tuple[str, str]:
+        config = {
+            "tool_output_chars": 123,
+            "session_dir": "unused",
+            "llm_provider": "lmstudio",
+            "llm_model": "local-model",
+        }
+        session_record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+        captured: list[str] = []
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            return True
+
+        async def bootstrap(
+            workspace: Path,
+            session: str | None,
+            resume: bool,
+            config: dict[str, object] | None = None,
+            renderer: object | None = None,
+        ) -> dict[str, object]:
+            return {
+                "agent": "agent",
+                "renderer": renderer,
+                "session": session_record,
+                "store": type("Store", (), {"save": lambda self, record: None})(),
+            }
+
+        async def run_turn(agent: object, text: str, renderer: object, thread_id: str) -> object:
+            captured.append(text)
+            return type("Result", (), {"final_text": "done"})()
+
+        with (
+            patch("config.loader.load_config", return_value=config),
+            patch("ui.renderer.Renderer", return_value=object()),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap", bootstrap),
+            patch("runtime.runner.run_turn", run_turn),
+        ):
+            await commands._run(
+                prompt=prompt,
+                resume=False,
+                workspace=workspace,
+                session=None,
+                prompt_file=prompt_file,
+            )
+
+        return captured[0], session_record["events"][0]["text"]
 
     async def test_run_checks_git_before_bootstrap(self) -> None:
         """The Git guard should run before sessions, resources, or agents are created."""
@@ -436,6 +503,86 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.exit_code, 1)
         bootstrap.assert_not_called()
+
+    async def test_short_file_flag_reads_markdown_prompt(self) -> None:
+        """The file prompt path should be read and sent to one-shot mode."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "prompt.md").write_text("# Task\nDo the thing.\n", encoding="utf-8")
+
+            run_text, recorded_text = await self._captured_one_shot_text(
+                prompt_file=Path("prompt.md"),
+                workspace=workspace,
+            )
+
+        self.assertEqual(run_text, "# Task\nDo the thing.\n")
+        self.assertEqual(recorded_text, "# Task\nDo the thing.\n")
+
+    async def test_long_file_flag_accepts_markdown_extension(self) -> None:
+        """The long Markdown extension should be accepted for file prompts."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "prompt.markdown").write_text("Use this prompt.\n", encoding="utf-8")
+
+            run_text, recorded_text = await self._captured_one_shot_text(
+                prompt_file=Path("prompt.markdown"),
+                workspace=workspace,
+            )
+
+        self.assertEqual(run_text, "Use this prompt.\n")
+        self.assertEqual(recorded_text, "Use this prompt.\n")
+
+    async def test_prompt_text_remains_literal_when_markdown_file_exists(self) -> None:
+        """The -p prompt text should not auto-read matching workspace files."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "README.md").write_text("file contents\n", encoding="utf-8")
+
+            run_text, recorded_text = await self._captured_one_shot_text(
+                prompt="README.md",
+                workspace=workspace,
+            )
+
+        self.assertEqual(run_text, "README.md")
+        self.assertEqual(recorded_text, "README.md")
+
+    async def test_prompt_and_file_flags_cannot_be_combined(self) -> None:
+        """One-shot startup should reject ambiguous prompt input."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "prompt.md").write_text("file contents\n", encoding="utf-8")
+
+            with self.assertRaises(typer.Exit) as raised:
+                await commands._run(
+                    prompt="literal",
+                    resume=False,
+                    workspace=workspace,
+                    session=None,
+                    prompt_file=Path("prompt.md"),
+                )
+
+        self.assertEqual(raised.exception.exit_code, 2)
+
+    async def test_file_flag_rejects_missing_directory_and_non_markdown_paths(self) -> None:
+        """The file prompt input should fail before model startup for invalid paths."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "notes.txt").write_text("not markdown\n", encoding="utf-8")
+            (workspace / "folder.md").mkdir()
+
+            cases = [Path("missing.md"), Path("folder.md"), Path("notes.txt")]
+            for prompt_file in cases:
+                with self.subTest(prompt_file=prompt_file):
+                    with self.assertRaises(typer.Exit) as raised:
+                        await commands._run(
+                            prompt=None,
+                            resume=False,
+                            workspace=workspace,
+                            session=None,
+                            prompt_file=prompt_file,
+                        )
+
+                    self.assertEqual(raised.exception.exit_code, 2)
 
 
 if __name__ == "__main__":

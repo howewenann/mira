@@ -43,6 +43,20 @@ Expected:
 - MIRA answers briefly using information from `README.md`.
 - The turn does not fail with an LM Studio native SDK tool-calling error.
 
+## One-Shot Markdown File Prompt
+
+```powershell
+conda run -n ai_agents python -m cli.main -f tests/manual/file_prompt.md
+```
+
+Expected:
+
+- MIRA reads the Markdown file as the one-shot prompt.
+- MIRA inspects `README.md`.
+- MIRA answers with exactly two bullet points.
+- Running `conda run -n ai_agents python -m cli.main -p tests/manual/file_prompt.md`
+  treats the path as literal prompt text, not as a file to read.
+
 Then run an interactive reasoning check:
 
 ```powershell

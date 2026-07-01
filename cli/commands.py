@@ -15,6 +15,7 @@ def run(
     workspace: Path,
     session: str | None,
     direct: bool = False,
+    prompt_file: Path | None = None,
 ) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
     from config.llm import ConfigError
@@ -24,6 +25,7 @@ def run(
         asyncio.run(
             _run(
                 prompt=prompt,
+                prompt_file=prompt_file,
                 resume=resume,
                 workspace=workspace,
                 session=session,
@@ -50,6 +52,7 @@ async def _run(
     workspace: Path,
     session: str | None,
     direct: bool = False,
+    prompt_file: Path | None = None,
 ) -> None:
     """Create the app objects, then run either one-shot or TUI mode."""
     import typer
@@ -58,6 +61,7 @@ async def _run(
     from config.loader import load_config
 
     workspace = workspace.expanduser().resolve()
+    prompt = _resolve_one_shot_prompt(prompt, prompt_file, workspace)
     config = load_config(workspace)
     config["llm_direct"] = bool(direct)
 
@@ -84,6 +88,41 @@ async def _run(
 
     app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
     await _run_one_shot(app, prompt)
+
+
+def _resolve_one_shot_prompt(prompt: str | None, prompt_file: Path | None, workspace: Path) -> str | None:
+    """Return literal prompt text or UTF-8 Markdown file contents."""
+    import typer
+
+    if prompt is not None and prompt_file is not None:
+        typer.echo("Use either --prompt/-p or --file/-f, not both.", err=True)
+        raise typer.Exit(code=2)
+    if prompt_file is None:
+        return prompt
+
+    path = prompt_file.expanduser()
+    if not path.is_absolute():
+        path = workspace / path
+    path = path.resolve()
+
+    if path.suffix.lower() not in {".md", ".markdown"}:
+        typer.echo("--file/-f only accepts Markdown files (.md or .markdown).", err=True)
+        raise typer.Exit(code=2)
+    if not path.exists():
+        typer.echo(f"Prompt file does not exist: {path}", err=True)
+        raise typer.Exit(code=2)
+    if not path.is_file():
+        typer.echo(f"Prompt file is not a file: {path}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        typer.echo(f"Could not read prompt file {path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    except UnicodeDecodeError as error:
+        typer.echo(f"Prompt file must be UTF-8: {path}", err=True)
+        raise typer.Exit(code=2) from error
 
 
 async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:

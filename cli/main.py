@@ -19,6 +19,13 @@ app = typer.Typer(
 def main(
     ctx: typer.Context,
     prompt: str | None = typer.Option(None, "--prompt", "-p", help="Run one prompt and exit."),
+    prompt_file: Path | None = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Read one Markdown prompt file and exit.",
+        show_default=False,
+    ),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume the most recent session."),
     workspace: Path = typer.Option(Path.cwd(), "--workspace", "-w", help="Workspace root.", show_default=False),
     session: str | None = typer.Option(None, "--session", "-s", help="Session id."),
@@ -33,6 +40,7 @@ def main(
     if ctx.invoked_subcommand is None:
         run(
             prompt=prompt,
+            prompt_file=prompt_file,
             resume=resume,
             workspace=workspace,
             session=session,

@@ -31,6 +31,7 @@ Running `mira` opens the Textual TUI. Run one prompt and exit with:
 
 ```powershell
 mira --prompt "summarize this project"
+mira --file prompt.md
 ```
 
 Useful startup options:
@@ -101,6 +102,7 @@ should be run as workspace-relative paths such as `python tmp.py`.
 
 - Chat in the TUI by running `mira`.
 - Use `mira -p "..."` for one-shot terminal output.
+- Use `mira -f prompt.md` to read a Markdown file as a one-shot prompt.
 - Resume the latest session with `mira -r`.
 - Resume a specific session with `mira -s <session-id>`.
 - Use `/help` in the TUI to see commands.
