@@ -432,6 +432,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(reasoning_blocks), 1)
             self.assertEqual(renderable_plain(reasoning_blocks[0]), "The user wants:\n1. Check envs\n2. Tell joke")
 
+    async def test_cancel_turn_detaches_reasoning_and_assistant_blocks(self) -> None:
+        """New streamed output after cancellation should start fresh main bubbles."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.reasoning_delta("old thinking")
+            app.text_delta("old answer")
+            await pilot.pause()
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            app.reasoning_delta("new thinking")
+            app.text_delta("new answer")
+            await pilot.pause()
+
+            reasoning_blocks = [block for block in app.query_one(ChatLog).children if "reasoning" in block.classes]
+            assistant_blocks = [block for block in app.query_one(ChatLog).children if "assistant" in block.classes]
+
+            self.assertEqual([renderable_plain(block) for block in reasoning_blocks], ["old thinking", "new thinking"])
+            self.assertEqual([renderable_plain(block) for block in assistant_blocks], ["old answer", "new answer"])
+
     def test_terminal_renderer_skips_whitespace_reasoning_delta(self) -> None:
         """One-shot output should not print blank thinking sections."""
         renderer = Renderer()
@@ -504,6 +530,37 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("preparing tool call...", rendered)
             self.assertIn("call:", rendered)
             app.busy = False
+
+    async def test_cancel_turn_removes_waiting_and_model_activity(self) -> None:
+        """Cancellation should clear transient status bubbles before the next turn."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.query_one(ChatLog).show_waiting()
+            await pilot.pause()
+            self.assertIn("working...", renderable_plain(app.query_one(ChatLog).children[-1]))
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertNotIn("working...", rendered)
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app.model_activity()
+            await pilot.pause()
+            self.assertIn("preparing tool call...", renderable_plain(app.query_one(ChatLog).children[-1]))
+
+            app._cancel_turn()
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertNotIn("preparing tool call...", rendered)
 
     async def test_unknown_context_usage_renders_pending(self) -> None:
         """A context limit without provider usage should not pretend to be measured."""
@@ -608,6 +665,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("compacting context...", animated)
             self.assertNotEqual(first, animated)
             self.assertIn("context compacted", done)
+
+    async def test_cancel_turn_stops_compaction_spinner(self) -> None:
+        """Cancelled compaction status should become terminal and non-animated."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.compaction_started()
+            await pilot.pause()
+            block = app.query_one(ChatLog).children[-1]
+            self.assertIn("compacting context...", renderable_plain(block))
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+            cancelled = renderable_plain(block)
+
+            self.assertIn("context compaction cancelled", cancelled)
+            self.assertNotIn("compacting context...", cancelled)
+
+            app.query_one(ChatLog).tick_compaction()
+            await pilot.pause()
+            self.assertEqual(renderable_plain(block), cancelled)
 
     async def test_discard_reasoning_removes_current_thinking_block(self) -> None:
         """Late compaction detection should retract already-rendered reasoning."""
@@ -2127,6 +2209,33 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("draft:", final)
             self.assertIn("README.md", final)
 
+    async def test_cancel_turn_discards_tool_call_drafts(self) -> None:
+        """Tool-call drafts from a cancelled turn should not be reused."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.tool_call_delta("read_file", {"path": "old"})
+            await pilot.pause()
+            old_draft = app.query_one(ChatLog).children[-1]
+            self.assertIn("old", renderable_plain(old_draft))
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            self.assertNotIn(old_draft, list(app.query_one(ChatLog).children))
+
+            app.tool_call_delta("read_file", {"path": "new"})
+            await pilot.pause()
+            tool_blocks = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
+
+            self.assertEqual(len(tool_blocks), 1)
+            self.assertIn("new", renderable_plain(tool_blocks[0]))
+            self.assertNotIn("old", renderable_plain(tool_blocks[0]))
+
     async def test_delegation_delta_updates_in_place_when_final_call_arrives(self) -> None:
         """Draft task requests should finalize in the same transcript block."""
         app = make_app()
@@ -2151,6 +2260,33 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(final_blocks), len(draft_blocks))
             self.assertIn("delegating to 1 subagent", final)
             self.assertIn("summarize README", final)
+
+    async def test_cancel_turn_discards_delegation_drafts(self) -> None:
+        """Delegation drafts from a cancelled turn should not promote later."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_delta([{"id": "task-old", "name": "task", "args": {"description": "old task"}}])
+            await pilot.pause()
+            old_draft = app.query_one(ChatLog).children[-1]
+            self.assertIn("old task", renderable_plain(old_draft))
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            self.assertNotIn(old_draft, list(app.query_one(ChatLog).children))
+
+            app.delegation_started([{"id": "task-new", "name": "task", "args": {"description": "new task"}}])
+            await pilot.pause()
+            delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
+
+            self.assertEqual(len(delegation_blocks), 1)
+            self.assertIn("new task", renderable_plain(delegation_blocks[0]))
+            self.assertNotIn("old task", renderable_plain(delegation_blocks[0]))
 
     async def test_empty_delegation_delta_renders_info_placeholder(self) -> None:
         """Empty task drafts should show a live info placeholder, not an empty task box."""
@@ -2622,6 +2758,37 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Status: discarded", rendered)
+
+    async def test_cancel_turn_keeps_unrelated_plan_bubble_active(self) -> None:
+        """Cancelling a later turn should not discard an active plan bubble."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Cancellation Plan",
+            "summary": ["Keep the active plan intact."],
+            "key_changes": ["Cancel an unrelated turn."],
+            "test_plan": ["Verify plan actions remain visible."],
+            "assumptions": ["The cancellation is unrelated."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            await app.present_plan(interrupt)
+            await pilot.pause()
+            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+
+            app.reasoning_delta("unrelated turn thinking")
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            self.assertIsNotNone(app.mode["current_plan"])
+            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
+            self.assertIn("Cancellation Plan", rendered)
+            self.assertNotIn("Status:", rendered)
 
     def test_normalize_plan_fills_all_structured_sections(self) -> None:
         """Partial plan payloads should not drop sections in logs or replay."""

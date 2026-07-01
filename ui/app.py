@@ -265,27 +265,23 @@ class MiraApp(App[None]):
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             self.system_message("turn cancelled", kind="warning")
             self._set_status(state="ready")
             raise
         except ContextOverflowError as exc:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             if not context_notice_rendered(exc):
                 self.system_message(pop_context_overflow_notice(exc), kind="info")
             self._set_status(state="ready")
         except Exception as exc:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
             self.busy = False
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn()
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -433,16 +429,19 @@ class MiraApp(App[None]):
             )
             self._refresh_sessions()
             self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.finish_turn(cancelled=True)
+            self.system_message("turn cancelled", kind="warning")
+            self._set_status(state="ready")
+            raise
         except Exception as exc:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
             self.busy = False
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn()
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -467,16 +466,19 @@ class MiraApp(App[None]):
             )
             self._refresh_sessions()
             self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.finish_turn(cancelled=True)
+            self.system_message("turn cancelled", kind="warning")
+            self._set_status(state="ready")
+            raise
         except Exception as exc:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             self.system_message(f"error: {exc}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
             self.busy = False
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn()
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -528,8 +530,7 @@ class MiraApp(App[None]):
     def _cancel_turn(self) -> None:
         """Cancel the active turn worker."""
         if self.busy and self.turn_worker is not None:
-            self.subagents_cancelled()
-            self.waiting_finished()
+            self.finish_turn(cancelled=True)
             self.turn_worker.cancel()
             self._set_status(state="cancelling")
 
@@ -1008,6 +1009,12 @@ class MiraApp(App[None]):
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
+
+    def finish_turn(self, *, cancelled: bool = False) -> None:
+        """Close live turn widgets without clearing visible transcript history."""
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(ChatLog).finish_turn(cancelled=cancelled)
 
     def usage_updated(self) -> None:
         """Refresh the status bar after token usage is committed."""

@@ -26,6 +26,61 @@ Expected:
 - The subagents inspect or locate the README file.
 - MIRA finishes with a joke after the README task.
 
+## Cancelled TUI Bubble Boundaries
+
+Run the interactive TUI:
+
+```powershell
+mira
+```
+
+Enter this reasoning-heavy prompt, cancel the turn while `thinking` is still
+streaming, then submit `continue`:
+
+```text
+Think out loud, then write three different short stories about a dog chasing a cat; use subagents in parallel and judge which is funniest.
+```
+
+Expected:
+
+- The cancelled turn keeps its partial `thinking` block as history.
+- The next turn starts a new `thinking` block instead of appending to the old
+  one.
+- Any running subagent blocks become `CANCELLED` and stop animating.
+- Transient `working...` or `preparing tool call...` status blocks disappear.
+
+Enter this tool/delegation prompt, cancel while tool or task setup is visible,
+then submit `continue`:
+
+```text
+Search this repo for cancellation handling and summarize every file involved. Use subagents if helpful.
+```
+
+Expected:
+
+- Incomplete tool-call or task-draft bubbles from the cancelled turn are not
+  reused by the next turn.
+- New tool, task, reasoning, or assistant output appears in fresh bubbles.
+
+Then verify active plans survive unrelated cancellation:
+
+```text
+/plan
+Plan a small change to improve transcript rendering after interrupted turns.
+```
+
+After a plan bubble appears, enter this separate prompt and cancel it while it
+is running:
+
+```text
+Now do a separate long reasoning task about how cancellation should work in terminal UIs.
+```
+
+Expected:
+
+- The existing plan bubble still shows Implement, Revise, and Discard.
+- The cancelled unrelated turn does not resolve, discard, or rewrite the plan.
+
 ## LM Studio Tool Calling And Reasoning
 
 Use LM Studio with a loaded reasoning-capable model and the OpenAI-compatible

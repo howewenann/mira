@@ -221,6 +221,17 @@ class ChatLog(VerticalScroll):
         self._reasoning_block = None
         self._reasoning_text = ""
 
+    def finish_turn(self, *, cancelled: bool = False) -> None:
+        """Close live turn state without clearing persisted transcript history."""
+        self.finish_main()
+        self.hide_waiting()
+        self._discard_delegation_draft()
+        if cancelled:
+            self.subagents_cancelled()
+            self._discard_tool_drafts()
+            self._cancel_compaction()
+            self._reset_delegation_group()
+
     def discard_reasoning(self) -> None:
         """Remove the current streamed reasoning block."""
         if self._reasoning_block is not None:
@@ -693,6 +704,37 @@ class ChatLog(VerticalScroll):
         self._delegation_draft_block = None
         self._delegation_calls = []
         self._delegation_keys = set()
+
+    def _discard_delegation_draft(self) -> None:
+        if self._delegation_draft_block is not None:
+            self._delegation_draft_block.remove()
+            self._delegation_draft_block = None
+
+    def _discard_tool_drafts(self) -> None:
+        draft_keys = [
+            key
+            for key, block in self._tool_blocks.items()
+            if block.get("draft") and not block.get("result")
+        ]
+        for key in draft_keys:
+            block = self._tool_blocks.pop(key, None)
+            if block is None:
+                continue
+            widget = block.get("widget")
+            if widget is not None:
+                widget.remove()
+        if draft_keys:
+            draft_key_set = set(draft_keys)
+            for name, queue in list(self._tool_name_queues.items()):
+                self._tool_name_queues[name] = deque(key for key in queue if key not in draft_key_set)
+
+    def _cancel_compaction(self) -> None:
+        if self._compaction_block is None or not self._compaction_running:
+            return
+        self._compaction_running = False
+        self._compaction_block.update(Text("context compaction cancelled", style="bold yellow"))
+        self._compaction_block = None
+        self._scroll_to_end()
 
     def _delegation_key(self, call: dict[str, Any]) -> tuple[str, str]:
         call_id = str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
