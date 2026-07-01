@@ -132,9 +132,9 @@ tool approval flow, and it does not stage files or create an initial commit.
 
 ## Project Resources
 
-MIRA ships small default resources, then layers project resources from `.mira/`
-on top. Project resources win when they use the same memory filename, skill
-name, subagent name, or tool name.
+MIRA ships a small default memory plus built-in tools, then layers project
+resources from `.mira/` on top. Project resources win when they use the same
+memory filename, skill name, subagent name, or tool name.
 
 The overwrite rules are intentionally simple:
 
@@ -195,8 +195,8 @@ what MIRA loaded and which project resources replaced defaults.
 - Context pressure display from DeepAgents' own summarization count, plus
   DeepAgents-backed context compaction. `In` and `Out` are cumulative provider
   token totals; `Ctx` is the latest DeepAgents context estimate.
-- Default `grep`, `ask_user`, and `present_plan` tools for search, concrete
-  user decisions, and structured plan review.
+- Default memory plus `grep`, `ask_user`, and `present_plan` tools for search,
+  concrete user decisions, and structured plan review.
 
 ## Sessions
 

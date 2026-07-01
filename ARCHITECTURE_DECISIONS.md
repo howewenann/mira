@@ -112,17 +112,20 @@ approval behavior changes, or shell environment inheritance changes.
 ## Project Resources
 
 **Decision:** MIRA loads bundled defaults first, then project `.mira/` resources.
-Project resources replace defaults by memory filename, skill name, subagent
-name, or tool name.
+Bundled defaults stay minimal: default memory plus MIRA's built-in project
+tools. Project resources replace defaults by memory filename, skill name,
+subagent name, or tool name.
 
-**Why:** Defaults make MIRA useful immediately, while project resources let a
-workspace customize behavior without editing package files. Name-based
-replacement makes overrides explicit and easy to inspect.
+**Why:** Defaults make MIRA useful immediately without prescribing a skill or
+subagent style. Project resources let a workspace customize behavior without
+editing package files. Name-based replacement makes overrides explicit and easy
+to inspect.
 
 **How it works at a high level:**
 
 - Defaults live under `agent/default_resources/` and are mounted read-only at
-  `/mira-defaults/...`.
+  `/mira-defaults/...`; only default memory and built-in tools are shipped
+  there by default.
 - Project resources live under the workspace's `.mira/` folder and are mounted
   at `/.mira/...`.
 - `build_resources()` loads memories, skills, subagents, and tools, then passes
@@ -135,12 +138,13 @@ replacement makes overrides explicit and easy to inspect.
 - Memories load from `*.md` and replace by filename. A project
   `.mira/memories/AGENTS.md` replaces the bundled default `AGENTS.md`; extra
   Markdown files are added as additional memories.
-- Skills load from folders containing `SKILL.md`. MIRA display metadata keys
-  them by YAML frontmatter `name`, falling back to the folder name. DeepAgents
-  receives default skill sources first and project skill sources second, so a
-  duplicate skill name follows DeepAgents' later-source-wins behavior.
+- Skills load from project folders containing `SKILL.md`. MIRA display metadata
+  keys them by YAML frontmatter `name`, falling back to the folder name. If
+  bundled default skills are added later, DeepAgents receives default skill
+  sources first and project skill sources second, so a duplicate skill name
+  follows DeepAgents' later-source-wins behavior.
 - Subagents load from Python files exporting `SUBAGENTS = [...]` and replace by
-  each subagent's `name`.
+  each subagent's `name`. MIRA does not ship an opinionated default subagent.
 - Tools load from module-level LangChain `@tool` objects, optional `TOOLS`, and
   optional `get_tools(project_backend)`. Duplicate tool names inside one file
   keep the first tool. Across layers, project tools replace defaults by tool

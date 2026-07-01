@@ -538,22 +538,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                         "replaces": "default",
                     }
                 ],
-                "skills": [
-                    {
-                        "name": "codebase-orientation",
-                        "source": "default",
-                        "path": "/mira-defaults/skills/codebase-orientation/SKILL.md",
-                        "replaces": "",
-                    }
-                ],
-                "subagents": [
-                    {
-                        "name": "code-reviewer",
-                        "source": "default",
-                        "path": "/mira-defaults/subagents/code_reviewer.py",
-                        "replaces": "",
-                    }
-                ],
+                "skills": [],
+                "subagents": [],
             }
         }
 
@@ -566,11 +552,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AGENTS.md", output)
         self.assertIn("project", output)
         self.assertIn("Replaces", output)
-        self.assertIn("Skills", output)
-        self.assertIn("codebase-orientation", output)
         self.assertIn("default", output)
+        self.assertIn("Skills", output)
         self.assertIn("Subagents", output)
-        self.assertIn("code-reviewer", output)
+        self.assertEqual(output.count("none loaded"), 2)
 
     def test_tool_specs_use_agent_metadata(self) -> None:
         """Tool specs should come from agent metadata when available."""

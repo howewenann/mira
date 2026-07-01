@@ -41,6 +41,18 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
             self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
             self.assertTrue((workspace / ".mira" / "tools" / "example_tool.py").exists())
+            self.assertIn(
+                "Example Skill",
+                (workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "example-project-guide",
+                (workspace / ".mira" / "subagents" / "example_subagent.py").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "example_project_note",
+                (workspace / ".mira" / "tools" / "example_tool.py").read_text(encoding="utf-8"),
+            )
 
     def test_default_memory_loads_without_project_memory(self) -> None:
         """The bundled AGENTS.md should load when project examples are skipped."""
@@ -161,40 +173,40 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 ],
             )
 
-    def test_project_skill_replaces_default_by_name(self) -> None:
-        """A project skill with the same frontmatter name should replace display metadata."""
+    def test_project_skill_loads_by_name(self) -> None:
+        """A project skill should load by frontmatter name without bundled skill defaults."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             skill_dir = workspace / ".mira" / "skills" / "custom-folder"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
                 """---
-name: codebase-orientation
-description: Project-specific orientation.
+name: project-skill
+description: Project-specific workflow.
 ---
 
-# Project Orientation
+# Project Skill
 """,
                 encoding="utf-8",
             )
 
             resources = build_resources(workspace, create_examples=False)
 
-            self.assertEqual(resources.skills, ["/mira-defaults/skills", "/.mira/skills"])
+            self.assertEqual(resources.skills, ["/.mira/skills"])
             self.assertEqual(
-                [item for item in resources.metadata["skills"] if item["name"] == "codebase-orientation"],
+                resources.metadata["skills"],
                 [
                     {
-                        "name": "codebase-orientation",
+                        "name": "project-skill",
                         "path": "/.mira/skills/custom-folder/SKILL.md",
                         "source": "project",
-                        "replaces": "default",
+                        "replaces": "",
                     }
                 ],
             )
 
-    def test_project_subagent_replaces_default_by_name(self) -> None:
-        """A project subagent with the same name should replace the default."""
+    def test_project_subagent_loads_by_name(self) -> None:
+        """A project subagent should load without bundled subagent defaults."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             subagent_dir = workspace / ".mira" / "subagents"
@@ -202,9 +214,9 @@ description: Project-specific orientation.
             (subagent_dir / "reviewer.py").write_text(
                 """SUBAGENTS = [
     {
-        "name": "code-reviewer",
-        "description": "Project reviewer.",
-        "system_prompt": "Review this project.",
+        "name": "project-guide",
+        "description": "Project guide.",
+        "system_prompt": "Guide this project.",
     }
 ]
 """,
@@ -214,18 +226,28 @@ description: Project-specific orientation.
             resources = build_resources(workspace, create_examples=False)
 
             self.assertEqual(len(resources.subagents), 1)
-            self.assertEqual(resources.subagents[0]["description"], "Project reviewer.")
+            self.assertEqual(resources.subagents[0]["description"], "Project guide.")
             self.assertEqual(
                 resources.metadata["subagents"],
                 [
                     {
-                        "name": "code-reviewer",
+                        "name": "project-guide",
                         "path": "/.mira/subagents/reviewer.py",
                         "source": "project",
-                        "replaces": "default",
+                        "replaces": "",
                     }
                 ],
             )
+
+    def test_default_resources_include_no_skills_or_subagents(self) -> None:
+        """Bundled defaults should stay minimal: memory plus tools only."""
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+
+            self.assertEqual(resources.skills, [])
+            self.assertEqual(resources.metadata["skills"], [])
+            self.assertEqual(resources.subagents, [])
+            self.assertEqual(resources.metadata["subagents"], [])
 
     def test_default_tools_include_ask_user_and_regex_grep(self) -> None:
         """Default tools should include ask_user and the built-in grep replacement."""
@@ -519,13 +541,11 @@ def get_tools(project_backend):
         self.assertIn("summary", kwargs["middleware"])
         self.assertTrue(any(isinstance(middleware, ProviderContextOverflowMiddleware) for middleware in kwargs["middleware"]))
         self.assertTrue(any(isinstance(middleware, ExecuteToolPromptMiddleware) for middleware in kwargs["middleware"]))
-        self.assertIn("/mira-defaults/skills", kwargs["skills"])
         self.assertIn("/.mira/skills", kwargs["skills"])
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")
-        self.assertTrue(any(subagent["name"] == "code-reviewer" for subagent in kwargs["subagents"]))
-        self.assertTrue(any(subagent["name"] == "project-guide" for subagent in kwargs["subagents"]))
+        self.assertTrue(any(subagent["name"] == "example-project-guide" for subagent in kwargs["subagents"]))
         self.assertTrue(any(tool.name == "grep" for tool in kwargs["tools"]))
-        self.assertTrue(any(tool.name == "project_note" for tool in kwargs["tools"]))
+        self.assertTrue(any(tool.name == "example_project_note" for tool in kwargs["tools"]))
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])

@@ -38,10 +38,11 @@ MIRA loads project resources from this folder on top of its defaults.
 
 - `memories/*.md`: always-on project context. A file with the same name as a
   default memory replaces the default.
-- `skills/<skill>/SKILL.md`: DeepAgents skills. Project skills override default
-  skills when the frontmatter `name` is the same.
+- `skills/<skill>/SKILL.md`: DeepAgents skills. Project skills are loaded from
+  these folders and may override bundled skills if MIRA adds any later.
 - `subagents/*.py`: Python files that export `SUBAGENTS = [...]`. Project
-  subagents override default subagents when the `name` is the same.
+  subagents are loaded from these files and may override bundled subagents if
+  MIRA adds any later.
 - `tools/*.py`: Python files with module-level LangChain `@tool` objects.
   Files can also define `get_tools(project_backend)` for tools that need
   workspace access. Project tools override defaults when the tool `name` is
@@ -51,50 +52,53 @@ Use `/memories`, `/skills`, `/subagents`, and `/tools` in the REPL to inspect
 what MIRA loaded.
 """
 
-EXAMPLE_MEMORY = """# Project Memory
+EXAMPLE_MEMORY = """# Example Project Memory
 
-Describe this project's commands, style, architecture, and preferences here.
+This is example memory. Replace it with this project's commands, style,
+architecture, and preferences.
 MIRA loads this file instead of its default `AGENTS.md`.
 """
 
 EXAMPLE_SKILL = """---
 name: example-skill
-description: Example project skill showing where local workflows belong.
+description: Example skill placeholder. Rename this before using it for a real project workflow.
 ---
 
 # Example Skill
 
-Use this file for a project-specific workflow. Rename the folder and `name`
-when you turn it into a real skill.
+This is an example skill. Rename the folder and frontmatter `name`, then
+replace this text with a real project-specific workflow.
 """
 
-EXAMPLE_SUBAGENT = '''"""Example project subagent.
+EXAMPLE_SUBAGENT = '''"""Example project subagent placeholder.
 
-Edit or delete this file when you know which project helpers you want.
+Edit or delete this file when you know which project helpers you want. Rename
+the subagent before using it for real work.
 """
 
 SUBAGENTS = [
     {
-        "name": "project-guide",
-        "description": "Answer questions about this project's local conventions.",
+        "name": "example-project-guide",
+        "description": "Example subagent placeholder. Rename before using for real project guidance.",
         "system_prompt": (
-            "You are a project guide. Inspect relevant files before answering "
-            "and keep guidance specific to this workspace."
+            "You are an example project guide placeholder. Replace this prompt "
+            "with concrete project guidance before relying on this subagent."
         ),
     }
 ]
 '''
 
-EXAMPLE_TOOL = '''"""Example project tool.
+EXAMPLE_TOOL = '''"""Example project tool placeholder.
 
-Edit or delete this file when you know which project helpers you want.
+Edit or delete this file when you know which project helpers you want. Rename
+the tool before using it for real work.
 """
 
 from langchain.tools import tool
 
 
 @tool
-def project_note() -> str:
-    """Return a short note proving project tools are loaded."""
-    return "Project tool loaded."
+def example_project_note() -> str:
+    """Return a short note proving example project tools are loaded."""
+    return "Example project tool loaded."
 '''
