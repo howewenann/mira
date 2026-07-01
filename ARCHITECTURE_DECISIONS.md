@@ -162,9 +162,10 @@ supported export shapes change.
 
 ## Tools And HITL
 
-**Decision:** Dangerous built-in tools require approval by default. Project
-tools can be enabled or disabled through settings and remain visible in
-metadata even when disabled. QuickJS programmatic tool calling is limited to
+**Decision:** Dangerous built-in tools require approval by default. Built-in
+dangerous tools and project tools can be enabled or disabled through settings;
+disabled project tools remain visible in metadata even when they are not
+exposed to the agent. QuickJS programmatic tool calling is limited to
 `ls`, `read_file`, `glob`, and `grep`; dynamic subagent delegation uses
 QuickJS' top-level `task()` helper only when the System Settings toggle is
 enabled, while destructive file tools, shell execution, and interrupt/control
@@ -173,7 +174,8 @@ flow tools stay outside that bridge.
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project
 tools in metadata lets the settings UI manage them without exposing them to the
-model.
+model, while disabled built-ins are hidden through the same excluded-tools path
+MIRA uses for mode-specific tool visibility.
 
 **Where to check:** `config/settings.py`, `agent/factory.py`,
 `agent/middleware.py`, `agent/resources/__init__.py`, `ui/interrupts.py`,

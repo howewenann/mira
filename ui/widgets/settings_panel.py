@@ -104,7 +104,7 @@ class SettingsPanel(Vertical):
                     with Horizontal(classes="settings-row"):
                         yield Static(tool_name, classes="settings-label")
                         yield self._toggle_button(
-                            ToggleCell("enabled", tool_name, locked=tool_name != EXECUTE_TOOL),
+                            ToggleCell("enabled", tool_name),
                             enabled,
                         )
                         yield self._toggle_button(
@@ -376,7 +376,7 @@ def button_id_for(cell: ToggleCell) -> str:
 
 def button_label(cell: ToggleCell, value: bool, *, locked: bool = False, enabled: bool = True) -> str:
     """Return display text for a settings toggle."""
-    if locked and cell.kind == "always_allow" and cell.name != EXECUTE_TOOL and not enabled:
+    if locked and cell.kind == "always_allow" and not enabled:
         return "-"
     return "yes" if value else "no"
 

@@ -37,7 +37,6 @@ def build_agent(
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_action_permissions(),
-        extra_middleware=[ModelToolVisibilityMiddleware(ACTION_EXCLUDED_TOOLS)],
         interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=ACTION_EXCLUDED_TOOLS,
         enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
@@ -59,7 +58,6 @@ def build_plan_agent(
         metadata=metadata,
         permissions=_plan_permissions(),
         system_prompt=PLAN_SYSTEM_PROMPT,
-        extra_middleware=[ModelToolVisibilityMiddleware(PLAN_EXCLUDED_TOOLS)],
         interrupt_on=None,
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
@@ -94,6 +92,10 @@ def _build_agent(
     backend = resources.backend
     permissions = [] if enable_execute_backend else permissions
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
+    extra_middleware = [
+        *(extra_middleware or []),
+        ModelToolVisibilityMiddleware(excluded_tools),
+    ]
 
     _register_summarization_exclusion(config, model)
     middleware_stack = build_agent_middleware(
@@ -244,6 +246,13 @@ def effective_excluded_tools(
 ) -> tuple[str, ...]:
     """Return tool specs that should be hidden from the UI/model metadata."""
     blocked = set(excluded_tools)
+    tools = hitl_settings(config).get("tools", {})
+    if isinstance(tools, dict):
+        blocked.update(
+            name
+            for name, spec in tools.items()
+            if isinstance(name, str) and isinstance(spec, dict) and spec.get("enabled") is False
+        )
     if not enable_execute_backend or not tool_enabled(config, EXECUTE_TOOL):
         blocked.add(EXECUTE_TOOL)
     return tuple(blocked)

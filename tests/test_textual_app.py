@@ -1748,10 +1748,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
-                self.assertTrue(buttons["settings-toggle-enabled-edit_file"].disabled)
+                self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
                 self.assertFalse(buttons["settings-toggle-enabled-execute"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-always_allow-execute"].label), "no")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-execute"].label), "-")
                 self.assertTrue(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
@@ -1759,6 +1759,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
+        """Inbuilt tool enable buttons should save disabled state and lock approvals."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls = []
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: "settings-toggle-enabled-edit_file" in {button.id for button in panel.query(Button)})
+
+                panel.query_one("#settings-toggle-enabled-edit_file", Button).press()
+                await pilot.pause()
+
+                loaded = load_settings(workspace)
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertFalse(tool_enabled(loaded, "edit_file"))
+                self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "no")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "-")
+                self.assertTrue(buttons["settings-toggle-always_allow-edit_file"].disabled)
+                self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_toggles_dynamic_subagents(self) -> None:
         """Dynamic subagents should save as a system setting and rebuild agents."""

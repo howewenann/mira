@@ -331,6 +331,23 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("edit_file", names)
         self.assertNotIn("execute", names)
 
+    def test_action_agent_metadata_hides_disabled_inbuilt_tools(self) -> None:
+        """Disabled inbuilt tools should be excluded from action-mode metadata."""
+        config = {"settings": {"hitl": {"tools": {"edit_file": {"enabled": False, "always_allow": False}}}}}
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
+        ):
+            agent = factory.build_agent(config, ".", "checkpointer")
+
+        names = [tool["name"] for tool in agent.mira_tool_specs]
+        self.assertIn("write_file", names)
+        self.assertNotIn("edit_file", names)
+        self.assertIn("edit_file", factory.effective_excluded_tools(config, (), True))
+
     def test_plan_tool_filter_hides_write_tools_from_model(self) -> None:
         """ModelToolVisibilityMiddleware should remove write/edit tools from requests."""
         middleware = ModelToolVisibilityMiddleware(PLAN_PROJECT_WRITE_TOOLS)

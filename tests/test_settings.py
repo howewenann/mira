@@ -111,8 +111,13 @@ class SettingsTests(unittest.TestCase):
             loaded = settings.load_settings(workspace)
             self.assertTrue(settings.dynamic_subagents_enabled(loaded))
             self.assertFalse(settings.git_protection_enabled(loaded))
-            self.assertTrue(settings.tool_enabled(loaded, "write_file"))
+            self.assertFalse(settings.tool_enabled(loaded, "write_file"))
             self.assertTrue(settings.tool_always_allow(loaded, "write_file"))
+
+            updated = settings.set_tool_enabled(loaded, "write_file", True)
+            self.assertTrue(settings.tool_enabled(updated, "write_file"))
+            updated = settings.set_tool_enabled(updated, "write_file", False)
+            self.assertFalse(settings.tool_enabled(updated, "write_file"))
 
             updated = settings.set_tool_enabled(loaded, "execute", True)
             self.assertTrue(settings.tool_enabled(updated, "execute"))

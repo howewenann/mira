@@ -182,7 +182,8 @@ what MIRA loaded and which project resources replaced defaults.
 - One-shot terminal mode for scripts or quick prompts.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
-  tools that need approval.
+  tools that need approval, with `/settings` toggles to enable or disable
+  built-in dangerous tools and project tools.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
   `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
   QuickJS' top-level `task()` helper when enabled in `/settings`, and
