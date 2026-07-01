@@ -106,6 +106,8 @@ should be run as workspace-relative paths such as `python tmp.py`.
 - Resume the latest session with `mira -r`.
 - Resume a specific session with `mira -s <session-id>`.
 - Use `/help` in the TUI to see commands.
+- Use `/new-chat` or the chat history `+ New` action to start a fresh saved
+  session without deleting the current one.
 - Use `/plan` when you want MIRA to think through a change without editing
   files.
   Implementation-ready planning turns appear as plan bubbles. Use Implement to
@@ -176,7 +178,7 @@ what MIRA loaded and which project resources replaced defaults.
 ## Features
 
 - Textual TUI with chat, tool calls, tool results, subagent progress, session
-  history, and a compact status/dashboard line.
+  history with a flat new-chat action, and a compact status/dashboard line.
 - One-shot terminal mode for scripts or quick prompts.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
@@ -208,6 +210,8 @@ local timestamp and timezone offset so they sort by creation time, for example:
 ```
 
 MIRA keeps replayable user and assistant messages for the chat history UI.
+Starting a new chat creates another saved session and switches to it; it does
+not clear or overwrite the previous session.
 Recent structured plan bubbles are also included in model resume context as
 compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA

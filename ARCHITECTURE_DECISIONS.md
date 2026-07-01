@@ -233,7 +233,9 @@ stays simpler for scripts and quick prompts.
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
-rebuilding agents without restarting the session.
+rebuilding agents without restarting the session. `/new-chat` and the sidebar
+`+ New` action create and switch to a fresh saved session without deleting the
+current session.
 
 **Where to check:** `ui/app.py`, `ui/widgets/`, `ui/renderer.py`,
 `runtime/*_events.py`, `tests/test_textual_app.py`.
@@ -247,6 +249,8 @@ tool/subagent events are projected differently.
 DeepAgents handles runtime context counting and compaction.
 
 **Why:** Session files should be stable user-facing history after restart.
+Starting a new chat is therefore non-destructive: MIRA creates another session
+record and makes it active instead of clearing the previous one.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result

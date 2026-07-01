@@ -70,6 +70,7 @@ COMMAND_HELP = {
     "/act": "return to action mode",
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
+    "/new-chat": "start a fresh saved chat session in the TUI",
     "/clear": "clear the log",
     "/clear-chat": "clear the current saved chat transcript in the TUI",
     "/clear-all-chats": "delete all saved chat sessions in the TUI",
@@ -319,6 +320,10 @@ async def handle_command(
 
     if text == "/reload":
         write_line(renderer, "/reload is available in the Textual app", kind="warning")
+        return True
+
+    if text == "/new-chat":
+        write_line(renderer, "/new-chat is available in the Textual app", kind="warning")
         return True
 
     if text == "/model":

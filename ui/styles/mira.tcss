@@ -10,6 +10,7 @@ Screen {
 
 #main-panel {
     width: 1fr;
+    min-width: 24;
     height: 100%;
 }
 
@@ -23,11 +24,34 @@ Screen {
     background: #101516;
 }
 
-#session-sidebar-title {
+#session-sidebar-header {
+    layout: horizontal;
     height: 1;
+    width: 1fr;
     margin: 0 0 1 0;
+}
+
+#session-sidebar-title {
+    width: 1fr;
+    height: 1;
     color: #eef7f8;
     text-style: bold;
+}
+
+#new-chat {
+    width: 7;
+    min-width: 7;
+    height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #7ce3dc;
+    text-style: bold;
+}
+
+#new-chat:focus {
+    background: #1b3036;
+    color: #eef7f8;
 }
 
 #sessions {

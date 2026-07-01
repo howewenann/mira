@@ -112,7 +112,9 @@ class MiraApp(App[None]):
         """Compose the Textual layout."""
         with Horizontal(id="app-shell"):
             with Vertical(id="session-sidebar"):
-                yield Static("Chat History", id="session-sidebar-title")
+                with Horizontal(id="session-sidebar-header"):
+                    yield Static("Chat History", id="session-sidebar-title")
+                    yield Button("+ New", id="new-chat")
                 yield SessionHistory(id="sessions")
             with Vertical(id="main-panel"):
                 yield StatusBar(id="status")
@@ -125,6 +127,7 @@ class MiraApp(App[None]):
         self.set_interval(1.0, self._tick_status)
         self.set_interval(0.12, self._tick_animations)
         self._set_status(state="starting")
+        self._sync_sidebar_visibility()
         self.query_one(PromptBox).disabled = True
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
@@ -225,6 +228,10 @@ class MiraApp(App[None]):
             self.run_worker(self._run_reload_command(), name="reload-command", exclusive=False)
             return
 
+        if text == "/new-chat":
+            self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
+            return
+
         if await handle_command(text, self, self.session, self.model_name, self.mode):
             self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -297,6 +304,61 @@ class MiraApp(App[None]):
                     exclusive=False,
                 )
                 return
+
+    @on(Button.Pressed, "#new-chat")
+    def press_new_chat(self, event: Button.Pressed) -> None:
+        """Start a fresh saved chat session from the sidebar action."""
+        event.stop()
+        self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
+
+    async def _run_new_chat(self) -> None:
+        """Create and switch to a fresh session outside event handlers."""
+        try:
+            if self._handle_new_chat():
+                self._set_status(state="ready")
+        except Exception as exc:
+            self.system_message(f"new chat error: {exc}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.action_focus_prompt()
+
+    def _handle_new_chat(self) -> bool:
+        """Create a fresh saved session while preserving the current one."""
+        if self.busy:
+            self.system_message("finish the current turn before starting a new chat", kind="warning")
+            return True
+        if self.store is None:
+            self.system_message("new chat needs the normal session store", kind="warning")
+            return True
+
+        load = getattr(self.store, "load", None)
+        if callable(load):
+            session = load(None, resume=False, workspace=self.workspace)
+        else:
+            new = getattr(self.store, "new", None)
+            if not callable(new):
+                self.system_message("new chat needs the normal session store", kind="warning")
+                return True
+            session = new(session_id=None, workspace=self.workspace)
+            save = getattr(self.store, "save", None)
+            if callable(save):
+                save(session)
+
+        self._switch_to_session(session)
+        self.system_message("started new chat", kind="info")
+        return True
+
+    def _switch_to_session(self, session: dict[str, Any]) -> None:
+        """Install a new active session without rebuilding agents."""
+        self.session = session
+        self.mode = initial_mode(self.agent, self.plan_agent)
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        self._render_current_session()
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
@@ -1246,6 +1308,20 @@ class MiraApp(App[None]):
         chat.tick_startup()
         chat.tick_subagents()
         chat.tick_compaction()
+
+    def on_resize(self) -> None:
+        """Keep the main panel usable in very narrow terminals."""
+        self._sync_sidebar_visibility()
+
+    def _sync_sidebar_visibility(self) -> None:
+        """Hide history before the fixed sidebar can squeeze chat to zero width."""
+        if not self.is_mounted:
+            return
+        try:
+            sidebar = self.query_one("#session-sidebar")
+        except NoMatches:
+            return
+        sidebar.display = self.size.width >= 72
 
     def _mode_label(self) -> str:
         """Return the compact mode label shown in the status line."""

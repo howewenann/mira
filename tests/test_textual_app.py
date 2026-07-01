@@ -36,11 +36,28 @@ class FakeStore:
         self.saves: list[dict[str, Any]] = []
         self.clear_all_calls = 0
         self.clear_compactions_calls = 0
+        self.new_sessions = 0
 
     def save(self, record: dict[str, Any]) -> None:
         """Ignore session saves."""
         self.saves.append(record)
         return None
+
+    def load(self, session_id: str | None, resume: bool, workspace: Path) -> dict[str, Any]:
+        """Return a new session for tests that exercise session creation."""
+        self.new_sessions += 1
+        record = {
+            "id": session_id or f"new-thread-{self.new_sessions}",
+            "title": "Untitled session",
+            "workspace": str(workspace),
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "events": [],
+        }
+        self.save(record)
+        return record
 
     def clear_all(self) -> int:
         """Record all-session clears."""
@@ -191,11 +208,81 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(app.query_one(ChatLog).children), 3)
             self.assertIsNotNone(app.query_one(SessionHistory))
             self.assertEqual(renderable_plain(app.query_one("#session-sidebar-title", Static)), "Chat History")
+            self.assertEqual(app.query_one("#new-chat", Button).label.plain, "+ New")
             startup = app.query_one(ChatLog).children[0]
             startup_text = renderable_plain(startup)
             self.assertIn(VERSION, startup_text)
             self.assertIn(blocky_wordmark().splitlines()[-1].rstrip(), startup_text)
             self.assertIn(HINTS, startup_text)
+
+    async def test_new_chat_button_switches_to_fresh_saved_session(self) -> None:
+        """The flat sidebar action should create a new chat without clearing the old one."""
+        old_session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 2,
+            "events": [{"type": "user", "text": "keep me"}],
+        }
+        store = FakeStore()
+        app = make_app(session=old_session, store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one("#new-chat", Button).press()
+            await wait_until(lambda: app.session["id"] == "new-thread-1")
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertEqual(old_session["events"], [{"type": "user", "text": "keep me"}])
+            self.assertEqual(app.session["turns"], 0)
+            self.assertEqual(app.session["events"], [])
+            self.assertEqual(store.new_sessions, 1)
+            self.assertIn("started new chat", rendered)
+            self.assertNotIn("keep me", rendered)
+            self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_new_chat_command_uses_same_session_switch(self) -> None:
+        """The slash command should create a blank saved session like the sidebar action."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/new-chat"))
+            await wait_until(lambda: app.session["id"] == "new-thread-1")
+
+            self.assertEqual(app.session["turns"], 0)
+            self.assertEqual(app.session["events"], [])
+            self.assertEqual(store.new_sessions, 1)
+
+    async def test_new_chat_is_blocked_while_busy(self) -> None:
+        """Starting a new chat should wait until the active turn finishes."""
+        store = FakeStore()
+        app = make_app(store=store)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+
+            handled = app._handle_new_chat()
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertTrue(handled)
+            self.assertEqual(app.session["id"], "thread-1")
+            self.assertEqual(store.new_sessions, 0)
+            self.assertIn("finish the current turn before starting a new chat", rendered)
+
+    async def test_narrow_window_hides_sidebar_and_keeps_prompt_width(self) -> None:
+        """Very narrow terminals should not squeeze the prompt to zero width."""
+        app = make_app()
+
+        async with app.run_test(size=(50, 20)) as pilot:
+            await pilot.pause()
+
+            self.assertFalse(app.query_one("#session-sidebar").display)
+            self.assertGreater(app.query_one(PromptBox).region.width, 0)
 
     async def test_prompt_submission_runs_turn_and_restores_focus(self) -> None:
         """Submitting prompt text should run the turn helper and refocus input."""
