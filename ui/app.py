@@ -16,6 +16,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.events import Click
 from textual.widgets import Button, ListView, Static
 
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
@@ -45,7 +46,7 @@ from ui.interrupts import (
     plan_request,
 )
 from ui.repl import handle_command, initial_mode, plan_revision_text, plan_thread_id, refresh_agent_specs, run_user_turn
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 
@@ -111,6 +112,7 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
+        self._subagent_live_active = False
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -124,6 +126,7 @@ class MiraApp(App[None]):
                 yield StatusBar(id="status")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
+                yield SubagentsPanel(id="subagents-panel")
                 yield PromptBox()
 
     def on_mount(self) -> None:
@@ -197,6 +200,7 @@ class MiraApp(App[None]):
         )
 
         chat = self.query_one(ChatLog)
+        self.query_one(SubagentsPanel).reset()
         chat.clear_log()
         chat.startup(
             model_name=self.model_name,
@@ -246,6 +250,7 @@ class MiraApp(App[None]):
             return
 
         self._record_prompt_history(text)
+        self.query_one(SubagentsPanel).prepare_turn()
         if text in DESTRUCTIVE_HISTORY_COMMANDS:
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
             return
@@ -338,6 +343,30 @@ class MiraApp(App[None]):
         event.stop()
         self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
 
+    @on(Click, "#subagents-panel-toggle")
+    def click_subagent_panel_toggle(self, event: Click) -> None:
+        """Collapse or expand the live subagents panel."""
+        event.stop()
+        self.query_one(SubagentsPanel).toggle()
+
+    @on(Click, "#subagents-panel-header")
+    def click_subagent_panel_header(self, event: Click) -> None:
+        """Collapse or expand the live subagents panel from its header."""
+        event.stop()
+        self.query_one(SubagentsPanel).toggle()
+
+    @on(Click, "#subagents-panel-close")
+    def click_subagent_panel_close(self, event: Click) -> None:
+        """Hide the live subagents panel."""
+        event.stop()
+        self.query_one(SubagentsPanel).close()
+
+    @on(Click, "#subagents-groups")
+    def click_subagent_group(self, event: Click) -> None:
+        """Select a subagent group from the left group list."""
+        event.stop()
+        self.query_one(SubagentsPanel).select_group_line(event.y)
+
     async def _run_new_chat(self) -> None:
         """Create and switch to a fresh session outside event handlers."""
         try:
@@ -379,6 +408,7 @@ class MiraApp(App[None]):
         """Install a new active session without rebuilding agents."""
         self.session = session
         self.mode = initial_mode(self.agent, self.plan_agent)
+        self.query_one(SubagentsPanel).reset()
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -661,6 +691,7 @@ class MiraApp(App[None]):
     def clear_log(self) -> None:
         """Clear chat output."""
         self.query_one(ChatLog).clear_log()
+        self.query_one(SubagentsPanel).reset()
 
     async def _run_history_command(self, text: str) -> None:
         """Run a destructive history command outside the submit event handler."""
@@ -926,6 +957,7 @@ class MiraApp(App[None]):
     def _render_current_session(self) -> None:
         """Rebuild visible chat output from the active session."""
         chat = self.query_one(ChatLog)
+        self.query_one(SubagentsPanel).reset()
         chat.clear_log()
         chat.startup(
             model_name=self.model_name,
@@ -978,6 +1010,9 @@ class MiraApp(App[None]):
         """Render a live draft of streamed task delegation input."""
         self.waiting_finished()
         self._mark_main_stream_active()
+        if self._subagent_panel_is_live():
+            self._set_status(state="running", detail="preparing subagent request...")
+            return
         self.query_one(ChatLog).delegation_delta(calls)
         self._set_status(state="running", detail="preparing subagent request...")
 
@@ -1010,24 +1045,41 @@ class MiraApp(App[None]):
         self.trace.delegation_started(calls)
         self._finish_main_stream_activity()
         self.waiting_finished()
+        if self._subagent_panel_is_live():
+            self._set_status(state="running", detail="delegating to subagents...")
+            self._rearm_waiting_if_busy()
+            return
         self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def start_subagent_live(self) -> None:
         """Prepare subagent display."""
+        self._subagent_live_active = True
         self.query_one(ChatLog).start_subagent_live()
+
+    def _subagent_panel_is_live(self) -> bool:
+        """Return whether live subagent work should own task delegation display."""
+        try:
+            panel = self.query_one(SubagentsPanel)
+        except NoMatches:
+            return self._subagent_live_active
+        return self._subagent_live_active or panel.has_running_subagents()
 
     def stop_subagent_live(self) -> None:
         """Finalize subagent display."""
         self.query_one(ChatLog).stop_subagent_live()
+        self._subagent_live_active = False
 
     def subagents_cancelled(self) -> None:
         """Mark active subagent display as cancelled."""
         self.query_one(ChatLog).subagents_cancelled()
+        self.query_one(SubagentsPanel).cancel_running()
+        self._subagent_live_active = False
 
     def tick_subagents(self) -> None:
         """Advance subagent status animation."""
         self.query_one(ChatLog).tick_subagents()
+        self.query_one(SubagentsPanel).tick()
 
     def subagent_label(self, subagent: Any) -> str:
         """Return a stable display label for a subagent."""
@@ -1039,34 +1091,143 @@ class MiraApp(App[None]):
         task_input: str = "",
         *,
         origin: str = "",
+        eval_id: str = "",
+        row_id: str = "",
+        model: str = "",
         created_at: str = "",
     ) -> None:
         """Render a subagent start."""
         self.trace.subagent_started(subagent, task_input)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
+        self.query_one(SubagentsPanel).start_subagent(
+            subagent,
+            task_input,
+            row_id=row_id,
+            eval_id=eval_id,
+        )
+        if not self._subagent_live_active:
+            self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Fill in a subagent request that arrived after the block started."""
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
+        self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
+        if not self._subagent_live_active:
+            self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
 
-    def subagent_finished(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
+    def subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+        created_at: str = "",
+    ) -> None:
         """Render a subagent finish."""
         self.trace.subagent_finished(subagent, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
+        self.query_one(SubagentsPanel).finish_subagent(
+            subagent,
+            result,
+            row_id=row_id,
+            eval_id=eval_id,
+            duration_ms=duration_ms,
+        )
+        if not self._subagent_live_active:
+            self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
         self._rearm_waiting_if_busy()
 
-    def subagent_cancelled(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
+    def subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+        created_at: str = "",
+    ) -> None:
         """Render a subagent cancellation."""
         self.trace.subagent_cancelled(subagent, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
+        self.query_one(SubagentsPanel).finish_subagent(
+            subagent,
+            result,
+            row_id=row_id,
+            eval_id=eval_id,
+            duration_ms=duration_ms,
+            status="CANCELLED",
+        )
+        if not self._subagent_live_active:
+            self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
+
+    def eval_subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        model: str = "",
+        label: str = "",
+    ) -> None:
+        """Render an eval-created subagent only in the live panel."""
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(SubagentsPanel).start_subagent(
+            subagent,
+            task_input,
+            row_id=row_id,
+            eval_id=eval_id,
+            label=label,
+        )
+
+    def eval_subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Mark an eval-created subagent done only in the live panel."""
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(SubagentsPanel).finish_subagent(
+            subagent,
+            result,
+            row_id=row_id,
+            eval_id=eval_id,
+            duration_ms=duration_ms,
+        )
+
+    def eval_subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Mark an eval-created subagent error/cancelled only in the live panel."""
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(SubagentsPanel).finish_subagent(
+            subagent,
+            result,
+            row_id=row_id,
+            eval_id=eval_id,
+            duration_ms=duration_ms,
+            status="ERROR" if result else "CANCELLED",
+        )
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
@@ -1081,6 +1242,9 @@ class MiraApp(App[None]):
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).finish_turn(cancelled=cancelled)
+        if cancelled:
+            self.query_one(SubagentsPanel).cancel_running()
+            self._subagent_live_active = False
 
     def usage_updated(self) -> None:
         """Refresh the status bar after token usage is committed."""
@@ -1387,6 +1551,10 @@ class MiraApp(App[None]):
         chat.tick_startup()
         chat.tick_subagents()
         chat.tick_compaction()
+        try:
+            self.query_one(SubagentsPanel).tick()
+        except NoMatches:
+            return
 
     def on_resize(self) -> None:
         """Keep the main panel usable in very narrow terminals."""

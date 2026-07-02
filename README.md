@@ -181,6 +181,9 @@ what MIRA loaded and which project resources replaced defaults.
 
 - Textual TUI with chat, tool calls, tool results, subagent progress, session
   history with a flat new-chat action, and a compact status/dashboard line.
+- Live subagent panel in the TUI for running task delegation. Eval-created
+  subagents are grouped as `Group 1`, `Group 2`, and so on; raw eval ids are not
+  shown. Rows use generated subagent names with compact inline task hints.
 - One-shot terminal mode for scripts or quick prompts.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
@@ -215,6 +218,11 @@ local timestamp and timezone offset so they sort by creation time, for example:
 MIRA keeps replayable user and assistant messages for the chat history UI.
 Starting a new chat creates another saved session and switches to it; it does
 not clear or overwrite the previous session.
+Regular subagent task outputs are stored as session transcript events so they
+can be restored and included in resume context. The live bottom subagents panel
+itself is not stored or replayed when opening past sessions; eval-created
+subagent detail remains live telemetry, with durable history coming from the
+parent eval tool call/result and assistant summary.
 Recent structured plan bubbles are also included in model resume context as
 compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA

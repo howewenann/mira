@@ -123,7 +123,7 @@ def normalize_messages(value: Any) -> list[dict[str, Any]]:
                 "content": item["text"],
             })
             continue
-        if item["type"] == "subagent" and item.get("status") == "DONE":
+        if item["type"] == "subagent" and item.get("status") in {"DONE", "CANCELLED"}:
             output = str(item.get("output") or "").strip()
             if not output:
                 continue
@@ -138,10 +138,12 @@ def normalize_messages(value: Any) -> list[dict[str, Any]]:
 
 
 def subagent_message_text(event: dict[str, Any], output: str) -> str:
-    """Return resume-context text for a completed subagent."""
+    """Return resume-context text for a terminal subagent."""
     name = compact_line(event.get("name") or "subagent")
     task_input = compact_text(event.get("task_input"))
-    parts = [f"{name} completed."]
+    status = compact_line(event.get("status") or "DONE")
+    verb = "was cancelled" if status == "CANCELLED" else "completed"
+    parts = [f"{name} {verb}."]
     if task_input:
         parts.append(f"Request:\n{task_input}")
     parts.append(f"Output:\n{output}")
