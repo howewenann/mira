@@ -238,6 +238,11 @@ TUI-only commands that need live app state stay in `ui/app.py`; for example,
 rebuilding agents without restarting the session. `/new-chat` and the sidebar
 `+ New` action create and switch to a fresh saved session without deleting the
 current session.
+The subagents bottom panel is live TUI state only. It opens for running
+subagents, uses compact `[-]`, `[+]`, and `x` controls, collapses to a summary
+before the next prompt after completion, and is reset by new subagent activity.
+Eval-created subagents are grouped in that panel by internal `eval_id`, but the
+UI labels them as `Group 1`, `Group 2`, and so on.
 
 **Where to check:** `ui/app.py`, `ui/widgets/`, `ui/renderer.py`,
 `runtime/*_events.py`, `tests/test_textual_app.py`.
@@ -260,6 +265,11 @@ so the UI can show context pressure. MIRA does not run a parallel dashboard
 counter, compute provider prompt tokens, or decide when to compact. Provider
 `In` and `Out` usage are cumulative per-call totals, not current context
 occupancy.
+Regular subagent completions remain durable `subagent` transcript events so
+past sessions can replay them and resume context can refer to their outputs.
+The live panel's open/collapsed/closed state is intentionally not persisted or
+replayed. Eval-created subagent rows are not stored separately; their durable
+history is the surrounding eval tool call/result plus the assistant's summary.
 
 **Where to check:** `agent/compaction.py`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,

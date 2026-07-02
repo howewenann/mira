@@ -26,6 +26,51 @@ Expected:
 - The subagents inspect or locate the README file.
 - MIRA finishes with a joke after the README task.
 
+## TUI Subagents Panel
+
+Run the interactive TUI:
+
+```powershell
+mira
+```
+
+Enter:
+
+```text
+Use two subagents in parallel: have one summarize README.md and one inspect pyproject.toml, then compare their findings.
+```
+
+Expected:
+
+- A bottom `subagents` panel opens while the subagents run.
+- Regular subagents appear as flat task rows with status and elapsed time; no
+  group labels or ids are shown.
+- Rows use generated subagent names plus compact inline task hints.
+- After completion, the panel remains visible. Submitting the next prompt
+  collapses it to the header summary.
+- Closing the panel hides it without deleting the just-finished rows; starting
+  another subagent workflow resets and reopens it.
+- Restarting or reopening the session shows durable transcript subagent blocks,
+  not the old live panel.
+
+## TUI Dynamic Eval Subagent Groups
+
+In `/settings`, enable dynamic subagents, then enter:
+
+```text
+Use eval to generate 8 haikus about breakfast food, then run a small tournament with subagent judges to pick the best one.
+```
+
+Expected:
+
+- A bottom `dynamic subagents` panel opens while eval-created subagents run.
+- The left list shows `Group 1`, `Group 2`, and so on for eval batches; raw
+  eval ids are not displayed.
+- The right task table follows the active group and shows generated subagent
+  names, compact inline hints, status, and elapsed time.
+- The durable session history contains the eval tool call/result and assistant
+  summary, not separate replayed panel rows for each eval-created subagent.
+
 ## Cancelled TUI Bubble Boundaries
 
 Run the interactive TUI:

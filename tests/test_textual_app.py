@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from pyfiglet import Figlet
 from rich.console import Console
+from rich.text import Text
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
@@ -25,7 +26,8 @@ from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, 
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
+from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon
 from ui.widgets.session_history import session_label
 
 
@@ -143,6 +145,15 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
 
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
+
+    def assert_styled_char(self, text: Text, char: str, expected_style: str) -> None:
+        """Assert that one character in a Rich Text object has a style."""
+        matches = [
+            span
+            for span in text.spans
+            if text.plain[span.start : span.end] == char and expected_style in str(span.style)
+        ]
+        self.assertTrue(matches, f"expected {char!r} to have style {expected_style!r}")
 
     def test_destructive_confirm_choices_match_visible_shortcuts(self) -> None:
         """Clear confirmations should return the same shortcuts shown in their labels."""
@@ -2416,6 +2427,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("scary story", final)
             self.assertIn("funny story", final)
 
+    async def test_live_subagent_panel_removes_existing_delegation_draft(self) -> None:
+        """Opening the panel should remove the transient task draft for the same work."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.delegation_delta([{"id": "task-1", "name": "task", "args": {"description": "judge haiku"}}])
+            await pilot.pause()
+            draft = app.query_one(ChatLog).children[-1]
+            self.assertIn("judge haiku", renderable_plain(draft))
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [one]", "judge haiku")
+            await pilot.pause()
+
+            delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
+            panel_text = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+
+            self.assertNotIn(draft, list(app.query_one(ChatLog).children))
+            self.assertEqual(delegation_blocks, [])
+            self.assertIn("general-purpose [one]", panel_text)
+            self.assertIn("judge haiku", panel_text)
+
+    async def test_live_subagent_panel_suppresses_sequential_delegation_bubbles(self) -> None:
+        """Sequential task starts should update the panel instead of stacking task bubbles."""
+        app = make_app()
+
+        async with app.run_test(size=(140, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            for index in range(1, 4):
+                calls = [
+                    {
+                        "id": f"task-{task_index}",
+                        "name": "task",
+                        "args": {"description": f"judge haiku pair {task_index}"},
+                    }
+                    for task_index in range(1, index + 1)
+                ]
+                app.subagent_started(f"general-purpose [{index}]", f"judge haiku pair {index}")
+                app.delegation_started(calls)
+                await pilot.pause()
+
+            delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
+            panel_text = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+
+            self.assertEqual(delegation_blocks, [])
+            self.assertEqual(panel_text.count("RUNNING"), 3)
+            self.assertIn("general-purpose [1]", panel_text)
+            self.assertIn("general-purpose [2]", panel_text)
+            self.assertIn("general-purpose [3]", panel_text)
+            self.assertIn("judge haiku pair 3", panel_text)
+
     async def test_subagent_request_update_fills_running_block(self) -> None:
         """A subagent block that started blank should accept late request text."""
         app = make_app()
@@ -2548,27 +2614,156 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("README.md", done)
 
     async def test_repeated_unsuffixed_subagents_get_separate_blocks(self) -> None:
-        """Concurrent subagents with the same base name should not share one bubble."""
+        """Live subagents should render in the bottom panel while they run."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [one]", "inspect README")
+            app.subagent_started("general-purpose [two]", "inspect pyproject")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            chat_blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
+
+            self.assertTrue(panel.display)
+            self.assertEqual(chat_blocks, [])
+            self.assertEqual(rendered.count("RUNNING"), 2)
+            self.assertGreaterEqual(rendered.count("["), 2)
+            self.assertIn("inspect README", rendered)
+            self.assertIn("inspect pyproject", rendered)
+            self.assertNotIn("MODEL", rendered)
+            self.assertNotIn("Group", renderable_plain(panel.query_one("#subagents-groups", Static)))
+
+    async def test_subagent_panel_uses_symbol_controls_without_ctrl_g(self) -> None:
+        """The panel should use compact visible controls only."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
             app.start_subagent_live()
-            app.subagent_started("general-purpose", "inspect README")
-            app.subagent_started("general-purpose", "inspect pyproject")
+            app.subagent_started("general-purpose [one]", "inspect README")
             await pilot.pause()
 
-            blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
-            titles = [str(getattr(block, "border_title", "")).replace("\\", "") for block in blocks]
-            rendered = [renderable_plain(block) for block in blocks]
+            panel = app.query_one(SubagentsPanel)
+            toggle = panel.query_one("#subagents-panel-toggle", Static)
+            close = panel.query_one("#subagents-panel-close", Static)
+            self.assertEqual(renderable_plain(toggle), "[-]")
+            self.assertEqual(renderable_plain(close), "x")
+            self.assertFalse(any(binding.key == "ctrl+g" for binding in app.BINDINGS))
 
-            self.assertEqual(len(blocks), 2)
-            self.assertNotEqual(titles[0], titles[1])
-            self.assertIn("inspect README", rendered[0])
-            self.assertIn("inspect pyproject", rendered[1])
-            self.assertIn("RUNNING", rendered[0])
-            self.assertIn("RUNNING", rendered[1])
+            panel.toggle()
+            await pilot.pause()
+            self.assertEqual(renderable_plain(toggle), "[+]")
+            self.assertFalse(panel.query_one("#subagents-panel-body").display)
+
+            panel.toggle()
+            await pilot.pause()
+            self.assertEqual(renderable_plain(toggle), "[-]")
+            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+
+            await pilot.click("#subagents-panel-header")
+            await pilot.pause()
+            self.assertEqual(renderable_plain(toggle), "[+]")
+            self.assertFalse(panel.query_one("#subagents-panel-body").display)
+
+    async def test_subagent_panel_keeps_full_identity_and_truncates_hint(self) -> None:
+        """Panel rows should never truncate the generated subagent identity."""
+        app = make_app()
+        identity = "general-purpose [persimmon-sparrow]"
+        long_hint = "Read the README.md file and provide a concise summary of the architecture and test setup"
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started(identity, long_hint)
+            await pilot.pause()
+
+            rendered = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+
+            self.assertIn(identity, rendered)
+            self.assertIn("Read the", rendered)
+            self.assertIn("...", rendered)
+            self.assertNotIn("general...", rendered)
+            self.assertNotIn("[persimmo...]", rendered)
+
+    async def test_subagent_panel_styles_identity_with_purple_type_colour(self) -> None:
+        """The subagent type and coolname should use MIRA's purple identity colour."""
+        identity = "general-purpose [persimmon-sparrow]"
+        text = Text()
+        append_task_cell(text, SubagentRecord(key="one", name=identity, hint="inspect README"), 80)
+        start = text.plain.index(identity)
+        end = start + len(identity)
+        matching = [
+            span for span in text.spans if span.start <= start and span.end >= end and "#B7A4E8" in str(span.style).upper()
+        ]
+
+        self.assertTrue(matching)
+
+    def test_subagent_group_status_icons_have_status_colours(self) -> None:
+        """Group status icons should mirror task-row status colours."""
+        self.assertEqual(group_status_icon(done=1, total=1, failed=0, cancelled=0), ("v", "bold green"))
+        self.assertEqual(group_status_icon(done=1, total=1, failed=1, cancelled=0), ("x", "bold red"))
+        self.assertEqual(group_status_icon(done=1, total=1, failed=0, cancelled=1), ("-", "bold yellow"))
+        self.assertEqual(group_status_icon(done=0, total=1, failed=0, cancelled=0), ("*", "bold yellow"))
+
+    def test_subagent_group_status_spans_colour_only_the_icon(self) -> None:
+        """The left group list should colour v/x/- without tinting labels."""
+        panel = SubagentsPanel()
+        panel.start_subagent("general-purpose [done]", "done", eval_id="eval-done", row_id="done")
+        panel.start_subagent("general-purpose [error]", "error", eval_id="eval-error", row_id="error")
+        panel.start_subagent("general-purpose [cancelled]", "cancelled", eval_id="eval-cancelled", row_id="cancelled")
+        panel.finish_subagent("general-purpose [done]", eval_id="eval-done", row_id="done")
+        panel.finish_subagent(
+            "general-purpose [error]",
+            "failed",
+            eval_id="eval-error",
+            row_id="error",
+            status="ERROR",
+        )
+        panel.finish_subagent(
+            "general-purpose [cancelled]",
+            "cancelled",
+            eval_id="eval-cancelled",
+            row_id="cancelled",
+            status="CANCELLED",
+        )
+
+        text = panel._render_groups()
+
+        self.assert_styled_char(text, "v", "bold green")
+        self.assert_styled_char(text, "x", "bold red")
+        self.assert_styled_char(text, "-", "bold yellow")
+        self.assertFalse(
+            [
+                span
+                for span in text.spans
+                if "Group" in text.plain[span.start : span.end] and any(color in str(span.style) for color in ("green", "red", "yellow"))
+            ]
+        )
+
+    async def test_subagent_panel_very_narrow_width_omits_hint_not_identity(self) -> None:
+        """When width is tight, only the hint should disappear."""
+        app = make_app()
+        identity = "general-purpose [persimmon-sparrow]"
+
+        async with app.run_test(size=(50, 24)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started(identity, "Inspect the pyproject.toml file and provide a summary")
+            await pilot.pause()
+
+            rendered = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+
+            self.assertIn(identity, rendered)
+            self.assertNotIn("general...", rendered)
+            self.assertNotIn("[persimmo...]", rendered)
 
     async def test_repeated_unsuffixed_subagent_errors_update_matching_blocks(self) -> None:
         """Error-like subagent output should finish only the matching active bubble."""
@@ -2577,7 +2772,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            app.start_subagent_live()
             app.subagent_started("general-purpose", "inspect README")
             app.subagent_started("general-purpose", "inspect pyproject")
             await pilot.pause()
@@ -2599,6 +2793,241 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("DONE", second_done)
             self.assertIn("pyproject summary", second_done)
+
+    async def test_subagent_panel_collapses_closes_and_reopens_for_new_activity(self) -> None:
+        """Completed panel state should collapse on the next prompt and reset on new work."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [one]", "inspect README")
+            app.subagent_finished("general-purpose [one]", "README summary")
+            app.stop_subagent_live()
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            self.assertTrue(panel.display)
+            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+
+            panel.prepare_turn()
+            await pilot.pause()
+            self.assertTrue(panel.display)
+            self.assertFalse(panel.query_one("#subagents-panel-body").display)
+
+            panel.close()
+            await pilot.pause()
+            self.assertFalse(panel.display)
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [two]", "py")
+            await pilot.pause()
+
+            rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            self.assertTrue(panel.display)
+            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+            self.assertIn("py", rendered)
+            self.assertNotIn("inspect README", rendered)
+
+    async def test_eval_subagents_are_grouped_without_showing_eval_ids(self) -> None:
+        """Eval-created subagents should use user-facing group labels."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+
+            app.eval_subagent_started(
+                "general-purpose [haiku 1]",
+                "Generate haiku 1",
+                eval_id="eval-round-a",
+                row_id="task-a",
+                model="claude-haiku",
+            )
+            app.eval_subagent_finished(
+                "general-purpose [haiku 1]",
+                eval_id="eval-round-a",
+                row_id="task-a",
+                duration_ms=1500,
+            )
+            app.eval_subagent_started(
+                "general-purpose [final]",
+                "judge",
+                eval_id="eval-round-b",
+                row_id="task-b",
+                model="claude-haiku",
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
+            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
+
+            self.assertIn("dynamic subagents", header)
+            self.assertIn("2 groups", header)
+            self.assertIn("Group 1", groups)
+            self.assertIn("Group 2", groups)
+            self.assertIn("RUNNING", tasks)
+            self.assertIn("general-purpose [", tasks)
+            self.assertIn("judge", tasks)
+            self.assertNotIn("MODEL", tasks)
+            self.assertNotIn("claude-haiku", tasks)
+            self.assertNotIn("final]", tasks)
+            self.assertNotIn("eval-round", groups)
+            self.assertNotIn("eval-round", tasks)
+
+    async def test_eval_subagent_failure_retry_reuses_group(self) -> None:
+        """A failed eval batch retry should reuse the same user-facing group."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+
+            app.eval_subagent_started(
+                "general-purpose [draft]",
+                "write long story description that should not become identity",
+                eval_id="eval-failed",
+                row_id="row-a",
+                label="draft",
+            )
+            app.eval_subagent_cancelled(
+                "general-purpose [draft]",
+                "tool failed",
+                eval_id="eval-failed",
+                row_id="row-a",
+            )
+            app.eval_subagent_started(
+                "general-purpose [retry]",
+                "write long story description that should not become identity",
+                eval_id="eval-retry",
+                row_id="row-b",
+                label="retry",
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
+            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
+
+            self.assertIn("Group 1", groups)
+            self.assertNotIn("Group 2", groups)
+            self.assertIn("retry", tasks)
+            self.assertNotIn("draft]", tasks)
+            self.assertNotIn("eval-", groups)
+            self.assertNotIn("eval-", tasks)
+
+    async def test_mixed_regular_and_eval_subagents_share_panel_sections(self) -> None:
+        """Mixed workflows should show regular tasks plus eval groups in one panel."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [one]", "inspect README")
+            app.eval_subagent_started(
+                "general-purpose [judge]",
+                "judge README summary",
+                eval_id="eval-judge",
+                row_id="judge-a",
+                label="judge",
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
+
+            self.assertIn("subagents", header)
+            self.assertNotIn("dynamic subagents", header)
+            self.assertIn("Tasks", groups)
+            self.assertIn("Group 1", groups)
+
+    async def test_subagent_group_list_click_selects_visible_group_rows(self) -> None:
+        """Clicking the left group list should switch the visible task table."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [regular]", "inspect README")
+            app.eval_subagent_started(
+                "general-purpose [judge]",
+                "judge README summary",
+                eval_id="eval-judge",
+                row_id="judge-a",
+                label="judge",
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            tasks_widget = panel.query_one("#subagents-tasks", Static)
+            initial = renderable_plain(tasks_widget)
+            self.assertIn("judge", initial)
+            self.assertNotIn("general-purpose [regular]", initial)
+
+            await pilot.click("#subagents-groups", offset=(1, 1))
+            await pilot.pause()
+            regular = renderable_plain(tasks_widget)
+            self.assertIn("general-purpose [regular]", regular)
+            self.assertNotIn("general-purpose [judge]", regular)
+
+            await pilot.click("#subagents-groups", offset=(1, 2))
+            await pilot.pause()
+            grouped = renderable_plain(tasks_widget)
+            self.assertIn("judge", grouped)
+            self.assertNotIn("general-purpose [regular]", grouped)
+
+    async def test_subagent_group_line_header_and_invalid_rows_do_not_change_selection(self) -> None:
+        """Header and invalid group lines should leave the selection alone."""
+        panel = SubagentsPanel()
+        panel.start_subagent("general-purpose [regular]", "inspect README")
+        panel.start_subagent(
+            "general-purpose [judge]",
+            "judge README summary",
+            eval_id="eval-judge",
+            row_id="judge-a",
+            label="judge",
+        )
+
+        before = [record.name for record in panel._displayed_records()]
+        panel.select_group_line(0)
+        self.assertEqual([record.name for record in panel._displayed_records()], before)
+        panel.select_group_line(99)
+        self.assertEqual([record.name for record in panel._displayed_records()], before)
+        panel.select_group_line(-1)
+        self.assertEqual([record.name for record in panel._displayed_records()], before)
+
+    async def test_live_subagent_panel_marks_running_rows_cancelled(self) -> None:
+        """Cancelling a live turn should stop panel spinners and mark rows terminal."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.start_subagent_live()
+            app.subagent_started("general-purpose [one]", "look for dead code")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            running = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            self.assertIn("RUNNING", running)
+
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app._cancel_turn()
+            await pilot.pause()
+
+            cancelled = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            self.assertIn("CANCELLED", cancelled)
+            self.assertNotIn("RUNNING", cancelled)
+            self.assertFalse(panel.has_running_subagents())
+
+            panel.tick()
+            await pilot.pause()
+            self.assertEqual(renderable_plain(panel.query_one("#subagents-tasks", Static)), cancelled)
 
     async def test_cancelled_subagent_blocks_stop_animating(self) -> None:
         """Cancelling a turn should leave active subagents in a terminal state."""
@@ -2654,6 +3083,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             subagent_blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
+            self.assertFalse(app.query_one(SubagentsPanel).display)
             self.assertEqual(len(subagent_blocks), 1)
             rendered = renderable_plain(subagent_blocks[0])
             self.assertIn("DONE", rendered)

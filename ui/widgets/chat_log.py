@@ -404,9 +404,23 @@ class ChatLog(VerticalScroll):
 
     def start_subagent_live(self) -> None:
         """Reset subagent state for a new delegation group."""
+        self.discard_delegation_summary()
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._subagent_aliases = {}
+
+    def discard_delegation_summary(self) -> None:
+        """Remove the current live delegation summary from the transcript."""
+        blocks = [self._delegation_draft_block, self._delegation_block]
+        removed = False
+        for block in blocks:
+            if block is None or block not in self.children:
+                continue
+            block.remove()
+            removed = True
+        self._reset_delegation_group()
+        if removed:
+            self._scroll_to_end()
 
     def stop_subagent_live(self) -> None:
         """Finalize subagent display."""

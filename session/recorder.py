@@ -386,9 +386,27 @@ class RecordingRenderer:
         if callable(activity):
             activity()
 
-    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
+    def subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        origin: str = "",
+        eval_id: str = "",
+        row_id: str = "",
+        model: str = "",
+    ) -> None:
         event = self.recorder.subagent_started(subagent, task_input, origin=origin)
-        call_renderer(self.renderer.subagent_started, subagent, task_input, origin=origin, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.subagent_started,
+            subagent,
+            task_input,
+            origin=origin,
+            eval_id=eval_id,
+            row_id=row_id,
+            model=model,
+            created_at=event_created_at(event),
+        )
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         callback = getattr(self.renderer, "subagent_request_updated", None)
@@ -396,15 +414,90 @@ class RecordingRenderer:
             callback(subagent, task_input)
         self.recorder.subagent_request_updated(subagent, task_input)
 
-    def subagent_finished(self, subagent: str, result: str = "") -> None:
+    def subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         event = self.recorder.subagent_finished(subagent, result)
-        call_renderer(self.renderer.subagent_finished, subagent, result, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.subagent_finished,
+            subagent,
+            result,
+            eval_id=eval_id,
+            row_id=row_id,
+            duration_ms=duration_ms,
+            created_at=event_created_at(event),
+        )
 
-    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+    def subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         callback = getattr(self.renderer, "subagent_cancelled", None)
         event = self.recorder.subagent_cancelled(subagent, result)
         if callable(callback):
-            call_renderer(callback, subagent, result, created_at=event_created_at(event))
+            call_renderer(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=row_id,
+                duration_ms=duration_ms,
+                created_at=event_created_at(event),
+            )
+
+    def eval_subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        model: str = "",
+        label: str = "",
+    ) -> None:
+        """Forward eval-internal subagent telemetry without recording it."""
+        callback = getattr(self.renderer, "eval_subagent_started", None)
+        if callable(callback):
+            call_renderer(callback, subagent, task_input, eval_id=eval_id, row_id=row_id, model=model, label=label)
+
+    def eval_subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Forward eval-internal subagent completion without recording it."""
+        callback = getattr(self.renderer, "eval_subagent_finished", None)
+        if callable(callback):
+            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
+
+    def eval_subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Forward eval-internal subagent failure without recording it."""
+        callback = getattr(self.renderer, "eval_subagent_cancelled", None)
+        if callable(callback):
+            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
 
     def subagents_cancelled(self) -> None:
         callback = getattr(self.renderer, "subagents_cancelled", None)
@@ -514,6 +607,7 @@ def event_created_at(event: dict[str, Any] | None) -> str:
 def call_renderer(callback: Any, *args: Any, created_at: str = "", **kwargs: Any) -> Any:
     if created_at and accepts_created_at(callback):
         kwargs["created_at"] = created_at
+    kwargs = accepted_kwargs(callback, kwargs)
     return callback(*args, **kwargs)
 
 
@@ -525,6 +619,23 @@ def accepts_created_at(callback: Any) -> bool:
     return any(
         parameter.kind == Parameter.VAR_KEYWORD or parameter.name == "created_at" for parameter in parameters
     )
+
+
+def accepted_kwargs(callback: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Drop optional renderer kwargs that a concrete renderer does not support."""
+    if not kwargs:
+        return {}
+    try:
+        parameters = signature(callback).parameters.values()
+    except (TypeError, ValueError):
+        return kwargs
+    names = set()
+    for parameter in parameters:
+        if parameter.kind == Parameter.VAR_KEYWORD:
+            return kwargs
+        if parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}:
+            names.add(parameter.name)
+    return {key: value for key, value in kwargs.items() if key in names}
 
 
 def delegation_key(call: Any) -> tuple[str, str]:

@@ -7,6 +7,7 @@ import json
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from inspect import Parameter, signature
 from typing import Any
 
 from langgraph.types import Command
@@ -150,30 +151,77 @@ class SubagentRequestRenderer:
                 self._pending_requests.append(description)
         self.renderer.delegation_started(calls)
 
-    def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
+    def subagent_started(
+        self,
+        subagent: str,
+        task_input: str = "",
+        *,
+        origin: str = "",
+        eval_id: str = "",
+        row_id: str = "",
+        model: str = "",
+    ) -> None:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
         request = task_input or queued_request
         if origin == DYNAMIC_TOOL_SUBAGENT and not request:
             self._hidden_subagents.add(subagent)
             return
         display_origin = "" if queued_request else origin
-        self.renderer.subagent_started(subagent, request, origin=display_origin)
+        call_renderer_with_supported_kwargs(
+            self.renderer.subagent_started,
+            subagent,
+            request,
+            origin=display_origin,
+            eval_id=eval_id,
+            row_id=row_id,
+            model=model,
+        )
         if not request:
             self._pending_subagents.append(subagent)
 
-    def subagent_finished(self, subagent: str, result: str = "") -> None:
+    def subagent_finished(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         if subagent in self._hidden_subagents:
             self._hidden_subagents.remove(subagent)
             return
-        self.renderer.subagent_finished(subagent, result)
+        call_renderer_with_supported_kwargs(
+            self.renderer.subagent_finished,
+            subagent,
+            result,
+            eval_id=eval_id,
+            row_id=row_id,
+            duration_ms=duration_ms,
+        )
 
-    def subagent_cancelled(self, subagent: str, result: str = "") -> None:
+    def subagent_cancelled(
+        self,
+        subagent: str,
+        result: str = "",
+        *,
+        eval_id: str = "",
+        row_id: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         if subagent in self._hidden_subagents:
             self._hidden_subagents.remove(subagent)
             return
         callback = getattr(self.renderer, "subagent_cancelled", None)
         if callable(callback):
-            callback(subagent, result)
+            call_renderer_with_supported_kwargs(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=row_id,
+                duration_ms=duration_ms,
+            )
 
 
 class EvalSubagentRenderer:
@@ -191,17 +239,51 @@ class EvalSubagentRenderer:
         if phase == "start":
             name = eval_subagent_name(event)
             self._labels[subagent_id] = name
-            self.renderer.subagent_started(
-                name,
-                str(event.get("description") or ""),
-                origin=EVAL_SUBAGENT,
-            )
+            callback = getattr(self.renderer, "eval_subagent_started", None)
+            if callable(callback):
+                call_renderer_with_supported_kwargs(
+                    callback,
+                    name,
+                    str(event.get("description") or ""),
+                    eval_id=str(event.get("eval_id") or ""),
+                    row_id=subagent_id,
+                    model=str(event.get("model") or ""),
+                    label=str(event.get("label") or ""),
+                )
+            else:
+                self.renderer.subagent_started(
+                    name,
+                    str(event.get("description") or ""),
+                    origin=EVAL_SUBAGENT,
+                )
         elif phase == "complete":
             name = self._labels.pop(subagent_id, eval_subagent_name(event))
-            self.renderer.subagent_finished(name)
+            callback = getattr(self.renderer, "eval_subagent_finished", None)
+            if callable(callback):
+                call_renderer_with_supported_kwargs(
+                    callback,
+                    name,
+                    eval_id=str(event.get("eval_id") or ""),
+                    row_id=subagent_id,
+                    duration_ms=event_duration_ms(event),
+                )
+            else:
+                self.renderer.subagent_finished(name)
         elif phase == "error":
             name = self._labels.pop(subagent_id, eval_subagent_name(event))
-            self.renderer.subagent_cancelled(name, str(event.get("error") or "error"))
+            error = str(event.get("error") or "error")
+            callback = getattr(self.renderer, "eval_subagent_cancelled", None)
+            if callable(callback):
+                call_renderer_with_supported_kwargs(
+                    callback,
+                    name,
+                    error,
+                    eval_id=str(event.get("eval_id") or ""),
+                    row_id=subagent_id,
+                    duration_ms=event_duration_ms(event),
+                )
+            else:
+                self.renderer.subagent_cancelled(name, error)
 
 
 async def consume_custom_events(stream: Any, renderer: Any) -> None:
@@ -226,6 +308,35 @@ def eval_subagent_name(event: dict[str, Any]) -> str:
     if not label:
         label = str(event.get("id") or "")[-8:] or "eval"
     return f"{subagent_type} [{label}]"
+
+
+def event_duration_ms(event: dict[str, Any]) -> int | None:
+    """Return optional event duration in milliseconds."""
+    value = event.get("duration_ms")
+    if isinstance(value, int | float):
+        return int(value)
+    return None
+
+
+def call_renderer_with_supported_kwargs(callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call a renderer method without requiring every renderer to accept new metadata."""
+    return callback(*args, **supported_kwargs(callback, kwargs))
+
+
+def supported_kwargs(callback: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return kwargs accepted by callback, preserving all kwargs for **kwargs renderers."""
+    try:
+        parameters = signature(callback).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(parameter.kind == Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    allowed = {
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+    }
+    return {key: value for key, value in kwargs.items() if key in allowed}
 
 
 async def run_turn(

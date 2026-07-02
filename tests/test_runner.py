@@ -638,6 +638,72 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("subagent_finished", "general-purpose [satire]", ""), renderer.events)
         self.assertIn(("subagent_finished", "general-purpose [knock-knock]", ""), renderer.events)
 
+    async def test_run_turn_forwards_eval_subagent_group_metadata(self) -> None:
+        class EvalAwareRenderer(RunTurnRenderer):
+            def eval_subagent_started(
+                self,
+                name: str,
+                task_input: str = "",
+                *,
+                eval_id: str = "",
+                row_id: str = "",
+                model: str = "",
+            ) -> None:
+                self.events.append(("eval_subagent_started", name, task_input, eval_id, row_id, model))
+
+            def eval_subagent_finished(
+                self,
+                name: str,
+                result: str = "",
+                *,
+                eval_id: str = "",
+                row_id: str = "",
+                duration_ms: int | None = None,
+            ) -> None:
+                self.events.append(("eval_subagent_finished", name, result, eval_id, row_id, duration_ms))
+
+        stream = FakeStream(
+            output={"messages": []},
+            custom_events=[
+                {
+                    "type": "subagent",
+                    "phase": "start",
+                    "id": "ptc_task_one",
+                    "eval_id": "eval-round-a",
+                    "subagent_type": "general-purpose",
+                    "label": "haiku 1",
+                    "description": "generate haiku 1",
+                    "model": "claude-haiku",
+                },
+                {
+                    "type": "subagent",
+                    "phase": "complete",
+                    "id": "ptc_task_one",
+                    "eval_id": "eval-round-a",
+                    "duration_ms": 1500,
+                },
+            ],
+        )
+        renderer = EvalAwareRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate via eval", renderer, "thread-1")
+
+        self.assertIn(
+            (
+                "eval_subagent_started",
+                "general-purpose [haiku 1]",
+                "generate haiku 1",
+                "eval-round-a",
+                "ptc_task_one",
+                "claude-haiku",
+            ),
+            renderer.events,
+        )
+        self.assertIn(
+            ("eval_subagent_finished", "general-purpose [haiku 1]", "", "eval-round-a", "ptc_task_one", 1500),
+            renderer.events,
+        )
+
     async def test_run_turn_keeps_tool_namespace_subagent_with_task_request_ordinary(self) -> None:
         stream = FakeStream(output={"messages": []})
         stream.tool_calls = AsyncItems(

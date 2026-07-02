@@ -6,5 +6,6 @@ from ui.widgets.prompt_panel import PromptPanel
 from ui.widgets.settings_panel import SettingsPanel
 from ui.widgets.session_history import SessionHistory
 from ui.widgets.status_bar import StatusBar
+from ui.widgets.subagent_panel import SubagentsPanel
 
-__all__ = ["ChatLog", "PromptBox", "PromptPanel", "SessionHistory", "SettingsPanel", "StatusBar"]
+__all__ = ["ChatLog", "PromptBox", "PromptPanel", "SessionHistory", "SettingsPanel", "StatusBar", "SubagentsPanel"]

@@ -110,6 +110,67 @@ Screen {
     background: #101516;
 }
 
+#subagents-panel {
+    display: none;
+    height: auto;
+    max-height: 14;
+    padding: 0 1 1 1;
+    border-top: solid #B7A4E8;
+    background: #101516;
+    color: #ECE7FF;
+}
+
+#subagents-panel-header-row {
+    height: 1;
+    width: 1fr;
+}
+
+#subagents-panel-header {
+    width: 1fr;
+    height: 1fr;
+    content-align: left middle;
+}
+
+.subagents-panel-action {
+    width: 5;
+    min-width: 3;
+    height: 1;
+    margin: 0;
+    border: none;
+    background: #101516;
+    color: #d2d8dc;
+}
+
+.subagents-panel-action:focus {
+    color: #eef7f8;
+}
+
+#subagents-panel-body {
+    height: auto;
+    max-height: 11;
+    width: 1fr;
+}
+
+#subagents-groups-scroll {
+    width: 28;
+    min-width: 24;
+    height: auto;
+    max-height: 11;
+    padding: 0 1 0 0;
+    margin: 0 1 0 0;
+    border-right: solid #4a5360;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#subagents-tasks-scroll {
+    width: 1fr;
+    height: auto;
+    max-height: 11;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
 #prompt-panel {
     width: 100%;
     height: auto;

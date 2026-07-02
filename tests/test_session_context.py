@@ -749,6 +749,60 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("origin", subagents[0])
         self.assertNotIn("origin", subagents[1])
 
+    def test_eval_subagent_renderer_events_are_not_persisted_as_subagents(self) -> None:
+        class EvalForwarder:
+            def __init__(self) -> None:
+                self.events: list[tuple[Any, ...]] = []
+
+            def eval_subagent_started(
+                self,
+                name: str,
+                task_input: str = "",
+                *,
+                eval_id: str = "",
+                row_id: str = "",
+                model: str = "",
+            ) -> None:
+                self.events.append(("eval_subagent_started", name, task_input, eval_id, row_id, model))
+
+            def eval_subagent_finished(
+                self,
+                name: str,
+                result: str = "",
+                *,
+                eval_id: str = "",
+                row_id: str = "",
+                duration_ms: int | None = None,
+            ) -> None:
+                self.events.append(("eval_subagent_finished", name, result, eval_id, row_id, duration_ms))
+
+        record = {"events": []}
+        renderer = EvalForwarder()
+        recorder = SessionRecordingRenderer(renderer, SessionRecorder(record, Store(), "action"))
+
+        recorder.eval_subagent_started(
+            "general-purpose [one]",
+            "judge pair",
+            eval_id="eval-round-a",
+            row_id="row-a",
+            model="claude-haiku",
+        )
+        recorder.eval_subagent_finished(
+            "general-purpose [one]",
+            eval_id="eval-round-a",
+            row_id="row-a",
+            duration_ms=1200,
+        )
+
+        self.assertEqual(context.normalize_events(record["events"]), [])
+        self.assertEqual(
+            renderer.events,
+            [
+                ("eval_subagent_started", "general-purpose [one]", "judge pair", "eval-round-a", "row-a", "claude-haiku"),
+                ("eval_subagent_finished", "general-purpose [one]", "", "eval-round-a", "row-a", 1200),
+            ],
+        )
+
     def test_done_subagent_output_contributes_to_resume_context(self) -> None:
         record = {
             "events": [
@@ -783,6 +837,31 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         resume = context.build_resume_context(record)
         self.assertIn("subagent (action):", resume)
         self.assertIn("No dead code found.", resume)
+
+    def test_cancelled_subagent_output_contributes_to_resume_context(self) -> None:
+        record = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "subagent",
+                    "mode": "action",
+                    "name": "general-purpose [one]",
+                    "status": "CANCELLED",
+                    "task_input": "inspect README",
+                    "output": "Partial notes before cancellation.",
+                },
+            ]
+        }
+
+        messages = context.normalize_messages(record["events"])
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "subagent")
+        self.assertIn("general-purpose [one] was cancelled", messages[0]["content"])
+        self.assertIn("Partial notes before cancellation.", messages[0]["content"])
+
+        resume = context.build_resume_context(record)
+        self.assertIn("subagent (action):", resume)
+        self.assertIn("Partial notes before cancellation.", resume)
 
     def test_recorder_deduplicates_delegation_events(self) -> None:
         record = {"events": []}
