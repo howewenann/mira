@@ -50,6 +50,7 @@ class SessionRecorder:
         delta = normalize_response_delta(self._assistant_text, delta)
         if not delta:
             return None
+        self._close_reasoning_phase()
         event = None
         if self._assistant_id is None:
             event = append_event(self.record, {"type": "assistant", "mode": self.mode, "text": ""})
@@ -81,6 +82,7 @@ class SessionRecorder:
         return self._append_reasoning(delta)
 
     def _append_reasoning(self, delta: str) -> dict[str, Any] | None:
+        self._close_assistant_phase()
         event = None
         if self._reasoning_id is None:
             event = append_event(self.record, {"type": "reasoning", "mode": self.mode, "text": ""})
@@ -209,6 +211,7 @@ class SessionRecorder:
             self.subagent_cancelled(name)
 
     def system_error(self, text: str) -> dict[str, Any]:
+        self.finish_main()
         stored = append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
         self.save()
         return stored
@@ -216,11 +219,13 @@ class SessionRecorder:
     def info(self, text: str) -> dict[str, Any] | None:
         if is_compaction_notice(text):
             return None
+        self.finish_main()
         stored = append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
         self.save()
         return stored
 
     def interrupted(self, text: str) -> dict[str, Any]:
+        self.finish_main()
         stored = append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
         self.save()
         return stored
@@ -238,6 +243,10 @@ class SessionRecorder:
             self.save()
 
     def finish_main(self) -> None:
+        self._close_reasoning_phase()
+        self._close_assistant_phase()
+
+    def _close_reasoning_phase(self) -> None:
         if self._reasoning_pending:
             if is_compaction_reasoning_fragment(self._reasoning_pending) or is_compaction_tail_fragment(
                 self._reasoning_pending
@@ -246,9 +255,12 @@ class SessionRecorder:
             else:
                 self._append_reasoning(self._reasoning_pending)
             self._reasoning_pending = ""
-        self._assistant_id = None
         self._reasoning_id = None
         self._reasoning_text = ""
+
+    def _close_assistant_phase(self) -> None:
+        self._assistant_id = None
+        self._assistant_text = ""
 
     def discard_last_assistant(self) -> None:
         """Remove the currently streamed assistant answer after a cutoff retry."""

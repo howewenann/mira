@@ -432,6 +432,67 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(reasoning_blocks), 1)
             self.assertEqual(renderable_plain(reasoning_blocks[0]), "The user wants:\n1. Check envs\n2. Tell joke")
 
+    async def test_reasoning_starts_new_block_after_intervening_bubbles(self) -> None:
+        """Any visible non-reasoning phase should separate thinking blocks."""
+        cases = [
+            ("assistant", lambda app: app.text_delta("mira text")),
+            ("tool draft", lambda app: app.tool_call_delta("read_file", {"path": "README.md"})),
+            ("tool call", lambda app: app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")),
+            ("delegation draft", lambda app: app.delegation_delta([{"name": "task", "args": {"description": "judge"}}])),
+            ("delegation", lambda app: app.delegation_started([{"name": "task", "args": {"description": "judge"}}])),
+            ("subagent", lambda app: app.subagent_started("general-purpose", "judge")),
+            ("compaction", lambda app: app.compaction_started()),
+            ("system", lambda app: app.system_message("status update", kind="status")),
+            ("command", lambda app: app.command_output("command output")),
+            ("activity", lambda app: app.model_activity()),
+        ]
+
+        for name, action in cases:
+            with self.subTest(name=name):
+                app = make_app()
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+
+                    app.reasoning_delta("first reasoning")
+                    action(app)
+                    app.reasoning_delta("second reasoning")
+                    await pilot.pause()
+
+                    reasoning_blocks = [
+                        block for block in app.query_one(ChatLog).children if "reasoning" in block.classes
+                    ]
+
+                    self.assertEqual(
+                        [renderable_plain(block) for block in reasoning_blocks],
+                        ["first reasoning", "second reasoning"],
+                    )
+
+    async def test_reasoning_starts_new_block_after_plan_bubble(self) -> None:
+        """Structured plan bubbles should also separate thinking blocks."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Boundary Plan",
+            "summary": ["Separate phases."],
+            "key_changes": ["Render a plan bubble."],
+            "test_plan": ["Check reasoning block count."],
+            "assumptions": ["The plan is visible."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.reasoning_delta("first reasoning")
+            await app.present_plan(interrupt)
+            app.reasoning_delta("second reasoning")
+            await pilot.pause()
+
+            reasoning_blocks = [block for block in app.query_one(ChatLog).children if "reasoning" in block.classes]
+            self.assertEqual(
+                [renderable_plain(block) for block in reasoning_blocks],
+                ["first reasoning", "second reasoning"],
+            )
+
     async def test_cancel_turn_detaches_reasoning_and_assistant_blocks(self) -> None:
         """New streamed output after cancellation should start fresh main bubbles."""
         app = make_app()

@@ -186,6 +186,7 @@ class ChatLog(VerticalScroll):
             return
         self.hide_waiting()
         self.hide_model_activity()
+        self._close_assistant_phase()
 
         if self._reasoning_block is None:
             self._reasoning_text = ""
@@ -204,6 +205,7 @@ class ChatLog(VerticalScroll):
             return
         self.hide_waiting()
         self.hide_model_activity()
+        self._close_reasoning_phase()
 
         if self._assistant_block is None:
             self._assistant_text = ""
@@ -216,8 +218,19 @@ class ChatLog(VerticalScroll):
     def finish_main(self) -> None:
         """Close the current streamed blocks so the next turn starts fresh."""
         self.hide_model_activity()
+        self._close_assistant_phase()
+        self._close_reasoning_phase()
+
+    def finish_stream_phase(self) -> None:
+        """Close the current model-message phase without ending the turn."""
+        self._close_assistant_phase()
+        self._close_reasoning_phase()
+
+    def _close_assistant_phase(self) -> None:
         self._assistant_block = None
         self._assistant_text = ""
+
+    def _close_reasoning_phase(self) -> None:
         self._reasoning_block = None
         self._reasoning_text = ""
 
@@ -242,12 +255,14 @@ class ChatLog(VerticalScroll):
 
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Append a system, info, status, warning, or error message."""
+        self.finish_stream_phase()
         self.hide_model_activity()
         title = "mira" if kind == "startup" else kind
         self._add_block(title, Text(text), f"message {kind}", created_at=created_at)
 
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
+        self.finish_stream_phase()
         self.hide_model_activity()
         self._add_block("output", renderable, "message command")
 
@@ -597,6 +612,7 @@ class ChatLog(VerticalScroll):
 
     def model_activity(self, text: str = "preparing tool call...") -> None:
         """Show transient model activity while tool-call JSON is streaming."""
+        self.finish_stream_phase()
         self.hide_waiting()
         renderable = Text(text, style="bold #DCE6FA")
         if self._activity_block is None:

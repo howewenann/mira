@@ -914,6 +914,7 @@ class MiraApp(App[None]):
 
     def model_stream_finished(self) -> None:
         """Re-arm waiting UI after streamed model text/reasoning goes quiet."""
+        self.query_one(ChatLog).finish_stream_phase()
         self._finish_main_stream_activity()
         self._rearm_waiting_if_busy()
 

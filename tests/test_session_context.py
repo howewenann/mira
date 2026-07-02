@@ -599,6 +599,33 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["content"], "hello")
 
+    def test_recorder_separates_reasoning_around_intervening_events(self) -> None:
+        cases = [
+            ("assistant", lambda recorder: recorder.text_delta("mira text")),
+            ("tool", lambda recorder: recorder.tool_call("read_file", {"path": "README.md"}, call_id="call-read")),
+            ("delegation", lambda recorder: recorder.delegation_started([{"name": "task", "args": {"description": "judge"}}])),
+            ("subagent", lambda recorder: recorder.subagent_started("general-purpose", "judge")),
+            ("info", lambda recorder: recorder.info("status update")),
+            ("error", lambda recorder: recorder.system_error("error update")),
+            ("interrupted", lambda recorder: recorder.interrupted("turn interrupted")),
+        ]
+
+        for name, action in cases:
+            with self.subTest(name=name):
+                record = {"events": []}
+                recorder = SessionRecorder(record, Store(), "action")
+
+                recorder.reasoning_delta("first reasoning")
+                action(recorder)
+                recorder.reasoning_delta("second reasoning")
+                recorder.finish_main()
+
+                reasoning_events = [
+                    event for event in context.normalize_events(record["events"]) if event["type"] == "reasoning"
+                ]
+
+                self.assertEqual([event["text"] for event in reasoning_events], ["first reasoning", "second reasoning"])
+
     def test_recorder_places_recovered_tool_result_before_last_assistant(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
