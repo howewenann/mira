@@ -5,6 +5,12 @@
 - Prefer small, readable changes over clever abstractions.
 - Follow existing local patterns before introducing new helpers or structure.
 - Keep modules direct and easy to trace; MIRA is intentionally educational.
+- Keep changes neat and tidy: avoid stacking small helper functions across
+  unrelated modules when a focused module or simple local class would make the
+  behavior easier to understand.
+- Do not grow catch-all classes or functions that do many jobs. Prefer narrow
+  modules with clear ownership, and keep UI layers from accumulating formatting,
+  logging, persistence, and runtime-control responsibilities.
 - Prefer DeepAgents and LangGraph native behavior for tool calls, HITL resume,
   backend routing, and stream handling.
 - Avoid MIRA-managed workarounds unless a real library/runtime edge case is

@@ -62,20 +62,28 @@ protection is moved later in the flow.
 
 ## Error Reports And Trace Diagnostics
 
-**Decision:** MIRA treats the TUI as a friendly display layer, automatic error
-reports as durable failure artifacts, and the trace window as optional live
-diagnostics.
+**Decision:** MIRA treats the TUI as a friendly display layer, the trace
+sidecar as an optional live plain-text stream, and automatic error reports as
+durable failure artifacts.
 
 **Why:** Some TUI exceptions are intentionally caught and rendered as concise
 messages, so uncaught-exception hooks are not enough. Reports are written at
 the boundaries that already catch one-shot and TUI turn failures, with a small
 top-level backup for unexpected escaping exceptions. Reports use the current
 session id whenever one exists and are only created when an exception happens.
-The trace window is a viewer over a bounded diagnostics log, so MIRA keeps
-running if that window cannot open or is closed.
+The trace sidecar mirrors visible TUI activity such as startup progress, user
+prompts, coalesced assistant text, tool calls, tool results, subagent
+lifecycle, and system messages through a bounded current-session diagnostics
+log. Trace transcript formatting is shared with one-shot terminal output, while
+sidecar color remains display-only in the log tailer. The trace sidecar is not
+the authoritative ordered transcript; saved session JSON is. It remains
+optional, so MIRA keeps running if that window cannot open or is closed, and
+normal non-trace TUI runs do not create live trace logs solely for successful
+activity.
 
 **Where to check:** `runtime/error_report.py`, `runtime/diagnostics.py`,
-`cli/commands.py`, `ui/app.py`.
+`runtime/trace_stream.py`, `ui/terminal_transcript.py`, `cli/commands.py`,
+`ui/app.py`.
 
 **Update this when:** Error artifact layout, reporting boundaries, diagnostic
 log behavior, or trace-window behavior changes.

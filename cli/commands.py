@@ -91,6 +91,10 @@ async def _run(
             ensure_git_repository=ensure_git_repository,
             tool_output_chars=config["tool_output_chars"],
         )
+        if trace:
+            from runtime.trace_stream import TraceStream
+
+            tui.trace = TraceStream(get_diagnostics_logger(), output_chars=config["tool_output_chars"])
         await tui.run_async()
         return
 

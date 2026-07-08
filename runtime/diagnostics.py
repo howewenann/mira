@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from contextlib import suppress
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -17,9 +18,17 @@ def setup_diagnostics_logging(workspace: Path) -> Path:
     """Configure a bounded diagnostics log for optional live tracing."""
     log_path = workspace.expanduser().resolve() / ".mira" / "_logs" / "mira.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _reset_trace_logs(log_path)
 
     logger = get_diagnostics_logger()
     resolved = str(log_path.resolve())
+    for handler in logger.handlers:
+        if isinstance(handler, RotatingFileHandler) and str(Path(handler.baseFilename).resolve()) == resolved:
+            with suppress(OSError):
+                handler.close()
+            logger.removeHandler(handler)
+            break
+
     for handler in logger.handlers:
         if isinstance(handler, RotatingFileHandler) and str(Path(handler.baseFilename).resolve()) == resolved:
             return log_path
@@ -30,7 +39,7 @@ def setup_diagnostics_logging(workspace: Path) -> Path:
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
     )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
     logger.info("diagnostics logging started")
     return log_path
@@ -59,3 +68,10 @@ def open_trace_window(log_path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def _reset_trace_logs(log_path: Path) -> None:
+    """Clear current and rotated trace logs for a fresh trace session."""
+    for path in [log_path, *sorted(log_path.parent.glob(f"{log_path.name}.*"))]:
+        with suppress(OSError):
+            path.unlink()

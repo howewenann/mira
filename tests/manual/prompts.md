@@ -112,6 +112,26 @@ Expected:
 - Running `conda run -n ai_agents python -m cli.main -p tests/manual/file_prompt.md`
   treats the path as literal prompt text, not as a file to read.
 
+## Neat And Tidy Architecture Audit
+
+Run this periodically when the repo starts feeling messy or before starting a
+cleanup pass:
+
+```powershell
+conda run -n ai_agents python -m cli.main -f tests/manual/neat_tidy_audit_prompt.md
+```
+
+Expected:
+
+- MIRA does not edit files.
+- MIRA reviews the full repo for architectural neatness and maintainability.
+- Findings are grouped by module or functional area, such as CLI/startup,
+  runtime streams, TUI, sessions, resources, diagnostics, and tests.
+- Each group includes risk, likely files/symbols, refactor difficulty, testing
+  scope, and a smallest safe cleanup target.
+- MIRA ends by asking which group to target first instead of starting a broad
+  refactor.
+
 Then run an interactive reasoning check:
 
 ```powershell

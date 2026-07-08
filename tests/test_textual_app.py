@@ -21,6 +21,8 @@ from agent.context_overflow import context_overflow_error, set_context_overflow_
 from config.metadata import ModelMetadata
 from config.settings import dynamic_subagents_enabled, execute_env_settings, load_settings, tool_always_allow, tool_enabled
 from config.version import display_version
+from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
+from runtime.trace_stream import TraceStream
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -441,6 +443,99 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("error report: load-report.txt", rendered)
                 self.assertEqual(report.call_args.kwargs["source"], "tui.session_load")
                 self.assertEqual(report.call_args.kwargs["session_id"], "thread-1")
+
+    async def test_trace_logging_mirrors_visible_tui_activity(self) -> None:
+        """Trace mode should log normal TUI renderer activity."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            logger = get_diagnostics_logger()
+            old_handlers = list(logger.handlers)
+            logger.handlers = []
+            try:
+                log_path = setup_diagnostics_logging(workspace)
+                app = make_app(workspace=workspace)
+                app.trace = TraceStream(logger, output_chars=80)
+
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+
+                    app.user_message("hello trace")
+                    app.text_delta("assistant ")
+                    app.text_delta("hello")
+                    app.reasoning_delta("hidden thinking")
+                    app.tool_call("read_file", {"path": "README.md"})
+                    app.tool_result("read_file", "content" * 30)
+                    app.system_message("bad thing", kind="error")
+                    app.subagent_started("worker", "do a thing")
+                    app.subagent_finished("worker", "done")
+                    await pilot.pause()
+
+                content = log_path.read_text(encoding="utf-8")
+                self.assertIn("user:\nhello trace", content)
+                self.assertIn("mira:\nassistant hello", content)
+                self.assertIn("read_file:\nargs:", content)
+                self.assertIn("read_file output: content", content)
+                self.assertIn("error:\nbad thing", content)
+                self.assertIn("subagent - worker:\nrequest: do a thing", content)
+                self.assertIn("subagent - worker:\ndone", content)
+                self.assertIn("truncated", content)
+                self.assertIn("thinking:\nhidden thinking", content)
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = old_handlers
+
+    async def test_trace_recovered_tool_result_matches_terminal_callback_order(self) -> None:
+        """Recovered tool results should use the same callback order as mira -p."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            logger = get_diagnostics_logger()
+            old_handlers = list(logger.handlers)
+            logger.handlers = []
+            try:
+                log_path = setup_diagnostics_logging(workspace)
+                app = make_app(workspace=workspace)
+                app.trace = TraceStream(logger, output_chars=80)
+
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+
+                    app.text_delta("final answer")
+                    app.model_stream_finished()
+                    app.recovered_tool_result("write_todos", "updated todos")
+                    app.finish_main()
+                    await pilot.pause()
+
+                content = log_path.read_text(encoding="utf-8")
+                tool_index = content.index("write_todos output: updated todos")
+                assistant_index = content.index("mira:\nfinal answer")
+                self.assertLess(assistant_index, tool_index)
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = old_handlers
+
+    async def test_trace_logging_is_silent_without_trace_setup(self) -> None:
+        """Normal TUI activity should not create trace logs unless trace mode is configured."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            logger = get_diagnostics_logger()
+            old_handlers = list(logger.handlers)
+            logger.handlers = []
+            try:
+                app = make_app(workspace=workspace)
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+
+                    app.user_message("hello no trace")
+                    app.tool_call("read_file", {"path": "README.md"})
+                    await pilot.pause()
+
+                self.assertFalse((workspace / ".mira" / "_logs").exists())
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = old_handlers
 
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
         """The transient working block should appear only during phase silence."""

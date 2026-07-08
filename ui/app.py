@@ -29,6 +29,7 @@ from config.settings import (
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from runtime.diagnostics import get_diagnostics_logger
 from runtime.error_report import write_error_report
+from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event
 from session.recorder import update_plan_event_status
@@ -109,6 +110,7 @@ class MiraApp(App[None]):
         self._waiting_delay_seconds = 0.8
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
+        self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -597,10 +599,12 @@ class MiraApp(App[None]):
 
     def user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
         """Write a submitted user message to the chat log."""
+        self.trace.user_message(text, planning=planning)
         self.query_one(ChatLog).timestamped_user_message(text, planning=planning, created_at=created_at)
 
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Write a command or status message to the chat log."""
+        self.trace.system_message(text, kind=kind)
         self.waiting_finished()
         self.query_one(ChatLog).system_message(text, kind=kind, created_at=created_at)
         detail = text if kind in {"status", "info", "warning"} else ""
@@ -608,6 +612,7 @@ class MiraApp(App[None]):
 
     def command_output(self, renderable: Any) -> None:
         """Write command output to the chat log."""
+        self.trace.command_output(renderable)
         self.waiting_finished()
         self.query_one(ChatLog).command_output(renderable)
 
@@ -637,6 +642,7 @@ class MiraApp(App[None]):
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
+        self.trace.compaction_started()
         self._main_stream_active = False
         self.waiting_finished()
         notice = pop_context_overflow_notice()
@@ -647,6 +653,7 @@ class MiraApp(App[None]):
 
     def compaction_finished(self) -> None:
         """Show that DeepAgents has finished compacting context."""
+        self.trace.compaction_finished()
         self.query_one(ChatLog).compaction_finished()
         self._set_status(state="running")
         self._rearm_waiting_if_busy()
@@ -930,16 +937,19 @@ class MiraApp(App[None]):
 
     def reasoning_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed reasoning text."""
+        self.trace.reasoning_delta(delta)
         self.waiting_finished()
         self._mark_main_stream_active()
         self.query_one(ChatLog).reasoning_delta(delta, created_at=created_at)
 
     def discard_reasoning(self) -> None:
         """Remove streamed reasoning that was later classified as internal."""
+        self.trace.discard_reasoning()
         self.query_one(ChatLog).discard_reasoning()
 
     def text_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed assistant text."""
+        self.trace.assistant_delta(delta)
         self.waiting_finished()
         self._mark_main_stream_active()
         self.query_one(ChatLog).text_delta(delta, created_at=created_at)
@@ -973,6 +983,7 @@ class MiraApp(App[None]):
 
     def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool call in transcript order."""
+        self.trace.tool_call(name, args)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).tool_call(name, args, call_id=call_id, created_at=created_at)
@@ -980,6 +991,15 @@ class MiraApp(App[None]):
 
     def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool result in transcript order."""
+        self.trace.tool_result(name, result)
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
+        self._rearm_waiting_if_busy()
+
+    def recovered_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Render a late-discovered tool result in session transcript order."""
+        self.trace.recovered_tool_result(name, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
@@ -987,6 +1007,7 @@ class MiraApp(App[None]):
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Render task delegation summary."""
+        self.trace.delegation_started(calls)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
@@ -1021,6 +1042,7 @@ class MiraApp(App[None]):
         created_at: str = "",
     ) -> None:
         """Render a subagent start."""
+        self.trace.subagent_started(subagent, task_input)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
@@ -1033,6 +1055,7 @@ class MiraApp(App[None]):
 
     def subagent_finished(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
         """Render a subagent finish."""
+        self.trace.subagent_finished(subagent, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
@@ -1040,18 +1063,21 @@ class MiraApp(App[None]):
 
     def subagent_cancelled(self, subagent: str, result: str = "", *, created_at: str = "") -> None:
         """Render a subagent cancellation."""
+        self.trace.subagent_cancelled(subagent, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
 
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
+        self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
     def finish_turn(self, *, cancelled: bool = False) -> None:
         """Close live turn widgets without clearing visible transcript history."""
+        self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).finish_turn(cancelled=cancelled)
@@ -1212,6 +1238,7 @@ class MiraApp(App[None]):
 
     def startup_progress(self, state: str) -> None:
         """Update startup splash and status while bootstrap is running."""
+        self.trace.startup(state)
         if not self.is_mounted:
             return
         try:

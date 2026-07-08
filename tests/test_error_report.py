@@ -6,6 +6,7 @@ import logging
 import sys
 import tempfile
 import unittest
+import builtins
 from pathlib import Path
 from unittest.mock import patch
 from io import StringIO
@@ -13,9 +14,13 @@ from contextlib import redirect_stdout
 
 from logging.handlers import RotatingFileHandler
 
-from runtime.diagnostics import get_diagnostics_logger, open_trace_window, setup_diagnostics_logging
+from runtime.diagnostics import (
+    get_diagnostics_logger,
+    open_trace_window,
+    setup_diagnostics_logging,
+)
 from runtime.error_report import error_report_path, write_error_report
-from runtime.trace_tail import main as trace_tail_main
+from runtime.trace_tail import TraceColorizer, color_for_label, colorize_line, enable_console_colors, main as trace_tail_main
 
 
 class ErrorReportTests(unittest.TestCase):
@@ -95,6 +100,30 @@ class DiagnosticsTests(unittest.TestCase):
                 self.assertEqual(len(handlers), 1)
                 self.assertEqual(handlers[0].maxBytes, 2 * 1024 * 1024)
                 self.assertEqual(handlers[0].backupCount, 3)
+                self.assertEqual(handlers[0].formatter._fmt, "%(message)s")
+            finally:
+                for handler in logger.handlers:
+                    handler.close()
+                logger.handlers = old_handlers
+                logger.setLevel(logging.NOTSET)
+
+    def test_setup_diagnostics_logging_resets_current_trace_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            log_dir = workspace / ".mira" / "_logs"
+            log_dir.mkdir(parents=True)
+            (log_dir / "mira.log").write_text("old log\n", encoding="utf-8")
+            (log_dir / "mira.log.1").write_text("old rotation\n", encoding="utf-8")
+            logger = get_diagnostics_logger()
+            old_handlers = list(logger.handlers)
+            logger.handlers = []
+            try:
+                log_path = setup_diagnostics_logging(workspace)
+
+                content = log_path.read_text(encoding="utf-8")
+                self.assertIn("diagnostics logging started", content)
+                self.assertNotIn("old log", content)
+                self.assertFalse((log_dir / "mira.log.1").exists())
             finally:
                 for handler in logger.handlers:
                     handler.close()
@@ -131,6 +160,85 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(code, 2)
         self.assertIn("Usage:", output.getvalue())
+
+    def test_trace_tail_prints_recent_existing_lines_before_following(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "mira.log"
+            log_path.write_text("old one\nold two\n", encoding="utf-8")
+
+            def stop_after_backlog(seconds: float) -> None:
+                raise KeyboardInterrupt
+
+            output = StringIO()
+            with patch("runtime.trace_tail.time.sleep", stop_after_backlog), redirect_stdout(output):
+                with self.assertRaises(KeyboardInterrupt):
+                    trace_tail_main([str(log_path)])
+
+            rendered = output.getvalue()
+            self.assertIn("MIRA Trace", rendered)
+            self.assertIn("old one", rendered)
+            self.assertIn("old two", rendered)
+
+    def test_trace_tail_colorizes_known_labels_only_for_display(self) -> None:
+        rendered = colorize_line("user:\n")
+
+        self.assertIn("\033[", rendered)
+        self.assertIn("user:", rendered)
+        self.assertEqual(colorize_line("plain body text\n"), "plain body text\n")
+        self.assertEqual(colorize_line("D:\\Projects\\mira\\.mira\\_logs\\mira.log\n"), "D:\\Projects\\mira\\.mira\\_logs\\mira.log\n")
+
+    def test_trace_tail_colors_entire_current_block(self) -> None:
+        colorizer = TraceColorizer()
+
+        header = colorizer.colorize("user:\n")
+        body = colorizer.colorize("hello from user\n")
+        next_header = colorizer.colorize("mira:\n")
+        next_body = colorizer.colorize("hello from mira\n")
+
+        self.assertIn("\033[", header)
+        self.assertIn("\033[", body)
+        self.assertIn("hello from user", body)
+        self.assertNotEqual(body.split("hello", 1)[0], next_body.split("hello", 1)[0])
+        self.assertIn("mira:", next_header)
+
+    def test_trace_tail_thinking_body_is_bright_not_dimmed(self) -> None:
+        colorizer = TraceColorizer()
+
+        header = colorizer.colorize("thinking:\n")
+        body = colorizer.colorize("visible reasoning\n")
+
+        self.assertIn("\033[38;2;130;144;154mthinking:", header)
+        self.assertIn("\033[38;2;184;194;201m", body)
+        self.assertNotIn("\033[2m", body)
+
+    def test_trace_tail_keeps_body_plain_before_first_header(self) -> None:
+        colorizer = TraceColorizer()
+
+        self.assertEqual(colorizer.colorize("plain body text\n"), "plain body text\n")
+
+    def test_trace_tail_maps_mira_bubble_labels_to_colors(self) -> None:
+        self.assertTrue(color_for_label("user"))
+        self.assertTrue(color_for_label("mira"))
+        self.assertTrue(color_for_label("thinking"))
+        self.assertTrue(color_for_label("warning"))
+        self.assertTrue(color_for_label("error"))
+        self.assertTrue(color_for_label("subagent - worker"))
+        self.assertTrue(color_for_label("read_file"))
+        self.assertEqual(color_for_label("ordinary sentence"), "")
+
+    def test_trace_tail_enable_console_colors_failure_is_non_fatal(self) -> None:
+        real_import = builtins.__import__
+
+        def import_without_ctypes(name, *args, **kwargs):
+            if name == "ctypes":
+                raise ImportError("no ctypes")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("builtins.__import__", side_effect=import_without_ctypes),
+        ):
+            enable_console_colors()
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from itertools import count
 from typing import Any
 
@@ -20,9 +19,9 @@ from ui.interrupts import (
     ask_user_request,
     plan_request,
 )
-from ui.names import generate_slug
+from ui.terminal_transcript import DEFAULT_TOOL_OUTPUT_CHARS, TerminalTranscript
 
-DEFAULT_TOOL_OUTPUT_CHARS = 240
+__all__ = ["DEFAULT_TOOL_OUTPUT_CHARS", "Renderer"]
 
 
 class Renderer:
@@ -30,108 +29,71 @@ class Renderer:
 
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
         self.tool_output_chars = tool_output_chars
-        self._section = ""
-        self._reasoning_text = ""
         self._subagent_ids = count(1)
-        self._subagent_labels: dict[int, str] = {}
-        self._subagent_origins: dict[str, str] = {}
+        self.transcript = TerminalTranscript(
+            lambda text: print(text, end="", flush=True),
+            tool_output_chars=tool_output_chars,
+            slug_fallback=self._subagent_ids,
+        )
 
     def reasoning_delta(self, delta: str) -> None:
         """Buffer streamed reasoning text for a clean terminal block."""
-        text = re.sub(r"</?[^>]+>", "", delta)
-        if text.strip() or self._reasoning_text:
-            self._reasoning_text += text
+        self.transcript.reasoning_delta(delta)
 
     def discard_reasoning(self) -> None:
         """Discard pending reasoning that has not been printed yet."""
-        self._reasoning_text = ""
-        return
+        self.transcript.discard_reasoning()
 
     def text_delta(self, delta: str) -> None:
         """Print streamed assistant text."""
-        if delta:
-            self._flush_reasoning()
-            self._stream("mira", delta)
+        self.transcript.text_delta(delta)
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         """Print a compact tool call."""
-        self._block(name, f"args: {self.truncate(args)}")
+        self.transcript.tool_call(name, args)
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Print a compact tool result."""
-        if result:
-            self._line(f"{name} output: {self.truncate(result)}")
+        self.transcript.tool_result(name, result)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Print a compact task delegation summary."""
-        descriptions = []
-        for call in calls:
-            raw_args = call.get("args", {}) if isinstance(call, dict) else {}
-            if isinstance(raw_args, str):
-                try:
-                    raw_args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    raw_args = {}
-            if isinstance(raw_args, dict) and raw_args.get("description"):
-                descriptions.append(str(raw_args["description"]))
-
-        if descriptions:
-            lines = [f"delegating to {len(descriptions)} subagent(s)"]
-            lines.extend(f"request: {self.truncate(description)}" for description in descriptions)
-            self._block("task", "\n".join(lines))
+        self.transcript.delegation_started(calls)
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Print one system-style block."""
-        self._block(kind, text)
+        self.transcript.system_message(text, kind=kind)
 
     def compaction_started(self) -> None:
         """Print a context compaction status."""
         notice = pop_context_overflow_notice()
         if notice and not is_compaction_notice(notice):
             self.system_message(notice, kind="info")
-        self._block("mira", "compacting context...")
+        self.transcript.compaction_started()
 
     def compaction_finished(self) -> None:
         """Print a context compaction completion status."""
-        self._line("context compacted")
+        self.transcript.compaction_finished()
 
     def subagent_label(self, subagent: Any) -> str:
         """Return a stable readable label for a subagent object."""
-        key = id(subagent)
-        if key not in self._subagent_labels:
-            name = getattr(subagent, "name", "subagent")
-            self._subagent_labels[key] = f"{name} [{self._next_suffix()}]"
-        return self._subagent_labels[key]
+        return self.transcript.subagent_label(subagent)
 
     def subagent_started(self, subagent: str, task_input: str = "", *, origin: str = "") -> None:
         """Print a subagent start."""
-        if origin:
-            self._subagent_origins[subagent] = origin
-        details = []
-        details.append(f"request: {self.truncate(task_input)}" if task_input else "running")
-        self._block(subagent_title(subagent, origin), "\n".join(details))
+        self.transcript.subagent_started(subagent, task_input, origin=origin)
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Print a late-arriving request for an already-started subagent."""
-        if task_input:
-            self._subagent_origins.pop(subagent, None)
-            self._block(subagent_title(subagent), f"request: {self.truncate(task_input)}")
+        self.transcript.subagent_request_updated(subagent, task_input)
 
     def subagent_finished(self, subagent: str, result: str = "") -> None:
         """Print a subagent finish."""
-        origin = self._subagent_origins.pop(subagent, "")
-        details = "done"
-        if result:
-            details += f"\noutput: {self.truncate(result)}"
-        self._block(subagent_title(subagent, origin), details)
+        self.transcript.subagent_finished(subagent, result)
 
     def subagent_cancelled(self, subagent: str, result: str = "") -> None:
         """Print a subagent cancellation."""
-        origin = self._subagent_origins.pop(subagent, "")
-        details = "cancelled"
-        if result:
-            details += f"\noutput: {self.truncate(result)}"
-        self._block(subagent_title(subagent, origin), details)
+        self.transcript.subagent_cancelled(subagent, result)
 
     def subagents_cancelled(self) -> None:
         """No-op for non-live terminal output."""
@@ -139,17 +101,14 @@ class Renderer:
 
     def finish_main(self) -> None:
         """Finish the current streamed section."""
-        self._flush_reasoning()
-        if self._section:
-            print()
-        self._section = ""
+        self.transcript.finish_main()
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted actions."""
         decisions = []
         for interrupt in interrupts:
             for index, action in enumerate(action_requests(interrupt)):
-                self._block("approval", action_text(action))
+                self.transcript.block("approval", action_text(action))
                 answer = await self._choice("Approve this action?", action_choices(interrupt, action, index))
                 if answer == "e":
                     decisions.append(await self._edit_decision(action))
@@ -163,9 +122,9 @@ class Renderer:
         """Ask the user for a concrete next-step choice."""
         request = ask_user_request(interrupt)
         options = ask_user_options(request)
-        self._block("question", ask_user_question(request))
+        self.transcript.block("question", ask_user_question(request))
         for index, option in enumerate(options, start=1):
-            self._line(f"{index}. {option}")
+            self.transcript.line(f"{index}. {option}")
 
         answer = await self._input("Choose an option: ")
         try:
@@ -195,7 +154,7 @@ class Renderer:
             lines.append(heading)
             lines.extend(f"- {item}" for item in items)
             lines.append("")
-        self._block("plan", "\n".join(lines).rstrip())
+        self.transcript.block("plan", "\n".join(lines).rstrip())
         return "Plan presented for user review."
 
     async def ask_create_git_repo(self, message: str) -> bool:
@@ -208,10 +167,7 @@ class Renderer:
 
     def truncate(self, value: Any) -> str:
         """Return a single-line string shortened to the configured display size."""
-        text = re.sub(r"\s+", " ", str(value or "")).strip()
-        if self.tool_output_chars == 0 or len(text) <= self.tool_output_chars:
-            return text
-        return text[: self.tool_output_chars] + " ... truncated ..."
+        return self.transcript.truncate(value)
 
     async def _edit_decision(self, action: Any) -> dict[str, Any]:
         """Ask for edited JSON args."""
@@ -223,11 +179,11 @@ class Renderer:
         try:
             args = json.loads(edited or original)
         except json.JSONDecodeError:
-            self._line("invalid JSON; rejecting action")
+            self.transcript.line("invalid JSON; rejecting action")
             return {"type": "reject"}
 
         if not isinstance(args, dict):
-            self._line("edited args must be a JSON object; rejecting action")
+            self.transcript.line("edited args must be a JSON object; rejecting action")
             return {"type": "reject"}
 
         return {
@@ -251,48 +207,7 @@ class Renderer:
         """Read input without blocking the event loop."""
         return await asyncio.to_thread(input, prompt)
 
-    def _stream(self, title: str, text: str) -> None:
-        """Print streamed text under a simple section heading."""
-        if self._section != title:
-            if self._section:
-                print()
-            print(f"\n{title}:")
-            self._section = title
-        print(text, end="", flush=True)
-
-    def _block(self, title: str, body: str) -> None:
-        """Print a titled block."""
-        self.finish_main()
-        print(f"\n{title}:")
-        print(body)
-
-    def _flush_reasoning(self) -> None:
-        """Print buffered reasoning once, preserving internal line breaks."""
-        if not self._reasoning_text.strip():
-            self._reasoning_text = ""
-            return
-        if self._section:
-            print()
-            self._section = ""
-        print("\nthinking:")
-        print(self._reasoning_text, end="" if self._reasoning_text.endswith("\n") else "\n")
-        self._reasoning_text = ""
-
-    def _line(self, text: str) -> None:
-        """Print one status line."""
-        self.finish_main()
-        print(text)
-
-    def _next_suffix(self) -> str:
-        """Return a readable subagent suffix."""
-        return generate_slug(fallback=self._subagent_ids)
-
 
 def is_compaction_notice(text: str) -> bool:
     """Return whether an info notice is really leaked compaction reasoning."""
     return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
-
-
-def subagent_title(subagent: str, origin: str = "") -> str:
-    """Return the terminal title for a subagent block."""
-    return f"subagent - {subagent}"

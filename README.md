@@ -245,9 +245,14 @@ only a convenience copy of the most recent report. TUI error messages include
 the timestamped report path, and one-shot mode preserves the normal terminal
 traceback after writing the report.
 
-For live diagnostics during TUI runs, start MIRA with `-t` or `--trace`. Trace
-mode opens a separate Windows command window that tails a bounded rotating log
-at `.mira/_logs/mira.log`. The trace window is optional diagnostics; error
+For a live plain-text mirror during TUI runs, start MIRA with `-t` or
+`--trace`. Trace mode opens a separate Windows command window that tails a
+bounded rotating log at `.mira/_logs/mira.log`. It uses the same plain terminal
+spacing as `mira -p`, with sidecar-only color, and shows startup progress, user
+prompts, assistant text, tool calls and results, subagent lifecycle, system
+messages, tracebacks, and error report paths. The trace log is overwritten for
+each trace session and is not durable ordered history; session JSON remains the
+authoritative transcript. The trace window is optional diagnostics, and error
 reports are written whether or not trace mode is enabled.
 
 ## Development
