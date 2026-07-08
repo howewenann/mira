@@ -50,24 +50,11 @@ def open_trace_window(log_path: Path) -> bool:
     """Open a separate cmd.exe window that tails the diagnostics log."""
     if sys.platform != "win32":
         return False
-    script = (
-        "import pathlib,time,sys;"
-        "p=pathlib.Path(sys.argv[1]);"
-        "print('MIRA Trace');print(str(p));"
-        "p.parent.mkdir(parents=True,exist_ok=True);p.touch(exist_ok=True);"
-        "f=p.open('r',encoding='utf-8',errors='replace');"
-        "f.seek(0,2);"
-        "\nwhile True:\n"
-        "    line=f.readline()\n"
-        "    if line:\n"
-        "        print(line,end='',flush=True)\n"
-        "    else:\n"
-        "        time.sleep(0.25)\n"
-    )
     try:
         subprocess.Popen(  # noqa: S603 - intentional local cmd.exe trace window.
-            ["cmd.exe", "/c", "start", "MIRA Trace", sys.executable, "-u", "-c", script, str(log_path)],
+            ["cmd.exe", "/k", sys.executable, "-u", "-m", "runtime.trace_tail", str(log_path)],
             close_fds=True,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
         )
     except OSError:
         return False

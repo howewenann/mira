@@ -8,11 +8,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from io import StringIO
+from contextlib import redirect_stdout
 
 from logging.handlers import RotatingFileHandler
 
 from runtime.diagnostics import get_diagnostics_logger, open_trace_window, setup_diagnostics_logging
 from runtime.error_report import error_report_path, write_error_report
+from runtime.trace_tail import main as trace_tail_main
 
 
 class ErrorReportTests(unittest.TestCase):
@@ -108,6 +111,26 @@ class DiagnosticsTests(unittest.TestCase):
             patch("runtime.diagnostics.subprocess.Popen", side_effect=OSError("no window")),
         ):
             self.assertFalse(open_trace_window(Path("mira.log")))
+
+    def test_open_trace_window_launches_trace_tail_module(self) -> None:
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch("runtime.diagnostics.subprocess.Popen") as popen,
+        ):
+            self.assertTrue(open_trace_window(Path("mira.log")))
+
+        command = popen.call_args.args[0]
+        self.assertIn("-m", command)
+        self.assertIn("runtime.trace_tail", command)
+        self.assertEqual(command[-1], "mira.log")
+
+    def test_trace_tail_reports_missing_log_path(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output):
+            code = trace_tail_main([])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage:", output.getvalue())
 
 
 if __name__ == "__main__":
