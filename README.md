@@ -42,10 +42,12 @@ mira --resume
 mira --session <session-id>
 mira --workspace <path>
 mira --direct
+mira --trace
 ```
 
 `--direct` is for trusted local setups that need direct LLM HTTP calls with
 proxy environment variables ignored and TLS verification disabled.
+`--trace` opens a separate diagnostics window for TUI runs.
 
 ## Configuration
 
@@ -221,6 +223,32 @@ status line's `Ctx` value is the latest DeepAgents summarization count MIRA has
 observed. `In` and `Out` are cumulative provider usage totals across every
 model call in the session, including repeated conversation history, so `In +
 Out` is not expected to equal current context after multiple turns.
+
+## Error Reports And Trace
+
+When an unexpected error reaches MIRA's handled one-shot, TUI, or top-level
+boundaries, MIRA writes a copy-pasteable report under `.mira/_errors/` before
+showing or re-raising the error. Successful runs do not create error reports.
+
+```text
+.mira/
+  _sessions/
+    <session-id>.json
+  _errors/
+    latest_error.txt
+    <session-id>/
+      <YYYYMMDD-HHMMSS+ZZZZ-ffffff>.txt
+```
+
+The timestamped report is the specific failure artifact. `latest_error.txt` is
+only a convenience copy of the most recent report. TUI error messages include
+the timestamped report path, and one-shot mode preserves the normal terminal
+traceback after writing the report.
+
+For live diagnostics during TUI runs, start MIRA with `-t` or `--trace`. Trace
+mode opens a separate Windows command window that tails a bounded rotating log
+at `.mira/_logs/mira.log`. The trace window is optional diagnostics; error
+reports are written whether or not trace mode is enabled.
 
 ## Development
 

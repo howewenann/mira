@@ -35,6 +35,12 @@ def main(
         "-d",
         help="Connect to the LLM directly, ignoring proxy env vars and disabling TLS verification.",
     ),
+    trace: bool = typer.Option(
+        False,
+        "--trace",
+        "-t",
+        help="Open a trace window that shows live MIRA diagnostics.",
+    ),
 ) -> None:
     """Start MIRA unless Typer is dispatching to a subcommand."""
     if ctx.invoked_subcommand is None:
@@ -45,6 +51,7 @@ def main(
             workspace=workspace,
             session=session,
             direct=direct,
+            trace=trace,
         )
 
 

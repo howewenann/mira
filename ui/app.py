@@ -27,6 +27,8 @@ from config.settings import (
     tool_enabled,
 )
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
+from runtime.diagnostics import get_diagnostics_logger
+from runtime.error_report import write_error_report
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event
 from session.recorder import update_plan_event_status
@@ -163,7 +165,8 @@ class MiraApp(App[None]):
             )
             self._install_state(state)
         except Exception as exc:
-            self.system_message(f"startup error: {exc}", kind="error")
+            error_path = self._write_error_report(exc, source="tui.startup")
+            self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
 
     def _install_state(self, state: dict[str, Any]) -> None:
@@ -202,6 +205,31 @@ class MiraApp(App[None]):
         self._refresh_sessions()
         self._set_status(state="ready")
         self.action_focus_prompt()
+
+    def _write_error_report(
+        self,
+        exc: BaseException,
+        *,
+        source: str,
+        context: dict[str, Any] | None = None,
+    ) -> Path:
+        """Write a report for an exception handled by the TUI."""
+        report_context = {
+            "workspace": str(self.workspace),
+            "mode": self._mode_label(),
+            "model": self.model_name,
+        }
+        if context:
+            report_context.update(context)
+        error_path = write_error_report(
+            exc,
+            workspace=self.workspace,
+            source=source,
+            session_id=str(self.session.get("id") or "") or None,
+            context=report_context,
+        )
+        get_diagnostics_logger().exception("%s failed; error report: %s", source, error_path)
+        return error_path
 
     @on(PromptBox.Submitted)
     async def submit_prompt(self, event: PromptBox.Submitted) -> None:
@@ -276,7 +304,8 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
         except Exception as exc:
             self.finish_turn(cancelled=True)
-            self.system_message(f"error: {exc}", kind="error")
+            error_path = self._write_error_report(exc, source="tui.turn")
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
@@ -436,7 +465,12 @@ class MiraApp(App[None]):
             raise
         except Exception as exc:
             self.finish_turn(cancelled=True)
-            self.system_message(f"error: {exc}", kind="error")
+            error_path = self._write_error_report(
+                exc,
+                source="tui.plan_turn",
+                context={"plan": plan_title(plan)},
+            )
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
@@ -473,7 +507,12 @@ class MiraApp(App[None]):
             raise
         except Exception as exc:
             self.finish_turn(cancelled=True)
-            self.system_message(f"error: {exc}", kind="error")
+            error_path = self._write_error_report(
+                exc,
+                source="tui.plan_revision",
+                context={"plan": plan_title(plan)},
+            )
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
             self.turn_worker = None
@@ -1234,7 +1273,12 @@ class MiraApp(App[None]):
             )
             self._install_state(state)
         except Exception as exc:
-            self.system_message(f"session load error: {exc}", kind="error")
+            error_path = self._write_error_report(
+                exc,
+                source="tui.session_load",
+                context={"requested_session_id": session_id},
+            )
+            self.system_message(f"session load error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
             self.busy = False

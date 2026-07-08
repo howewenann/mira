@@ -60,6 +60,26 @@ repository; it does not stage files or create an initial commit.
 **Update this when:** Startup order changes, a new runtime mode is added, or Git
 protection is moved later in the flow.
 
+## Error Reports And Trace Diagnostics
+
+**Decision:** MIRA treats the TUI as a friendly display layer, automatic error
+reports as durable failure artifacts, and the trace window as optional live
+diagnostics.
+
+**Why:** Some TUI exceptions are intentionally caught and rendered as concise
+messages, so uncaught-exception hooks are not enough. Reports are written at
+the boundaries that already catch one-shot and TUI turn failures, with a small
+top-level backup for unexpected escaping exceptions. Reports use the current
+session id whenever one exists and are only created when an exception happens.
+The trace window is a viewer over a bounded diagnostics log, so MIRA keeps
+running if that window cannot open or is closed.
+
+**Where to check:** `runtime/error_report.py`, `runtime/diagnostics.py`,
+`cli/commands.py`, `ui/app.py`.
+
+**Update this when:** Error artifact layout, reporting boundaries, diagnostic
+log behavior, or trace-window behavior changes.
+
 ## Configuration And Settings
 
 **Decision:** Provider configuration comes from environment variables and

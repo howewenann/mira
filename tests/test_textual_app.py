@@ -326,6 +326,122 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 status = renderable_plain(app.query_one("#status", Static))
                 self.assertIn("In 45.3k Out 13.0k", status)
 
+    async def test_turn_failure_shows_error_report_path(self) -> None:
+        """Suppressed TUI turn errors should show the generated report path."""
+        app = make_app()
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            raise RuntimeError("turn boom")
+
+        with (
+            patch("ui.app.run_user_turn", fake_run_user_turn),
+            patch("ui.app.write_error_report", return_value=Path("turn-report.txt")) as report,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app.submit_prompt(PromptBox.Submitted(app.query_one(PromptBox), "hello"))
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("error: turn boom", rendered)
+                self.assertIn("error report: turn-report.txt", rendered)
+                report.assert_called_once()
+                self.assertEqual(report.call_args.kwargs["source"], "tui.turn")
+                self.assertEqual(report.call_args.kwargs["session_id"], "thread-1")
+
+    async def test_plan_turn_failure_shows_error_report_path(self) -> None:
+        """Approved-plan turn errors should show the generated report path."""
+        app = make_app()
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            raise RuntimeError("plan boom")
+
+        with (
+            patch("ui.app.run_user_turn", fake_run_user_turn),
+            patch("ui.app.write_error_report", return_value=Path("plan-report.txt")) as report,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app._run_turn_for_plan({"title": "Build It"})
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("error: plan boom", rendered)
+                self.assertIn("error report: plan-report.txt", rendered)
+                self.assertEqual(report.call_args.kwargs["source"], "tui.plan_turn")
+
+    async def test_plan_revision_failure_shows_error_report_path(self) -> None:
+        """Plan-revision errors should show the generated report path."""
+        app = make_app()
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            raise RuntimeError("revision boom")
+
+        with (
+            patch("ui.app.run_user_turn", fake_run_user_turn),
+            patch("ui.app.write_error_report", return_value=Path("revision-report.txt")) as report,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app._run_turn_for_plan_revision({"title": "Revise It"}, "more tests")
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("error: revision boom", rendered)
+                self.assertIn("error report: revision-report.txt", rendered)
+                self.assertEqual(report.call_args.kwargs["source"], "tui.plan_revision")
+
+    async def test_startup_failure_shows_error_report_path(self) -> None:
+        """Startup errors should get a report even before a real session exists."""
+        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("startup boom")
+
+        async def ensure_git_repository(*args: Any, **kwargs: Any) -> bool:
+            return True
+
+        app = MiraApp(
+            workspace=Path("."),
+            config={},
+            bootstrap=bootstrap,
+            ensure_git_repository=ensure_git_repository,
+        )
+
+        with patch("ui.app.write_error_report", return_value=Path("startup-report.txt")) as report:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await wait_until(lambda: app.status_state == "error")
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("startup error: startup boom", rendered)
+                self.assertIn("error report: startup-report.txt", rendered)
+                self.assertEqual(report.call_args.kwargs["source"], "tui.startup")
+                self.assertIsNone(report.call_args.kwargs["session_id"])
+
+    async def test_session_load_failure_shows_error_report_path(self) -> None:
+        """Session-switch failures should show the generated report path."""
+        app = make_app()
+
+        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("load boom")
+
+        app.bootstrap = bootstrap
+
+        with patch("ui.app.write_error_report", return_value=Path("load-report.txt")) as report:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                await app._load_session("thread-2")
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("session load error: load boom", rendered)
+                self.assertIn("error report: load-report.txt", rendered)
+                self.assertEqual(report.call_args.kwargs["source"], "tui.session_load")
+                self.assertEqual(report.call_args.kwargs["session_id"], "thread-1")
+
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
         """The transient working block should appear only during phase silence."""
         app = make_app()

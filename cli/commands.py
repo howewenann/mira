@@ -16,6 +16,7 @@ def run(
     session: str | None,
     direct: bool = False,
     prompt_file: Path | None = None,
+    trace: bool = False,
 ) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
     from config.llm import ConfigError
@@ -30,6 +31,7 @@ def run(
                 workspace=workspace,
                 session=session,
                 direct=direct,
+                trace=trace,
             )
         )
     except ConfigError as error:
@@ -37,6 +39,11 @@ def run(
 
         typer.echo(f"Configuration error: {error}", err=True)
         raise typer.Exit(code=2) from error
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        _write_backup_error_report(exc, workspace=workspace, session=session, prompt=prompt)
+        raise
 
 
 def _suppress_known_warnings() -> None:
@@ -53,6 +60,7 @@ async def _run(
     session: str | None,
     direct: bool = False,
     prompt_file: Path | None = None,
+    trace: bool = False,
 ) -> None:
     """Create the app objects, then run either one-shot or TUI mode."""
     import typer
@@ -66,6 +74,12 @@ async def _run(
     config["llm_direct"] = bool(direct)
 
     if prompt is None:
+        if trace:
+            from runtime.diagnostics import get_diagnostics_logger, open_trace_window, setup_diagnostics_logging
+
+            log_path = setup_diagnostics_logging(workspace)
+            if not open_trace_window(log_path):
+                get_diagnostics_logger().warning("trace window could not be opened")
         from ui.app import MiraApp
 
         tui = MiraApp(
@@ -129,6 +143,8 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     """Run one prompt and persist the visible transcript."""
     from runtime.runner import run_turn
     from runtime.context_usage import context_usage_scope
+    from runtime.error_report import write_error_report
+    from runtime.diagnostics import get_diagnostics_logger
     from session.dashboard import apply_context_usage, apply_turn_usage
     from session.context import sync_deepagents_compaction, update_title, with_resume_context
     from session.recorder import RecordingRenderer, SessionRecorder
@@ -178,7 +194,20 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         app["store"].save(app["session"])
         return
     except Exception as exc:
-        recorder.system_error(f"turn error: {exc}")
+        report_workspace = Path(app.get("workspace") or app["session"].get("workspace") or ".")
+        error_path = write_error_report(
+            exc,
+            workspace=report_workspace,
+            source="one_shot.turn",
+            session_id=str(app["session"].get("id") or ""),
+            context={
+                "mode": "action",
+                "model": app.get("model_name", ""),
+                "workspace": str(report_workspace),
+            },
+        )
+        get_diagnostics_logger().exception("one-shot turn failed; error report: %s", error_path)
+        recorder.system_error(f"turn error: {exc}; error report: {error_path}")
         raise
     recorder.ensure_assistant(getattr(result, "final_text", ""))
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
@@ -262,3 +291,36 @@ def startup_progress(renderer: Any, state: str) -> None:
     callback = getattr(renderer, "startup_progress", None)
     if callable(callback):
         callback(state)
+
+
+def _write_backup_error_report(
+    exc: Exception,
+    *,
+    workspace: Path,
+    session: str | None,
+    prompt: str | None,
+) -> None:
+    """Best-effort top-level error report for unexpected escaping failures."""
+    import typer
+
+    if isinstance(exc, typer.Exit):
+        return
+
+    from runtime.diagnostics import get_diagnostics_logger
+    from runtime.error_report import error_report_path, write_error_report
+
+    if error_report_path(exc) is not None:
+        return
+    with suppress(Exception):
+        resolved_workspace = workspace.expanduser().resolve()
+        error_path = write_error_report(
+            exc,
+            workspace=resolved_workspace,
+            source="cli.run",
+            session_id=session,
+            context={
+                "workspace": str(resolved_workspace),
+                "prompt_mode": "one_shot" if prompt is not None else "tui",
+            },
+        )
+        get_diagnostics_logger().exception("top-level failure; error report: %s", error_path)

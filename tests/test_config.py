@@ -227,6 +227,8 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("-d", result.output)
         self.assertIn("--direct", result.output)
+        self.assertIn("-t", result.output)
+        self.assertIn("--trace", result.output)
         self.assertIn("-f", result.output)
         self.assertIn("--file", result.output)
         self.assertIn("-h", result.output)
@@ -245,6 +247,16 @@ class CLIConfigTests(unittest.TestCase):
                 run.assert_called_once()
                 self.assertEqual(run.call_args.kwargs["prompt"], None)
                 self.assertEqual(run.call_args.kwargs["prompt_file"], Path("prompt.markdown"))
+
+    def test_cli_trace_option_passes_to_run(self) -> None:
+        """The public trace option should map to the internal trace argument."""
+        for option in ("--trace", "-t"):
+            with self.subTest(option=option), patch("cli.main.run") as run:
+                result = CliRunner().invoke(cli_app, [option])
+
+                self.assertEqual(result.exit_code, 0)
+                run.assert_called_once()
+                self.assertTrue(run.call_args.kwargs["trace"])
 
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
@@ -477,13 +489,51 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("runtime.runner.run_turn", run_turn),
+            patch("runtime.error_report.write_error_report", return_value=Path("report.txt")) as report,
         ):
             with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
                 await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
         self.assertEqual([event["type"] for event in session_record["events"]], ["user", "system_error"])
         self.assertIn("unexecuted tool call", session_record["events"][-1]["text"])
+        self.assertIn("error report: report.txt", session_record["events"][-1]["text"])
+        report.assert_called_once()
         self.assertTrue(saved)
+
+    def test_run_writes_backup_report_for_unexpected_top_level_failures(self) -> None:
+        """Unexpected errors escaping the async runner should get a backup report."""
+        async def fail(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("startup boom")
+
+        with (
+            patch("cli.commands._suppress_known_warnings"),
+            patch("cli.commands._run", fail),
+            patch("runtime.error_report.write_error_report", return_value=Path("backup.txt")) as report,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "startup boom"):
+                commands.run(prompt=None, resume=False, workspace=Path("."), session="requested")
+
+        report.assert_called_once()
+        self.assertEqual(report.call_args.kwargs["source"], "cli.run")
+        self.assertEqual(report.call_args.kwargs["session_id"], "requested")
+
+    def test_run_does_not_duplicate_already_reported_errors(self) -> None:
+        """The backup boundary should skip exceptions reported by lower layers."""
+        error = RuntimeError("already reported")
+        setattr(error, "__mira_error_report_path__", "existing.txt")
+
+        async def fail(*args: object, **kwargs: object) -> None:
+            raise error
+
+        with (
+            patch("cli.commands._suppress_known_warnings"),
+            patch("cli.commands._run", fail),
+            patch("runtime.error_report.write_error_report") as report,
+        ):
+            with self.assertRaises(RuntimeError):
+                commands.run(prompt="hello", resume=False, workspace=Path("."), session=None)
+
+        report.assert_not_called()
 
     async def test_run_exits_when_git_guard_blocks_startup(self) -> None:
         """Choosing exit after a Git failure should stop before bootstrap."""
