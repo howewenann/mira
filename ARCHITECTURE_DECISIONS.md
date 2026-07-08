@@ -269,6 +269,10 @@ current session.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents, uses compact `[-]`, `[+]`, and `x` controls, collapses to a summary
 before the next prompt after completion, and is reset by new subagent activity.
+While the panel owns live subagent progress, the chat log suppresses separate
+task delegation and subagent bubbles so the running turn has one live progress
+surface. The status line may briefly report delegation setup, but the task rows
+belong in the panel.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
 
@@ -295,8 +299,10 @@ counter, compute provider prompt tokens, or decide when to compact. Provider
 occupancy.
 Regular subagent completions remain durable `subagent` transcript events so
 past sessions can replay them and resume context can refer to their outputs.
-The live panel's open/collapsed/closed state is intentionally not persisted or
-replayed. Eval-created subagent rows are not stored separately; their durable
+The live panel's open/collapsed/closed state and row layout are intentionally
+not persisted or replayed. Reopening a session projects those durable subagent
+events back into chat transcript blocks rather than reconstructing the old live
+panel. Eval-created subagent rows are not stored separately; their durable
 history is the surrounding eval tool call/result plus the assistant's summary.
 
 **Where to check:** `agent/compaction.py`, `session/store.py`,
