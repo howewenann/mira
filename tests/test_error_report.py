@@ -20,7 +20,8 @@ from runtime.diagnostics import (
     setup_diagnostics_logging,
 )
 from runtime.error_report import error_report_path, write_error_report
-from runtime.trace_tail import TraceColorizer, color_for_label, colorize_line, enable_console_colors, main as trace_tail_main
+from runtime.trace_tail import main as trace_tail_main
+from ui.terminal_colors import TerminalColorizer, color_for_label, colorize_line, enable_console_colors, strip_ansi
 
 
 class ErrorReportTests(unittest.TestCase):
@@ -188,7 +189,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(colorize_line("D:\\Projects\\mira\\.mira\\_logs\\mira.log\n"), "D:\\Projects\\mira\\.mira\\_logs\\mira.log\n")
 
     def test_trace_tail_colors_entire_current_block(self) -> None:
-        colorizer = TraceColorizer()
+        colorizer = TerminalColorizer()
 
         header = colorizer.colorize("user:\n")
         body = colorizer.colorize("hello from user\n")
@@ -201,8 +202,17 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotEqual(body.split("hello", 1)[0], next_body.split("hello", 1)[0])
         self.assertIn("mira:", next_header)
 
+    def test_terminal_colorizer_strips_back_to_plain_transcript(self) -> None:
+        colorizer = TerminalColorizer()
+        plain = "mira:\nhello\nthinking:\nvisible reasoning\n"
+
+        rendered = colorizer.colorize(plain)
+
+        self.assertIn("\033[", rendered)
+        self.assertEqual(strip_ansi(rendered), plain)
+
     def test_trace_tail_thinking_body_is_bright_not_dimmed(self) -> None:
-        colorizer = TraceColorizer()
+        colorizer = TerminalColorizer()
 
         header = colorizer.colorize("thinking:\n")
         body = colorizer.colorize("visible reasoning\n")
@@ -212,7 +222,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertNotIn("\033[2m", body)
 
     def test_trace_tail_keeps_body_plain_before_first_header(self) -> None:
-        colorizer = TraceColorizer()
+        colorizer = TerminalColorizer()
 
         self.assertEqual(colorizer.colorize("plain body text\n"), "plain body text\n")
 

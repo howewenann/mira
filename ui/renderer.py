@@ -9,6 +9,7 @@ from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
+from ui.terminal_colors import TerminalColorizer, enable_console_colors
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -30,8 +31,10 @@ class Renderer:
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
         self.tool_output_chars = tool_output_chars
         self._subagent_ids = count(1)
+        enable_console_colors()
+        self._colorizer = TerminalColorizer()
         self.transcript = TerminalTranscript(
-            lambda text: print(text, end="", flush=True),
+            self._write,
             tool_output_chars=tool_output_chars,
             slug_fallback=self._subagent_ids,
         )
@@ -206,6 +209,10 @@ class Renderer:
     async def _input(self, prompt: str) -> str:
         """Read input without blocking the event loop."""
         return await asyncio.to_thread(input, prompt)
+
+    def _write(self, text: str) -> None:
+        """Write colored transcript text to stdout."""
+        print(self._colorizer.colorize(text), end="", flush=True)
 
 
 def is_compaction_notice(text: str) -> bool:

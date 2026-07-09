@@ -27,6 +27,7 @@ from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, 
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
+from ui.terminal_colors import strip_ansi
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar
 from ui.widgets.session_history import session_label
 
@@ -753,7 +754,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             renderer.reasoning_delta("2. Tell joke")
             renderer.finish_main()
 
-        self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
+        rendered = output.getvalue()
+        self.assertIn("\033[", rendered)
+        self.assertEqual(strip_ansi(rendered), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
 
     async def test_terminal_renderer_filters_respond_decision(self) -> None:
         """One-shot approval prompts should not accept Respond from stale interrupts."""

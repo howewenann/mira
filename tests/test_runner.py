@@ -28,6 +28,7 @@ from runtime.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
 from ui.renderer import Renderer
+from ui.terminal_colors import strip_ansi
 
 
 class AsyncItems:
@@ -2617,7 +2618,9 @@ Await further instructions.
             await consume_messages(messages, renderer)
             renderer.finish_main()
 
-        self.assertEqual(output.getvalue(), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
+        rendered = output.getvalue()
+        self.assertIn("\033[", rendered)
+        self.assertEqual(strip_ansi(rendered), "\nthinking:\nThe user wants:\n1. Check envs\n2. Tell joke\n")
 
     def test_terminal_renderer_keeps_dynamic_subagent_origin_quiet(self) -> None:
         renderer = Renderer()
@@ -2626,7 +2629,7 @@ Await further instructions.
         with redirect_stdout(output):
             renderer.subagent_started("general-purpose [one]", "", origin="dynamic_tool_subagent")
 
-        text = output.getvalue()
+        text = strip_ansi(output.getvalue())
         self.assertIn("subagent - general-purpose [one]:", text)
         self.assertNotIn("from eval/tool", text)
         self.assertNotIn("eval/tool-created subagent", text)

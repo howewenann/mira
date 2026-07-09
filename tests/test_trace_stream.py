@@ -40,6 +40,7 @@ class TraceStreamTests(unittest.TestCase):
         trace.flush_all()
 
         self.assertEqual(handler.messages, ["\nmira:\nhello"])
+        self.assertNotIn("\033[", handler.messages[0])
 
     def test_reasoning_deltas_flush_once_as_one_block(self) -> None:
         trace, handler = self.make_stream()
