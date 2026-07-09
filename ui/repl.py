@@ -74,6 +74,7 @@ COMMAND_HELP = {
     "/clear": "clear the log",
     "/clear-chat": "clear the current saved chat transcript in the TUI",
     "/clear-all-chats": "delete all saved chat sessions in the TUI",
+    "/clear-errors": "delete saved error reports in the TUI",
     "/clear-prompts": "clear prompt input history in the TUI",
     "/exit": "quit MIRA",
 }
@@ -310,7 +311,7 @@ async def handle_command(
         clear(renderer)
         return True
 
-    if text in {"/clear-chat", "/clear-all-chats", "/clear-prompts"}:
+    if text in {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}:
         write_line(renderer, f"{text} is available in the Textual app with confirmation", kind="warning")
         return True
 

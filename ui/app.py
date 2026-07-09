@@ -29,7 +29,7 @@ from config.settings import (
 )
 from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from runtime.diagnostics import get_diagnostics_logger
-from runtime.error_report import write_error_report
+from runtime.error_report import clear_error_reports, write_error_report
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event
@@ -52,7 +52,7 @@ from ui.widgets.session_history import SessionItem
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
-DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-prompts"}
+DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
 DESTRUCTIVE_CONFIRM_HINT = "Press O to confirm, C or Esc to cancel."
 DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
 
@@ -744,6 +744,22 @@ class MiraApp(App[None]):
                 f"{compactions} compaction file{compaction_suffix}",
                 kind="info",
             )
+            return True
+
+        if text == "/clear-errors":
+            answer = await self._prompt_choice(
+                "Clear Error Reports?",
+                "Delete saved error reports under .mira/_errors for this workspace? "
+                "Saved chats and prompt history will be kept.\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear error reports cancelled", kind="muted")
+                return True
+            reports = clear_error_reports(self.workspace)
+            suffix = "" if reports == 1 else "s"
+            self.system_message(f"cleared {reports} error report file{suffix}", kind="info")
             return True
 
         if text == "/clear-prompts":

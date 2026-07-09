@@ -58,6 +58,25 @@ def error_report_path(exc: BaseException) -> Path | None:
     return Path(str(existing)) if existing else None
 
 
+def clear_error_reports(workspace: Path) -> int:
+    """Delete saved error report files for a workspace."""
+    root = workspace.expanduser().resolve() / ".mira" / "_errors"
+    if not root.exists() or not root.is_dir():
+        return 0
+
+    count = 0
+    for path in sorted(root.rglob("*"), reverse=True):
+        if path.is_file():
+            path.unlink()
+            count += 1
+        elif path.is_dir():
+            with suppress(OSError):
+                path.rmdir()
+    with suppress(OSError):
+        root.rmdir()
+    return count
+
+
 def _format_report(
     exc: BaseException,
     *,

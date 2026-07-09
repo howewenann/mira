@@ -1926,6 +1926,77 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.clear_all_calls, 0)
             self.assertEqual(store.clear_compactions_calls, 0)
 
+    async def test_clear_errors_command_confirm_deletes_error_reports(self) -> None:
+        """The error-report clear should delete only .mira/_errors files."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            errors = workspace / ".mira" / "_errors"
+            session_errors = errors / "thread-1"
+            session_errors.mkdir(parents=True)
+            (session_errors / "report.txt").write_text("boom", encoding="utf-8")
+            (errors / "latest_error.txt").write_text("latest", encoding="utf-8")
+            settings = workspace / ".mira" / "settings.yml"
+            settings.write_text("keep: true\n", encoding="utf-8")
+            app = make_app(workspace=workspace)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with patch.object(app, "_prompt_choice", return_value="o"):
+                    handled = await app._handle_history_command("/clear-errors")
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertTrue(handled)
+                self.assertFalse(errors.exists())
+                self.assertEqual(settings.read_text(encoding="utf-8"), "keep: true\n")
+                self.assertIn("cleared 2 error report files", rendered)
+
+    async def test_clear_errors_command_cancel_keeps_error_reports(self) -> None:
+        """Cancelling the error-report clear should leave reports untouched."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            report = workspace / ".mira" / "_errors" / "thread-1" / "report.txt"
+            report.parent.mkdir(parents=True)
+            report.write_text("boom", encoding="utf-8")
+            app = make_app(workspace=workspace)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with patch.object(app, "_prompt_choice", return_value="c"):
+                    handled = await app._handle_history_command("/clear-errors")
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertTrue(handled)
+                self.assertTrue(report.exists())
+                self.assertIn("clear error reports cancelled", rendered)
+
+    async def test_clear_chat_commands_keep_error_reports(self) -> None:
+        """Chat-history clears should not delete diagnostic error reports."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            report = workspace / ".mira" / "_errors" / "thread-1" / "report.txt"
+            report.parent.mkdir(parents=True)
+            report.write_text("boom", encoding="utf-8")
+            session = {
+                "id": "thread-1",
+                "workspace": str(workspace),
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "turns": 1,
+                "events": [{"type": "user", "text": "clear me"}],
+            }
+            app = make_app(workspace=workspace, session=session, store=FakeStore())
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with patch.object(app, "_prompt_choice", return_value="o"):
+                    await app._handle_history_command("/clear-chat")
+                self.assertTrue(report.exists())
+
+                with patch.object(app, "_prompt_choice", return_value="o"):
+                    await app._handle_history_command("/clear-all-chats")
+                self.assertTrue(report.exists())
+
     async def test_clear_prompts_confirmation_accepts_escape_cancel(self) -> None:
         """The prompt-history clear should visibly support Esc to cancel."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

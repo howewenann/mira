@@ -19,7 +19,7 @@ from runtime.diagnostics import (
     open_trace_window,
     setup_diagnostics_logging,
 )
-from runtime.error_report import error_report_path, write_error_report
+from runtime.error_report import clear_error_reports, error_report_path, write_error_report
 from runtime.trace_tail import main as trace_tail_main
 from ui.terminal_colors import TerminalColorizer, color_for_label, colorize_line, enable_console_colors, strip_ansi
 
@@ -81,6 +81,32 @@ class ErrorReportTests(unittest.TestCase):
             self.assertEqual(error_report_path(exc), first)
             reports = list((workspace / ".mira" / "_errors" / "thread").glob("*.txt"))
             self.assertEqual(len(reports), 1)
+
+    def test_clear_error_reports_missing_directory_returns_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(clear_error_reports(Path(directory)), 0)
+
+    def test_clear_error_reports_deletes_reports_and_keeps_other_mira_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            try:
+                raise RuntimeError("first")
+            except RuntimeError as exc:
+                first = write_error_report(exc, workspace=workspace, source="test", session_id="thread-one")
+            try:
+                raise RuntimeError("second")
+            except RuntimeError as exc:
+                second = write_error_report(exc, workspace=workspace, source="test", session_id="thread-two")
+            settings = workspace / ".mira" / "settings.yml"
+            settings.write_text("keep: true\n", encoding="utf-8")
+
+            removed = clear_error_reports(workspace)
+
+            self.assertEqual(removed, 3)
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+            self.assertFalse((workspace / ".mira" / "_errors" / "latest_error.txt").exists())
+            self.assertEqual(settings.read_text(encoding="utf-8"), "keep: true\n")
 
 
 class DiagnosticsTests(unittest.TestCase):

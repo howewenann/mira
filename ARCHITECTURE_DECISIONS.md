@@ -71,6 +71,9 @@ messages, so uncaught-exception hooks are not enough. Reports are written at
 the boundaries that already catch one-shot and TUI turn failures, with a small
 top-level backup for unexpected escaping exceptions. Reports use the current
 session id whenever one exists and are only created when an exception happens.
+They are durable diagnostics, not chat history, so `/clear-chat` and
+`/clear-all-chats` leave them in place; `/clear-errors` is the explicit TUI
+command for deleting `.mira/_errors/`.
 The trace sidecar mirrors visible TUI activity such as startup progress, user
 prompts, coalesced assistant text, tool calls, tool results, subagent
 lifecycle, and system messages through a bounded current-session diagnostics

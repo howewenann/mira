@@ -670,12 +670,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_destructive_clear_commands_are_textual_only_in_repl_handler(self) -> None:
         """Durable clear commands should not run without Textual confirmation support."""
-        renderer = RecordingRenderer()
+        for command in ("/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"):
+            renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/clear-chat", renderer, {}, "model", {"planning": False})
+            handled = await repl.handle_command(command, renderer, {}, "model", {"planning": False})
 
-        self.assertTrue(handled)
-        self.assertIn("/clear-chat is available in the Textual app with confirmation", renderer.console.lines)
+            self.assertTrue(handled)
+            self.assertIn(f"{command} is available in the Textual app with confirmation", renderer.console.lines)
 
     async def test_run_user_turn_routes_to_plan_agent_while_planning(self) -> None:
         """User text in planning mode should go to the planning agent."""

@@ -49,6 +49,9 @@ mira --trace
 proxy environment variables ignored and TLS verification disabled.
 `--trace` opens a separate diagnostics window for TUI runs.
 
+In the TUI, `/clear-errors` deletes saved error reports for the current
+workspace. Chat-clearing commands keep error reports unless this command is run.
+
 ## Configuration
 
 MIRA reads environment variables and a workspace `.env` file. Start from
@@ -255,7 +258,8 @@ showing or re-raising the error. Successful runs do not create error reports.
 The timestamped report is the specific failure artifact. `latest_error.txt` is
 only a convenience copy of the most recent report. TUI error messages include
 the timestamped report path, and one-shot mode preserves the normal terminal
-traceback after writing the report.
+traceback after writing the report. Error reports are durable diagnostics; use
+`/clear-errors` in the TUI to delete them explicitly.
 
 For a live plain-text mirror during TUI runs, start MIRA with `-t` or
 `--trace`. Trace mode opens a separate Windows command window that tails a
