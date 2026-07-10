@@ -7,12 +7,17 @@ import unittest
 from langchain.agents import create_agent
 from langchain.agents.middleware.human_in_the_loop import HumanInTheLoopMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, convert_to_messages
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_messages
+from langgraph.channels.delta import DeltaChannel
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Command
 from pydantic import BaseModel
 from pydantic_core import SchemaSerializer, SchemaValidator
 
-from session.checkpoint import make_checkpointer, sanitize_checkpoint_value
+from deepagents._messages_reducer import _messages_delta_reducer
+
+from session.checkpoint import make_checkpointer, message_snapshot_shape, sanitize_checkpoint_value
 
 
 class Finding(BaseModel):
@@ -61,6 +66,86 @@ class CheckpointTests(unittest.TestCase):
         self.assertIsInstance(value, AIMessage)
         self.assertEqual(value.content, "hello")
         self.assertEqual(convert_to_messages([value])[0].content, "hello")
+
+    def test_raw_jsonplus_preserves_delta_snapshots(self) -> None:
+        serde = JsonPlusSerializer()
+        snapshot = _DeltaSnapshot([HumanMessage(content="hello")])
+
+        kind, payload = serde.dumps_typed(snapshot)
+        value = serde.loads_typed((kind, payload))
+
+        self.assertEqual(kind, "msgpack")
+        self.assertIsInstance(value, _DeltaSnapshot)
+        self.assertEqual(value.value[0].content, "hello")
+
+    def test_mira_jsonplus_preserves_delta_snapshots(self) -> None:
+        serde = make_checkpointer().serde
+        snapshot = _DeltaSnapshot([HumanMessage(content="hello")])
+
+        kind, payload = serde.dumps_typed(snapshot)
+        value = serde.loads_typed((kind, payload))
+
+        self.assertEqual(kind, "msgpack")
+        self.assertIsInstance(value, _DeltaSnapshot)
+        self.assertEqual(value.value[0].content, "hello")
+
+    def test_delta_snapshot_round_trip_replays_as_message_state(self) -> None:
+        serde = make_checkpointer().serde
+        snapshot = _DeltaSnapshot([
+            HumanMessage(content="user"),
+            AIMessage(content="assistant"),
+            ToolMessage(content="tool", tool_call_id="call-1"),
+        ])
+
+        kind, payload = serde.dumps_typed(snapshot)
+        loaded = serde.loads_typed((kind, payload))
+        channel = DeltaChannel(_messages_delta_reducer, list, snapshot_frequency=50).from_checkpoint(loaded)
+
+        channel.update([[HumanMessage(content="next")]])
+
+        self.assertEqual([message.__class__.__name__ for message in channel.get()], [
+            "HumanMessage",
+            "AIMessage",
+            "ToolMessage",
+            "HumanMessage",
+        ])
+
+    def test_load_repairs_legacy_corrupted_message_snapshot(self) -> None:
+        raw_serde = JsonPlusSerializer()
+        mira_serde = make_checkpointer().serde
+        corrupted = {
+            "channel_values": {
+                "messages": [[
+                    HumanMessage(content="user"),
+                    AIMessage(content="assistant"),
+                    ToolMessage(content="tool", tool_call_id="call-1"),
+                ]],
+                "state": [[AIMessage(content="not a messages channel")]],
+            },
+        }
+
+        data = raw_serde.dumps_typed(corrupted)
+        value = mira_serde.loads_typed(data)
+
+        self.assertEqual([message.__class__.__name__ for message in value["channel_values"]["messages"]], [
+            "HumanMessage",
+            "AIMessage",
+            "ToolMessage",
+        ])
+        self.assertIsInstance(value["channel_values"]["state"][0], list)
+
+    def test_message_snapshot_shape_reports_nested_corruption(self) -> None:
+        shape = message_snapshot_shape(
+            [[HumanMessage(content="user"), AIMessage(content="assistant")]],
+            source="write",
+        )
+
+        self.assertEqual(shape["channel"], "messages")
+        self.assertEqual(shape["source"], "write")
+        self.assertEqual(shape["outer_len"], 1)
+        self.assertTrue(shape["nested"])
+        self.assertEqual(shape["inner_len"], 2)
+        self.assertEqual(shape["inner_item_types"], ["HumanMessage", "AIMessage"])
 
     def test_checkpointer_serializes_message_type_markers(self) -> None:
         serde = make_checkpointer().serde
