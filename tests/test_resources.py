@@ -281,6 +281,21 @@ description: Project-specific workflow.
                 ],
             )
 
+    def test_ask_user_description_honors_explicit_many_option_requests(self) -> None:
+        """The default ask_user prompt should distinguish explicit ask_user requests."""
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+            ask_user = next(tool for tool in resources.tools if tool.name == "ask_user")
+
+            description = str(ask_user.description)
+
+            self.assertIn("without asking for ask_user, answer normally in chat", description)
+            self.assertIn("explicitly asks you to use ask_user with many options", description)
+            self.assertIn("include every requested option", description)
+            self.assertIn("MIRA numbers choices in the UI", description)
+            self.assertIn("good options: ['test_checkpoint.py', 'test_config.py']", description)
+            self.assertIn("bad options: ['1. test_checkpoint.py', '2. test_config.py']", description)
+
     def test_regex_grep_matches_regex_patterns(self) -> None:
         """The default grep should treat the pattern as regex."""
         with tempfile.TemporaryDirectory() as directory:

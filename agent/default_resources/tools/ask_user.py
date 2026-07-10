@@ -15,8 +15,15 @@ ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
         "Ask the user to choose between concrete next steps when you are blocked on a specific decision. "
         "Use this only for meaningful choices that materially affect what MIRA should do next. "
         "Do not use this for generic follow-ups like 'what can I help you with next?' or when you can "
-        "make a reasonable safe assumption. Provide concise, mutually exclusive options; MIRA will always "
-        "append the final open-ended option 'Tell MIRA what to do differently'."
+        "make a reasonable safe assumption. Put only the direct question in `question`; put answer choices "
+        "only in `options`, and do not enumerate or repeat the choices inside the question text. Prefer 1-3 "
+        "concise, mutually exclusive options of about 2-7 words each. Add '(Recommended)' to the best default "
+        "only when there is a real default. If the user asks for a list of many options without asking for "
+        "ask_user, answer normally in chat. If the user explicitly asks you to use ask_user with many options, "
+        "use ask_user and include every requested option. MIRA numbers choices in the UI, so option strings "
+        "should not include numbering; good options: ['test_checkpoint.py', 'test_config.py']; bad options: "
+        "['1. test_checkpoint.py', '2. test_config.py']. MIRA will always append the final open-ended option "
+        "'Tell MIRA what to do differently'."
     ),
 )
 def ask_user(question: str, options: list[str]) -> str:

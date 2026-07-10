@@ -308,7 +308,47 @@ Expected:
 - MIRA recalls the saved palindrome plan, including Summary, Key Changes, Test Plan, and Assumptions.
 - MIRA includes the plan status such as discarded, revision requested, or approved for implementation.
 
-Use the ask_user tool to ask me which implementation path to take: minimal change, full refactor, or planning only. Do not proceed until I choose.
+## Ask User Prompt Layout
+
+```text
+Use the ask_user tool to ask me which implementation path to take. Use exactly these options: minimal change (Recommended), focused refactor, planning only. Put only the question in the question field and only the answers in options.
+```
+
+Expected:
+
+- The prompt panel shows the question once.
+- Three concrete options plus `Tell MIRA what to do differently` fit vertically
+  without scrolling.
+- The recommended option is visible as `(Recommended)`.
+
+```text
+Use the ask_user tool to ask me to choose between 10 numbered test targets. Do not proceed until I choose.
+```
+
+Expected:
+
+- The choices remain accessible with a scrollbar.
+- The TUI does not overflow, hide the fallback, or crash.
+
+```text
+Use ask_user to give me 10 unique lunch options.
+```
+
+Expected:
+
+- MIRA calls `ask_user`.
+- The prompt shows 10 lunch choices plus `Tell MIRA what to do differently`.
+- The choices remain accessible with a scrollbar.
+
+```text
+Use the ask_user tool with three deliberately long option labels about testing database initialization, email ingestion, and processing/extraction.
+```
+
+Expected:
+
+- The choice buttons are equal-width and vertical.
+- Long labels truncate cleanly.
+- `Tell MIRA what to do differently` remains visible.
 
 ## One-Shot Implementation Runs Planned Checks
 

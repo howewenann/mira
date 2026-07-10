@@ -224,17 +224,34 @@ Screen {
     margin-top: 1;
 }
 
-.prompt-panel-button-row {
+.vertical-choices #prompt-panel-buttons {
+    max-height: 4;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+Horizontal.prompt-panel-button-row {
     layout: horizontal;
     width: 100%;
-    height: 3;
+    height: 1;
+    min-height: 1;
     margin: 0;
 }
 
-.prompt-panel-button {
+Button.prompt-panel-button {
     min-width: 12;
-    height: 3;
+    height: 1;
+    min-height: 1;
     margin: 0 1 0 0;
+    content-align: center middle;
+    text-align: center;
+}
+
+.vertical-choices Button.prompt-panel-button {
+    content-align: left middle;
+    text-align: left;
 }
 
 .message {

@@ -26,7 +26,8 @@ from runtime.subagent_events import consume_subagent, consume_subagents
 from runtime.tool_events import consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
-from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options
+from agent.default_resources.tools.ask_user import normalize_options
+from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options, ask_user_question
 from ui.renderer import Renderer
 from ui.terminal_colors import strip_ansi
 
@@ -2788,6 +2789,31 @@ Await further instructions.
         )
 
         self.assertEqual(options, ["Use A", "Use B", ASK_USER_OPEN_OPTION])
+
+    def test_ask_user_options_keeps_large_choice_sets(self) -> None:
+        options = ask_user_options({"options": [f"Option {index}" for index in range(1, 11)]})
+
+        self.assertEqual(options, [f"Option {index}" for index in range(1, 11)] + [ASK_USER_OPEN_OPTION])
+
+    def test_ask_user_question_preserves_intentional_line_breaks(self) -> None:
+        question = ask_user_question({"question": "Choose a path:\n\n  Then confirm timing.  "})
+
+        self.assertEqual(question, "Choose a path:\n\nThen confirm timing.")
+
+    def test_normalize_options_keeps_large_choice_sets(self) -> None:
+        options = normalize_options(
+            [
+                "Use A",
+                ASK_USER_OPEN_OPTION,
+                "Use B",
+                "Use A",
+                "",
+                "Use C",
+                "Use D",
+            ]
+        )
+
+        self.assertEqual(options, ["Use A", "Use B", "Use C", "Use D", ASK_USER_OPEN_OPTION])
 
     def test_usage_parser_accepts_lmstudio_native_stats_object(self) -> None:
         stats = type(

@@ -7,14 +7,38 @@ from typing import Any
 
 from textual import events, on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widgets import Button, Input, Static, TextArea
 
 
+class PromptButton(Button):
+    """Button that lets PromptPanel own choice navigation keys."""
+
+    def _prompt_panel(self) -> PromptPanel | None:
+        panel: Any = self.parent
+        while panel is not None and not isinstance(panel, PromptPanel):
+            panel = panel.parent
+        return panel
+
+    def on_key(self, event: Key) -> None:
+        panel = self._prompt_panel()
+        if panel is not None and panel.handle_choice_key(event):
+            return
+        super().on_key(event)
+
+
 class PromptPanel(Vertical):
     """Focused prompt surface mounted in the main app layout."""
+
+    BINDINGS = [
+        Binding("left", "prompt_left", show=False, priority=True),
+        Binding("right", "prompt_right", show=False, priority=True),
+        Binding("up", "prompt_up", show=False, priority=True),
+        Binding("down", "prompt_down", show=False, priority=True),
+    ]
 
     MIN_BUTTON_WIDTH = 12
     MAX_BUTTON_WIDTH = 32
@@ -34,6 +58,7 @@ class PromptPanel(Vertical):
         self._last_button_width = 0
         self._reflow_running = False
         self._reflow_generation = 0
+        self._vertical_choices = False
 
     @property
     def active(self) -> bool:
@@ -54,9 +79,18 @@ class PromptPanel(Vertical):
         self.query_one("#prompt-panel-input", Input).display = False
         self.query_one("#prompt-panel-editor", TextArea).display = False
 
-    async def choose(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
+    async def choose(
+        self,
+        title: str,
+        message: str,
+        choices: list[tuple[str, str]],
+        *,
+        vertical: bool = False,
+    ) -> str | None:
         """Show a choice prompt and return the selected value."""
         await self._open("choice", title, message)
+        self._vertical_choices = vertical
+        self.set_class(vertical, "vertical-choices")
         self.focus()
         self._shortcuts = choice_shortcuts(choices)
         self._button_specs = []
@@ -75,7 +109,7 @@ class PromptPanel(Vertical):
         answer = self.query_one("#prompt-panel-input", Input)
         answer.value = ""
         answer.display = True
-        self._mount_action_buttons(("prompt-submit", "submit"), ("prompt-cancel", "cancel"))
+        self._mount_action_buttons(("prompt-submit", "Submit"), ("prompt-cancel", "Cancel"))
         self.call_after_refresh(answer.focus)
         return await self._wait()
 
@@ -86,7 +120,7 @@ class PromptPanel(Vertical):
         editor = self.query_one("#prompt-panel-editor", TextArea)
         editor.text = text
         editor.display = True
-        self._mount_action_buttons(("prompt-save", "save"), ("prompt-cancel", "cancel"))
+        self._mount_action_buttons(("prompt-save", "Save"), ("prompt-cancel", "Cancel"))
         self.call_after_refresh(editor.focus)
         return await self._wait()
 
@@ -105,6 +139,8 @@ class PromptPanel(Vertical):
         self._last_button_width = 0
         self._reflow_running = False
         self._reflow_generation += 1
+        self._vertical_choices = False
+        self.set_class(False, "vertical-choices")
 
         self.query_one("#prompt-panel-title", Static).update(title)
         self.query_one("#prompt-panel-message", Static).update(message)
@@ -133,6 +169,8 @@ class PromptPanel(Vertical):
         self._last_button_width = 0
         self._reflow_running = False
         self._reflow_generation += 1
+        self._vertical_choices = False
+        self.set_class(False, "vertical-choices")
         if not self.is_mounted:
             self._future = None
             return
@@ -161,17 +199,25 @@ class PromptPanel(Vertical):
         await container.remove_children()
         self._button_rows = []
         self._button_positions = {}
-        for row_index, row in enumerate(wrapped_button_rows(buttons, available_width)):
+        rows = vertical_button_rows(buttons) if self._vertical_choices else wrapped_button_rows(buttons, available_width)
+        vertical_width = vertical_button_width(available_width)
+        for row_index, row in enumerate(rows):
             row_id = f"prompt-panel-button-row-{row_index}"
             row_ids = []
             row_buttons = []
             for column_index, (button_id, label) in enumerate(row):
-                button = Button(
-                    visible_button_label(label),
+                width = vertical_width if self._vertical_choices else button_width(label)
+                button = PromptButton(
+                    visible_button_label(label, width=width),
                     id=button_id,
                     classes="prompt-panel-button",
+                    compact=True,
+                    flat=False,
                 )
-                button.styles.width = button_width(label)
+                button.styles.width = width
+                if self._vertical_choices:
+                    button.styles.min_width = width
+                    button.styles.max_width = width
                 row_buttons.append(button)
                 row_ids.append(button_id)
                 self._button_positions[button_id] = (row_index, column_index)
@@ -236,8 +282,6 @@ class PromptPanel(Vertical):
             await self._mount_button_rows(self._button_specs, available_width)
             await asyncio.sleep(0)
             self._restore_button_focus(focused_id, focus_first)
-            if not measured:
-                self.call_after_refresh(self._start_button_reflow, self._reflow_generation, False)
         finally:
             self._reflow_running = False
 
@@ -293,10 +337,29 @@ class PromptPanel(Vertical):
         else:
             target_row_index = row_index
             target_row = self._button_rows[target_row_index]
+            if column_delta and len(target_row) == 1:
+                self._focus_button_offset(column_delta)
+                return
             target_column_index = (column_index + column_delta) % len(target_row)
 
         target_id = target_row[target_column_index]
         self.query_one(f"#{target_id}", Button).focus()
+
+    def action_prompt_left(self) -> None:
+        if self._mode == "choice":
+            self._focus_button_grid(0, -1)
+
+    def action_prompt_right(self) -> None:
+        if self._mode == "choice":
+            self._focus_button_grid(0, 1)
+
+    def action_prompt_up(self) -> None:
+        if self._mode == "choice":
+            self._focus_button_grid(-1, 0)
+
+    def action_prompt_down(self) -> None:
+        if self._mode == "choice":
+            self._focus_button_grid(1, 0)
 
     def _focused_button_value(self) -> str | None:
         """Return the choice value for the focused footer button."""
@@ -340,45 +403,53 @@ class PromptPanel(Vertical):
 
     def on_key(self, event: Key) -> None:
         """Handle direct shortcuts and cancel keys."""
-        if self._mode == "choice":
-            if event.key == "escape":
-                event.stop()
-                self._resolve(None)
-                return
-
-            if event.key in {"left", "up"}:
-                event.stop()
-                if event.key == "up":
-                    self._focus_button_grid(-1, 0)
-                else:
-                    self._focus_button_grid(0, -1)
-                return
-
-            if event.key in {"right", "down"}:
-                event.stop()
-                if event.key == "down":
-                    self._focus_button_grid(1, 0)
-                else:
-                    self._focus_button_grid(0, 1)
-                return
-
-            if event.key == "enter":
-                value = self._focused_button_value()
-                if value is not None:
-                    event.stop()
-                    self._resolve(value)
-                return
-
-            value = self._shortcuts.get(event.key.lower())
-            if value is None:
-                return
-            event.stop()
-            self._resolve(value)
+        if self.handle_choice_key(event):
             return
 
         if self._mode in {"text", "json"} and event.key == "escape":
             event.stop()
             self._resolve(None)
+
+    def handle_choice_key(self, event: Key) -> bool:
+        """Handle keys for active choice prompts."""
+        if self._mode != "choice":
+            return False
+
+        if event.key == "escape":
+            event.stop()
+            self._resolve(None)
+            return True
+
+        if event.key in {"left", "up"}:
+            event.stop()
+            if event.key == "up":
+                self._focus_button_grid(-1, 0)
+            else:
+                self._focus_button_grid(0, -1)
+            return True
+
+        if event.key in {"right", "down"}:
+            event.stop()
+            if event.key == "down":
+                self._focus_button_grid(1, 0)
+            else:
+                self._focus_button_grid(0, 1)
+            return True
+
+        if event.key == "enter":
+            value = self._focused_button_value()
+            if value is not None:
+                event.stop()
+                self._resolve(value)
+                return True
+            return False
+
+        value = self._shortcuts.get(event.key.lower())
+        if value is None:
+            return False
+        event.stop()
+        self._resolve(value)
+        return True
 
     def on_resize(self, event: events.Resize) -> None:
         """Reflow prompt buttons when the available panel width changes."""
@@ -405,12 +476,24 @@ def button_width(label: str) -> int:
     return max(PromptPanel.MIN_BUTTON_WIDTH, min(PromptPanel.MAX_BUTTON_WIDTH, len(label) + 2))
 
 
-def visible_button_label(label: str) -> str:
+def visible_button_label(label: str, *, width: int | None = None) -> str:
     """Return a display label that fits the prompt button width."""
-    width = button_width(label)
+    width = width or button_width(label)
     if len(label) <= width - 2:
         return label
     return f"{label[: width - 5].rstrip()}..."
+
+
+def vertical_button_width(available_width: int) -> int:
+    """Return one button width for a vertical choice list."""
+    if available_width <= 0:
+        return PromptPanel.MIN_BUTTON_WIDTH
+    return max(PromptPanel.MIN_BUTTON_WIDTH, available_width)
+
+
+def vertical_button_rows(buttons: list[tuple[str, str]]) -> list[list[tuple[str, str]]]:
+    """Return one prompt button per row."""
+    return [[button] for button in buttons]
 
 
 def wrapped_button_rows(buttons: list[tuple[str, str]], available_width: int) -> list[list[tuple[str, str]]]:

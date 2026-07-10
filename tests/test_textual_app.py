@@ -15,7 +15,7 @@ from unittest.mock import patch
 from pyfiglet import Figlet
 from rich.console import Console
 from rich.text import Text
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -1155,6 +1155,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(worker.cancelled)
             self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Cancel Turn?")
+            self.assertEqual(
+                [button.label.plain for button in app.query_one(PromptPanel).query(Button)],
+                ["Yes (y)", "No (n)"],
+            )
 
             await pilot.press("n")
             await pilot.pause()
@@ -1178,6 +1182,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("alt+q")
                 await pilot.pause()
                 self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Exit MIRA?")
+                self.assertEqual(
+                    [button.label.plain for button in app.query_one(PromptPanel).query(Button)],
+                    ["Yes (y)", "No (n)"],
+                )
 
                 await pilot.press("n")
                 await pilot.pause()
@@ -1657,18 +1665,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(
                     lambda: len(list(panel.query(Button))) == 3 and list(panel.query(Button))[0].has_focus
                 )
+                await wait_until(lambda: not panel._reflow_running and len(panel._button_positions) == 3)
                 buttons = list(panel.query(Button))
                 self.assertTrue(panel.display)
                 self.assertEqual(len(buttons), 3)
                 self.assertTrue(buttons[0].has_focus)
+                self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+                self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
 
-                await pilot.press("right")
-                await pilot.pause()
+                for _ in range(3):
+                    await pilot.press("right")
+                    await pilot.pause()
+                    if list(panel.query(Button))[1].has_focus:
+                        break
+                await wait_until(lambda: list(panel.query(Button))[1].has_focus)
+                buttons = list(panel.query(Button))
                 self.assertTrue(buttons[1].has_focus)
                 self.assertFalse(app.query_one(PromptBox).has_focus)
 
-                await pilot.press("right")
-                await pilot.pause()
+                for _ in range(3):
+                    await pilot.press("right")
+                    await pilot.pause()
+                    if list(panel.query(Button))[2].has_focus:
+                        break
+                await wait_until(lambda: list(panel.query(Button))[2].has_focus)
+                buttons = list(panel.query(Button))
                 self.assertTrue(buttons[2].has_focus)
 
                 await pilot.press("enter")
@@ -1707,6 +1728,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 [button.label.plain for button in buttons],
                 ["Approve (a)", "Edit (e)", "Reject (r)"],
             )
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             self.assertTrue(all(button.variant == "default" for button in buttons))
 
             await pilot.press("r")
@@ -1838,9 +1861,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await asyncio.wait_for(task, timeout=2)
 
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) == 2)
             buttons = list(app.query_one(PromptPanel).query(Button))
             message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             self.assertIn("Press O to confirm, C or Esc to cancel.", message)
 
             await pilot.press("o")
@@ -1893,9 +1919,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await asyncio.wait_for(task, timeout=2)
 
+            await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) == 2)
             buttons = list(app.query_one(PromptPanel).query(Button))
             message = renderable_plain(app.query_one("#prompt-panel-message", Static))
             self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             self.assertIn("Press O to confirm, C or Esc to cancel.", message)
 
             await pilot.press("o")
@@ -1919,6 +1948,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(lambda: len(list(app.query_one(PromptPanel).query(Button))) == 2)
             buttons = list(app.query_one(PromptPanel).query(Button))
             self.assertEqual([button.label.plain for button in buttons], ["OK (o)", "Cancel (c)"])
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
 
             await pilot.press("c")
             await wait_until(lambda: not app.query_one(PromptPanel).display)
@@ -2504,6 +2535,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(editor.has_focus)
             editor.text = '{"file_path": "test.txt", "content": "bye"}'
             await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-save"))) > 0)
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Save", "Cancel"],
+            )
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             app.query_one("#prompt-save", Button).press()
             decision = await asyncio.wait_for(task, timeout=2)
 
@@ -2522,6 +2560,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             app.query_one("#prompt-panel-editor", TextArea).text = "{bad json"
             await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-save"))) > 0)
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Save", "Cancel"],
+            )
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             app.query_one("#prompt-save", Button).press()
             self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject"})
 
@@ -3417,6 +3462,134 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(open_task, timeout=2), "Try the safer patch")
 
+    async def test_text_prompt_action_buttons_use_action_labels(self) -> None:
+        """Freeform PromptPanel actions should use readable action labels."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app._prompt_text("Question", "Tell MIRA what to do differently"))
+            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == 2)
+
+            buttons = list(panel.query(Button))
+            self.assertEqual([button.label.plain for button in buttons], ["Submit", "Cancel"])
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
+
+            app.query_one("#prompt-cancel", Button).press()
+            self.assertIsNone(await asyncio.wait_for(task, timeout=2))
+
+    async def test_ask_user_uses_vertical_buttons_and_preserves_question(self) -> None:
+        """ask_user choices should be vertical buttons separate from the question text."""
+        app = make_app()
+        interrupt = {
+            "type": "ask_user",
+            "question": "Which path?\nPick one.",
+            "options": ["Minimal change (Recommended)", "Focused refactor", "Planning only"],
+        }
+
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.ask_user(interrupt))
+            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == 4)
+            await wait_until(lambda: all(row.region.height == 1 for row in panel.query(".prompt-panel-button-row")))
+
+            message = renderable_plain(app.query_one("#prompt-panel-message", Static))
+            buttons = list(panel.query(Button))
+            rows = list(panel.query(".prompt-panel-button-row"))
+            row_heights = {row.region.height for row in rows}
+
+            self.assertEqual(message, "Which path?\nPick one.")
+            self.assertNotIn("Minimal change", message)
+            self.assertEqual(len(rows), 4)
+            self.assertEqual(row_heights, {1})
+            self.assertTrue(all(button.compact for button in buttons))
+            self.assertTrue(all(not button.flat for button in buttons))
+            self.assertTrue(all(str(button.label) for button in buttons))
+            self.assertTrue(all(button.styles.content_align_horizontal == "left" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
+            self.assertTrue(str(buttons[-1].label).startswith("4 Tell MIRA"))
+
+            await pilot.press("1")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "Minimal change (Recommended)")
+
+    async def test_ask_user_large_choice_set_scrolls_and_remains_selectable(self) -> None:
+        """ask_user should keep larger choice sets accessible in a vertical scroll area."""
+        app = make_app()
+        interrupt = {
+            "type": "ask_user",
+            "question": "Choose a target.",
+            "options": [f"Target {index}" for index in range(1, 11)],
+        }
+
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.ask_user(interrupt))
+            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == 11)
+
+            button_area = app.query_one("#prompt-panel-buttons", Vertical)
+            rows = list(panel.query(".prompt-panel-button-row"))
+            self.assertEqual(len(rows), 11)
+            self.assertLessEqual(button_area.region.height, 4)
+
+            await wait_until(lambda: len(list(panel.query(Button))) == 11 and list(panel.query(Button))[0].has_focus)
+            for _ in range(9):
+                await pilot.press("down")
+                await pilot.pause()
+            await pilot.press("enter")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "Target 10")
+
+    async def test_ask_user_vertical_buttons_fit_narrow_and_truncate_long_labels(self) -> None:
+        """ask_user should not overflow narrow prompts with long labels."""
+        app = make_app()
+        interrupt = {
+            "type": "ask_user",
+            "question": "What should be tested?",
+            "options": [
+                "Test database initialization and schema creation",
+                "Test email ingestion without segmentation",
+                "Test processing extraction and reporting",
+            ],
+        }
+
+        async with app.run_test(size=(48, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.ask_user(interrupt))
+            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: len(list(panel.query(Button))) == 4)
+            await wait_until(lambda: all(row.region.height == 1 for row in panel.query(".prompt-panel-button-row")))
+            await wait_until(lambda: any(str(button.label).endswith("...") for button in panel.query(Button)))
+            buttons = list(panel.query(Button))
+            rows = list(panel.query(".prompt-panel-button-row"))
+            panel_right = panel.region.x + panel.region.width
+
+            self.assertTrue(all(button.region.x + button.region.width <= panel_right for button in buttons))
+            self.assertTrue(all(row.region.height == 1 for row in rows))
+            self.assertTrue(all(button.compact for button in buttons))
+            self.assertTrue(all(not button.flat for button in buttons))
+            self.assertTrue(all(str(button.label) for button in buttons))
+            self.assertTrue(any(str(button.label).endswith("...") for button in buttons[:-1]))
+            self.assertTrue(str(buttons[-1].label).startswith("4 Tell MIRA"))
+
+            await pilot.press("4")
+            await pilot.pause()
+            answer = app.query_one("#prompt-panel-input", Input)
+            await wait_until(lambda: answer.has_focus)
+            answer.value = "Run a shorter smoke test"
+            await pilot.press("enter")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "Run a shorter smoke test")
+
     async def test_choice_prompt_buttons_wrap_in_narrow_viewports(self) -> None:
         """Shared choice dialogs should wrap options instead of hiding later buttons."""
         app = make_app()
@@ -3433,6 +3606,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(
                 lambda: len({row.region.y for row in panel.query(".prompt-panel-button-row")}) > 1
             )
+            await wait_until(lambda: all(row.region.height == 1 for row in panel.query(".prompt-panel-button-row")))
             rows = list(panel.query(".prompt-panel-button-row"))
             buttons = list(panel.query(Button))
             row_positions = {row.region.y for row in rows}
@@ -3440,6 +3614,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(rows), 1)
             self.assertGreater(len(row_positions), 1, [row.region for row in rows])
             self.assertEqual(str(buttons[-1].label), "8 Option 8")
+            self.assertTrue(all(row.region.height == 1 for row in rows))
+            self.assertTrue(all(button.compact for button in buttons))
+            self.assertTrue(all(not button.flat for button in buttons))
+            self.assertTrue(all(str(button.label) for button in buttons))
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             self.assertTrue(
                 all(button.region.x + button.region.width <= panel_right for button in buttons),
                 {
@@ -3487,6 +3667,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             panel = app.query_one(PromptPanel)
             await wait_until(lambda: len(list(panel.query(Button))) == len(choices))
             await wait_until(lambda: any(button.has_focus for button in panel.query(Button)))
+            await wait_until(lambda: not panel._reflow_running and len(panel._button_rows) >= 2)
             rows = list(panel.query(Horizontal))
             self.assertGreaterEqual(len(rows), 2)
             first_row_buttons = list(rows[0].query(Button))
@@ -3495,6 +3676,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("down")
             await pilot.pause()
+            await wait_until(lambda: list(panel.query(Horizontal))[1].query(Button).first().has_focus)
+            rows = list(panel.query(Horizontal))
+            second_row_buttons = list(rows[1].query(Button))
             self.assertTrue(second_row_buttons[0].has_focus)
 
             await pilot.press("enter")
@@ -3679,11 +3863,25 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             create_task = asyncio.create_task(app.ask_create_git_repo("Initialize Git?"))
             await pilot.pause()
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Yes (y)", "No (n)"],
+            )
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             await pilot.press("y")
             self.assertTrue(await asyncio.wait_for(create_task, timeout=2))
 
             continue_task = asyncio.create_task(app.ask_continue_without_git("Continue without Git?"))
             await pilot.pause()
+            buttons = list(app.query_one(PromptPanel).query(Button))
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Continue (c)", "Exit (e)"],
+            )
+            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
+            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             await pilot.press("e")
             self.assertFalse(await asyncio.wait_for(continue_task, timeout=2))
 

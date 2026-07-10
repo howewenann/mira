@@ -27,7 +27,7 @@ def ask_user_request(interrupt: Any) -> dict[str, Any]:
 
 def ask_user_question(request: dict[str, Any]) -> str:
     """Return the ask_user question text with a compact fallback."""
-    question = " ".join(str(request.get("question") or "").split())
+    question = compact_multiline_text(request.get("question"))
     return question or "MIRA needs a decision."
 
 
@@ -91,6 +91,25 @@ def compact_items(value: Any, *, fallback: str = "") -> list[str]:
 def compact_text(value: Any) -> str:
     """Collapse whitespace in a display string."""
     return " ".join(str(value or "").split())
+
+
+def compact_multiline_text(value: Any) -> str:
+    """Collapse noisy spaces while preserving intentional line breaks."""
+    lines = [" ".join(line.split()) for line in str(value or "").splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+
+    compacted = []
+    previous_blank = False
+    for line in lines:
+        blank = not line
+        if blank and previous_blank:
+            continue
+        compacted.append(line)
+        previous_blank = blank
+    return "\n".join(compacted)
 
 
 def action_requests(interrupt: Any) -> list[Any]:

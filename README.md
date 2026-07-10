@@ -194,6 +194,9 @@ what MIRA loaded and which project resources replaced defaults.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project
   tools that need approval, with `/settings` toggles to enable or disable
   built-in dangerous tools and project tools.
+- `ask_user` decision prompts prefer concise choices, show options as vertical
+  buttons with an open-ended fallback, and scroll only when larger choice sets
+  are explicitly needed.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
   `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
   QuickJS' top-level `task()` helper when enabled in `/settings`, and
@@ -209,7 +212,9 @@ what MIRA loaded and which project resources replaced defaults.
   DeepAgents-backed context compaction. `In` and `Out` are cumulative provider
   token totals; `Ctx` is the latest DeepAgents context estimate.
 - Default memory plus `grep`, `ask_user`, and `present_plan` tools for search,
-  concrete user decisions, and structured plan review.
+  concrete user decisions, and structured plan review. `ask_user` should put
+  only the direct question in its prompt text and keep answer choices in
+  options; add `(Recommended)` only when there is a real default.
 
 ## Sessions
 

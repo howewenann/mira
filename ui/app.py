@@ -582,7 +582,7 @@ class MiraApp(App[None]):
                 answer = await self._prompt_choice(
                     "Cancel Turn?",
                     "MIRA is still working. Cancel this turn?",
-                    [("y", "y yes"), ("n", "n no")],
+                    [("y", "Yes (y)"), ("n", "No (n)")],
                 )
                 if answer == "y" and self.busy and self.turn_worker is not None:
                     self._cancel_turn()
@@ -591,7 +591,7 @@ class MiraApp(App[None]):
             answer = await self._prompt_choice(
                 "Exit MIRA?",
                 "No cancellable turn is running. Exit MIRA?",
-                [("y", "y yes"), ("n", "n no")],
+                [("y", "Yes (y)"), ("n", "No (n)")],
             )
             if answer == "y":
                 self.exit()
@@ -1292,7 +1292,7 @@ class MiraApp(App[None]):
         question = ask_user_question(request)
         options = ask_user_options(request)
         choices = [(str(index), f"{index} {option}") for index, option in enumerate(options, start=1)]
-        answer = str(await self._prompt_choice("Question", question, choices) or "")
+        answer = str(await self._prompt_choice("Question", question, choices, vertical=True) or "")
         selected = options[int(answer) - 1] if answer.isdigit() and 0 < int(answer) <= len(options) else options[-1]
         if selected != ASK_USER_OPEN_OPTION:
             return selected
@@ -1302,12 +1302,12 @@ class MiraApp(App[None]):
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""
-        answer = await self._prompt_choice("Git", message, [("y", "y yes"), ("n", "n no")])
+        answer = await self._prompt_choice("Git", message, [("y", "Yes (y)"), ("n", "No (n)")])
         return answer == "y"
 
     async def ask_continue_without_git(self, message: str) -> bool:
         """Ask whether startup should continue without Git protection."""
-        answer = await self._prompt_choice("Git", message, [("c", "c continue"), ("e", "e exit")])
+        answer = await self._prompt_choice("Git", message, [("c", "Continue (c)"), ("e", "Exit (e)")])
         return answer == "c"
 
     async def edit_decision(self, action: Any) -> dict[str, Any]:
@@ -1337,9 +1337,16 @@ class MiraApp(App[None]):
             },
         }
 
-    async def _prompt_choice(self, title: str, message: str, choices: list[tuple[str, str]]) -> str | None:
+    async def _prompt_choice(
+        self,
+        title: str,
+        message: str,
+        choices: list[tuple[str, str]],
+        *,
+        vertical: bool = False,
+    ) -> str | None:
         """Show a choice prompt in the main window."""
-        return await self._with_prompt_lock(self.query_one(PromptPanel).choose(title, message, choices))
+        return await self._with_prompt_lock(self.query_one(PromptPanel).choose(title, message, choices, vertical=vertical))
 
     async def _prompt_text(self, title: str, message: str) -> str | None:
         """Show a text prompt in the main window."""

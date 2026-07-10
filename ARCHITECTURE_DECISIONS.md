@@ -201,12 +201,19 @@ exposed to the agent. QuickJS programmatic tool calling is limited to
 QuickJS' top-level `task()` helper only when the System Settings toggle is
 enabled, while destructive file tools, shell execution, and interrupt/control
 flow tools stay outside that bridge.
+MIRA also owns display of `ask_user` interrupts: the interrupt payload keeps
+`question` and `options` separate, the TUI shows the question once, and options
+render as vertical choice buttons with the open-ended fallback last. Larger
+choice sets are allowed for compatibility and explicit user requests, but the
+default tool prompt asks the agent to prefer 1-3 concise options.
 
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project
 tools in metadata lets the settings UI manage them without exposing them to the
 model, while disabled built-ins are hidden through the same excluded-tools path
-MIRA uses for mode-specific tool visibility.
+MIRA uses for mode-specific tool visibility. `ask_user` stays a normal
+LangGraph interrupt/resume path; MIRA only formats the prompt surface so user
+decisions remain readable in narrow terminals.
 
 **Where to check:** `config/settings.py`, `agent/factory.py`,
 `agent/middleware.py`, `agent/resources/__init__.py`, `ui/interrupts.py`,
