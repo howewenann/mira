@@ -249,6 +249,12 @@ Button.prompt-panel-button {
     text-align: center;
 }
 
+Button.prompt-panel-button:focus {
+    background: #d2a957;
+    color: #0c0f10;
+    text-style: bold;
+}
+
 .vertical-choices Button.prompt-panel-button {
     content-align: left middle;
     text-align: left;

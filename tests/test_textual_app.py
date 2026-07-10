@@ -15,6 +15,7 @@ from unittest.mock import patch
 from pyfiglet import Figlet
 from rich.console import Console
 from rich.text import Text
+from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
@@ -32,6 +33,10 @@ from ui.terminal_colors import strip_ansi
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon
 from ui.widgets.session_history import session_label
+
+
+PROMPT_BUTTON_FOCUS_BACKGROUND = Color.parse("#d2a957")
+PROMPT_BUTTON_FOCUS_COLOR = Color.parse("#0c0f10")
 
 
 class FakeStore:
@@ -1672,6 +1677,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(buttons[0].has_focus)
                 self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
                 self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
+                self.assertEqual(buttons[0].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+                self.assertEqual(buttons[0].styles.color, PROMPT_BUTTON_FOCUS_COLOR)
+                self.assertNotEqual(buttons[1].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+                self.assertNotEqual(buttons[2].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
 
                 for _ in range(3):
                     await pilot.press("right")
@@ -1681,6 +1690,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: list(panel.query(Button))[1].has_focus)
                 buttons = list(panel.query(Button))
                 self.assertTrue(buttons[1].has_focus)
+                self.assertEqual(buttons[1].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+                self.assertNotEqual(buttons[0].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+                self.assertNotEqual(buttons[2].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
                 self.assertFalse(app.query_one(PromptBox).has_focus)
 
                 for _ in range(3):
@@ -3514,6 +3526,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(str(button.label) for button in buttons))
             self.assertTrue(all(button.styles.content_align_horizontal == "left" for button in buttons))
             self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
+            self.assertTrue(buttons[0].has_focus)
+            self.assertEqual(buttons[0].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+            self.assertEqual(buttons[0].styles.color, PROMPT_BUTTON_FOCUS_COLOR)
+            self.assertTrue(all(button.region.width >= row.region.width - 2 for button, row in zip(buttons, rows)))
             self.assertTrue(str(buttons[-1].label).startswith("4 Tell MIRA"))
 
             await pilot.press("1")
@@ -3620,6 +3636,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(str(button.label) for button in buttons))
             self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
             self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
+            self.assertEqual(buttons[0].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
+            self.assertNotEqual(buttons[1].styles.background, PROMPT_BUTTON_FOCUS_BACKGROUND)
             self.assertTrue(
                 all(button.region.x + button.region.width <= panel_right for button in buttons),
                 {

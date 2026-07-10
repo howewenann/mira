@@ -205,7 +205,10 @@ MIRA also owns display of `ask_user` interrupts: the interrupt payload keeps
 `question` and `options` separate, the TUI shows the question once, and options
 render as vertical choice buttons with the open-ended fallback last. Larger
 choice sets are allowed for compatibility and explicit user requests, but the
-default tool prompt asks the agent to prefer 1-3 concise options.
+default tool prompt asks the agent to prefer 1-3 concise options. Prompt-panel
+keyboard focus styles the selected button itself, not a parent row; ask_user
+option buttons fill their row to provide a full-row selection feel without
+extra focus bookkeeping.
 
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project

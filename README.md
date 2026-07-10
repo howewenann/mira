@@ -196,7 +196,8 @@ what MIRA loaded and which project resources replaced defaults.
   built-in dangerous tools and project tools.
 - `ask_user` decision prompts prefer concise choices, show options as vertical
   buttons with an open-ended fallback, and scroll only when larger choice sets
-  are explicitly needed.
+  are explicitly needed. Prompt-panel focus highlights the selected button
+  itself; ask_user choices span the row so keyboard selection is easy to scan.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
   `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
   QuickJS' top-level `task()` helper when enabled in `/settings`, and
