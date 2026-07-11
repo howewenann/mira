@@ -186,9 +186,11 @@ what MIRA loaded and which project resources replaced defaults.
   history with a flat new-chat action, and a compact status/dashboard line.
 - Live subagent panel in the TUI for running task delegation. Eval-created
   subagents are grouped as `Group 1`, `Group 2`, and so on; raw eval ids are not
-  shown. Rows use generated subagent names with compact inline task hints. While
-  this panel is active, the live chat suppresses separate task delegation
-  bubbles and shows subagent progress in the panel instead.
+  shown. Rows keep fixed task, status, and elapsed-time columns as the terminal
+  resizes, with long task text truncated using `...`. While work is active, the
+  panel can collapse to an animated summary but cannot be dismissed; new
+  subagent activity opens it again. The live chat suppresses separate task
+  delegation bubbles and shows subagent progress in the panel instead.
 - One-shot terminal mode for scripts or quick prompts.
 - Git protection before agent startup.
 - Human-in-the-loop approvals for write, edit, eval, task, execute, and project

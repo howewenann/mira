@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import patch
 
 from pyfiglet import Figlet
+from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
 from textual.color import Color
@@ -31,7 +32,7 @@ from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import strip_ansi
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
-from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon
+from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
 from ui.widgets.session_history import session_label
 
 
@@ -2996,43 +2997,77 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             close = panel.query_one("#subagents-panel-close", Static)
             self.assertEqual(renderable_plain(toggle), "[-]")
             self.assertEqual(renderable_plain(close), "x")
+            self.assertFalse(close.display)
             self.assertFalse(any(binding.key == "ctrl+g" for binding in app.BINDINGS))
 
             panel.toggle()
             await pilot.pause()
             self.assertEqual(renderable_plain(toggle), "[+]")
             self.assertFalse(panel.query_one("#subagents-panel-body").display)
+            first_header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            panel.tick()
+            await pilot.pause()
+            second_header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            self.assertNotEqual(first_header[0], second_header[0])
+            self.assertIn("subagents", second_header)
 
-            panel.toggle()
+            app.subagent_started("general-purpose [two]", "inspect pyproject")
             await pilot.pause()
             self.assertEqual(renderable_plain(toggle), "[-]")
             self.assertTrue(panel.query_one("#subagents-panel-body").display)
 
-            await pilot.click("#subagents-panel-header")
+            panel.toggle()
             await pilot.pause()
             self.assertEqual(renderable_plain(toggle), "[+]")
             self.assertFalse(panel.query_one("#subagents-panel-body").display)
 
-    async def test_subagent_panel_keeps_full_identity_and_truncates_hint(self) -> None:
-        """Panel rows should never truncate the generated subagent identity."""
-        app = make_app()
+            await pilot.click("#subagents-panel-header")
+            await pilot.pause()
+            self.assertEqual(renderable_plain(toggle), "[-]")
+            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+
+            app.subagent_finished("general-purpose [one]", "README summary")
+            app.subagent_finished("general-purpose [two]", "pyproject summary")
+            await pilot.pause()
+            self.assertTrue(close.display)
+
+    async def test_subagent_panel_keeps_fixed_columns_across_terminal_widths(self) -> None:
+        """Task truncation should preserve one-line status and time columns."""
         identity = "general-purpose [persimmon-sparrow]"
-        long_hint = "Read the README.md file and provide a concise summary of the architecture and test setup"
+        long_hint = "Inspect README and explain " + "every relevant architecture detail " * 8
+        app = make_app()
 
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=(160, 24)) as pilot:
             await pilot.pause()
 
-            app.start_subagent_live()
-            app.subagent_started(identity, long_hint)
+            app.eval_subagent_started(identity, long_hint, eval_id="eval-a", row_id="row-a")
+            app.eval_subagent_started(
+                "general-purpose [second-runner]",
+                long_hint,
+                eval_id="eval-a",
+                row_id="row-b",
+            )
             await pilot.pause()
 
-            rendered = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+            for width in (160, 100, 50):
+                with self.subTest(width=width):
+                    if width != 160:
+                        await pilot.resize_terminal(width, 24)
+                    await pilot.pause()
 
-            self.assertIn(identity, rendered)
-            self.assertIn("Read the", rendered)
-            self.assertIn("...", rendered)
-            self.assertNotIn("general...", rendered)
-            self.assertNotIn("[persimmo...]", rendered)
+                    panel = app.query_one(SubagentsPanel)
+                    rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
+                    self.assertIn("Group 1", renderable_plain(panel.query_one("#subagents-groups", Static)))
+                    lines = rendered.rstrip("\n").splitlines()
+                    self.assertEqual(len(lines), 3)
+                    status_col = lines[0].index("STATUS")
+                    time_col = lines[0].index("TIME")
+
+                    for row in lines[1:]:
+                        self.assertEqual(row[status_col : status_col + 11].strip(), "RUNNING")
+                        self.assertTrue(row[time_col:].strip().endswith("s"))
+                        task_cell = row[3:status_col].rstrip()
+                        self.assertTrue(task_cell.endswith("..."))
 
     async def test_subagent_panel_styles_identity_with_purple_type_colour(self) -> None:
         """The subagent type and coolname should use MIRA's purple identity colour."""
@@ -3046,6 +3081,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         self.assertTrue(matching)
+
+    def test_subagent_task_truncation_uses_terminal_cell_width(self) -> None:
+        """Wide task characters should retain exact table width and ellipsis."""
+        value = truncate_cells("任务说明 with extra detail", 12)
+
+        self.assertEqual(cell_len(value), 12)
+        self.assertTrue(value.endswith("..."))
 
     def test_subagent_group_status_icons_have_status_colours(self) -> None:
         """Group status icons should mirror task-row status colours."""
@@ -3088,24 +3130,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 if "Group" in text.plain[span.start : span.end] and any(color in str(span.style) for color in ("green", "red", "yellow"))
             ]
         )
-
-    async def test_subagent_panel_very_narrow_width_omits_hint_not_identity(self) -> None:
-        """When width is tight, only the hint should disappear."""
-        app = make_app()
-        identity = "general-purpose [persimmon-sparrow]"
-
-        async with app.run_test(size=(50, 24)) as pilot:
-            await pilot.pause()
-
-            app.start_subagent_live()
-            app.subagent_started(identity, "Inspect the pyproject.toml file and provide a summary")
-            await pilot.pause()
-
-            rendered = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
-
-            self.assertIn(identity, rendered)
-            self.assertNotIn("general...", rendered)
-            self.assertNotIn("[persimmo...]", rendered)
 
     async def test_repeated_unsuffixed_subagent_errors_update_matching_blocks(self) -> None:
         """Error-like subagent output should finish only the matching active bubble."""

@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from itertools import count
 from typing import Any
 
+from rich.cells import cell_len, set_cell_size
 from rich.text import Text
+from textual import events
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Static
@@ -24,7 +26,7 @@ STATUS_ERROR = "ERROR"
 TASKS_GROUP = "__regular_tasks__"
 STATUS_COL = 11
 TIME_COL = 7
-TASK_MIN_COL = 48
+TASK_MIN_COL = 4
 MAX_LABEL_CHARS = 80
 MAX_HINT_CHARS = 60
 IDENTITY_STYLE = "bold #B7A4E8"
@@ -122,6 +124,9 @@ class SubagentsPanel(Vertical):
 
     def close(self) -> None:
         """Hide the current panel without deleting in-memory state."""
+        if self.has_running_subagents():
+            self.set_expanded(False)
+            return
         self._closed = True
         self.display = False
 
@@ -233,6 +238,10 @@ class SubagentsPanel(Vertical):
             return
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
         self._refresh()
+
+    def on_resize(self, _event: events.Resize) -> None:
+        """Rebuild fixed-width task rows after terminal layout changes."""
+        self.call_after_refresh(self._refresh)
 
     def has_running_subagents(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())
@@ -346,6 +355,7 @@ class SubagentsPanel(Vertical):
     def _refresh_controls(self) -> None:
         try:
             self.query_one("#subagents-panel-toggle", Static).update("[-]" if self._expanded else "[+]")
+            self.query_one("#subagents-panel-close", Static).display = not self.has_running_subagents()
         except NoMatches:
             return
 
@@ -378,6 +388,8 @@ class SubagentsPanel(Vertical):
     def _render_header(self) -> Text:
         done, total, failed, cancelled = self._counts(self._records.values())
         text = Text()
+        if self.has_running_subagents():
+            text.append(f"{SPINNER_FRAMES[self._spinner_index]} ", style="bold yellow")
         text.append("dynamic subagents" if self._eval_only() else "subagents", style="bold #ECE7FF")
         if total:
             text.append(f"  {done}/{total} done", style="dim")
@@ -451,10 +463,15 @@ class SubagentsPanel(Vertical):
         return [self._records[key] for key in group.order if key in self._records]
 
     def _task_col(self) -> int:
-        width = max(60, self.size.width or 80)
-        if self._display_group_keys():
-            width -= 28
-        return max(TASK_MIN_COL, width - STATUS_COL - TIME_COL - 8)
+        try:
+            width = self.query_one("#subagents-tasks-scroll").content_region.width
+        except NoMatches:
+            width = 0
+        if width <= 0:
+            width = max(50, self.size.width or 80)
+            if self._display_group_keys():
+                width -= 18
+        return max(TASK_MIN_COL, width - STATUS_COL - TIME_COL - 3)
 
     def _counts(self, records: Any) -> tuple[int, int, int, int]:
         items = list(records)
@@ -492,24 +509,31 @@ def group_status_icon(*, done: int, total: int, failed: int, cancelled: int) -> 
 def task_text(record: SubagentRecord, width: int) -> str:
     identity = record.name
     hint = terminal_hint(record)
-    if not hint:
-        return identity
-    remaining = width - len(identity) - 2
-    if remaining <= 0:
-        return identity
-    return f"{identity}  {sanitize(hint, max_chars=remaining)}"
+    value = f"{identity}  {hint}" if hint else identity
+    return truncate_cells(value, width)
 
 
 def append_task_cell(text: Text, record: SubagentRecord, width: int) -> None:
     value = task_text(record, width)
     identity = record.name
-    text.append(identity, style=IDENTITY_STYLE)
-    rest = value[len(identity):]
-    if rest:
-        text.append(rest)
-    padding = max(0, width - len(value))
+    start = len(text)
+    text.append(value)
+    styled_length = len(identity) if value.startswith(identity) else len(value)
+    text.stylize(IDENTITY_STYLE, start, start + min(styled_length, len(value)))
+    padding = max(0, width - cell_len(value))
     if padding:
         text.append(" " * padding)
+
+
+def truncate_cells(value: str, width: int) -> str:
+    """Truncate text to an exact terminal-cell width with an ASCII marker."""
+    width = max(0, width)
+    if cell_len(value) <= width:
+        return value
+    if width <= 3:
+        return "." * width
+    prefix = set_cell_size(value, width - 3).rstrip()
+    return set_cell_size(prefix, width - 3) + "..."
 
 
 def terminal_hint(record: SubagentRecord) -> str:

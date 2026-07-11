@@ -280,8 +280,12 @@ rebuilding agents without restarting the session. `/new-chat` and the sidebar
 `+ New` action create and switch to a fresh saved session without deleting the
 current session.
 The subagents bottom panel is live TUI state only. It opens for running
-subagents, uses compact `[-]`, `[+]`, and `x` controls, collapses to a summary
-before the next prompt after completion, and is reset by new subagent activity.
+subagents and renders task, status, and elapsed time as fixed single-line
+columns; task text yields width first and truncates with `...` when needed.
+While work is active, `[-]`/`[+]` collapses the panel to an animated summary and
+the close control is hidden. New subagent activity reopens the panel. Once all
+rows are terminal, `x` becomes available; completed state collapses before the
+next prompt and is reset by later subagent activity.
 While the panel owns live subagent progress, the chat log suppresses separate
 task delegation and subagent bubbles so the running turn has one live progress
 surface. The status line may briefly report delegation setup, but the task rows

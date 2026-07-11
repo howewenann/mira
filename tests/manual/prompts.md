@@ -46,6 +46,11 @@ Expected:
 - Regular subagents appear as flat task rows with status and elapsed time; no
   group labels or ids are shown.
 - Rows use generated subagent names plus compact inline task hints.
+- `TASK`, `STATUS`, and `TIME` remain fixed and aligned when the terminal is
+  resized; task text stays on one line and visible truncation ends in `...`.
+- While work is running, the close control is hidden. Collapsing the panel keeps
+  an animated summary visible, and starting another subagent reopens the panel.
+- After all rows finish, the close control returns and dismisses the panel.
 - After completion, the panel remains visible. Submitting the next prompt
   collapses it to the header summary.
 - Closing the panel hides it without deleting the just-finished rows; starting

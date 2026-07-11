@@ -152,8 +152,9 @@ Screen {
 }
 
 #subagents-groups-scroll {
-    width: 28;
-    min-width: 24;
+    width: 25%;
+    min-width: 15;
+    max-width: 28;
     height: auto;
     max-height: 11;
     padding: 0 1 0 0;
@@ -167,8 +168,15 @@ Screen {
     width: 1fr;
     height: auto;
     max-height: 11;
+    overflow-x: hidden;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
+}
+
+#subagents-tasks {
+    width: 100%;
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
 
 #prompt-panel {
