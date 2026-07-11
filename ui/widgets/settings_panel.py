@@ -15,12 +15,15 @@ from textual.widgets import Button, Input, Static
 
 from config.settings import (
     DYNAMIC_SUBAGENTS,
+    DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
     git_protection_enabled,
+    set_dynamic_subagent_response_schema,
     set_dynamic_subagents,
     set_execute_env_allow,
     set_execute_env_mode,
@@ -32,7 +35,7 @@ from config.settings import (
     tool_enabled,
 )
 
-ToggleKind = Literal["git", "system", "enabled", "always_allow"]
+ToggleKind = Literal["git", "system", "response_schema", "enabled", "always_allow"]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
     "conda_name": "conda env name",
@@ -96,9 +99,15 @@ class SettingsPanel(Vertical):
                         ToggleCell("system", DYNAMIC_SUBAGENTS),
                         dynamic_subagents_enabled(self.settings),
                     )
+                with Horizontal(classes="settings-row settings-child-row"):
+                    yield Static("Response schemas", classes="settings-label settings-child-label")
+                    yield self._toggle_button(
+                        ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
+                        dynamic_subagent_response_schema_enabled(self.settings),
+                    )
 
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
-                yield SettingsHeaderRow("Tool")
+                yield SettingsHeaderRow("")
                 for tool_name in INBUILT_DANGEROUS_TOOLS:
                     enabled = tool_enabled(self.settings, tool_name)
                     with Horizontal(classes="settings-row"):
@@ -153,7 +162,7 @@ class SettingsPanel(Vertical):
                 yield Static("Examples only. Use comma-separated names.", classes="settings-help")
 
                 yield Static("Custom Tools", classes="settings-section custom")
-                yield SettingsHeaderRow("Tool")
+                yield SettingsHeaderRow("")
                 custom_names = custom_tool_names(self.tool_metadata)
                 if not custom_names:
                     yield Static("No custom tools loaded", classes="settings-empty")
@@ -246,6 +255,8 @@ class SettingsPanel(Vertical):
             updated = set_git_protection(self.settings, value)
         elif cell.kind == "system":
             updated = set_dynamic_subagents(self.settings, value)
+        elif cell.kind == "response_schema":
+            updated = set_dynamic_subagent_response_schema(self.settings, value)
         elif cell.kind == "enabled":
             updated = set_tool_enabled(self.settings, cell.name, value)
         else:
@@ -275,9 +286,7 @@ class SettingsPanel(Vertical):
     def _refresh_buttons(self) -> None:
         for button_id, cell in self._button_cells.items():
             button = self.query_one(f"#{button_id}", Button)
-            locked = cell.locked
-            if cell.kind == "always_allow":
-                locked = not tool_enabled(self.settings, cell.name)
+            locked = self._cell_locked(cell)
             value = selected_value(self.settings, cell)
             button.label = button_label(cell, value, locked=locked, enabled=tool_enabled(self.settings, cell.name))
             button.disabled = locked
@@ -286,6 +295,8 @@ class SettingsPanel(Vertical):
     def _cell_locked(self, cell: ToggleCell) -> bool:
         if cell.kind == "always_allow":
             return not tool_enabled(self.settings, cell.name)
+        if cell.kind == "response_schema":
+            return not dynamic_subagents_enabled(self.settings)
         return cell.locked
 
     def _set_status(self, message: str) -> None:
@@ -363,6 +374,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return git_protection_enabled(settings)
     if cell.kind == "system":
         return dynamic_subagents_enabled(settings)
+    if cell.kind == "response_schema":
+        return dynamic_subagent_response_schema_enabled(settings)
     if cell.kind == "enabled":
         return tool_enabled(settings, cell.name)
     return tool_always_allow(settings, cell.name)

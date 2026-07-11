@@ -26,6 +26,7 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tool_enabled(loaded, "write_file"))
         self.assertFalse(settings.tool_enabled(loaded, "execute"))
         self.assertFalse(settings.dynamic_subagents_enabled(loaded))
+        self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
@@ -88,6 +89,19 @@ class SettingsTests(unittest.TestCase):
         updated = settings.set_dynamic_subagents(updated, False)
         self.assertFalse(settings.dynamic_subagents_enabled(updated))
 
+    def test_dynamic_response_schema_defaults_on_and_can_toggle(self) -> None:
+        """Dynamic response schemas should stay enabled for compatibility."""
+        loaded = settings.normalize_settings({})
+
+        self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
+
+        updated = settings.set_dynamic_subagent_response_schema(loaded, False)
+        self.assertFalse(settings.dynamic_subagent_response_schema_enabled(updated))
+        self.assertFalse(settings.dynamic_subagents_enabled(updated))
+
+        updated = settings.set_dynamic_subagent_response_schema(updated, True)
+        self.assertTrue(settings.dynamic_subagent_response_schema_enabled(updated))
+
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
         """Partial settings should merge with defaults; malformed YAML should not crash."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -98,6 +112,7 @@ class SettingsTests(unittest.TestCase):
                 "system:\n"
                 "  dynamic_subagents:\n"
                 "    enabled: true\n"
+                "    response_schema: false\n"
                 "hitl:\n"
                 "  git_protection:\n"
                 "    enabled: false\n"
@@ -110,6 +125,7 @@ class SettingsTests(unittest.TestCase):
 
             loaded = settings.load_settings(workspace)
             self.assertTrue(settings.dynamic_subagents_enabled(loaded))
+            self.assertFalse(settings.dynamic_subagent_response_schema_enabled(loaded))
             self.assertFalse(settings.git_protection_enabled(loaded))
             self.assertFalse(settings.tool_enabled(loaded, "write_file"))
             self.assertTrue(settings.tool_always_allow(loaded, "write_file"))
@@ -143,6 +159,7 @@ class SettingsTests(unittest.TestCase):
 
         self.assertIn("settings.yml", str(settings.settings_path(workspace)))
         self.assertIn("git_protection", text)
+        self.assertIn("response_schema: true", text)
         self.assertIn("web_search", text)
         self.assertIn("enabled: false", text)
         self.assertFalse(settings.git_protection_enabled(loaded))

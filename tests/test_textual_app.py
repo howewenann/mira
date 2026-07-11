@@ -22,7 +22,16 @@ from textual.widgets import Button, Input, Static, TextArea
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
-from config.settings import dynamic_subagents_enabled, execute_env_settings, load_settings, tool_always_allow, tool_enabled
+from config.settings import (
+    dynamic_subagent_response_schema_enabled,
+    dynamic_subagents_enabled,
+    execute_env_settings,
+    load_settings,
+    save_settings,
+    set_dynamic_subagents,
+    tool_always_allow,
+    tool_enabled,
+)
 from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
 from runtime.trace_stream import TraceStream
@@ -32,6 +41,7 @@ from ui.renderer import Renderer
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import strip_ansi
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
 from ui.widgets.session_history import session_label
 
@@ -2191,6 +2201,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query(Button)) >= 10)
                 rendered = "\n".join(renderable_plain(child) for child in panel.query(Static))
+                static_labels = {renderable_plain(child).strip() for child in panel.query(Static)}
                 buttons = {button.id: button for button in panel.query(Button)}
 
                 self.assertNotIn("Config", rendered)
@@ -2205,8 +2216,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Additional env var names", rendered)
                 self.assertIn("Examples only. Use comma-separated names.", rendered)
                 self.assertIn("Custom Tools", rendered)
+                self.assertNotIn("Tool", static_labels)
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("Dynamic subagents", rendered)
+                self.assertIn("Response schemas", rendered)
                 self.assertIn("write_file", rendered)
                 self.assertIn("edit_file", rendered)
                 self.assertIn("eval", rendered)
@@ -2214,6 +2227,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("execute", rendered)
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
+                self.assertIn("settings-toggle-response_schema-response_schema", buttons)
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
@@ -2230,6 +2244,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(panel.query_one("#settings-execute-env-allow", Input).display)
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
+                self.assertEqual(str(buttons["settings-toggle-response_schema-response_schema"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -2242,6 +2258,71 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_tool_section_headers_match_system_spacing(self) -> None:
+        """Tool tables should use the compact System Settings row progression."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 55)) as pilot:
+                await pilot.pause()
+                app.mode.setdefault("resources", {})["tools"] = [
+                    {
+                        "name": "project_status",
+                        "path": "/.mira/tools/status.py",
+                        "source": "project",
+                        "replaces": "",
+                    }
+                ]
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 3)
+                await pilot.pause()
+
+                labels = {
+                    renderable_plain(widget).strip(): widget
+                    for widget in panel.query(Static)
+                    if renderable_plain(widget).strip()
+                }
+                system_header, inbuilt_header, custom_header = list(panel.query(SettingsHeaderRow))
+
+                for section_name, header, first_row in (
+                    ("System Settings", system_header, labels["Git Protection"]),
+                    ("Inbuilt Tools", inbuilt_header, labels["write_file"]),
+                ):
+                    section = labels[section_name]
+                    self.assertEqual(header.region.y, section.region.y + section.region.height)
+                    self.assertEqual(first_row.region.y, header.region.y + header.region.height)
+
+                custom_section = labels["Custom Tools"]
+                custom_first_row = labels["project_status"]
+                self.assertEqual(custom_header.region.y, custom_section.region.y + custom_section.region.height)
+                self.assertEqual(custom_first_row.region.y, custom_header.region.y + custom_header.region.height)
+
+                enable_x = [
+                    header.query_one(".settings-column-label.enabled", Static).region.x
+                    for header in (system_header, inbuilt_header, custom_header)
+                ]
+                self.assertEqual(enable_x, [enable_x[0]] * 3)
+
+                execute_section = labels["Execute Environment"]
+                inbuilt_section = labels["Inbuilt Tools"]
+                last_system_row = labels["Response schemas"]
+                last_inbuilt_row = labels["execute"]
+                run_commands = labels["Run commands in"]
+                execute_help = labels["Examples only. Use comma-separated names."]
+                self.assertEqual(
+                    inbuilt_section.region.y,
+                    last_system_row.region.y + last_system_row.region.height + 1,
+                )
+                self.assertEqual(
+                    execute_section.region.y,
+                    last_inbuilt_row.region.y + last_inbuilt_row.region.height + 1,
+                )
+                self.assertEqual(run_commands.region.y, execute_section.region.y + execute_section.region.height)
+                self.assertEqual(custom_section.region.y, execute_help.region.y + execute_help.region.height + 2)
 
     async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
         """Inbuilt tool enable buttons should save disabled state and lock approvals."""
@@ -2295,6 +2376,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 buttons = {button.id: button for button in panel.query(Button)}
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "yes")
+                self.assertFalse(buttons["settings-toggle-response_schema-response_schema"].disabled)
+                self.assertEqual(len(calls), 1)
+
+    async def test_settings_panel_toggles_dynamic_response_schemas(self) -> None:
+        """Dynamic response schemas should save independently and rebuild agents."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            settings = set_dynamic_subagents(load_settings(workspace), True)
+            save_settings(workspace, settings)
+            app = make_app(workspace=workspace, config={"settings": settings})
+            calls = []
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                button_id = "settings-toggle-response_schema-response_schema"
+                await wait_until(lambda: button_id in {button.id for button in panel.query(Button)})
+
+                panel.query_one(f"#{button_id}", Button).press()
+                await wait_until(lambda: not dynamic_subagent_response_schema_enabled(load_settings(workspace)))
+
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertEqual(str(buttons[button_id].label), "no")
                 self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_execute_env_cycle_preserves_scroll(self) -> None:
@@ -2305,6 +2415,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 18)) as pilot:
                 await pilot.pause()
+                app.mode.setdefault("resources", {})["tools"] = [
+                    {
+                        "name": "project_status",
+                        "path": "/.mira/tools/status.py",
+                        "source": "project",
+                        "replaces": "",
+                    }
+                ]
                 async def rebuild() -> None:
                     return None
 

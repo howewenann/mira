@@ -12,9 +12,17 @@ from agent.llm import get_llm
 from agent.middleware import ModelToolVisibilityMiddleware, build_agent_middleware
 from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, plan_system_prompt
 from agent.resources import build_resources
+from agent.subagent_compilation import compile_dynamic_subagents
 from agent.tools.specs import collect_tool_specs
 from config.metadata import ModelMetadata
-from config.settings import EXECUTE_TOOL, hitl_settings, tool_always_allow, tool_enabled
+from config.settings import (
+    EXECUTE_TOOL,
+    dynamic_subagent_response_schema_enabled,
+    dynamic_subagents_enabled,
+    hitl_settings,
+    tool_always_allow,
+    tool_enabled,
+)
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 ACTION_EXCLUDED_TOOLS = (PRESENT_PLAN_TOOL,)
@@ -105,6 +113,23 @@ def _build_agent(
         settings=(config or {}).get("settings"),
         extra_middleware=extra_middleware,
     )
+    resolved_interrupt_on = (
+        _write_interrupts(config, resources.metadata["tools"])
+        if interrupt_on == SETTINGS_INTERRUPTS
+        else interrupt_on
+    )
+    subagents = resources.subagents
+    settings = (config or {}).get("settings")
+    if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
+        subagents = compile_dynamic_subagents(
+            subagents,
+            model=model,
+            tools=resources.tools,
+            backend=backend,
+            skills=resources.skills,
+            permissions=permissions,
+            interrupt_on=resolved_interrupt_on,
+        )
 
     agent = create_deep_agent(
         model=model,
@@ -113,12 +138,10 @@ def _build_agent(
         tools=resources.tools,
         skills=resources.skills,
         memory=resources.memory,
-        subagents=resources.subagents,
+        subagents=subagents,
         permissions=permissions,
         system_prompt=system_prompt,
-        interrupt_on=_write_interrupts(config, resources.metadata["tools"])
-        if interrupt_on == SETTINGS_INTERRUPTS
-        else interrupt_on,
+        interrupt_on=resolved_interrupt_on,
         checkpointer=checkpointer,
     )
     _attach_tool_specs(

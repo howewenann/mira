@@ -11,12 +11,16 @@ import yaml
 SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
+DYNAMIC_SUBAGENT_RESPONSE_SCHEMA = "response_schema"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task", EXECUTE_TOOL)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system": {
-        DYNAMIC_SUBAGENTS: {"enabled": False},
+        DYNAMIC_SUBAGENTS: {
+            "enabled": False,
+            DYNAMIC_SUBAGENT_RESPONSE_SCHEMA: True,
+        },
     },
     "hitl": {
         "git_protection": {"enabled": True},
@@ -76,8 +80,13 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     system = raw.get("system")
     if isinstance(system, dict):
         dynamic_subagents = system.get(DYNAMIC_SUBAGENTS)
-        if isinstance(dynamic_subagents, dict) and isinstance(dynamic_subagents.get("enabled"), bool):
-            settings["system"][DYNAMIC_SUBAGENTS]["enabled"] = dynamic_subagents["enabled"]
+        if isinstance(dynamic_subagents, dict):
+            if isinstance(dynamic_subagents.get("enabled"), bool):
+                settings["system"][DYNAMIC_SUBAGENTS]["enabled"] = dynamic_subagents["enabled"]
+            if isinstance(dynamic_subagents.get(DYNAMIC_SUBAGENT_RESPONSE_SCHEMA), bool):
+                settings["system"][DYNAMIC_SUBAGENTS][DYNAMIC_SUBAGENT_RESPONSE_SCHEMA] = dynamic_subagents[
+                    DYNAMIC_SUBAGENT_RESPONSE_SCHEMA
+                ]
 
     hitl = raw.get("hitl")
     if not isinstance(hitl, dict):
@@ -183,6 +192,26 @@ def set_dynamic_subagents(settings: dict[str, Any], enabled: bool) -> dict[str, 
     """Return settings with dynamic eval subagents enabled or disabled."""
     updated = normalize_settings(settings)
     updated["system"][DYNAMIC_SUBAGENTS]["enabled"] = bool(enabled)
+    return updated
+
+
+def dynamic_subagent_response_schema_enabled(config_or_settings: dict[str, Any] | None) -> bool:
+    """Return whether eval may request dynamic subagent response schemas."""
+    if not isinstance(config_or_settings, dict):
+        return True
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return bool(
+        normalized.get("system", {})
+        .get(DYNAMIC_SUBAGENTS, {})
+        .get(DYNAMIC_SUBAGENT_RESPONSE_SCHEMA, True)
+    )
+
+
+def set_dynamic_subagent_response_schema(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Return settings with dynamic subagent response schemas configured."""
+    updated = normalize_settings(settings)
+    updated["system"][DYNAMIC_SUBAGENTS][DYNAMIC_SUBAGENT_RESPONSE_SCHEMA] = bool(enabled)
     return updated
 
 

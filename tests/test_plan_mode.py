@@ -269,6 +269,52 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(code_middleware.call_args.kwargs["subagents"])
 
+    def test_action_agent_compiles_subagents_when_response_schemas_are_disabled(self) -> None:
+        """Schema-free dynamic mode should pass compiled workers to DeepAgents."""
+        config = {
+            "settings": {
+                "system": {
+                    "dynamic_subagents": {"enabled": True, "response_schema": False},
+                }
+            }
+        }
+        compiled = [{"name": "general-purpose", "description": "Compiled", "runnable": object()}]
+
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.compile_dynamic_subagents", return_value=compiled) as compile_subagents,
+            patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
+        ):
+            factory.build_agent(config, ".", "checkpointer")
+
+        compile_subagents.assert_called_once()
+        self.assertIs(create_deep_agent.call_args.kwargs["subagents"], compiled)
+
+    def test_action_agent_leaves_subagents_raw_when_response_schemas_are_enabled(self) -> None:
+        """The compatibility default should leave DeepAgents construction unchanged."""
+        config = {
+            "settings": {
+                "system": {
+                    "dynamic_subagents": {"enabled": True, "response_schema": True},
+                }
+            }
+        }
+
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.compile_dynamic_subagents") as compile_subagents,
+            patch("agent.factory.create_deep_agent", return_value="agent"),
+        ):
+            factory.build_agent(config, ".", "checkpointer")
+
+        compile_subagents.assert_not_called()
+
     def test_agent_build_passes_metadata_before_summarization_middleware(self) -> None:
         """Model metadata should be applied before DeepAgents summarization middleware is created."""
         metadata = ModelMetadata(10000, "test")

@@ -410,15 +410,11 @@ Button.prompt-panel-button:focus {
 
 .settings-section {
     height: 1;
-    margin: 2 0 1 0;
+    margin: 0;
     width: auto;
     padding: 0;
     text-style: bold;
     content-align: left middle;
-}
-
-.settings-section.system {
-    margin-top: 0;
 }
 
 .settings-section.system {
@@ -433,6 +429,15 @@ Button.prompt-panel-button:focus {
     color: #7FBE72;
 }
 
+.settings-section.inbuilt,
+.settings-section.execute-env {
+    margin-top: 1;
+}
+
+.settings-section.custom {
+    margin-top: 2;
+}
+
 .settings-section.execute-env {
     color: #cba6f7;
 }
@@ -440,6 +445,11 @@ Button.prompt-panel-button:focus {
 .settings-row {
     height: 2;
     width: auto;
+}
+
+.settings-child-label {
+    padding-left: 3;
+    color: #5bb8b1;
 }
 
 .settings-wide-row {

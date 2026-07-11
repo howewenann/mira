@@ -80,7 +80,11 @@ MIRA does not create or overwrite `.env`. Workspace settings such as Git
 protection, dynamic eval subagents, and tool approval behavior live in
 `.mira/settings.yml`; change them from the TUI with `/settings`. Dynamic
 subagents are disabled by default, so QuickJS eval does not expose its
-top-level `task()` helper unless enabled in System Settings.
+top-level `task()` helper unless enabled in System Settings. Dynamic response
+schemas remain enabled by default for compatibility. Disable them when a local
+model cannot reliably complete DeepAgents' structured-output tool protocol;
+MIRA then keeps the same full subagents but compiles them ahead of time, so
+Eval `responseSchema` requests are rejected before a child model starts.
 
 MIRA's own Python runtime can be different from the environment used by the
 agent's `execute` tool. In `/settings`, the Execute Environment section lets a
@@ -203,7 +207,9 @@ what MIRA loaded and which project resources replaced defaults.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
   `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
   QuickJS' top-level `task()` helper when enabled in `/settings`, and
-  write/edit/shell tools stay outside that bridge.
+  write/edit/shell tools stay outside that bridge. The nested Response schemas
+  setting can make all synchronous subagents text-only for dynamic Eval
+  dispatch while retaining their normal tools and middleware.
 - Project-specific `execute` environment selection for system shell, Conda, or
   venv commands without saving host env values.
 - Planning mode that hides and blocks project write tools, with explicit plan

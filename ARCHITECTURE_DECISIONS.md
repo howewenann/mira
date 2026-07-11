@@ -104,11 +104,20 @@ tool calls use LM Studio's `/v1` server path instead of the native
 tool approval choices are workspace behavior. Dynamic eval subagents are also
 workspace behavior: they let JavaScript eval spawn subagents through
 QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
-requires an explicit System Settings toggle. Keeping these separate makes
-settings easier to inspect and safer to change from the TUI.
+requires an explicit System Settings toggle. Dynamic response schemas default
+on for compatibility, but can be disabled independently for models that do not
+reliably complete the synthetic structured-output tool protocol. In that mode,
+MIRA materializes every raw synchronous subagent with its inherited model,
+tools, middleware, skills, permissions, and interrupts, then passes it to
+DeepAgents as a `CompiledSubAgent`. A compiled `general-purpose` replaces the
+auto-added raw one by name. DeepAgents therefore rejects a dynamic
+`responseSchema` before starting the child while ordinary text delegation and
+static response formats continue to work. Keeping these choices in workspace
+settings makes them inspectable without changing QuickJS or installed packages.
 
 **Where to check:** `config/loader.py`, `config/llm.py`, `agent/llm.py`,
-`config/settings.py`, `ui/widgets/settings_panel.py`.
+`config/settings.py`, `agent/subagent_compilation.py`,
+`ui/widgets/settings_panel.py`.
 
 **Update this when:** A setting moves between `.env` and `.mira/settings.yml`,
 new provider variables are introduced, or `/settings` changes what it controls.

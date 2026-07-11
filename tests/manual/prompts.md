@@ -76,6 +76,43 @@ Expected:
 - The durable session history contains the eval tool call/result and assistant
   summary, not separate replayed panel rows for each eval-created subagent.
 
+## Dynamic Eval Response Schemas
+
+In `/settings`, enable **Dynamic subagents**. First leave its nested **Response
+schemas** setting enabled and enter:
+
+```text
+Use eval to ask a general-purpose subagent to judge which is better, "quiet pond" or "bright market". Require a responseSchema with string fields winner and reason, then return the result.
+```
+
+Expected:
+
+- Eval may dispatch the structured request using the model/provider's normal
+  structured-output behavior.
+- Existing behavior is unchanged when Response schemas is `yes`.
+
+Then set **Response schemas** to `no` and repeat the same prompt.
+
+Expected:
+
+- DeepAgents reports that `response_schema` cannot be used with the compiled
+  `general-purpose` subagent.
+- No child model starts for the rejected schema-bearing dispatch.
+- MIRA remains responsive and does not enter a child todo or generation loop.
+
+With Response schemas still set to `no`, enter:
+
+```text
+Use eval to ask a general-purpose subagent to inspect the workspace and judge which is better, "quiet pond" or "bright market". Do not pass responseSchema. Return its text answer.
+```
+
+Expected:
+
+- The compiled full subagent starts normally.
+- It can use todos, filesystem tools, project tools, and skills available to
+  the current agent.
+- Eval receives and returns the final text answer.
+
 ## Cancelled TUI Bubble Boundaries
 
 Run the interactive TUI:
