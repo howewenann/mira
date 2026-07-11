@@ -105,9 +105,9 @@ Screen {
 
 #prompt {
     height: 5;
-    border: tall #5bb8b1;
+    border: heavy #5bb8b1;
     padding: 0 1;
-    background: #101516;
+    background: transparent;
 }
 
 #subagents-panel {
@@ -206,7 +206,7 @@ Screen {
 #prompt-panel-input {
     height: 3;
     margin-top: 1;
-    border: tall #5bb8b1;
+    border: heavy #5bb8b1;
     padding: 0 1;
     background: #101516;
 }
@@ -331,13 +331,13 @@ Button.prompt-panel-button:focus {
     width: auto;
     height: 3;
     margin-right: 1;
-    border: tall #6f7f4b;
+    border: heavy #6f7f4b;
     background: #172018;
     color: #eef5d8;
 }
 
 .plan-action:focus {
-    border: tall #d2a957;
+    border: heavy #d2a957;
     text-style: bold;
 }
 
@@ -383,14 +383,14 @@ Button.prompt-panel-button:focus {
     height: 3;
     margin: 0 0 0 1;
     color: #d2d8dc;
-    background: #151a1d;
-    border: tall #56616a;
+    background: transparent;
+    border: heavy #56616a;
 }
 
 .settings-close:focus {
-    color: #eef7f8;
-    border: tall #d2a957;
-    text-style: bold;
+    color: #d2d8dc;
+    background: transparent;
+    border: heavy #56616a;
 }
 
 #settings-body {
@@ -430,8 +430,12 @@ Button.prompt-panel-button:focus {
 }
 
 .settings-row {
-    height: 3;
+    height: 2;
     width: auto;
+}
+
+.settings-wide-row {
+    height: 3;
 }
 
 .settings-header-row {
@@ -454,15 +458,17 @@ Button.prompt-panel-button:focus {
 
 .settings-column-label.enabled,
 .settings-column-label.always {
-    width: 14;
+    width: 12;
     min-width: 12;
+    margin: 0 2 0 0;
     height: 1fr;
     content-align: center middle;
 }
 
 .settings-mode {
-    width: 14;
+    width: 12;
     min-width: 12;
+    margin: 0 2 0 0;
     height: 1fr;
     content-align: center middle;
 }
@@ -470,32 +476,45 @@ Button.prompt-panel-button:focus {
 .settings-toggle {
     min-width: 12;
     width: 12;
-    height: 3;
-    margin: 0 1 0 0;
-    border: tall #56616a;
+    height: 1;
+    margin: 0 2 1 0;
+    border: none;
+    content-align: center middle;
+    text-align: center;
+    text-style: bold;
 }
 
 .settings-toggle.on {
     color: #e8fffb;
     background: #14524f;
-    border: tall #5bb8b1;
+    border: none;
 }
 
 .settings-toggle.off {
     color: #d2d8dc;
     background: #20272b;
-    border: tall #6f7782;
+    border: none;
 }
 
 .settings-toggle.locked {
     color: #7a858c;
     background: #151a1d;
-    border: tall #56616a;
+    border: none;
 }
 
 .settings-toggle:focus {
-    border: tall #d2a957;
+    border: none;
     text-style: bold;
+}
+
+.settings-toggle.on:focus {
+    color: #e8fffb;
+    background: #14524f;
+}
+
+.settings-toggle.off:focus {
+    color: #d2d8dc;
+    background: #20272b;
 }
 
 .settings-empty,
@@ -508,14 +527,15 @@ Button.prompt-panel-button:focus {
     min-width: 32;
     height: 3;
     margin: 0 1 0 0;
-    border: tall #56616a;
+    border: solid #56616a;
     color: #e8fffb;
     background: #20272b;
 }
 
-.settings-value-button:focus,
-.settings-input:focus {
-    border: tall #d2a957;
+.settings-value-button:focus {
+    border: solid #56616a;
+    color: #e8fffb;
+    background: #20272b;
 }
 
 .settings-input {
@@ -523,9 +543,13 @@ Button.prompt-panel-button:focus {
     min-width: 36;
     height: 3;
     margin: 0 1 0 0;
-    border: tall #56616a;
+    border: solid #56616a;
     color: #e8fffb;
     background: #151a1d;
+}
+
+.settings-input:focus {
+    border: solid #5bb8b1;
 }
 
 .settings-help {
