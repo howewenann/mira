@@ -248,6 +248,9 @@ for the plan explicitly. Material questions must use `ask_user` choices rather
 than an open-ended assistant message. At the start of each turn, the planning
 prompt requires a semantic classification: safe conversation may end in prose,
 while implementation intent must end through `ask_user` or `present_plan`.
+Each wrapped planning request repeats this terminal contract after the user's
+text so lengthy repository research does not displace it from the model's final
+output decision.
 This uses the existing planning-agent call, not punctuation/regex
 classification or an extra model-judge request.
 Structured plans are shown as ephemeral plan bubbles with explicit Implement,

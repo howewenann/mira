@@ -18,6 +18,7 @@ from agent.plan_policy import (
     PLAN_DISABLED_TOOLS,
     PLAN_OUTPUT_TEMPLATE,
     PLAN_PROJECT_WRITE_TOOLS,
+    PLAN_TERMINAL_REMINDER,
     PRESENT_PLAN_TOOL,
     plan_disabled_tools_text,
 )
@@ -55,7 +56,9 @@ Fill every present_plan section: Title, Summary, Key Changes, Test Plan, and Ass
 If execute is unavailable, still include test scripts/checks to create or run, skip running tests, and tell the user tests were not run because execute is unavailable.
 
 User request:
-{text}"""
+{text}
+
+{terminal_reminder}"""
 
 COMMAND_HELP = {
     "/help": "show commands and what they do",
@@ -592,6 +595,7 @@ def plan_request_text(text: str) -> str:
         behavior_policy=PLAN_BEHAVIOR_POLICY,
         plan_template=PLAN_OUTPUT_TEMPLATE,
         text=text,
+        terminal_reminder=PLAN_TERMINAL_REMINDER,
     )
 
 

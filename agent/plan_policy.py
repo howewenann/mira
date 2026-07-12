@@ -22,6 +22,11 @@ Examples: 'What is a structured model call?' is SAFE_CONVERSATION. 'Explain how 
 - Do not call present_plan for ordinary safe conversation, read-only findings with no intended project change, or recall of an existing plan unless you are proposing a new or revised plan.
 Before ending a planning turn, follow the classified intent's terminal contract: SAFE_CONVERSATION may end with a normal assistant response; IMPLEMENTATION must call ask_user for required input or present_plan for a decision-complete proposal."""
 
+PLAN_TERMINAL_REMINDER = """Before returning, check the intent you classified.
+- For SAFE_CONVERSATION, you may return a normal assistant message.
+- For IMPLEMENTATION, repository research and prose findings are intermediate work, not a valid final response. If a material decision is required, call ask_user. Otherwise, call present_plan.
+- Never end an IMPLEMENTATION turn with assistant prose or a user-facing question."""
+
 PLAN_OUTPUT_TEMPLATE = """Use this exact content template when calling present_plan.
 Pass summary, key_changes, test_plan, and assumptions as JSON arrays of strings, never as single strings:
 Title: concise implementation title.
