@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pyfiglet import Figlet
 from rich.cells import cell_len
@@ -3869,15 +3869,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Key Changes", rendered)
             self.assertIn("Test Plan", rendered)
             self.assertIn("Assumptions", rendered)
-            self.assertEqual(len(app.query(".plan-action")), 3)
+            buttons = list(app.query(".plan-action"))
+            self.assertEqual(len(buttons), 3)
+            self.assertEqual(
+                [button.label.plain for button in buttons],
+                ["Implement (i)", "Revise (r)", "Discard (d)"],
+            )
+            self.assertEqual(len(app.query(".plan-actions")), 1)
+            self.assertTrue(all(button.compact for button in buttons))
+            self.assertTrue(all(button.region.height == 1 for button in buttons))
+            self.assertTrue(all(all(edge[0] == "" for edge in button.styles.border) for button in buttons))
 
-            app.query_one("#plan-discard-plan-1", Button).press()
+            discard_button = app.query_one("#plan-discard-plan-1", Button)
+            discard_button.scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
+            await pilot.click("#plan-discard-plan-1")
             await wait_until(lambda: app.mode["current_plan"] is None)
 
             self.assertIsNone(app.mode["current_plan"])
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Status: discarded", rendered)
+
+    async def test_present_plan_shortcuts_match_visible_button_labels(self) -> None:
+        """Focused plan controls should honor the shortcuts shown in their labels."""
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Shortcut Plan",
+            "summary": ["Keep shortcut labels honest."],
+            "key_changes": ["Handle i, r, and d."],
+            "test_plan": ["Press each visible shortcut."],
+            "assumptions": ["The plan button row has focus."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await app.present_plan(interrupt)
+            await pilot.pause()
+
+            first_button = app.query_one("#plan-implement-plan-1", Button)
+            first_button.focus()
+            await wait_until(lambda: first_button.has_focus)
+
+            with patch.object(app, "_handle_plan_action", new_callable=AsyncMock) as handle_action:
+                for count, (shortcut, action) in enumerate(
+                    (("i", "implement"), ("r", "revise"), ("d", "discard")),
+                    start=1,
+                ):
+                    await pilot.press(shortcut)
+                    await wait_until(lambda: handle_action.await_count == count)
+                    self.assertEqual(handle_action.await_args_list[-1].args, (action, "plan-1"))
+
+                await pilot.press("enter")
+                await wait_until(lambda: handle_action.await_count == 4)
+                self.assertEqual(handle_action.await_args_list[-1].args, ("implement", "plan-1"))
 
     async def test_cancel_turn_keeps_unrelated_plan_bubble_active(self) -> None:
         """Cancelling a later turn should not discard an active plan bubble."""

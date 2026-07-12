@@ -117,18 +117,23 @@ should be run as workspace-relative paths such as `python tmp.py`.
 - Use `/help` in the TUI to see commands.
 - Use `/new-chat` or the chat history `+ New` action to start a fresh saved
   session without deleting the current one.
-- Use `/plan` when you want MIRA to think through a change without editing
-  files.
-  Implementation-ready planning turns appear as plan bubbles. Use Implement to
-  run the plan, Revise to give targeted feedback with the previous plan kept in
-  context, or Discard to close it. Plan bubbles include Summary, Key Changes,
-  Test Plan, and Assumptions. Test Plan items should name the exact tests or
-  checks to create/run and expected results. When a plan is implemented, MIRA
-  should run the feasible planned checks after building, or say exactly why a
-  check was skipped. If execute is unavailable, MIRA should still plan
-  test files/checks and say they were not run. Recent plan bubbles are included
-  in lightweight resume context so MIRA can answer follow-ups like "show me the
-  previous plan" after switching modes or resuming a session.
+- Use `/plan` for safe, read-only conversation and implementation planning.
+  `write_file`, `edit_file`, `execute`, `task`, and `eval` are hidden from the
+  planning agent. Explanations and read-only findings may remain normal chat;
+  requests that imply implementation should proactively become plan bubbles
+  without requiring a follow-up such as "show me the plan." Material decisions
+  should use `ask_user` choices instead of open-ended chat questions. Use
+  Implement to run the plan, Revise to give targeted feedback with the previous
+  plan kept in context, or Discard to close it. Plan bubbles include Summary,
+  Key Changes, Test Plan, and Assumptions. Test Plan items should name the exact
+  tests or checks to create/run and expected results. When a plan is
+  implemented, MIRA should run the feasible planned checks after building, or
+  say exactly why a check was skipped. If execute is unavailable, MIRA should
+  still plan test files/checks and say they were not run. Recent plan bubbles
+  are included in lightweight resume context so MIRA can answer follow-ups like
+  "show me the previous plan" after switching modes or resuming a session.
+  Implement, Revise, and Discard use the same compact one-row button treatment
+  as prompt-panel choices.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
   active agents without restarting the TUI.
@@ -204,6 +209,7 @@ what MIRA loaded and which project resources replaced defaults.
   buttons with an open-ended fallback, and scroll only when larger choice sets
   are explicitly needed. Prompt-panel focus highlights the selected button
   itself; ask_user choices span the row so keyboard selection is easy to scan.
+  Planning mode uses this tool for every decision that needs a user answer.
 - QuickJS eval can call the safe project exploration tools `ls`, `read_file`,
   `glob`, and `grep` through PTC; optional dynamic subagent delegation uses
   QuickJS' top-level `task()` helper when enabled in `/settings`, and
@@ -212,9 +218,10 @@ what MIRA loaded and which project resources replaced defaults.
   dispatch while retaining their normal tools and middleware.
 - Project-specific `execute` environment selection for system shell, Conda, or
   venv commands without saving host env values.
-- Planning mode that hides and blocks project write tools, with explicit plan
-  bubbles for implementation-ready plans. Resolved plan bubbles stay as inactive
-  history; only the newest unresolved plan is actionable.
+- Planning mode that hides write, shell, eval, and delegation tools while still
+  supporting read-only conversation. Implementation intent produces a
+  structured plan bubble; resolved bubbles stay as inactive history and only
+  the newest unresolved plan is actionable.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display from DeepAgents' own summarization count, plus

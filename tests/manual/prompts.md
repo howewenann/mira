@@ -250,25 +250,32 @@ Then enter:
 
 ```text
 /plan
-discuss how to write a file called test.txt with the content 'hello world'
+explain how planning mode prevents project mutations
 ```
 
 Expected:
 
 - MIRA says it is in planning mode.
-- MIRA says write/edit tools are disabled or not allowed.
-- MIRA discusses the change without editing `test.txt`.
-- MIRA does not write or edit `test.txt`.
+- MIRA reports `write_file`, `edit_file`, `execute`, `task`, and `eval` as
+  disabled.
+- MIRA answers normally without creating a plan bubble or asking a follow-up.
 
 Then enter:
 
 ```text
-give me the plan
+find all dead code for refactoring
 ```
 
 Expected:
 
+- MIRA inspects the repository without using a disabled planning tool.
+- MIRA's reasoning classifies the request as implementation intent before it
+  begins repository research.
+- If a material scope decision is needed, MIRA calls `ask_user` with concise
+  choices instead of asking an open-ended chat question.
 - MIRA shows a structured plan bubble with Implement, Revise, and Discard.
+- Implement, Revise, and Discard are compact, borderless one-row buttons that
+  match the prompt-panel button treatment.
 - The plan bubble includes Summary, Key Changes, Test Plan, and Assumptions.
 - The Test Plan names an exact command/check to run and an expected result.
 - MIRA does not write or edit `test.txt` until Implement is chosen.

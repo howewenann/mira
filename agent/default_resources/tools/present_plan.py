@@ -12,10 +12,12 @@ PRESENT_PLAN_INTERRUPT_TYPE = "present_plan"
     "present_plan",
     description=(
         "Present a concrete implementation plan to the user for review. "
-        "Use this only in planning mode when the user explicitly asks for a plan, "
-        "final review, or implementation-ready proposal. Do not use it for ordinary "
-        "planning discussion or brainstorming. Fill every section: title, summary, "
-        "key_changes, test_plan, and assumptions."
+        "In planning mode, you must use this when the user has implementation intent and the proposal is "
+        "decision-complete, even when the user did not explicitly ask to see a plan. Also use it for explicit "
+        "new, revised, final, or implementation-ready plan requests. Do not use it for ordinary safe "
+        "conversation, read-only findings with no intended project change, or recall of an existing plan. "
+        "Fill every section: title, summary, key_changes, test_plan, and assumptions. Pass summary, "
+        "key_changes, test_plan, and assumptions as lists of strings, never as single strings."
     ),
 )
 def present_plan(

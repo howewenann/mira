@@ -12,6 +12,7 @@ from typing import Any
 from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Key
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
@@ -1050,6 +1051,31 @@ def pending_result_text(value: str) -> str:
     return value
 
 
+class PlanActionButton(Button):
+    """Compact plan control with shortcuts matching its visible label."""
+
+    SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "d": "discard"}
+
+    def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            self.press()
+            return
+
+        action = self.SHORTCUT_ACTIONS.get(event.key.lower())
+        if action is None:
+            return
+
+        bubble: Any = self.parent
+        while bubble is not None and not isinstance(bubble, PlanBubble):
+            bubble = bubble.parent
+        if bubble is None:
+            return
+
+        event.stop()
+        bubble.query_one(f"#plan-{action}-{bubble.plan_id}", Button).press()
+
+
 class PlanBubble(Vertical):
     """Structured plan transcript block with optional action buttons."""
 
@@ -1064,9 +1090,18 @@ class PlanBubble(Vertical):
         yield Static(self._render_plan(), classes="plan-body")
         if self.active:
             with Horizontal(classes="plan-actions"):
-                yield Button("Implement", id=f"plan-implement-{self.plan_id}", classes="plan-action")
-                yield Button("Revise", id=f"plan-revise-{self.plan_id}", classes="plan-action")
-                yield Button("Discard", id=f"plan-discard-{self.plan_id}", classes="plan-action")
+                yield PlanActionButton(
+                    "Implement (i)",
+                    id=f"plan-implement-{self.plan_id}",
+                    classes="plan-action",
+                    compact=True,
+                )
+                yield PlanActionButton(
+                    "Revise (r)", id=f"plan-revise-{self.plan_id}", classes="plan-action", compact=True
+                )
+                yield PlanActionButton(
+                    "Discard (d)", id=f"plan-discard-{self.plan_id}", classes="plan-action", compact=True
+                )
 
     @property
     def plan_id(self) -> str:

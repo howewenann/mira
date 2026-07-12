@@ -10,7 +10,12 @@ from langchain.agents.middleware.types import AgentMiddleware
 
 from agent.llm import get_llm
 from agent.middleware import ModelToolVisibilityMiddleware, build_agent_middleware
-from agent.plan_policy import PLAN_DENIED_FS_OPERATIONS, PLAN_PROJECT_WRITE_TOOLS, PRESENT_PLAN_TOOL, plan_system_prompt
+from agent.plan_policy import (
+    PLAN_DENIED_FS_OPERATIONS,
+    PLAN_DISABLED_TOOLS,
+    PRESENT_PLAN_TOOL,
+    plan_system_prompt,
+)
 from agent.resources import build_resources
 from agent.subagent_compilation import compile_dynamic_subagents
 from agent.tools.specs import collect_tool_specs
@@ -26,7 +31,7 @@ from config.settings import (
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 ACTION_EXCLUDED_TOOLS = (PRESENT_PLAN_TOOL,)
-PLAN_EXCLUDED_TOOLS = (*PLAN_PROJECT_WRITE_TOOLS, EXECUTE_TOOL)
+PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
 _REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()

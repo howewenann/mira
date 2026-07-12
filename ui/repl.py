@@ -13,11 +13,13 @@ from rich.table import Table
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.plan_policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+    PLAN_BEHAVIOR_POLICY,
     PLAN_BLOCKED_RESULT_MARKERS,
+    PLAN_DISABLED_TOOLS,
     PLAN_OUTPUT_TEMPLATE,
     PLAN_PROJECT_WRITE_TOOLS,
     PRESENT_PLAN_TOOL,
-    project_write_tools_text,
+    plan_disabled_tools_text,
 )
 from runtime.context_usage import context_usage_scope
 from runtime.runner import TurnResult, run_turn
@@ -45,12 +47,9 @@ User feedback:
 Create a revised plan using present_plan when ready. Preserve the existing intent unless the feedback explicitly changes it."""
 
 PLAN_REQUEST_TEMPLATE = """You are in planning mode.
-Do not call write_file, edit_file, or any other tool that modifies files.
-Do not attempt the requested change.
-Use normal assistant messages for discussion and brainstorming.
-If the user explicitly asks for a plan, final review, or implementation-ready proposal, call present_plan.
-You may also proactively call present_plan when the user is clearly asking for implementation work and you have enough context to propose a useful implementation plan.
-Do not call present_plan for early brainstorming, ambiguous intent, or minor follow-up discussion.
+The following tools are disabled: {disabled_tools}.
+Do not call a disabled tool or attempt the requested change.
+{behavior_policy}
 Fill every present_plan section: Title, Summary, Key Changes, Test Plan, and Assumptions.
 {plan_template}
 If execute is unavailable, still include test scripts/checks to create or run, skip running tests, and tell the user tests were not run because execute is unavailable.
@@ -66,7 +65,7 @@ COMMAND_HELP = {
     "/memories": "list loaded memory files and replacements",
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
-    "/plan": "enter planning mode; write/edit tools are disabled",
+    "/plan": "enter safe planning mode; mutating and delegation tools are disabled",
     "/act": "return to action mode",
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
@@ -299,7 +298,7 @@ async def handle_command(
         mode["plan_runs"] = mode.get("plan_runs", 0) + 1
         mode["plan_thread_id"] = plan_thread_id(session, mode["plan_runs"])
         mark_resume_context_pending(session, resumed=True)
-        write_line(renderer, f"planning mode: {project_write_tools_text()} disabled; use /act to leave", kind="status")
+        write_line(renderer, f"planning mode: {plan_disabled_tools_text()} disabled; use /act to leave", kind="status")
         return True
 
     if text == "/act":
@@ -428,7 +427,7 @@ def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, s
         blocked = {PRESENT_PLAN_TOOL}
         return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
-    blocked = {*PLAN_PROJECT_WRITE_TOOLS, "execute"}
+    blocked = set(PLAN_DISABLED_TOOLS)
     return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
 
@@ -588,7 +587,12 @@ def write_was_blocked(result: TurnResult) -> bool:
 
 def plan_request_text(text: str) -> str:
     """Wrap user input in the planning-mode instruction template."""
-    return PLAN_REQUEST_TEMPLATE.format(plan_template=PLAN_OUTPUT_TEMPLATE, text=text)
+    return PLAN_REQUEST_TEMPLATE.format(
+        disabled_tools=plan_disabled_tools_text(),
+        behavior_policy=PLAN_BEHAVIOR_POLICY,
+        plan_template=PLAN_OUTPUT_TEMPLATE,
+        text=text,
+    )
 
 
 def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:

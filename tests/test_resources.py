@@ -289,12 +289,27 @@ description: Project-specific workflow.
 
             description = str(ask_user.description)
 
+            self.assertIn("every user-facing question that needs an answer must use ask_user", description)
+            self.assertIn("never ask it in a normal assistant message", description)
             self.assertIn("without asking for ask_user, answer normally in chat", description)
             self.assertIn("explicitly asks you to use ask_user with many options", description)
             self.assertIn("include every requested option", description)
             self.assertIn("MIRA numbers choices in the UI", description)
             self.assertIn("good options: ['test_checkpoint.py', 'test_config.py']", description)
             self.assertIn("bad options: ['1. test_checkpoint.py', '2. test_config.py']", description)
+
+    def test_present_plan_description_requires_implementation_intent(self) -> None:
+        """The planning tool should not wait for an explicit request when implementation is intended."""
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+            present_plan = next(tool for tool in resources.tools if tool.name == "present_plan")
+
+            description = str(present_plan.description)
+
+            self.assertIn("must use this when the user has implementation intent", description)
+            self.assertIn("did not explicitly ask to see a plan", description)
+            self.assertIn("recall of an existing plan", description)
+            self.assertIn("as lists of strings, never as single strings", description)
 
     def test_regex_grep_matches_regex_patterns(self) -> None:
         """The default grep should treat the pattern as regex."""

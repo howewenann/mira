@@ -236,10 +236,24 @@ settings-panel tool behavior changes.
 
 ## Planning Mode
 
-**Decision:** Planning mode has a separate agent with project write tools hidden
-from the model and blocked by filesystem permissions as a backstop. Structured
-plans are created only through the `present_plan` tool and shown as ephemeral
-plan bubbles with explicit Implement, Revise, and Discard actions.
+**Decision:** Planning mode has a separate agent with `write_file`, `edit_file`,
+`execute`, `task`, and `eval` hidden from the model; filesystem permissions also
+deny writes as a backstop. This keeps shell execution, programmatic evaluation,
+and delegation paths out of planning mode rather than relying on their normal
+action-mode approval behavior. Planning mode still supports ordinary read-only
+conversation, explanations, findings, brainstorming, and existing-plan recall.
+Requests with implementation intent must produce a structured plan through the
+`present_plan` tool once decision-complete, without requiring the user to ask
+for the plan explicitly. Material questions must use `ask_user` choices rather
+than an open-ended assistant message. At the start of each turn, the planning
+prompt requires a semantic classification: safe conversation may end in prose,
+while implementation intent must end through `ask_user` or `present_plan`.
+This uses the existing planning-agent call, not punctuation/regex
+classification or an extra model-judge request.
+Structured plans are shown as ephemeral plan bubbles with explicit Implement,
+Revise, and Discard actions. Their compact one-row styling and visible keyboard
+shortcut labels intentionally mirror prompt-panel choices without changing
+PromptPanel itself.
 Every structured plan includes Summary, Key Changes, Test Plan, and
 Assumptions. Planning prompts include an exact content template so Summary names
 goal, context, and success criteria; Key Changes name concrete implementation
@@ -259,10 +273,12 @@ Recent structured plan events are included in lightweight model resume context
 so mode switches and resumed sessions can answer plan follow-ups. Raw reasoning,
 tool-call, and tool-result events remain excluded from normal model history.
 
-**Why:** Users need a mode where MIRA can reason about a change without editing
-files. Hiding write tools improves model behavior; permissions provide a safety
-fallback. Plan execution should be an explicit user action, not an automatic
-side effect of leaving planning mode.
+**Why:** Users need a mode where MIRA can converse and investigate safely while
+still recognizing when an implementation-ready plan is the useful outcome.
+Hiding every tool path that can mutate or delegate improves model behavior;
+permissions provide a filesystem safety fallback. Prompt-level semantic policy
+avoids brittle text heuristics. Plan execution remains an explicit user action,
+not an automatic side effect of leaving planning mode.
 
 **Where to check:** `agent/factory.py`, `agent/plan_policy.py`, `ui/app.py`,
 `ui/repl.py`, `tests/test_plan_mode.py`, `tests/test_textual_app.py`.

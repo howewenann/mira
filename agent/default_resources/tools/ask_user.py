@@ -12,8 +12,10 @@ ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
 @tool(
     "ask_user",
     description=(
-        "Ask the user to choose between concrete next steps when you are blocked on a specific decision. "
-        "Use this only for meaningful choices that materially affect what MIRA should do next. "
+        "Ask the user to choose between concrete next steps when a specific decision requires their input. "
+        "In planning mode, every user-facing question that needs an answer must use ask_user; never ask it "
+        "in a normal assistant message. Use this only for meaningful choices that materially affect what MIRA "
+        "should do next. "
         "Do not use this for generic follow-ups like 'what can I help you with next?' or when you can "
         "make a reasonable safe assumption. Put only the direct question in `question`; put answer choices "
         "only in `options`, and do not enumerate or repeat the choices inside the question text. Prefer 1-3 "

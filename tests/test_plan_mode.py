@@ -14,7 +14,7 @@ from rich.console import Console
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
 from agent.middleware import ModelToolVisibilityMiddleware
-from agent.plan_policy import PLAN_PROJECT_WRITE_TOOLS, project_write_tools_text, plan_system_prompt
+from agent.plan_policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
 from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
 from runtime import runner
@@ -359,7 +359,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(grep["replaces"], "built-in")
 
     def test_plan_agent_metadata_hides_write_tools(self) -> None:
-        """Plan agents should expose only planning-available tool metadata."""
+        """Plan agents should hide mutating and delegation tool metadata."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
@@ -376,6 +376,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
         self.assertNotIn("execute", names)
+        self.assertNotIn("task", names)
+        self.assertNotIn("eval", names)
 
     def test_action_agent_metadata_hides_disabled_inbuilt_tools(self) -> None:
         """Disabled inbuilt tools should be excluded from action-mode metadata."""
@@ -394,14 +396,17 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("edit_file", names)
         self.assertIn("edit_file", factory.effective_excluded_tools(config, (), True))
 
-    def test_plan_tool_filter_hides_write_tools_from_model(self) -> None:
-        """ModelToolVisibilityMiddleware should remove write/edit tools from requests."""
-        middleware = ModelToolVisibilityMiddleware(PLAN_PROJECT_WRITE_TOOLS)
+    def test_plan_tool_filter_hides_mutating_and_delegation_tools_from_model(self) -> None:
+        """Plan requests should omit every tool disabled by planning policy."""
+        middleware = ModelToolVisibilityMiddleware(PLAN_DISABLED_TOOLS)
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
                 {"name": "write_file"},
                 type("Tool", (), {"name": "edit_file"})(),
+                {"name": "execute"},
+                {"name": "task"},
+                {"name": "eval"},
                 type("Tool", (), {"name": "grep"})(),
             ]
         )
@@ -434,7 +439,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("present_plan", action_names)
         self.assertIn("present_plan", planning_names)
-        self.assertNotIn("execute", planning_names)
+        for tool in PLAN_DISABLED_TOOLS:
+            self.assertNotIn(tool, planning_names)
 
     async def test_plan_and_act_commands_toggle_mode(self) -> None:
         """Slash commands should switch between planning and action modes."""
@@ -446,7 +452,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(mode["planning"])
         self.assertIn("planning mode", renderer.console.lines[-1])
-        self.assertIn(f"{project_write_tools_text()} disabled", renderer.console.lines[-1])
+        self.assertIn(f"{plan_disabled_tools_text()} disabled", renderer.console.lines[-1])
 
         handled = await repl.handle_command("/act", renderer, session, "model", mode)
         self.assertTrue(handled)
@@ -532,7 +538,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(renderer.console.lines)
         self.assertIn("Commands", output)
         self.assertIn("/plan", output)
-        self.assertIn("enter planning mode", output)
+        self.assertIn("enter safe planning mode", output)
         self.assertIn("/act", output)
         self.assertIn("return to action mode", output)
         self.assertIn("/tools", output)
@@ -585,8 +591,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tools (planning)", output)
         self.assertIn("ask_user", output)
         self.assertIn("read_file", output)
-        self.assertNotIn("write_file", output)
-        self.assertNotIn("edit_file", output)
+        for tool in PLAN_DISABLED_TOOLS:
+            self.assertNotIn(tool, output)
 
     async def test_resource_commands_show_loaded_resources(self) -> None:
         """Resource commands should print attached resource metadata."""
@@ -767,7 +773,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls[0][0], "plan-agent")
         self.assertIn("You are in planning mode.", calls[0][1])
-        self.assertIn("Do not call write_file, edit_file", calls[0][1])
+        self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", calls[0][1])
         self.assertIn("User request:\nwrite a file", calls[0][1])
         self.assertEqual(calls[0][2], "thread-1:plan:1")
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
@@ -1128,13 +1134,20 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         text = repl.plan_request_text("write a file")
 
         self.assertIn("You are in planning mode.", text)
-        self.assertIn("Use normal assistant messages", text)
-        self.assertIn("proactively call present_plan", text)
-        self.assertIn("early brainstorming", text)
-        self.assertIn("call present_plan", text)
+        self.assertIn("use normal assistant messages", text)
+        self.assertIn("Never ask a user-facing question in a normal assistant message", text)
+        self.assertIn("classify the current user request as exactly one", text)
+        self.assertIn("SAFE_CONVERSATION", text)
+        self.assertIn("IMPLEMENTATION", text)
+        self.assertIn("Find all dead code for refactoring", text)
+        self.assertIn("A normal assistant message is not a valid final outcome", text)
+        self.assertIn("Do not wait for the user to say 'show me the plan'", text)
+        self.assertIn("you must call present_plan", text)
+        self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", text)
         self.assertIn("User request:\nwrite a file", text)
         self.assertIn("Fill every present_plan section", text)
         self.assertIn("Use this exact content template when calling present_plan", text)
+        self.assertIn("as JSON arrays of strings, never as single strings", text)
         self.assertIn("Goal: the user-visible outcome", text)
         self.assertIn("Run: exact command/check to execute after implementation.", text)
         self.assertIn("Do not use vague Test Plan items", text)
@@ -1175,10 +1188,14 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The policy constants should appear in the planning prompt."""
         prompt = plan_system_prompt()
 
-        for tool in PLAN_PROJECT_WRITE_TOOLS:
+        for tool in PLAN_DISABLED_TOOLS:
             self.assertIn(tool, prompt)
 
         self.assertIn("Never call disabled tools", prompt)
+        self.assertIn("Never ask a user-facing question in a normal assistant message", prompt)
+        self.assertIn("before using tools or answering, classify", prompt)
+        self.assertIn("Do not classify by punctuation, keywords alone, or regex-style text matching", prompt)
+        self.assertIn("IMPLEMENTATION must call ask_user", prompt)
         self.assertIn("Test Plan bullets", prompt)
         self.assertIn("Use this exact content template when calling present_plan", prompt)
         self.assertIn("Success criteria", prompt)
