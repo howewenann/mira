@@ -59,7 +59,7 @@ class PostTurnCompactionResult:
 
 
 async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionResult:
-    """Compact older context after a completed turn without re-answering the prompt."""
+    """Compact older context without running another conversational turn."""
     summarization = getattr(agent, "mira_summarization", None)
     if summarization is None:
         return PostTurnCompactionResult(reason="unavailable")
@@ -97,8 +97,8 @@ async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionRe
         if callable(backend):
             return PostTurnCompactionResult(reason="backend_unavailable")
         with compaction_scope():
-            file_path = await summarization._aoffload_to_backend(backend, to_summarize)
             summary = await summarization._acreate_summary(to_summarize)
+            file_path = await summarization._aoffload_to_backend(backend, to_summarize)
     finally:
         if callable(original_get_thread_id):
             setattr(summarization, "_get_thread_id", original_get_thread_id)

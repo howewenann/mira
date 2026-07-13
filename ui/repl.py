@@ -62,6 +62,7 @@ User request:
 
 COMMAND_HELP = {
     "/help": "show commands and what they do",
+    "/compact": "summarize older context now",
     "/tools": "list tools available in the current mode",
     "/settings": "configure tool approvals in the TUI",
     "/reload": "reload .env/project resources and rebuild agents in the TUI",
@@ -323,6 +324,10 @@ async def handle_command(
 
     if text == "/reload":
         write_line(renderer, "/reload is available in the Textual app", kind="warning")
+        return True
+
+    if text == "/compact":
+        write_line(renderer, "/compact is available in the Textual app", kind="warning")
         return True
 
     if text == "/new-chat":

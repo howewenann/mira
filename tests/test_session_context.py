@@ -88,6 +88,21 @@ class FakeSummarization:
         return cutoff
 
 
+class IneligibleFakeSummarization(FakeSummarization):
+    def _is_eligible_for_compaction(self, messages: list[Any]) -> bool:
+        return False
+
+
+class EmptyRetentionFakeSummarization(FakeSummarization):
+    def _determine_cutoff_index(self, messages: list[Any]) -> int:
+        return 0
+
+
+class FailingSummaryFakeSummarization(FakeSummarization):
+    async def _acreate_summary(self, messages: list[Any]) -> str:
+        raise RuntimeError("summary failed")
+
+
 class AgentWithFailingState(FakeAgent):
     async def aget_state(self, config: dict[str, Any]) -> Snapshot:
         raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
@@ -440,6 +455,46 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Visible answer.", rendered_archive)
         self.assertNotIn("private chain", rendered_archive)
         self.assertNotIn("reasoning_content", rendered_archive)
+
+    async def test_manual_compaction_does_not_apply_agent_tool_eligibility_gate(self) -> None:
+        summarization = IneligibleFakeSummarization()
+        agent = AgentWithMutableState(
+            {"messages": [HumanMessage(content="old"), HumanMessage(content="recent")]},
+            summarization,
+        )
+
+        result = await compact_after_turn(agent, "thread-1")
+
+        self.assertTrue(result.compacted)
+        self.assertIn("_summarization_event", agent.values)
+
+    async def test_manual_compaction_returns_noop_within_retention_window(self) -> None:
+        summarization = EmptyRetentionFakeSummarization()
+        agent = AgentWithMutableState(
+            {"messages": [HumanMessage(content="recent")]},
+            summarization,
+        )
+
+        result = await compact_after_turn(agent, "thread-1")
+
+        self.assertFalse(result.compacted)
+        self.assertEqual(result.reason, "nothing_to_compact")
+        self.assertEqual(summarization.offloaded, [])
+        self.assertEqual(agent.updates, [])
+
+    async def test_manual_compaction_summary_failure_has_no_side_effects(self) -> None:
+        summarization = FailingSummaryFakeSummarization()
+        agent = AgentWithMutableState(
+            {"messages": [HumanMessage(content="old"), HumanMessage(content="recent")]},
+            summarization,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "summary failed"):
+            await compact_after_turn(agent, "thread-1")
+
+        self.assertEqual(summarization.offloaded, [])
+        self.assertEqual(agent.updates, [])
+        self.assertNotIn("_summarization_event", agent.values)
 
     def test_checkpointed_summary_event_replays_as_human_message(self) -> None:
         summarization = FakeSummarization()

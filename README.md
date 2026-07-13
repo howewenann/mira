@@ -117,6 +117,10 @@ should be run as workspace-relative paths such as `python tmp.py`.
 - Use `/help` in the TUI to see commands.
 - Use `/new-chat` or the chat history `+ New` action to start a fresh saved
   session without deleting the current one.
+- Use `/compact` in the TUI to summarize and archive older context immediately
+  when changing topics. This explicit command bypasses the agent-selected
+  compaction eligibility gate but still keeps DeepAgents' normal recent-context
+  retention window.
 - Use `/plan` for safe, read-only conversation and implementation planning.
   `write_file`, `edit_file`, `execute`, `task`, and `eval` are hidden from the
   planning agent. Explanations and read-only findings may remain normal chat;
@@ -265,10 +269,15 @@ Recent structured plan bubbles are also included in model resume context as
 compact plan summaries, without replaying raw reasoning or tool event noise.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA
 records visible compaction markers and archive paths in the session file. The
-status line's `Ctx` value is the latest DeepAgents summarization count MIRA has
-observed. `In` and `Out` are cumulative provider usage totals across every
-model call in the session, including repeated conversation history, so `In +
-Out` is not expected to equal current context after multiple turns. MIRA
+TUI `/compact` command uses the same DeepAgents summarization engine and writes
+the same checkpoint event as runtime compaction, without adding a user or
+assistant turn. It can compact before the agent-selected tool becomes eligible,
+but it does not discard the recent context protected by DeepAgents' retention
+policy. The status line's `Ctx` value is the latest DeepAgents summarization
+count MIRA has observed. `In` and `Out` are cumulative provider usage totals
+across every model call in the session, including repeated conversation
+history, so `In + Out` is not expected to equal current context after multiple
+turns. MIRA
 normalizes ChatAnyLLM responses with the missing provider identity before they
 enter agent state, allowing DeepAgents to trust reported usage without changing
 its compaction thresholds.

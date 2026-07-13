@@ -280,12 +280,12 @@ class ChatLog(VerticalScroll):
             self._compaction_block.update(text)
             self._scroll_to_end()
 
-    def compaction_finished(self) -> None:
+    def compaction_finished(self, message: str = "context compacted", *, success: bool = True) -> None:
         """Mark the compaction status as complete."""
         if self._compaction_block is None:
             return
         self._compaction_running = False
-        self._compaction_block.update(Text("context compacted", style="bold green"))
+        self._compaction_block.update(Text(message, style="bold green" if success else "dim"))
         self._compaction_block = None
         self._scroll_to_end()
 

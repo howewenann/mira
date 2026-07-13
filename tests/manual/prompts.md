@@ -517,3 +517,29 @@ Expected:
   `python .\scripts\check_path.py`, or an equivalent workspace-relative path.
 - The `execute` command does not use `python /scripts/check_path.py`.
 - Approving the command prints `nested path ok`.
+
+## Manual Context Compaction
+
+Use a disposable workspace and start the TUI:
+
+```powershell
+conda run -n ai_agents python -m cli.main --workspace .tmp_compact_manual
+```
+
+Build a conversation with several substantial prompts and replies, then enter:
+
+```text
+/compact
+```
+
+Expected:
+
+- MIRA shows a compaction status without displaying a model-made
+  `compact_conversation` tool call.
+- If older messages exceed DeepAgents' retention window, the status finishes as
+  `context compacted` and the saved session gains a compaction event.
+- If the conversation is already within the retention window, the status
+  finishes as `nothing to compact`.
+- `/session` reports the same turn count as before `/compact`.
+- A subsequent topic-switch prompt starts a normal turn and retains relevant
+  information from the generated summary.

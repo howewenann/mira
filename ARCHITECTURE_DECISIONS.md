@@ -317,7 +317,9 @@ TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/reload` reloads `.env`, current settings, and project resources before
 rebuilding agents without restarting the session. `/new-chat` and the sidebar
 `+ New` action create and switch to a fresh saved session without deleting the
-current session.
+current session. `/compact` is also TUI-only because it needs the active agent,
+thread, checkpoint, and session store; it runs outside a normal model turn and
+does not create synthetic assistant or tool messages.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
@@ -350,7 +352,11 @@ Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result
 so the UI can show context pressure. MIRA does not run a parallel dashboard
-counter, compute provider prompt tokens, or decide when to compact. Provider
+counter or compute provider prompt tokens. Automatic and agent-selected
+eligibility remain DeepAgents decisions. The explicit TUI `/compact` command is
+the narrow exception: it reuses the attached summarization middleware to apply
+the normal retention policy immediately, then writes the same
+`_summarization_event` consumed by subsequent DeepAgents model calls. Provider
 `In` and `Out` usage are cumulative per-call totals, not current context
 occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
 response metadata required by DeepAgents' reported-token validation. MIRA's

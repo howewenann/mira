@@ -20,6 +20,7 @@ from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Input, Static, TextArea
 
+from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
 from config.settings import (
@@ -1529,7 +1530,94 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             output = renderable_plain(command_blocks[0])
             self.assertIn("Commands", output)
             self.assertIn("/help", output)
+            self.assertIn("/compact", output)
             self.assertIn("/subagents", output)
+
+    async def test_compact_command_updates_action_thread_without_adding_turn(self) -> None:
+        app = make_app()
+        compact_result = PostTurnCompactionResult(compacted=True, reason="compacted")
+
+        with (
+            patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact,
+            patch("ui.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy)
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+        compact.assert_awaited_once_with("agent", "thread-1")
+        sync.assert_awaited_once_with(app.session, "agent", "thread-1")
+        self.assertEqual(app.session["turns"], 0)
+        self.assertEqual(len(app.store.saves), 1)
+        self.assertIn("context compacted", rendered)
+
+    async def test_compact_command_uses_active_planning_thread(self) -> None:
+        app = make_app()
+        compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
+
+        with patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.mode["planning"] = True
+                app.mode["plan_thread_id"] = "thread-1:plan:7"
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy)
+                await pilot.pause()
+
+        compact.assert_awaited_once_with("plan-agent", "thread-1:plan:7")
+        self.assertEqual(app.session["turns"], 0)
+
+    async def test_compact_command_reports_noop_without_syncing_session(self) -> None:
+        app = make_app()
+        compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
+
+        with (
+            patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
+            patch("ui.app.sync_deepagents_compaction", new=AsyncMock()) as sync,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy)
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+        sync.assert_not_awaited()
+        self.assertEqual(app.store.saves, [])
+        self.assertIn("nothing to compact", rendered)
+
+    async def test_compact_command_reports_failure_and_restores_prompt(self) -> None:
+        app = make_app()
+
+        with (
+            patch("ui.app.compact_after_turn", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
+            patch.object(app, "_write_error_report", return_value=Path("compaction-error.json")),
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy)
+                await pilot.pause()
+
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertFalse(prompt.disabled)
+
+        self.assertIn("context compaction failed", rendered)
+        self.assertIn("compaction error: summary failed", rendered)
+        self.assertIn("compaction-error.json", rendered)
 
     async def test_session_command_renders_as_one_status_bubble(self) -> None:
         """The session command should group its details into one chat block."""

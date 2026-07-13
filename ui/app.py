@@ -19,6 +19,7 @@ from textual.css.query import NoMatches
 from textual.events import Click
 from textual.widgets import Button, ListView, Static
 
+from agent.compaction import compact_after_turn
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from config.settings import (
     EXECUTE_TOOL,
@@ -32,7 +33,7 @@ from runtime.diagnostics import get_diagnostics_logger
 from runtime.error_report import clear_error_reports, write_error_report
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
-from session.context import append_event
+from session.context import append_event, sync_deepagents_compaction
 from session.recorder import update_plan_event_status
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -267,6 +268,18 @@ class MiraApp(App[None]):
             self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
             return
 
+        if text == "/compact":
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            prompt.disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_compact_command(),
+                name="compact-command",
+                exclusive=True,
+            )
+            return
+
         if await handle_command(text, self, self.session, self.model_name, self.mode):
             self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -318,6 +331,48 @@ class MiraApp(App[None]):
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _run_compact_command(self) -> None:
+        """Compact the current action or planning conversation."""
+        if self.mode["planning"]:
+            active_agent = self.plan_agent
+            thread_id = self.mode["plan_thread_id"]
+        else:
+            active_agent = self.agent
+            thread_id = self.session["id"]
+
+        self.compaction_started()
+        try:
+            result = await compact_after_turn(active_agent, thread_id)
+            if result.compacted:
+                if await sync_deepagents_compaction(self.session, active_agent, thread_id):
+                    self.store.save(self.session)
+                    self._refresh_sessions()
+                self.compaction_finished("context compacted", resume_waiting=False)
+            elif result.reason in {"no_messages", "nothing_to_compact"}:
+                self.compaction_finished("nothing to compact", success=False, resume_waiting=False)
+            else:
+                self.compaction_finished(
+                    f"context compaction unavailable: {result.reason}",
+                    success=False,
+                    resume_waiting=False,
+                )
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.compaction_finished("context compaction cancelled", success=False, resume_waiting=False)
+            self._set_status(state="ready")
+            raise
+        except Exception as exc:
+            self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
+            error_path = self._write_error_report(exc, source="tui.compact")
+            self.system_message(f"compaction error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -681,12 +736,19 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
 
-    def compaction_finished(self) -> None:
+    def compaction_finished(
+        self,
+        message: str = "context compacted",
+        *,
+        success: bool = True,
+        resume_waiting: bool = True,
+    ) -> None:
         """Show that DeepAgents has finished compacting context."""
         self.trace.compaction_finished()
-        self.query_one(ChatLog).compaction_finished()
+        self.query_one(ChatLog).compaction_finished(message, success=success)
         self._set_status(state="running")
-        self._rearm_waiting_if_busy()
+        if resume_waiting:
+            self._rearm_waiting_if_busy()
 
     def clear_log(self) -> None:
         """Clear chat output."""
