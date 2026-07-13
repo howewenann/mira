@@ -12,6 +12,9 @@ SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
 DYNAMIC_SUBAGENT_RESPONSE_SCHEMA = "response_schema"
+RUBRIC = "rubric"
+RUBRIC_MAX_ITERATIONS = "max_iterations"
+RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task", EXECUTE_TOOL)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
@@ -20,6 +23,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         DYNAMIC_SUBAGENTS: {
             "enabled": False,
             DYNAMIC_SUBAGENT_RESPONSE_SCHEMA: True,
+        },
+        RUBRIC: {
+            "enabled": False,
+            RUBRIC_MAX_ITERATIONS: 3,
         },
     },
     "hitl": {
@@ -87,6 +94,13 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 settings["system"][DYNAMIC_SUBAGENTS][DYNAMIC_SUBAGENT_RESPONSE_SCHEMA] = dynamic_subagents[
                     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA
                 ]
+        rubric = system.get(RUBRIC)
+        if isinstance(rubric, dict):
+            if isinstance(rubric.get("enabled"), bool):
+                settings["system"][RUBRIC]["enabled"] = rubric["enabled"]
+            iterations = rubric.get(RUBRIC_MAX_ITERATIONS)
+            if valid_rubric_max_iterations(iterations):
+                settings["system"][RUBRIC][RUBRIC_MAX_ITERATIONS] = iterations
 
     hitl = raw.get("hitl")
     if not isinstance(hitl, dict):
@@ -213,6 +227,48 @@ def set_dynamic_subagent_response_schema(settings: dict[str, Any], enabled: bool
     updated = normalize_settings(settings)
     updated["system"][DYNAMIC_SUBAGENTS][DYNAMIC_SUBAGENT_RESPONSE_SCHEMA] = bool(enabled)
     return updated
+
+
+def rubric_enabled(config_or_settings: dict[str, Any] | None) -> bool:
+    """Return whether goal-driven rubric grading is enabled."""
+    if not isinstance(config_or_settings, dict):
+        return False
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return bool(normalized.get("system", {}).get(RUBRIC, {}).get("enabled", False))
+
+
+def rubric_max_iterations(config_or_settings: dict[str, Any] | None) -> int:
+    """Return the configured rubric grading iteration cap."""
+    if not isinstance(config_or_settings, dict):
+        return 3
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return int(normalized.get("system", {}).get(RUBRIC, {}).get(RUBRIC_MAX_ITERATIONS, 3))
+
+
+def set_rubric_enabled(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Return settings with rubric grading enabled or disabled."""
+    updated = normalize_settings(settings)
+    updated["system"][RUBRIC]["enabled"] = bool(enabled)
+    return updated
+
+
+def set_rubric_max_iterations(settings: dict[str, Any], value: Any) -> dict[str, Any]:
+    """Return settings with a valid rubric iteration cap, preserving invalid input."""
+    updated = normalize_settings(settings)
+    if valid_rubric_max_iterations(value):
+        updated["system"][RUBRIC][RUBRIC_MAX_ITERATIONS] = value
+    return updated
+
+
+def valid_rubric_max_iterations(value: Any) -> bool:
+    """Return whether a value is supported by the minimum DeepAgents version."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= RUBRIC_MAX_ITERATIONS_LIMIT
+    )
 
 
 def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:

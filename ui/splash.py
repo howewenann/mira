@@ -16,7 +16,7 @@ MIRA_LABEL = "bold #d2a957"
 MIRA_VALUE = "#e8edef"
 MIRA_HINT = "#b8c1c7"
 VERSION = display_version()
-HINTS = "Hints: /help commands | /plan plan safely | /act action mode | Ctrl+C copy | Alt+Q cancel/quit"
+HINTS = "Hints: /help commands | /goal graded goal | /plan plan safely | /act action mode | Ctrl+C copy | Alt+Q cancel/quit"
 
 
 def blocky_wordmark() -> str:

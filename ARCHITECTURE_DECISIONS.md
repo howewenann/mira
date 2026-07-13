@@ -296,12 +296,86 @@ permissions provide a filesystem safety fallback. Prompt-level semantic policy
 avoids brittle text heuristics. Plan execution remains an explicit user action,
 not an automatic side effect of leaving planning mode.
 
-**Where to check:** `agent/factory.py`, `agent/plan_policy.py`, `ui/app.py`,
+**Where to check:** `agent/factory.py`, `agent/planning/policy.py`, `ui/app.py`,
 `ui/repl.py`, `tests/test_plan_mode.py`, `tests/test_textual_app.py`.
 
 **Update this when:** Planning mode gains or loses tools, changes how plan
 bubbles are presented, resolved, or replayed into model context, or changes its
 filesystem permissions.
+
+## Goal-Driven Rubric Grading
+
+**Decision:** Rubric grading is an opt-in workspace setting under
+`system.rubric`, disabled by default with a three-iteration cap. Valid caps are
+1 through 20. Only the action agent receives DeepAgents' `RubricMiddleware`,
+using the active model, no grader tools, and the configured cap. The planning
+agent and the criteria service never receive that middleware. Changing either
+rubric setting rebuilds both agents and resolves any pending rubric proposal as
+`settings changed` so its displayed cap cannot become stale.
+
+MIRA keeps three invocation states distinct. Planning and rubric-disabled
+action turns omit rubric state. Ordinary rubric-enabled action turns send
+`rubric=None` to clear any checkpointed criteria. An approved goal or plan
+sends its Markdown criteria. The middleware's injected revision messages stay
+inside DeepAgents state and are not projected as user-authored session events.
+
+**Proposal lifecycle:** `/goal <prompt>` is TUI-only because it requires an
+interactive review bubble. A separate `GoalCriteriaService` creates or revises
+Markdown criteria with a fresh instance of MIRA's configured model outside the
+action graph. Goal proposals and rubric-enabled plan proposals store their id,
+kind, original objective, structured resolved decisions, deterministically
+derived effective objective, criteria, optional structured plan, iteration
+cap, and status as explicit proposal events.
+
+Rubric-enabled planning adds one hidden control interrupt, `prepare_goal`. The
+planning agent calls it only after read-only research and material `ask_user`
+decisions are complete. A focused `PlanningStageMiddleware` owns a checkpointed
+`research | finalize` state using LangChain's middleware state schema. It keeps
+the compiled tool registry stable while filtering each model request: research
+hides `present_plan`; after the interrupt, the runner resumes with a native
+LangGraph `Command` that also updates the stage to `finalize`; finalization
+exposes only `present_plan` and sets the provider-portable `required` tool
+choice. Requiring a call is deterministic with one exposed tool and avoids the
+named-tool object rejected by some OpenAI-compatible providers. The wrapped
+research request repeats a stage-specific `ask_user`/`prepare_goal` terminal
+contract instead of the legacy `present_plan` reminder. MIRA then
+generates criteria and resumes the same planning thread to produce the plan
+alone. Revision first sends feedback to criteria revision, then starts a new
+planning thread directly in finalization with the same feedback, revised
+criteria, original objective, and previous plan. This avoids graph rebuilding,
+message parsing, duplicate plan tools, and prompt-only ordering. Disabled
+planning does not install the stage middleware and keeps the legacy prompt,
+tools, plan event, rendering, and action handoff unchanged.
+
+Criteria generation and plan finalization can each involve a silent model call.
+The TUI reuses its transient animated waiting block with phase-specific labels
+for Definition-of-Done drafting/revision and plan drafting; these blocks are not
+persisted as transcript events.
+
+**Streaming and persistence:** One custom-event dispatcher independently
+routes QuickJS Eval subagent events and DeepAgents rubric start/end events.
+Rubric passes are displayed one-based and include pass counts, failed criteria,
+gaps, and terminal verdicts. For DeepAgents 0.6.12, MIRA reads completed
+checkpoint `_rubric_status` because the final streamed event can still say
+`needs_revision` when the cap was reached; newer terminal statuses are accepted
+directly. Starts are transient. Completed evaluations are durable rubric
+events, never tools. TUI results update in place, while one-shot and trace
+surfaces emit concise blocks. Rubric colors are centralized as `#C58FD6` for
+headers/borders and `#F1DCF5` for body text and are isolated to rubric UI.
+
+**Why:** Users can agree on observable completion conditions before work while
+DeepAgents continues to own iterative grading and revision. Separating the
+objective, decisions, criteria, and plan avoids flattening recoverable state or
+making the planning agent grade its own output. Opt-in construction preserves
+the existing workflow when disabled.
+
+**Where to check:** `agent/planning/criteria.py`, `agent/planning/proposals.py`,
+`agent/factory.py`, `agent/middleware.py`, `agent/default_resources/tools/prepare_goal.py`, `runtime/rubric_events.py`,
+`runtime/runner.py`, `session/context.py`, `session/recorder.py`, `ui/app.py`,
+`ui/repl.py`, and `ui/widgets/chat_log.py`.
+
+**Update this when:** Rubric ownership, criteria prompts, proposal persistence,
+terminal-status handling, or the goal/plan review lifecycle changes.
 
 ## Textual TUI And One-Shot Output
 

@@ -5,26 +5,29 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
+from deepagents import FilesystemPermission, HarnessProfile, RubricMiddleware, create_deep_agent, register_harness_profile
 from langchain.agents.middleware.types import AgentMiddleware
 
 from agent.llm import get_llm
-from agent.middleware import ModelToolVisibilityMiddleware, build_agent_middleware
-from agent.plan_policy import (
+from agent.middleware import ModelToolVisibilityMiddleware, PlanningStageMiddleware, build_agent_middleware
+from agent.planning.policy import (
     PLAN_DENIED_FS_OPERATIONS,
     PLAN_DISABLED_TOOLS,
+    PREPARE_GOAL_TOOL,
     PRESENT_PLAN_TOOL,
     plan_system_prompt,
 )
 from agent.resources import build_resources
 from agent.subagent_compilation import compile_dynamic_subagents
-from agent.tools.specs import collect_tool_specs
+from agent.tools.specs import collect_tool_specs, tool_name
 from config.metadata import ModelMetadata
 from config.settings import (
     EXECUTE_TOOL,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     hitl_settings,
+    rubric_enabled,
+    rubric_max_iterations,
     tool_always_allow,
     tool_enabled,
 )
@@ -53,6 +56,7 @@ def build_agent(
         interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=ACTION_EXCLUDED_TOOLS,
         enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
+        enable_rubric=rubric_enabled(config),
     )
     return agent
 
@@ -64,16 +68,19 @@ def build_plan_agent(
     metadata: ModelMetadata | None = None,
 ) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
+    enabled = rubric_enabled(config)
     agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_plan_permissions(),
-        system_prompt=PLAN_SYSTEM_PROMPT,
+        system_prompt=plan_system_prompt(rubric=enabled) if enabled else PLAN_SYSTEM_PROMPT,
         interrupt_on=None,
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
+        extra_middleware=[PlanningStageMiddleware()] if enabled else None,
+        omitted_tools=() if enabled else (PREPARE_GOAL_TOOL,),
     )
     return agent
 
@@ -89,6 +96,8 @@ def _build_agent(
     interrupt_on: dict[str, Any] | str | None = None,
     excluded_tools: tuple[str, ...] = (),
     enable_execute_backend: bool = False,
+    enable_rubric: bool = False,
+    omitted_tools: tuple[str, ...] = (PREPARE_GOAL_TOOL,),
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
@@ -105,8 +114,14 @@ def _build_agent(
     backend = resources.backend
     permissions = [] if enable_execute_backend else permissions
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
+    rubric_middleware = (
+        [RubricMiddleware(model=model, tools=None, max_iterations=rubric_max_iterations(config))]
+        if enable_rubric
+        else []
+    )
     extra_middleware = [
         *(extra_middleware or []),
+        *rubric_middleware,
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
 
@@ -123,13 +138,14 @@ def _build_agent(
         if interrupt_on == SETTINGS_INTERRUPTS
         else interrupt_on
     )
+    tools = [tool for tool in resources.tools if tool_name(tool) not in omitted_tools]
     subagents = resources.subagents
     settings = (config or {}).get("settings")
     if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
         subagents = compile_dynamic_subagents(
             subagents,
             model=model,
-            tools=resources.tools,
+            tools=tools,
             backend=backend,
             skills=resources.skills,
             permissions=permissions,
@@ -140,7 +156,7 @@ def _build_agent(
         model=model,
         backend=backend,
         middleware=middleware_stack.items,
-        tools=resources.tools,
+        tools=tools,
         skills=resources.skills,
         memory=resources.memory,
         subagents=subagents,
@@ -154,7 +170,7 @@ def _build_agent(
         collect_tool_specs(
             backend,
             middleware_stack.items,
-            resources.tools,
+            tools,
             resources.metadata["tools"],
             excluded_tools,
         ),

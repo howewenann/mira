@@ -351,6 +351,47 @@ Button.plan-action:focus {
     text-style: bold;
 }
 
+.message.proposal {
+    height: auto;
+}
+
+.message.proposal.goal,
+.message.rubric {
+    border: solid #C58FD6;
+    color: #F1DCF5;
+}
+
+.message.proposal.plan-review {
+    border: solid #A0B86B;
+    color: #EEF5D8;
+}
+
+.proposal-body {
+    height: auto;
+}
+
+.proposal-actions {
+    height: 1;
+    min-height: 1;
+    margin-top: 1;
+}
+
+Button.proposal-action {
+    min-width: 12;
+    width: auto;
+    height: 1;
+    min-height: 1;
+    margin-right: 1;
+    content-align: center middle;
+    text-align: center;
+}
+
+Button.proposal-action:focus {
+    background: #C58FD6;
+    color: #0c0f10;
+    text-style: bold;
+}
+
 .message.command {
     border: solid #6F7782;
     color: #CBD1D5;
@@ -570,6 +611,28 @@ Button.plan-action:focus {
 
 .settings-input:focus {
     border: solid #5bb8b1;
+}
+
+.settings-input:disabled {
+    border: solid #3c4a50;
+    color: #7a858c;
+}
+
+.rubric-iterations-row {
+    height: 2;
+}
+
+.settings-input.rubric-iterations-input {
+    width: 12;
+    min-width: 12;
+    height: 1;
+    margin: 0 2 1 0;
+    border: none;
+}
+
+.settings-input.rubric-iterations-input:focus,
+.settings-input.rubric-iterations-input:disabled {
+    border: none;
 }
 
 .settings-help {

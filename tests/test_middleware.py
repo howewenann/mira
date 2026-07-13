@@ -14,17 +14,30 @@ from agent.middleware import (
     ExecuteToolPromptMiddleware,
     MIRA_EXECUTE_TOOL_DESCRIPTION,
     ModelResponseNormalizationMiddleware,
+    PlanningStageMiddleware,
 )
 
 
 class FakeModelRequest:
     """Small model request double with overridable tools."""
 
-    def __init__(self, tools: list[Any]) -> None:
+    def __init__(
+        self,
+        tools: list[Any],
+        *,
+        state: dict[str, Any] | None = None,
+        tool_choice: Any = None,
+    ) -> None:
         self.tools = tools
+        self.state = state or {}
+        self.tool_choice = tool_choice
 
     def override(self, **kwargs: Any) -> "FakeModelRequest":
-        return FakeModelRequest(kwargs.get("tools", self.tools))
+        return FakeModelRequest(
+            kwargs.get("tools", self.tools),
+            state=kwargs.get("state", self.state),
+            tool_choice=kwargs.get("tool_choice", self.tool_choice),
+        )
 
 
 class AnyLLMMetadataModel:
@@ -83,6 +96,48 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(updated_tools[0]["description"], MIRA_EXECUTE_TOOL_DESCRIPTION)
         self.assertEqual(updated_tools[1], grep_tool)
         self.assertEqual(execute_tool["description"], "old execute")
+
+    def test_rubric_planning_research_stage_hides_present_plan(self) -> None:
+        middleware = PlanningStageMiddleware()
+        request = FakeModelRequest(
+            [
+                {"name": "read_file"},
+                {"name": "ask_user"},
+                {"name": "prepare_goal"},
+                {"name": "present_plan"},
+            ],
+            state={"planning_stage": "research"},
+            tool_choice="previous",
+        )
+
+        updated = middleware._stage_request(request)
+
+        self.assertEqual(
+            [tool["name"] for tool in updated.tools],
+            ["read_file", "ask_user", "prepare_goal"],
+        )
+        self.assertIsNone(updated.tool_choice)
+
+    def test_rubric_planning_finalize_stage_forces_present_plan_only(self) -> None:
+        middleware = PlanningStageMiddleware()
+        request = FakeModelRequest(
+            [{"name": "read_file"}, {"name": "prepare_goal"}, {"name": "present_plan"}],
+            state={"planning_stage": "finalize"},
+        )
+
+        updated = middleware._stage_request(request)
+
+        self.assertEqual([tool["name"] for tool in updated.tools], ["present_plan"])
+        self.assertEqual(updated.tool_choice, "required")
+
+    def test_rubric_planning_finalize_requires_registered_present_plan(self) -> None:
+        request = FakeModelRequest(
+            [{"name": "prepare_goal"}],
+            state={"planning_stage": "finalize"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires present_plan"):
+            PlanningStageMiddleware()._stage_request(request)
 
     def test_model_response_normalizer_adds_missing_anyllm_provider(self) -> None:
         """ChatAnyLLM messages should gain the provider identity DeepAgents expects."""

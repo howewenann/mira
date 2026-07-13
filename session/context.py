@@ -14,6 +14,7 @@ TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
 RESUME_MESSAGE_LIMIT = 20
 RESUME_PLAN_LIMIT = 3
+RESUME_PROPOSAL_LIMIT = 3
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 
@@ -62,6 +63,19 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["plan"] = plan
             status = compact_line(item.get("status") or "pending")
             event["status"] = status or "pending"
+        elif event_type == "proposal":
+            proposal = item.get("proposal")
+            if not isinstance(proposal, dict):
+                continue
+            event["proposal"] = proposal
+            status = compact_line(item.get("status") or "pending")
+            event["status"] = status or "pending"
+        elif event_type == "rubric":
+            evaluation = item.get("evaluation")
+            if not isinstance(evaluation, dict):
+                continue
+            event["evaluation"] = evaluation
+            event["max_iterations"] = bounded_positive_int(item.get("max_iterations"), default=1, maximum=20)
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
             if event["name"] in CONTROL_TOOLS:
@@ -189,6 +203,43 @@ def normalize_plans(value: Any) -> list[dict[str, Any]]:
     return plans
 
 
+def normalize_proposals(value: Any) -> list[dict[str, Any]]:
+    """Return explicit goal/plan proposals for replay and resume context."""
+    proposals = []
+    for item in normalize_events(value):
+        if item["type"] != "proposal":
+            continue
+        value = item.get("proposal")
+        if not isinstance(value, dict):
+            continue
+        plan = value.get("plan") if isinstance(value.get("plan"), dict) else None
+        proposals.append(
+            {
+                "id": compact_line(value.get("id") or f"proposal-{item['id']}"),
+                "kind": "plan" if value.get("kind") == "plan" else "goal",
+                "status": compact_line(item.get("status") or "pending"),
+                "original_objective": compact_text(value.get("original_objective")),
+                "objective": compact_text(value.get("objective")),
+                "criteria": compact_text(value.get("criteria")),
+                "plan": plan,
+                "rubric_iterations": bounded_positive_int(value.get("rubric_iterations"), default=3, maximum=20),
+                "created_at": item["created_at"],
+            }
+        )
+    return proposals
+
+
+def bounded_positive_int(value: Any, *, default: int, maximum: int) -> int:
+    """Return persisted bounded integer data without trusting session JSON."""
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if 1 <= parsed <= maximum else default
+
+
 def append_event(record: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     events = record.setdefault("events", [])
     next_id = max((int(item.get("id", 0)) for item in events if isinstance(item, dict)), default=0) + 1
@@ -286,8 +337,9 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
 def build_resume_context(record: dict[str, Any]) -> str:
     compactions = normalize_compactions(record.get("events"))
     plans = normalize_plans(record.get("events"))[-RESUME_PLAN_LIMIT:]
+    proposals = normalize_proposals(record.get("events"))[-RESUME_PROPOSAL_LIMIT:]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    if not compactions and not plans and not messages:
+    if not compactions and not plans and not proposals and not messages:
         return ""
 
     parts = ["Previous MIRA session context:"]
@@ -302,6 +354,10 @@ def build_resume_context(record: dict[str, Any]) -> str:
         parts.append("Recent structured plans:")
         for plan in plans:
             parts.append(plan_context_text(plan))
+    if proposals:
+        parts.append("Recent goal-driven proposals:")
+        for value in proposals:
+            parts.append(proposal_context_text(value))
     if messages:
         parts.append("Recent visible transcript:")
         for message in messages:
@@ -324,6 +380,7 @@ def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> Non
     record["resume_context_pending"] = resumed and (
         bool(normalize_compactions(record.get("events")))
         or bool(normalize_plans(record.get("events")))
+        or bool(normalize_proposals(record.get("events")))
         or bool(normalize_messages(record.get("events")))
     )
 
@@ -372,6 +429,16 @@ def plan_context_text(plan: dict[str, Any]) -> str:
             continue
         lines.append(f"{heading}:")
         lines.extend(f"- {item}" for item in items)
+    return "\n".join(lines)
+
+
+def proposal_context_text(value: dict[str, Any]) -> str:
+    """Return separately labelled objective, criteria, and optional plan context."""
+    lines = [f"{value['id']} ({value['status']}, {value['kind']})"]
+    lines.extend(["Objective:", value["objective"], "Definition of Done:", value["criteria"]])
+    plan = value.get("plan")
+    if isinstance(plan, dict):
+        lines.extend(["Plan:", plan_context_text({"id": value["id"], "status": value["status"], **plan})])
     return "\n".join(lines)
 
 

@@ -732,6 +732,78 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.events, [])
         self.assertEqual(context.normalize_events(record["events"]), [])
 
+    def test_rubric_results_are_persisted_as_events_and_reconciled(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        evaluation = {
+            "grading_run_id": "grade-1",
+            "iteration": 0,
+            "result": "needs_revision",
+            "explanation": "Missing a test.",
+            "criteria": [{"name": "Tested", "passed": False, "gap": "No test."}],
+        }
+
+        recorder.rubric_evaluation_finished(evaluation, 1)
+        recorder.rubric_evaluation_status("grade-1", 1, "max_iterations_reached")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["rubric"])
+        self.assertEqual(events[0]["evaluation"]["result"], "max_iterations_reached")
+        self.assertEqual(events[0]["max_iterations"], 1)
+
+    def test_normalize_proposals_keeps_goal_fields_separately_recoverable(self) -> None:
+        events = [
+            {
+                "id": 1,
+                "type": "proposal",
+                "status": "pending",
+                "proposal": {
+                    "id": "proposal-1",
+                    "kind": "plan",
+                    "original_objective": "Build search.",
+                    "objective": "Build search.\n\nResolved decisions:\n- Backend: SQLite",
+                    "resolved_decisions": [{"question": "Backend?", "answer": "SQLite"}],
+                    "criteria": "- Search returns ranked results.",
+                    "plan": {"id": "plan-1", "title": "Search plan", "summary": ["Add search."]},
+                    "rubric_iterations": 3,
+                },
+            }
+        ]
+
+        proposals = context.normalize_proposals(events)
+        resume = context.build_resume_context({"events": events})
+
+        self.assertEqual(proposals[0]["original_objective"], "Build search.")
+        self.assertIn("Resolved decisions", proposals[0]["objective"])
+        self.assertEqual(proposals[0]["criteria"], "- Search returns ranked results.")
+        self.assertEqual(proposals[0]["plan"]["title"], "Search plan")
+        self.assertIn("Recent goal-driven proposals:", resume)
+        self.assertIn("Definition of Done", resume)
+
+    def test_malformed_persisted_iteration_values_restore_defaults(self) -> None:
+        events = [
+            {
+                "id": 1,
+                "type": "proposal",
+                "proposal": {
+                    "id": "proposal-1",
+                    "original_objective": "Do it.",
+                    "objective": "Do it.",
+                    "criteria": "- Done.",
+                    "rubric_iterations": "invalid",
+                },
+            },
+            {
+                "id": 2,
+                "type": "rubric",
+                "evaluation": {"grading_run_id": "grade-1", "iteration": 0},
+                "max_iterations": 99,
+            },
+        ]
+
+        self.assertEqual(context.normalize_proposals(events)[0]["rubric_iterations"], 3)
+        self.assertEqual(context.normalize_events(events)[1]["max_iterations"], 1)
+
     def test_normalize_events_hides_legacy_present_plan_tool_events(self) -> None:
         record = {
             "events": [

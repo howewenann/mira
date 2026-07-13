@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any, Callable
 
+from runtime.rubric_events import rubric_result_text
 from ui.names import generate_slug
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -104,6 +105,26 @@ class TerminalTranscript:
         if result:
             detail += f"\noutput: {self.truncate(result)}"
         self.block(subagent_title(subagent), detail)
+
+    def rubric_evaluation_started(self, pass_number: int, max_iterations: int) -> None:
+        """Write immediate rubric review activity."""
+        self.block(
+            "rubric review",
+            f"Reviewing completion criteria · pass {pass_number} of {max_iterations}…",
+        )
+
+    def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
+        """Write a concise rubric result."""
+        self.block("rubric review", rubric_result_text(evaluation, max_iterations))
+
+    def rubric_evaluation_status(self, pass_number: int, status: str, max_iterations: int) -> None:
+        """Write a corrected terminal status when the checkpoint differs."""
+        if status == "max_iterations_reached":
+            self.block(
+                "rubric review",
+                f"Rubric review · pass {pass_number} of {max_iterations}\n"
+                "Incomplete: maximum rubric iterations reached",
+            )
 
     def finish_main(self) -> None:
         """Finish the current streamed section."""

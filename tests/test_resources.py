@@ -249,12 +249,13 @@ description: Project-specific workflow.
             self.assertEqual(resources.subagents, [])
             self.assertEqual(resources.metadata["subagents"], [])
 
-    def test_default_tools_include_ask_user_and_regex_grep(self) -> None:
-        """Default tools should include ask_user and the built-in grep replacement."""
+    def test_default_tools_include_planning_controls_and_regex_grep(self) -> None:
+        """Default tools should include planning controls and the built-in grep replacement."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "prepare_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "present_plan" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
@@ -263,6 +264,12 @@ description: Project-specific workflow.
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "prepare_goal",
+                        "path": "/mira-defaults/tools/prepare_goal.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -363,14 +370,20 @@ def project_status() -> str:
             resources = build_resources(workspace, create_examples=False)
 
             names = [tool.name for tool in resources.tools]
-            self.assertEqual(names, ["ask_user", "present_plan", "grep", "project_status"])
-            self.assertEqual(resources.tools[2].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(names, ["ask_user", "prepare_goal", "present_plan", "grep", "project_status"])
+            self.assertEqual(resources.tools[3].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "prepare_goal",
+                        "path": "/mira-defaults/tools/prepare_goal.py",
                         "source": "default",
                         "replaces": "",
                     },

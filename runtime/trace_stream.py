@@ -95,6 +95,24 @@ class TraceStream:
         """Trace subagent cancellation."""
         self._emit("subagent_cancelled", subagent, result)
 
+    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:  # noqa: ARG002
+        """Trace rubric evaluation activity."""
+        self._emit("rubric_evaluation_started", pass_number, max_iterations)
+
+    def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
+        """Trace a completed rubric evaluation."""
+        self._emit("rubric_evaluation_finished", evaluation, max_iterations)
+
+    def rubric_evaluation_status(
+        self,
+        run_id: str,
+        pass_number: int,
+        status: str,
+        max_iterations: int,
+    ) -> None:  # noqa: ARG002
+        """Trace checkpoint status reconciliation."""
+        self._emit("rubric_evaluation_status", pass_number, status, max_iterations)
+
     def line(self, text: str) -> None:
         """Write one plain trace line."""
         if not self.enabled:

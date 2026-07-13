@@ -21,10 +21,15 @@ from textual.widgets import Button, ListView, Static
 
 from agent.compaction import compact_after_turn
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
+from agent.planning.criteria import GoalCriteriaService
+from agent.planning.policy import PLANNING_STAGE_FINALIZE, PLANNING_STAGE_RESEARCH
+from agent.planning.proposals import effective_objective, proposal, proposal_title
 from config.settings import (
     EXECUTE_TOOL,
     git_protection_enabled,
     load_settings,
+    rubric_enabled,
+    rubric_max_iterations,
     save_settings,
     tool_enabled,
 )
@@ -33,7 +38,7 @@ from runtime.error_report import clear_error_reports, write_error_report
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event, sync_deepagents_compaction
-from session.recorder import update_plan_event_status
+from session.recorder import update_plan_event_status, update_proposal_event_status
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -45,7 +50,15 @@ from ui.interrupts import (
     ask_user_request,
     plan_request,
 )
-from ui.repl import handle_command, initial_mode, plan_revision_text, plan_thread_id, refresh_agent_specs, run_user_turn
+from ui.repl import (
+    handle_command,
+    initial_mode,
+    plan_revision_text,
+    plan_thread_id,
+    refresh_agent_specs,
+    rubric_plan_revision_text,
+    run_user_turn,
+)
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
@@ -109,6 +122,7 @@ class MiraApp(App[None]):
         self._waiting_task: Any | None = None
         self._waiting_generation = 0
         self._waiting_delay_seconds = 0.8
+        self._waiting_label = "working..."
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
@@ -185,7 +199,7 @@ class MiraApp(App[None]):
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
         self.checkpointer = state.get("checkpointer")
-        self.mode = initial_mode(self.agent, self.plan_agent)
+        self.mode = initial_mode(self.agent, self.plan_agent, (self.config or {}).get("settings"))
         self.ready = True
         self.busy = False
         self._main_stream_active = False
@@ -267,6 +281,27 @@ class MiraApp(App[None]):
             self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
             return
 
+        if text == "/goal" or text.startswith("/goal "):
+            objective = text.removeprefix("/goal").strip()
+            if not rubric_enabled((self.config or {}).get("settings")):
+                self.system_message("enable Rubric Middleware in /settings to use /goal", kind="info")
+                self.action_focus_prompt()
+                return
+            if not objective:
+                self.system_message("usage: /goal <prompt>", kind="muted")
+                self.action_focus_prompt()
+                return
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            prompt.disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_goal_command(objective),
+                name="goal-command",
+                exclusive=True,
+            )
+            return
+
         if text == "/compact":
             self.busy = True
             self._main_stream_active = False
@@ -297,6 +332,11 @@ class MiraApp(App[None]):
         """Run one agent turn and restore prompt focus when done."""
         try:
             await self._refresh_model_metadata()
+            if self.mode.get("planning") and self.mode.get("rubric_enabled"):
+                self.mode["active_objective"] = text
+                self.mode["resolved_decisions"] = []
+                self.mode["pending_criteria"] = ""
+                self.mode["planning_stage"] = PLANNING_STAGE_RESEARCH
             await run_user_turn(
                 agent=self.agent,
                 plan_agent=self.plan_agent,
@@ -391,6 +431,20 @@ class MiraApp(App[None]):
                 )
                 return
 
+    @on(Button.Pressed, ".proposal-action")
+    def press_proposal_action(self, event: Button.Pressed) -> None:
+        """Handle goal or rubric-enabled plan review actions."""
+        button_id = event.button.id or ""
+        for action in ("implement", "revise", "discard"):
+            prefix = f"proposal-{action}-"
+            if button_id.startswith(prefix):
+                self.run_worker(
+                    self._handle_proposal_action(action, button_id[len(prefix):]),
+                    name=f"proposal-{action}",
+                    exclusive=False,
+                )
+                return
+
     @on(Button.Pressed, "#new-chat")
     def press_new_chat(self, event: Button.Pressed) -> None:
         """Start a fresh saved chat session from the sidebar action."""
@@ -461,7 +515,7 @@ class MiraApp(App[None]):
     def _switch_to_session(self, session: dict[str, Any]) -> None:
         """Install a new active session without rebuilding agents."""
         self.session = session
-        self.mode = initial_mode(self.agent, self.plan_agent)
+        self.mode = initial_mode(self.agent, self.plan_agent, (self.config or {}).get("settings"))
         self.query_one(SubagentsPanel).reset()
         ensure_dashboard(
             self.session,
@@ -524,6 +578,198 @@ class MiraApp(App[None]):
                 name="plan-implementation",
                 exclusive=True,
             )
+
+    async def _run_goal_command(self, objective: str) -> None:
+        """Generate and present a standalone goal proposal."""
+        try:
+            self.waiting_started("drafting Definition of Done...", immediate=True)
+            criteria = await GoalCriteriaService(self.config or {}).generate(objective)
+            value = proposal(
+                proposal_id=self._next_proposal_id(),
+                kind="goal",
+                original_objective=objective,
+                decisions=[],
+                criteria=criteria,
+                plan=None,
+                rubric_iterations=rubric_max_iterations((self.config or {}).get("settings")),
+            )
+            self._present_proposal(value)
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.system_message("goal generation cancelled", kind="warning")
+            raise
+        except Exception as exc:
+            error_path = self._write_error_report(exc, source="tui.goal")
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.waiting_finished()
+            self._waiting_label = "working..."
+            self.turn_worker = None
+            self.busy = False
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _handle_proposal_action(self, action: str, proposal_id: str) -> None:
+        """Resolve an active goal or rubric-enabled plan proposal."""
+        value = self.mode.get("current_proposal")
+        if not isinstance(value, dict) or str(value.get("id") or "") != proposal_id:
+            self.system_message("that proposal is no longer active", kind="warning")
+            return
+        if self.busy:
+            self.system_message("finish the current turn before resolving the proposal", kind="warning")
+            return
+
+        if action == "discard":
+            self._resolve_current_proposal("discarded")
+            self.system_message(f'discarded proposal "{proposal_title(value)}"', kind="muted")
+            self.action_focus_prompt()
+            return
+
+        if action == "revise":
+            label = "Plan" if value.get("kind") == "plan" else "Goal"
+            feedback = await self._prompt_text(f"Revise {label}", f"What should MIRA change about this {label.lower()}?")
+            feedback = (feedback or "").strip()
+            if not feedback:
+                self.system_message(f'kept proposal "{proposal_title(value)}" active', kind="muted")
+                self.action_focus_prompt()
+                return
+            self._resolve_current_proposal("revision requested")
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            self.query_one(PromptBox).disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_proposal_revision(value, feedback),
+                name="proposal-revision",
+                exclusive=True,
+            )
+            return
+
+        if action == "implement":
+            self._resolve_current_proposal("approved for implementation")
+            self.mode["planning"] = False
+            self.mode["approved_proposal"] = value
+            self.system_message(f'implementing proposal "{proposal_title(value)}"', kind="status")
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            self.query_one(PromptBox).disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_turn_for_proposal(value),
+                name="proposal-implementation",
+                exclusive=True,
+            )
+
+    async def _run_turn_for_proposal(self, value: dict[str, Any]) -> None:
+        """Run the normal action agent from an approved proposal."""
+        try:
+            await self._refresh_model_metadata()
+            is_plan = value.get("kind") == "plan"
+            await run_user_turn(
+                agent=self.agent,
+                plan_agent=self.plan_agent,
+                renderer=self,
+                store=self.store,
+                session=self.session,
+                mode=self.mode,
+                text="Implement the approved plan." if is_plan else str(value.get("objective") or ""),
+                display_text=f"Implement {'plan' if is_plan else 'goal'}: {proposal_title(value)}",
+                record_user=False,
+                model_name=self.model_name,
+                context_limit_tokens=self.context_limit_tokens,
+                context_limit_source=self.context_limit_source,
+            )
+            self._refresh_sessions()
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.finish_turn(cancelled=True)
+            self.system_message("turn cancelled", kind="warning")
+            raise
+        except Exception as exc:
+            self.finish_turn(cancelled=True)
+            error_path = self._write_error_report(
+                exc,
+                source="tui.proposal_turn",
+                context={"proposal": proposal_title(value)},
+            )
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            self.finish_turn()
+            self.query_one(PromptBox).disabled = False
+            self.action_focus_prompt()
+
+    async def _run_proposal_revision(self, value: dict[str, Any], feedback: str) -> None:
+        """Revise criteria first, then optionally revise the separate plan."""
+        try:
+            service = GoalCriteriaService(self.config or {})
+            self.waiting_started("revising Definition of Done...", immediate=True)
+            revised = await service.revise(
+                str(value.get("objective") or ""),
+                str(value.get("criteria") or ""),
+                feedback,
+            )
+            revised_value = {**value, "criteria": revised}
+            if value.get("kind") == "goal":
+                event = append_event(
+                    self.session,
+                    {"type": "user", "mode": "planning", "text": f"Revise goal: {feedback}"},
+                )
+                self.store.save(self.session)
+                self.user_message(
+                    f"Revise goal: {feedback}",
+                    planning=True,
+                    created_at=str(event.get("created_at") or ""),
+                )
+                revised_value = {
+                    **revised_value,
+                    "id": self._next_proposal_id(),
+                }
+                self._present_proposal(revised_value)
+            else:
+                self.waiting_started("drafting plan...", immediate=True)
+                self.mode["planning"] = True
+                self.mode["plan_runs"] = self.mode.get("plan_runs", 0) + 1
+                self.mode["plan_thread_id"] = plan_thread_id(self.session, self.mode["plan_runs"])
+                self.mode["active_objective"] = str(value.get("original_objective") or "")
+                self.mode["resolved_decisions"] = list(value.get("resolved_decisions") or [])
+                self.mode["pending_criteria"] = revised
+                self.mode["planning_stage"] = PLANNING_STAGE_FINALIZE
+                await run_user_turn(
+                    agent=self.agent,
+                    plan_agent=self.plan_agent,
+                    renderer=self,
+                    store=self.store,
+                    session=self.session,
+                    mode=self.mode,
+                    text=rubric_plan_revision_text(revised_value, feedback),
+                    display_text=f"Revise plan: {feedback}",
+                    record_user=True,
+                    model_name=self.model_name,
+                    context_limit_tokens=self.context_limit_tokens,
+                    context_limit_source=self.context_limit_source,
+                )
+            self._refresh_sessions()
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.finish_turn(cancelled=True)
+            self.system_message("revision cancelled", kind="warning")
+            raise
+        except Exception as exc:
+            self.finish_turn(cancelled=True)
+            error_path = self._write_error_report(exc, source="tui.proposal_revision")
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            self.finish_turn()
+            self.query_one(PromptBox).disabled = False
+            self.action_focus_prompt()
 
     async def _run_turn_for_plan(self, plan: dict[str, Any]) -> None:
         """Run action mode from an approved structured plan."""
@@ -620,6 +866,43 @@ class MiraApp(App[None]):
         update_plan_event_status(self.session, plan_id, status)
         self.store.save(self.session)
 
+    def _next_proposal_id(self) -> str:
+        """Return a session-local review proposal id."""
+        self.mode["plan_counter"] = int(self.mode.get("plan_counter") or 0) + 1
+        return f"proposal-{self.mode['plan_counter']}"
+
+    def _present_proposal(self, value: dict[str, Any]) -> None:
+        """Persist and render one active rubric proposal."""
+        current_plan = self.mode.get("current_plan")
+        if isinstance(current_plan, dict):
+            self._resolve_current_plan("superseded")
+        current = self.mode.get("current_proposal")
+        if isinstance(current, dict):
+            self._resolve_current_proposal("superseded")
+        self.mode["current_proposal"] = value
+        event = append_event(
+            self.session,
+            {"type": "proposal", "mode": "planning", "proposal": value, "status": "pending"},
+        )
+        self.store.save(self.session)
+        self.query_one(ChatLog).present_proposal(
+            value,
+            active=True,
+            status="pending",
+            created_at=str(event.get("created_at") or ""),
+        )
+
+    def _resolve_current_proposal(self, status: str) -> None:
+        """Resolve the active rubric proposal in UI and durable history."""
+        value = self.mode.get("current_proposal")
+        if not isinstance(value, dict):
+            return
+        proposal_id = str(value.get("id") or "")
+        self.mode["current_proposal"] = None
+        self.query_one(ChatLog).resolve_proposal(proposal_id, status)
+        update_proposal_event_status(self.session, proposal_id, status)
+        self.store.save(self.session)
+
     def action_interrupt_or_quit(self) -> None:
         """Confirm before cancelling a turn or quitting the app."""
         if self.confirming_interrupt:
@@ -705,6 +988,19 @@ class MiraApp(App[None]):
         """Render a structured plan for explicit user review."""
         self.waiting_finished()
         plan = plan_request(interrupt)
+        if self.mode.get("rubric_enabled") and self.mode.get("pending_criteria"):
+            value = proposal(
+                proposal_id=self._next_proposal_id(),
+                kind="plan",
+                original_objective=str(self.mode.get("active_objective") or ""),
+                decisions=list(self.mode.get("resolved_decisions") or []),
+                criteria=str(self.mode.get("pending_criteria") or ""),
+                plan=plan,
+                rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
+            )
+            self.mode["pending_criteria"] = ""
+            self._present_proposal(value)
+            return "Plan and Definition of Done presented for user review."
         self.mode["plan_counter"] = int(self.mode.get("plan_counter") or 0) + 1
         plan = {**plan, "id": f"plan-{self.mode['plan_counter']}"}
 
@@ -724,6 +1020,27 @@ class MiraApp(App[None]):
             created_at=str(event.get("created_at") or ""),
         )
         return "Plan presented for user review."
+
+    async def prepare_goal(self, interrupt: Any) -> str:  # noqa: ARG002
+        """Generate criteria after planning research and decisions are complete."""
+        self.waiting_finished()
+        original = str(self.mode.get("active_objective") or "").strip()
+        decisions = list(self.mode.get("resolved_decisions") or [])
+        if not original:
+            raise RuntimeError("planning objective is unavailable for criteria generation")
+        objective = effective_objective(original, decisions)
+        self.waiting_started("drafting Definition of Done...", immediate=True)
+        criteria = await GoalCriteriaService(self.config or {}).generate(objective)
+        self.mode["pending_criteria"] = criteria
+        self.mode["planning_stage"] = PLANNING_STAGE_FINALIZE
+        self.waiting_started("drafting plan...", immediate=True)
+        return (
+            "MIRA generated the Definition of Done through the separate criteria pathway. "
+            "Now create the final plan using the original objective, these criteria, and your existing "
+            "read-only research. Call present_plan with the plan alone.\n\n"
+            f"<objective>\n{objective}\n</objective>\n\n"
+            f"<definition_of_done>\n{criteria}\n</definition_of_done>"
+        )
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
@@ -934,11 +1251,17 @@ class MiraApp(App[None]):
             return False, "execute remains disabled"
         old_git_enabled = git_protection_enabled(old_settings)
         new_git_enabled = git_protection_enabled(settings)
+        rubric_changed = (
+            rubric_enabled(old_settings) != rubric_enabled(settings)
+            or rubric_max_iterations(old_settings) != rubric_max_iterations(settings)
+        )
         if not save_settings(self.workspace, settings):
             return False, "could not save .mira/settings.yml"
 
         self.config = dict(self.config or {})
         self.config["settings"] = settings
+        if rubric_changed and isinstance(self.mode.get("current_proposal"), dict):
+            self._resolve_current_proposal("settings changed")
         if new_git_enabled != old_git_enabled:
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
@@ -1307,6 +1630,44 @@ class MiraApp(App[None]):
             status="ERROR" if result else "CANCELLED",
         )
 
+    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+        """Show live rubric activity in the TUI and trace sidecar."""
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.trace.rubric_evaluation_started(run_id, pass_number, max_iterations)
+        self.query_one(ChatLog).rubric_evaluation_started(run_id, pass_number, max_iterations)
+
+    def rubric_evaluation_finished(
+        self,
+        evaluation: dict[str, Any],
+        max_iterations: int,
+        *,
+        created_at: str = "",
+    ) -> None:
+        """Render a completed rubric evaluation."""
+        self.trace.rubric_evaluation_finished(evaluation, max_iterations)
+        self.query_one(ChatLog).rubric_evaluation_finished(
+            evaluation,
+            max_iterations,
+            created_at=created_at,
+        )
+
+    def rubric_evaluation_status(
+        self,
+        run_id: str,
+        pass_number: int,
+        status: str,
+        max_iterations: int,
+    ) -> None:
+        """Reconcile a rubric result with the completed agent state."""
+        self.trace.rubric_evaluation_status(run_id, pass_number, status, max_iterations)
+        self.query_one(ChatLog).rubric_evaluation_status(
+            run_id,
+            pass_number,
+            status,
+            max_iterations,
+        )
+
     def finish_main(self) -> None:
         """Close streamed chat blocks after a top-level turn."""
         self.trace.flush_all()
@@ -1319,6 +1680,7 @@ class MiraApp(App[None]):
         self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
+        self._waiting_label = "working..."
         self.query_one(ChatLog).finish_turn(cancelled=cancelled)
         if cancelled:
             self.query_one(SubagentsPanel).cancel_running()
@@ -1357,10 +1719,15 @@ class MiraApp(App[None]):
         answer = str(await self._prompt_choice("Question", question, choices, vertical=True) or "")
         selected = options[int(answer) - 1] if answer.isdigit() and 0 < int(answer) <= len(options) else options[-1]
         if selected != ASK_USER_OPEN_OPTION:
-            return selected
-
-        response = await self._prompt_text("Question", ASK_USER_OPEN_OPTION)
-        return (response or "").strip() or ASK_USER_OPEN_OPTION
+            result = selected
+        else:
+            response = await self._prompt_text("Question", ASK_USER_OPEN_OPTION)
+            result = (response or "").strip() or ASK_USER_OPEN_OPTION
+        if self.mode.get("planning") and self.mode.get("rubric_enabled"):
+            decisions = list(self.mode.get("resolved_decisions") or [])
+            decisions.append({"question": question, "answer": result})
+            self.mode["resolved_decisions"] = decisions
+        return result
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""
@@ -1430,8 +1797,10 @@ class MiraApp(App[None]):
             if self.is_mounted and self.ready and not self.busy and not prompt.disabled:
                 self.action_focus_prompt()
 
-    def waiting_started(self) -> None:
+    def waiting_started(self, label: str | None = None, *, immediate: bool = False) -> None:
         """Arm the transient working indicator while the turn is silent."""
+        if label is not None:
+            self._waiting_label = label
         self._waiting_generation += 1
         self._cancel_waiting_task()
         if not self.is_mounted or not self.busy or self._main_stream_active:
@@ -1440,6 +1809,9 @@ class MiraApp(App[None]):
             if self.query_one(PromptPanel).active:
                 return
         except NoMatches:
+            return
+        if immediate:
+            self.query_one(ChatLog).show_waiting(self._waiting_label)
             return
         generation = self._waiting_generation
         self._waiting_task = self.run_worker(
@@ -1462,7 +1834,7 @@ class MiraApp(App[None]):
             return
         if generation != self._waiting_generation or not self.busy or not self.is_mounted or self._main_stream_active:
             return
-        self.query_one(ChatLog).show_waiting()
+        self.query_one(ChatLog).show_waiting(self._waiting_label)
 
     def _cancel_waiting_task(self) -> None:
         """Cancel the pending delayed thinking task if one exists."""
@@ -1610,6 +1982,8 @@ class MiraApp(App[None]):
             metadata=metadata,
         )
         refresh_agent_specs(self.mode, self.agent, self.plan_agent)
+        self.mode["rubric_enabled"] = rubric_enabled(self.config.get("settings"))
+        self.mode["rubric_max_iterations"] = rubric_max_iterations(self.config.get("settings"))
 
     def _refresh_sessions(self) -> None:
         """Reload the session list if the store is available."""

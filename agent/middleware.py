@@ -5,9 +5,9 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NotRequired
 
-from langchain.agents.middleware.types import AgentMiddleware, ModelResponse
+from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelResponse
 from langchain_core.messages import AIMessage
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -16,6 +16,11 @@ from agent.compaction import (
     create_mira_summarization_tool_middleware,
 )
 from agent.context_overflow import ProviderContextOverflowMiddleware
+from agent.planning.policy import (
+    PLANNING_STAGE_FINALIZE,
+    PLANNING_STAGE_RESEARCH,
+    PRESENT_PLAN_TOOL,
+)
 from agent.tools.specs import tool_name as resource_tool_name
 from config.settings import dynamic_subagents_enabled
 
@@ -202,6 +207,40 @@ class ModelToolVisibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         """Return a request copy with excluded tools removed."""
         tools = [tool for tool in request.tools if resource_tool_name(tool) not in self.excluded_tools]
         return request.override(tools=tools)
+
+
+class PlanningStageState(AgentState):
+    """Checkpointed stage for rubric-enabled planning tool visibility."""
+
+    planning_stage: NotRequired[Literal["research", "finalize"]]
+
+
+class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
+    """Expose only the planning tools valid for the current rubric stage."""
+
+    state_schema = PlanningStageState
+
+    def wrap_model_call(self, request: Any, handler: Any) -> Any:
+        """Filter and constrain synchronous planning model calls."""
+        return handler(self._stage_request(request))
+
+    async def awrap_model_call(self, request: Any, handler: Any) -> Any:
+        """Filter and constrain asynchronous planning model calls."""
+        return await handler(self._stage_request(request))
+
+    def _stage_request(self, request: Any) -> Any:
+        stage = str(request.state.get("planning_stage") or PLANNING_STAGE_RESEARCH)
+        if stage == PLANNING_STAGE_FINALIZE:
+            tools = [tool for tool in request.tools if resource_tool_name(tool) == PRESENT_PLAN_TOOL]
+            if not tools:
+                raise RuntimeError("rubric planning finalization requires present_plan")
+            # OpenAI-compatible providers do not consistently accept the
+            # named-tool object produced by LangChain. With one visible tool,
+            # ``required`` is equally deterministic and provider-portable.
+            return request.override(tools=tools, tool_choice="required")
+
+        tools = [tool for tool in request.tools if resource_tool_name(tool) != PRESENT_PLAN_TOOL]
+        return request.override(tools=tools, tool_choice=None)
 
 
 class ModelResponseNormalizationMiddleware(AgentMiddleware[Any, Any, Any]):

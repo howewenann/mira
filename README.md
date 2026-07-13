@@ -86,6 +86,19 @@ model cannot reliably complete DeepAgents' structured-output tool protocol;
 MIRA then keeps the same full subagents but compiles them ahead of time, so
 Eval `responseSchema` requests are rejected before a child model starts.
 
+Goal-driven rubric grading is opt-in under System Settings. Its stored form is:
+
+```yaml
+system:
+  rubric:
+    enabled: false
+    max_iterations: 3
+```
+
+The maximum accepts whole numbers from 1 through 20. The input remains locked
+while Rubric Middleware is off, and changing either rubric setting rebuilds the
+action and planning agents.
+
 MIRA's own Python runtime can be different from the environment used by the
 agent's `execute` tool. In `/settings`, the Execute Environment section lets a
 project run shell commands through the system shell, a Conda env name, a Conda
@@ -146,6 +159,24 @@ should be run as workspace-relative paths such as `python tmp.py`.
   Clicking an active plan bubble restores focus to its most recently focused
   action after the prompt or another control has been selected. Discarding a
   plan returns focus to the prompt.
+- When Rubric Middleware is enabled, use `/goal <prompt>` to review a generated
+  Definition of Done before any action begins. The goal bubble keeps the
+  original objective and acceptance criteria separate, shows the configured
+  iteration cap, and offers Implement, Revise, and Discard. Implement runs the
+  effective objective through the normal action agent with rubric grading;
+  Revise updates only the criteria from your feedback.
+- Rubric-enabled `/plan` keeps the same read-only research and `ask_user`
+  decision flow, then generates the Definition of Done before the final
+  structured plan. During research, `present_plan` is hidden; after
+  `prepare_goal`, MIRA checkpoints a finalization stage where `present_plan` is
+  the only visible tool and a tool call is required. The research prompt ends
+  with the matching `ask_user`/`prepare_goal` contract rather than asking for a
+  plan early. Animated status blocks remain visible while MIRA drafts the
+  Definition of Done and the final plan. The review
+  bubble shows the normal plan sections followed by separately styled criteria.
+  Revising it updates criteria first and starts directly in finalization with
+  the same feedback. When Rubric Middleware is disabled, `/plan` retains its
+  original prompt, model-call count, bubble, and execution flow.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
   active agents without restarting the TUI.
@@ -234,6 +265,10 @@ what MIRA loaded and which project resources replaced defaults.
   supporting read-only conversation. Implementation intent produces a
   structured plan bubble; resolved bubbles stay as inactive history and only
   the newest unresolved plan is actionable.
+- Optional goal-driven rubric grading with reviewable `/goal` proposals and a
+  criteria-aware `/plan` flow. Only the action agent owns DeepAgents'
+  `RubricMiddleware`; criteria generation uses a fresh configured model outside
+  either agent graph.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display from DeepAgents' own summarization count, plus
@@ -268,6 +303,12 @@ subagent detail remains live telemetry, with durable history coming from the
 parent eval tool call/result and assistant summary.
 Recent structured plan bubbles are also included in model resume context as
 compact plan summaries, without replaying raw reasoning or tool event noise.
+Goal-driven proposals are stored as explicit proposal events with the original
+objective, resolved decisions, effective objective, criteria, optional plan,
+and iteration cap separately recoverable. Completed rubric evaluations are
+stored as rubric events; evaluation-start activity remains transient. Neither
+rubric grading nor its internal feedback messages are recorded as tool calls or
+user-authored transcript events.
 DeepAgents manages runtime context compaction while MIRA is running, and MIRA
 records visible compaction markers and archive paths in the session file. The
 TUI `/compact` command uses the same DeepAgents summarization engine and writes

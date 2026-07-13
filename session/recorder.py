@@ -31,6 +31,7 @@ class SessionRecorder:
         self._running_subagents: dict[str, str] = {}
         self._running_subagent_origins: dict[str, str] = {}
         self._running_subagent_event_ids: dict[str, int] = {}
+        self._rubric_event_ids: dict[tuple[str, int], int] = {}
         self._delegation_keys: set[tuple[str, str]] = set()
 
     def save(self) -> None:
@@ -207,6 +208,39 @@ class SessionRecorder:
         stored = append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
         self.save()
         return stored
+
+    def rubric_evaluation_finished(
+        self,
+        evaluation: dict[str, Any],
+        max_iterations: int,
+    ) -> dict[str, Any]:
+        """Persist one completed rubric evaluation as a non-tool event."""
+        stored = append_event(
+            self.record,
+            {
+                "type": "rubric",
+                "mode": self.mode,
+                "evaluation": json_value(evaluation),
+                "max_iterations": int(max_iterations),
+            },
+        )
+        key = (str(evaluation.get("grading_run_id") or ""), int(evaluation.get("iteration") or 0) + 1)
+        self._rubric_event_ids[key] = int(stored["id"])
+        self.save()
+        return stored
+
+    def rubric_evaluation_status(self, run_id: str, pass_number: int, status: str) -> None:
+        """Update the persisted evaluation after checkpoint reconciliation."""
+        event_id = self._rubric_event_ids.get((run_id, pass_number))
+        if event_id is None:
+            return
+        for event in self.record.get("events", []):
+            if isinstance(event, dict) and int(event.get("id") or 0) == event_id:
+                evaluation = event.get("evaluation")
+                if isinstance(evaluation, dict):
+                    evaluation["result"] = status
+                self.save()
+                return
 
     def ensure_assistant(self, text: str) -> None:
         text = text.strip()
@@ -468,6 +502,38 @@ class RecordingRenderer:
         if callable(callback):
             callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
 
+    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+        """Forward transient rubric activity without persisting a start event."""
+        self.recorder.finish_main()
+        callback = getattr(self.renderer, "rubric_evaluation_started", None)
+        if callable(callback):
+            callback(run_id, pass_number, max_iterations)
+
+    def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
+        """Persist and forward one completed rubric evaluation."""
+        event = self.recorder.rubric_evaluation_finished(evaluation, max_iterations)
+        callback = getattr(self.renderer, "rubric_evaluation_finished", None)
+        if callable(callback):
+            call_renderer(
+                callback,
+                evaluation,
+                max_iterations,
+                created_at=event_created_at(event),
+            )
+
+    def rubric_evaluation_status(
+        self,
+        run_id: str,
+        pass_number: int,
+        status: str,
+        max_iterations: int,
+    ) -> None:
+        """Reconcile durable and visible rubric terminal state."""
+        self.recorder.rubric_evaluation_status(run_id, pass_number, status)
+        callback = getattr(self.renderer, "rubric_evaluation_status", None)
+        if callable(callback):
+            callback(run_id, pass_number, status, max_iterations)
+
     def subagents_cancelled(self) -> None:
         callback = getattr(self.renderer, "subagents_cancelled", None)
         if callable(callback):
@@ -558,6 +624,16 @@ def update_plan_event_status(record: dict[str, Any], plan_id: str, status: str) 
             continue
         plan = event.get("plan")
         if isinstance(plan, dict) and str(plan.get("id") or "") == plan_id:
+            event["status"] = status
+
+
+def update_proposal_event_status(record: dict[str, Any], proposal_id: str, status: str) -> None:
+    """Update the persisted status for an explicit goal proposal."""
+    for event in record.get("events", []):
+        if not isinstance(event, dict) or event.get("type") != "proposal":
+            continue
+        value = event.get("proposal")
+        if isinstance(value, dict) and str(value.get("id") or "") == proposal_id:
             event["status"] = status
             return
 

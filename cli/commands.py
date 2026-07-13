@@ -158,8 +158,17 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         pop_context_overflow_notice,
     )
     from langchain_core.exceptions import ContextOverflowError
+    from config.settings import rubric_enabled, rubric_max_iterations
 
     request_text = with_resume_context(app["session"], prompt)
+    settings = (app.get("config") or {}).get("settings")
+    rubric_kwargs = {}
+    if rubric_enabled(settings):
+        rubric_kwargs = {
+            "rubric": None,
+            "rubric_max_iterations": rubric_max_iterations(settings),
+            "include_rubric_state": True,
+        }
     recorder = SessionRecorder(app["session"], app["store"], "action")
     recorder.user_message(prompt)
     update_title(app["session"])
@@ -183,6 +192,7 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
                 text=request_text,
                 renderer=renderer,
                 thread_id=app["session"]["id"],
+                **rubric_kwargs,
             )
     except ContextOverflowError as exc:
         with suppress(Exception):

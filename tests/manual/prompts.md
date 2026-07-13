@@ -554,3 +554,101 @@ Expected:
 
 - The ordinary reasoning and reply remain visible; wording alone does not make
   MIRA classify the model call as compaction.
+
+## Goal-Driven Rubric Grading
+
+Use a disposable workspace and keep its session files for replay checks. Use
+mock models for deterministic criteria revision and iteration-cap behavior, and
+also run scenario 2 once with a real locally configured MIRA model where
+practical.
+
+### 1. Disabled compatibility
+
+Leave Rubric Middleware disabled in `/settings`, then enter:
+
+```text
+/goal add a palindrome helper
+```
+
+Expected: MIRA directs you to Rubric Middleware in `/settings`; no model call or
+proposal event is created. Enter `/plan` and plan the same task. The legacy plan
+bubble and single planning flow remain unchanged, with no Definition of Done or
+visible `prepare_goal` control.
+
+### 2. Goal proposal and implementation
+
+Enable Rubric Middleware, leave maximum iterations at 3, then enter:
+
+```text
+/goal create palindrome.py with a typed is_palindrome function and focused tests
+```
+
+Expected: a goal bubble separately shows the original objective, Markdown
+Definition of Done, and `Rubric iterations: 3`. Choose Implement. The normal
+action agent receives the effective objective plus rubric criteria, rubric
+activity updates one TUI block in place, passes are numbered from 1, and no
+`rubric_grader` tool appears. While criteria are being generated, an animated
+`drafting Definition of Done...` block remains visible.
+
+### 3. Goal criteria-only revision
+
+Create another `/goal`, choose Revise, and enter:
+
+```text
+Make the plan shorter.
+```
+
+Expected with the deterministic mock: criteria are returned exactly unchanged,
+the previous plan is absent from the criteria-revision request, and the real
+feedback is recorded as a user event. Revise again with `Require Unicode
+examples in the tests.` Only the Definition of Done changes. Discard the
+proposal and verify prompt focus is restored.
+
+### 4. Rubric-enabled planning order
+
+Enter `/plan`, then:
+
+```text
+Plan a searchable notes index. SQLite and JSON are both acceptable, but choose
+with me before finalizing the design.
+```
+
+Expected: the planning agent uses `ask_user`; the answer remains structured,
+read-only research completes, the hidden `prepare_goal` interrupt generates
+criteria, and the same planning thread then calls `present_plan`. Before
+`prepare_goal`, `/tools` and diagnostics should not show `present_plan` in the
+model-visible research surface. After the resume, `present_plan` is the only
+model-visible tool and a tool call is required; `prepare_goal`, `ask_user`, and
+research tools cannot be selected. The TUI changes its animated status from
+`drafting Definition of Done...` to `drafting plan...` across the two model
+calls. The bubble shows normal plan sections followed by the
+Definition of Done. Session JSON keeps original objective, resolved decision,
+effective objective, criteria, and plan as separate proposal fields.
+
+### 5. Plan revision and approval
+
+Choose Revise on the rubric-enabled plan and enter:
+
+```text
+Keep the same outcomes, but make the plan shorter.
+```
+
+Expected: criteria revision completes first and may return criteria unchanged;
+plan revision then receives identical feedback, original objective, previous
+plan, and revised criteria, and returns a complete plan. Choose Implement. The
+action context contains the approved plan while invocation state contains the
+separate criteria.
+
+### 6. Cap reconciliation, ordinary clearing, and replay
+
+Set maximum iterations to 1. With a deterministic mock grader, implement a goal
+whose final event says `needs_revision` while checkpoint state says
+`max_iterations_reached`.
+
+Expected: TUI, one-shot/trace output, `TurnResult`, and the durable rubric event
+finish as `max_iterations_reached`, showing failed criteria and gaps. Reopen the
+session: completed proposal and rubric blocks replay, start activity does not,
+and no synthetic grader feedback appears as user chat. Submit an ordinary
+action prompt while rubric remains enabled; MIRA sends explicit `rubric=None`
+and performs no grading. Changing either rubric setting while a proposal is
+pending resolves it as `settings changed` and rebuilds both agents.

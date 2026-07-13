@@ -19,23 +19,29 @@ from config.settings import (
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    RUBRIC,
+    RUBRIC_MAX_ITERATIONS_LIMIT,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
     git_protection_enabled,
+    rubric_enabled,
+    rubric_max_iterations,
     set_dynamic_subagent_response_schema,
     set_dynamic_subagents,
     set_execute_env_allow,
     set_execute_env_mode,
     set_execute_env_value,
     set_git_protection,
+    set_rubric_enabled,
+    set_rubric_max_iterations,
     set_tool_always_allow,
     set_tool_enabled,
     tool_always_allow,
     tool_enabled,
 )
 
-ToggleKind = Literal["git", "system", "response_schema", "enabled", "always_allow"]
+ToggleKind = Literal["git", "system", "response_schema", "rubric", "enabled", "always_allow"]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
     "conda_name": "conda env name",
@@ -105,6 +111,24 @@ class SettingsPanel(Vertical):
                         ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
                         dynamic_subagent_response_schema_enabled(self.settings),
                     )
+                with Horizontal(classes="settings-row"):
+                    yield Static("Rubric Middleware", classes="settings-label")
+                    yield self._toggle_button(
+                        ToggleCell("rubric", RUBRIC),
+                        rubric_enabled(self.settings),
+                    )
+                with Horizontal(classes="settings-row settings-child-row rubric-iterations-row"):
+                    yield Static("Maximum iterations", classes="settings-label settings-child-label")
+                    yield Input(
+                        value=str(rubric_max_iterations(self.settings)),
+                        id="settings-rubric-max-iterations",
+                        classes="settings-input rubric-iterations-input",
+                        disabled=not rubric_enabled(self.settings),
+                    )
+                yield Static(
+                    f"Enter a whole number from 1 to {RUBRIC_MAX_ITERATIONS_LIMIT}.",
+                    classes="settings-help",
+                )
 
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
                 yield SettingsHeaderRow("")
@@ -222,6 +246,9 @@ class SettingsPanel(Vertical):
         """Save execute environment text fields on Enter."""
         event.stop()
         input_id = event.input.id or ""
+        if input_id == "settings-rubric-max-iterations":
+            await self._submit_rubric_iterations(event.input)
+            return
         value = event.value
         if input_id == "settings-execute-env-allow":
             updated = set_execute_env_allow(self.settings, value)
@@ -257,6 +284,8 @@ class SettingsPanel(Vertical):
             updated = set_dynamic_subagents(self.settings, value)
         elif cell.kind == "response_schema":
             updated = set_dynamic_subagent_response_schema(self.settings, value)
+        elif cell.kind == "rubric":
+            updated = set_rubric_enabled(self.settings, value)
         elif cell.kind == "enabled":
             updated = set_tool_enabled(self.settings, cell.name, value)
         else:
@@ -267,6 +296,24 @@ class SettingsPanel(Vertical):
             return
         self.settings = updated
         self._refresh_buttons()
+        self._refresh_rubric_control()
+
+    async def _submit_rubric_iterations(self, input_widget: Input) -> None:
+        """Persist a valid rubric cap and restore the last value after invalid input."""
+        try:
+            value = int(input_widget.value.strip())
+        except ValueError:
+            value = 0
+        updated = set_rubric_max_iterations(self.settings, value)
+        if rubric_max_iterations(updated) != value:
+            input_widget.value = str(rubric_max_iterations(self.settings))
+            self._set_status(f"maximum iterations must be from 1 to {RUBRIC_MAX_ITERATIONS_LIMIT}")
+            return
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+        input_widget.value = str(rubric_max_iterations(self.settings))
 
     def _toggle_button(self, cell: ToggleCell, value: bool) -> Button:
         button_id = button_id_for(cell)
@@ -318,6 +365,12 @@ class SettingsPanel(Vertical):
                 self.query_one(f"#{focus_id}", Button).focus(scroll_visible=False)
             except Exception:
                 pass
+
+    def _refresh_rubric_control(self) -> None:
+        """Refresh dependent rubric controls after the parent toggle changes."""
+        control = self.query_one("#settings-rubric-max-iterations", Input)
+        control.disabled = not rubric_enabled(self.settings)
+        control.value = str(rubric_max_iterations(self.settings))
 
     def _focused_toggle(self) -> Button | None:
         for button in self.query(Button):
@@ -376,6 +429,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return dynamic_subagents_enabled(settings)
     if cell.kind == "response_schema":
         return dynamic_subagent_response_schema_enabled(settings)
+    if cell.kind == "rubric":
+        return rubric_enabled(settings)
     if cell.kind == "enabled":
         return tool_enabled(settings, cell.name)
     return tool_always_allow(settings, cell.name)

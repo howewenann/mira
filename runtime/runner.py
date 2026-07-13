@@ -13,6 +13,7 @@ from typing import Any
 from langgraph.types import Command
 from langgraph.stream.transformers import CustomTransformer
 
+from agent.planning.policy import PLANNING_STAGE_FINALIZE, PLANNING_STAGE_RESEARCH
 from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import (
@@ -23,6 +24,7 @@ from runtime.output_events import (
     output_tool_calls,
     output_tool_results,
 )
+from runtime.rubric_events import RubricEventRenderer
 from runtime.subagent_events import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
 from runtime.tool_call_args import tool_call_args
 from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
@@ -51,6 +53,8 @@ class TurnResult:
     context_tokens: int = 0
     context_source: str = "unknown"
     usage_source: str = "unknown"
+    rubric_status: str = ""
+    rubric_evaluations: list[dict[str, Any]] = field(default_factory=list)
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _seen_tool_result_ids: set[str] = field(default_factory=set, repr=False)
@@ -287,10 +291,12 @@ class EvalSubagentRenderer:
                 self.renderer.subagent_cancelled(name, error)
 
 
-async def consume_custom_events(stream: Any, renderer: Any) -> None:
-    """Consume raw custom events emitted by eval-internal subagent dispatch."""
+async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventRenderer) -> None:
+    """Dispatch custom events without competing stream consumers."""
     eval_renderer = EvalSubagentRenderer(renderer)
     async for event in stream:
+        if isinstance(event, dict) and rubric.handle(event):
+            continue
         if custom_event_data(event) is not None:
             eval_renderer.handle(event)
 
@@ -346,6 +352,10 @@ async def run_turn(
     renderer: Any,
     thread_id: str,
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
+    rubric: str | None | object = None,
+    rubric_max_iterations: int = 3,
+    include_rubric_state: bool = False,
+    planning_stage: str | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -357,6 +367,10 @@ async def run_turn(
     with a ``Command`` payload.
     """
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
+    if include_rubric_state:
+        payload["rubric"] = rubric
+    if planning_stage in {PLANNING_STAGE_RESEARCH, PLANNING_STAGE_FINALIZE}:
+        payload["planning_stage"] = planning_stage
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
 
@@ -372,6 +386,7 @@ async def run_turn(
             ],
         )
         event_renderer = SubagentRequestRenderer(renderer)
+        rubric_renderer = RubricEventRenderer(event_renderer, rubric_max_iterations)
         output: dict[str, Any] = {}
         tool_call_start = len(result.tool_calls)
         waiting_started = getattr(renderer, "waiting_started", None)
@@ -379,7 +394,7 @@ async def run_turn(
             waiting_started()
 
         await asyncio.gather(
-            consume_custom_events(stream.custom, event_renderer),
+            consume_custom_events(stream.custom, event_renderer, rubric_renderer),
             consume_messages(
                 stream.messages,
                 event_renderer,
@@ -393,6 +408,7 @@ async def run_turn(
         )
 
         render_output_tool_results(output.get("value"), event_renderer, result)
+        result.rubric_evaluations.extend(rubric_renderer.evaluations)
         result.final_text = final_text(output.get("value")) or result.final_text
         usage_delta = result.commit_loop_usage(output.get("value"))
         if usage_callback is not None and (has_usage(usage_delta) or has_context_usage(usage_delta)):
@@ -432,11 +448,23 @@ async def run_turn(
                         stream_tool_calls_observed=stream_tool_calls_observed,
                     )
                 )
+            if include_rubric_state and isinstance(rubric, str) and rubric.strip():
+                state = await completed_agent_state(agent, config)
+                result.rubric_status = str(state.get("_rubric_status") or "")
+                if not result.rubric_status and result.rubric_evaluations:
+                    result.rubric_status = str(result.rubric_evaluations[-1].get("result") or "")
+                rubric_renderer.finalize(result.rubric_status)
             return result
 
+        prepare_goal_interrupt = first_typed_interrupt(interrupts, "prepare_goal")
         plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
-        if plan_interrupt is not None:
+        if prepare_goal_interrupt is not None:
+            payload = Command(
+                resume=await renderer.prepare_goal(prepare_goal_interrupt),
+                update={"planning_stage": PLANNING_STAGE_FINALIZE},
+            )
+        elif plan_interrupt is not None:
             await renderer.present_plan(plan_interrupt)
             result.final_text = ""
             return result
@@ -447,6 +475,17 @@ async def run_turn(
             payload = Command(resume={"decisions": decisions})
 
 
+async def completed_agent_state(agent: Any, config: dict[str, Any]) -> dict[str, Any]:
+    """Return checkpoint values used to reconcile rubric terminal status."""
+    getter = getattr(agent, "aget_state", None)
+    if not callable(getter):
+        return {}
+    try:
+        snapshot = await getter(config)
+    except Exception:
+        return {}
+    values = getattr(snapshot, "values", None)
+    return values if isinstance(values, dict) else {}
 
 
 def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:

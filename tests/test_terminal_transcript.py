@@ -72,6 +72,29 @@ class TerminalTranscriptTests(unittest.TestCase):
 
         self.assertNotIn("\033[", "".join(chunks))
 
+    def test_rubric_activity_and_result_are_concise(self) -> None:
+        transcript, chunks = self.make_transcript()
+        transcript.rubric_evaluation_started(1, 3)
+        transcript.rubric_evaluation_finished(
+            {
+                "grading_run_id": "run-1",
+                "iteration": 0,
+                "result": "needs_revision",
+                "explanation": "Verification is missing.",
+                "criteria": [
+                    {"name": "Files updated", "passed": True, "gap": ""},
+                    {"name": "Tests run", "passed": False, "gap": "No test output"},
+                ],
+            },
+            3,
+        )
+
+        rendered = "".join(chunks)
+        self.assertIn("Reviewing completion criteria · pass 1 of 3", rendered)
+        self.assertIn("1 of 2 criteria satisfied", rendered)
+        self.assertIn("- Tests run: No test output", rendered)
+        self.assertNotIn("grading_run_id", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

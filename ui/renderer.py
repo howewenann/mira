@@ -101,6 +101,28 @@ class Renderer:
         """No-op for non-live terminal output."""
         return None
 
+    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:  # noqa: ARG002
+        """Print rubric review activity in one-shot mode."""
+        self.transcript.rubric_evaluation_started(pass_number, max_iterations)
+
+    def rubric_evaluation_finished(
+        self,
+        evaluation: dict[str, Any],
+        max_iterations: int,
+    ) -> None:
+        """Print a completed rubric evaluation."""
+        self.transcript.rubric_evaluation_finished(evaluation, max_iterations)
+
+    def rubric_evaluation_status(
+        self,
+        run_id: str,
+        pass_number: int,
+        status: str,
+        max_iterations: int,
+    ) -> None:  # noqa: ARG002
+        """Print a reconciled terminal rubric status."""
+        self.transcript.rubric_evaluation_status(pass_number, status, max_iterations)
+
     def finish_main(self) -> None:
         """Finish the current streamed section."""
         self.transcript.finish_main()

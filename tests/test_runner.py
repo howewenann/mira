@@ -407,6 +407,25 @@ class RunTurnRenderer(RecordingRenderer):
         self.events.append(("present_plan", interrupt))
         return "Plan presented for user review."
 
+    async def prepare_goal(self, interrupt: Any) -> str:
+        self.events.append(("prepare_goal", interrupt))
+        return "Criteria are ready. Continue to present_plan."
+
+    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+        self.events.append(("rubric_started", run_id, pass_number, max_iterations))
+
+    def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
+        self.events.append(("rubric_finished", evaluation, max_iterations))
+
+    def rubric_evaluation_status(
+        self,
+        run_id: str,
+        pass_number: int,
+        status: str,
+        max_iterations: int,
+    ) -> None:
+        self.events.append(("rubric_status", run_id, pass_number, status, max_iterations))
+
 
 class FakeStream:
     """Fake DeepAgents stream with the channels the runner consumes."""
@@ -442,6 +461,17 @@ class FakeAgent:
     async def astream_events(self, payload: Any, config: dict[str, Any], version: str, **kwargs: Any) -> FakeStream:
         self.payloads.append(payload)
         return self.streams.pop(0)
+
+
+class FakeRubricAgent(FakeAgent):
+    """Fake agent exposing the completed checkpoint values used by rubrics."""
+
+    def __init__(self, streams: list[FakeStream], state: dict[str, Any]) -> None:
+        super().__init__(streams)
+        self.state = state
+
+    async def aget_state(self, config: dict[str, Any]) -> Any:
+        return type("Snapshot", (), {"values": self.state})()
 
 
 class FakeBackend:
@@ -734,6 +764,98 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ("eval_subagent_finished", "general-purpose [haiku 1]", "", "eval-round-a", "ptc_task_one", 1500),
             renderer.events,
         )
+
+    async def test_run_turn_routes_rubric_and_eval_events_and_reconciles_cap(self) -> None:
+        stream = FakeStream(
+            output={"messages": []},
+            custom_events=[
+                {
+                    "type": "subagent",
+                    "phase": "start",
+                    "id": "ptc_task_one",
+                    "eval_id": "eval-1",
+                    "subagent_type": "general-purpose",
+                    "label": "research",
+                    "description": "check the result",
+                },
+                {"type": "rubric_evaluation_start", "grading_run_id": "grade-1", "iteration": 0},
+                {
+                    "type": "rubric_evaluation_end",
+                    "grading_run_id": "grade-1",
+                    "iteration": 0,
+                    "result": "needs_revision",
+                    "explanation": "One requirement remains.",
+                    "criteria": [
+                        {"name": "Works", "passed": True, "gap": ""},
+                        {"name": "Tested", "passed": False, "gap": "No focused test."},
+                    ],
+                },
+                {"type": "subagent", "phase": "complete", "id": "ptc_task_one"},
+            ],
+        )
+        agent = FakeRubricAgent([stream], {"_rubric_status": "max_iterations_reached"})
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "implement it",
+            renderer,
+            "thread-1",
+            rubric="- Works\n- Tested",
+            rubric_max_iterations=1,
+            include_rubric_state=True,
+        )
+
+        self.assertEqual(agent.payloads[0]["rubric"], "- Works\n- Tested")
+        self.assertEqual(result.rubric_status, "max_iterations_reached")
+        self.assertEqual(result.rubric_evaluations[0]["result"], "max_iterations_reached")
+        self.assertIn(("rubric_started", "grade-1", 1, 1), renderer.events)
+        self.assertIn(("rubric_status", "grade-1", 1, "max_iterations_reached", 1), renderer.events)
+        self.assertIn(
+            ("subagent_started", "general-purpose [research]", "check the result", "eval_subagent"),
+            renderer.events,
+        )
+        self.assertFalse(any(call.get("name") == "rubric_grader" for call in result.tool_calls))
+
+    async def test_run_turn_can_explicitly_clear_checkpointed_rubric(self) -> None:
+        agent = FakeAgent([FakeStream(output={"messages": []})])
+
+        result = await runner.run_turn(
+            agent,
+            "ordinary request",
+            RunTurnRenderer(),
+            "thread-1",
+            rubric=None,
+            include_rubric_state=True,
+        )
+
+        self.assertIn("rubric", agent.payloads[0])
+        self.assertIsNone(agent.payloads[0]["rubric"])
+        self.assertNotIn("planning_stage", agent.payloads[0])
+        self.assertEqual(result.rubric_evaluations, [])
+
+    async def test_run_turn_resumes_prepare_goal_control_interrupt(self) -> None:
+        interrupt = {"type": "prepare_goal"}
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(
+            agent,
+            "research first",
+            renderer,
+            "thread-1",
+            planning_stage="research",
+        )
+
+        self.assertIn(("prepare_goal", interrupt), renderer.events)
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(agent.payloads[0]["planning_stage"], "research")
+        self.assertEqual(agent.payloads[1].update, {"planning_stage": "finalize"})
 
     async def test_run_turn_keeps_tool_namespace_subagent_with_task_request_ordinary(self) -> None:
         stream = FakeStream(output={"messages": []})

@@ -9,7 +9,7 @@ from langgraph.types import Command
 from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
-CONTROL_TOOLS = {"present_plan"}
+CONTROL_TOOLS = {"present_plan", "prepare_goal"}
 
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:

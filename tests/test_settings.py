@@ -27,6 +27,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_enabled(loaded, "execute"))
         self.assertFalse(settings.dynamic_subagents_enabled(loaded))
         self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
+        self.assertFalse(settings.rubric_enabled(loaded))
+        self.assertEqual(settings.rubric_max_iterations(loaded), 3)
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
@@ -101,6 +103,24 @@ class SettingsTests(unittest.TestCase):
 
         updated = settings.set_dynamic_subagent_response_schema(updated, True)
         self.assertTrue(settings.dynamic_subagent_response_schema_enabled(updated))
+
+    def test_rubric_settings_normalize_and_preserve_invalid_iteration_values(self) -> None:
+        """Rubric settings should default safely and reject unsupported caps."""
+        loaded = settings.normalize_settings(
+            {"system": {"rubric": {"enabled": True, "max_iterations": 5}}}
+        )
+        self.assertTrue(settings.rubric_enabled(loaded))
+        self.assertEqual(settings.rubric_max_iterations(loaded), 5)
+
+        for value in (0, -1, 21, True, "4"):
+            updated = settings.set_rubric_max_iterations(loaded, value)
+            self.assertEqual(settings.rubric_max_iterations(updated), 5)
+
+        malformed = settings.normalize_settings(
+            {"system": {"rubric": {"enabled": "yes", "max_iterations": 0}}}
+        )
+        self.assertFalse(settings.rubric_enabled(malformed))
+        self.assertEqual(settings.rubric_max_iterations(malformed), 3)
 
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
         """Partial settings should merge with defaults; malformed YAML should not crash."""

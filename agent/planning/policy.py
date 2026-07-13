@@ -7,6 +7,9 @@ PLAN_DISABLED_TOOLS = (*PLAN_PROJECT_WRITE_TOOLS, "execute", "task", "eval")
 PLAN_DENIED_FS_OPERATIONS = ("write",)
 PLAN_BLOCKED_RESULT_MARKERS = ("permission denied for write",)
 PRESENT_PLAN_TOOL = "present_plan"
+PREPARE_GOAL_TOOL = "prepare_goal"
+PLANNING_STAGE_RESEARCH = "research"
+PLANNING_STAGE_FINALIZE = "finalize"
 
 PLAN_BEHAVIOR_POLICY = """Planning mode supports safe, read-only conversation as well as implementation planning.
 At the start of every turn, before using tools or answering, classify the current user request as exactly one of these intents:
@@ -32,6 +35,13 @@ PLAN_TERMINAL_REMINDER = """Before returning, check the intent you classified.
 - For IMPLEMENTATION, repository research and prose findings are intermediate work, not a valid final response. If a material decision is required, call ask_user. Otherwise, call present_plan.
 - If your proposed response offers alternatives that require the user to select a direction, stop and move the decision plus 1-3 choices into ask_user instead of showing those alternatives in prose.
 - If this is a resumed ask_user turn, the selected answer resolves the pending decision but does not change IMPLEMENTATION into SAFE_CONVERSATION; finish the original request by calling present_plan.
+- Never end an IMPLEMENTATION turn with assistant prose or a user-facing question."""
+
+RUBRIC_PLAN_RESEARCH_REMINDER = """Before returning, check the intent you classified.
+- For SAFE_CONVERSATION, you may return a normal assistant message.
+- For IMPLEMENTATION, repository research and prose findings are intermediate work, not a valid final response. If a material decision is required, call ask_user. Otherwise, finish read-only research and call prepare_goal.
+- If this is a resumed ask_user turn, the selected answer resolves the pending decision but does not change IMPLEMENTATION into SAFE_CONVERSATION; finish the original request by calling prepare_goal.
+- present_plan is unavailable during this research stage. Do not try to call it or draft the final plan yet.
 - Never end an IMPLEMENTATION turn with assistant prose or a user-facing question."""
 
 PLAN_OUTPUT_TEMPLATE = """Use this exact content template when calling present_plan.
@@ -61,15 +71,25 @@ APPROVED_PLAN_EXECUTION_INSTRUCTIONS = """Implement the approved plan as binding
 - If a planned test/check cannot be run, state exactly which one was skipped and why.
 - In the final response, report the implementation result and the tests/checks actually run."""
 
+RUBRIC_PLAN_INSTRUCTIONS = """Rubric-enabled planning uses two separate model pathways and this order is mandatory:
+- The original user objective is authoritative.
+- During the research stage, finish read-only research and resolve every material ask_user decision, then call prepare_goal with no plan content. present_plan is unavailable during this stage.
+- prepare_goal is an intermediate control step. MIRA generates the Definition of Done and advances the planning state before the next model call.
+- During the finalization stage, present_plan is the only available tool and is required. Use the Definition of Done plus your existing read-only research to create the final plan.
+- The criteria define completion. The plan must satisfy them without adding unsupported deliverables or scope.
+- Add implementation detail only when necessary to achieve the objective.
+- A revision with an existing MIRA-provided Definition of Done starts directly in the finalization stage."""
+
 
 def plan_disabled_tools_text() -> str:
     """Return the complete tool set hidden while planning mode is active."""
     return ", ".join(PLAN_DISABLED_TOOLS)
 
 
-def plan_system_prompt() -> str:
+def plan_system_prompt(*, rubric: bool = False) -> str:
     """Build the system prompt that keeps planning mode non-mutating."""
     tools = plan_disabled_tools_text()
+    rubric_instructions = f"\n{RUBRIC_PLAN_INSTRUCTIONS}\n" if rubric else ""
     return f"""You are MIRA in planning mode.
 
 You may inspect the workspace, but you must not modify files, run commands, delegate work, evaluate programs, or take destructive actions.
@@ -77,6 +97,7 @@ The following tools are disabled in this mode: {tools}.
 Never call disabled tools in planning mode.
 Do not write or edit source files, configuration files, tests, or any other project file while planning.
 {PLAN_BEHAVIOR_POLICY}
+{rubric_instructions}
 When calling present_plan, provide a concise title, Summary bullets, Key Changes bullets, Test Plan bullets, and Assumptions bullets.
 Fill every present_plan section. If you think there are no special assumptions, include that explicitly.
 {PLAN_OUTPUT_TEMPLATE}

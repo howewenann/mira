@@ -13,8 +13,8 @@ from rich.console import Console
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
-from agent.middleware import ModelToolVisibilityMiddleware
-from agent.plan_policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
+from agent.middleware import ModelToolVisibilityMiddleware, PlanningStageMiddleware
+from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
 from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
 from runtime import runner
@@ -269,6 +269,47 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(code_middleware.call_args.kwargs["subagents"])
 
+    def test_rubric_middleware_is_action_only_and_uses_configured_cap(self) -> None:
+        """Enabled rubric grading should not leak into the planning agent."""
+        config = {"settings": {"system": {"rubric": {"enabled": True, "max_iterations": 5}}}}
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.RubricMiddleware", return_value="rubric") as rubric,
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            factory.build_agent(config, ".", "checkpointer")
+            action_middleware = create.call_args.kwargs["middleware"]
+            factory.build_plan_agent(config, ".", "checkpointer")
+            plan_kwargs = create.call_args.kwargs
+
+        rubric.assert_called_once_with(model="model", tools=None, max_iterations=5)
+        self.assertIn("rubric", action_middleware)
+        self.assertNotIn("rubric", plan_kwargs["middleware"])
+        self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
+        self.assertTrue(any(isinstance(item, PlanningStageMiddleware) for item in plan_kwargs["middleware"]))
+
+    def test_disabled_plan_prompt_and_tools_remain_unchanged(self) -> None:
+        """The default planning agent must retain its existing prompt and tools."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.RubricMiddleware") as rubric,
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            factory.build_plan_agent({}, ".", "checkpointer")
+
+        rubric.assert_not_called()
+        self.assertEqual(create.call_args.kwargs["system_prompt"], factory.PLAN_SYSTEM_PROMPT)
+        self.assertNotIn("prepare_goal", [tool_name(tool) for tool in create.call_args.kwargs["tools"]])
+        self.assertFalse(
+            any(isinstance(item, PlanningStageMiddleware) for item in create.call_args.kwargs["middleware"])
+        )
+
     def test_action_agent_compiles_subagents_when_response_schemas_are_disabled(self) -> None:
         """Schema-free dynamic mode should pass compiled workers to DeepAgents."""
         config = {
@@ -353,6 +394,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("write_file", names)
         self.assertIn("edit_file", names)
         self.assertIn("grep", names)
+        self.assertNotIn("prepare_goal", names)
         self.assertNotIn("present_plan", names)
         grep = next(tool for tool in agent.mira_tool_specs if tool["name"] == "grep")
         self.assertEqual(grep["source"], "default")
@@ -372,6 +414,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         names = [tool["name"] for tool in agent.mira_tool_specs]
         self.assertIn("ask_user", names)
         self.assertIn("present_plan", names)
+        self.assertNotIn("prepare_goal", names)
         self.assertIn("read_file", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
@@ -441,6 +484,25 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("present_plan", planning_names)
         for tool in PLAN_DISABLED_TOOLS:
             self.assertNotIn(tool, planning_names)
+
+    def test_rubric_planning_tool_display_matches_current_stage(self) -> None:
+        mode = {
+            "rubric_enabled": True,
+            "planning_tools": [
+                {"name": "read_file"},
+                {"name": "ask_user"},
+                {"name": "prepare_goal"},
+                {"name": "present_plan"},
+            ],
+            "planning_stage": "research",
+        }
+
+        research = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
+        mode["planning_stage"] = "finalize"
+        finalize = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
+
+        self.assertEqual(research, ["read_file", "ask_user", "prepare_goal"])
+        self.assertEqual(finalize, ["present_plan"])
 
     async def test_plan_and_act_commands_toggle_mode(self) -> None:
         """Slash commands should switch between planning and action modes."""
@@ -837,6 +899,113 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("User request:\ndo it", calls[0][1])
         self.assertEqual(calls[1], ("action-agent", "do another thing", "thread-1"))
 
+    async def test_run_user_turn_distinguishes_omitted_cleared_and_supplied_rubric(self) -> None:
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0}
+        store = FakeStore()
+        disabled = repl.initial_mode("action-agent", "plan-agent")
+        enabled = repl.initial_mode(
+            "action-agent",
+            "plan-agent",
+            {"system": {"rubric": {"enabled": True, "max_iterations": 4}}},
+        )
+        calls: list[dict[str, Any]] = []
+
+        async def fake_run_turn(**kwargs: Any) -> runner.TurnResult:
+            calls.append(kwargs)
+            return runner.TurnResult()
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=disabled,
+                text="ordinary disabled turn",
+            )
+            await repl.handle_command("/plan", renderer, session, "model", enabled)
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=enabled,
+                text="research a plan",
+            )
+            enabled["planning"] = False
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=enabled,
+                text="ordinary enabled turn",
+            )
+            enabled["approved_proposal"] = {
+                "kind": "goal",
+                "objective": "Build it.",
+                "criteria": "- It works.",
+                "plan": None,
+            }
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=store,
+                session=session,
+                mode=enabled,
+                text="Build it.",
+            )
+
+        self.assertFalse(calls[0]["include_rubric_state"])
+        self.assertFalse(calls[1]["include_rubric_state"])
+        self.assertEqual(calls[1]["planning_stage"], "research")
+        self.assertIn("call prepare_goal", calls[1]["text"])
+        self.assertNotIn("Fill every present_plan section", calls[1]["text"])
+        self.assertTrue(calls[2]["include_rubric_state"])
+        self.assertIsNone(calls[2]["rubric"])
+        self.assertEqual(calls[3]["rubric"], "- It works.")
+        self.assertEqual(calls[3]["rubric_max_iterations"], 4)
+
+    async def test_rubric_plan_revision_starts_in_finalize_stage(self) -> None:
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0}
+        mode = repl.initial_mode(
+            "action-agent",
+            "plan-agent",
+            {"system": {"rubric": {"enabled": True, "max_iterations": 3}}},
+        )
+        mode.update(
+            {
+                "planning": True,
+                "planning_stage": "finalize",
+                "plan_thread_id": "thread-1:plan:revision",
+            }
+        )
+        captured: dict[str, Any] = {}
+
+        async def fake_run_turn(**kwargs: Any) -> runner.TurnResult:
+            captured.update(kwargs)
+            return runner.TurnResult()
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="revise with existing criteria",
+            )
+
+        self.assertEqual(captured["agent"], "plan-agent")
+        self.assertEqual(captured["planning_stage"], "finalize")
+
     async def test_run_user_turn_applies_live_usage_once(self) -> None:
         """Interactive usage callbacks should refresh dashboard without final double-counting."""
         renderer = RecordingRenderer()
@@ -1168,6 +1337,14 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not use vague Test Plan items", text)
         self.assertIn("If execute is unavailable", text)
 
+    def test_rubric_research_request_ends_with_prepare_goal_contract(self) -> None:
+        text = repl.plan_request_text("write a file", rubric_research=True)
+
+        self.assertIn("rubric-enabled planning research mode", text)
+        self.assertIn("call prepare_goal", text)
+        self.assertIn("present_plan is unavailable during this research stage", text)
+        self.assertNotIn("Fill every present_plan section", text)
+
     def test_plan_revision_text_includes_old_plan_and_feedback(self) -> None:
         """Revision requests should not depend on planning-thread memory."""
         text = repl.plan_revision_text(
@@ -1189,6 +1366,22 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Assumptions:\n- Use Python.", text)
         self.assertIn("User feedback:\ninclude a testing plan", text)
         self.assertIn("Create a revised plan using present_plan", text)
+
+    def test_rubric_plan_revision_keeps_fields_delimited_and_feedback_identical(self) -> None:
+        text = repl.rubric_plan_revision_text(
+            {
+                "objective": "Build search.",
+                "criteria": "- Ranked results are returned.",
+                "plan": {"title": "Search", "summary": ["Add ranking."]},
+            },
+            "Make the plan shorter.",
+        )
+
+        self.assertIn("<objective>\nBuild search.\n</objective>", text)
+        self.assertIn("<previous_plan>\nTitle: Search", text)
+        self.assertIn("<definition_of_done>\n- Ranked results are returned.", text)
+        self.assertIn("<user_feedback>\nMake the plan shorter.\n</user_feedback>", text)
+        self.assertIn("If no plan change is required, return the previous plan unchanged.", text)
 
     async def test_plans_command_is_removed(self) -> None:
         """The old saved-plan command should no longer be handled specially."""

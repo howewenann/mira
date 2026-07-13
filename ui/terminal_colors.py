@@ -1,4 +1,4 @@
-"""Display-only ANSI colors for terminal transcripts."""
+"""Shared display colors for terminal transcripts and Textual widgets."""
 
 from __future__ import annotations
 
@@ -10,6 +10,10 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 THINKING_BODY = "\033[38;2;184;194;201m"
+RUBRIC_HEADER_COLOR = "#C58FD6"
+RUBRIC_BODY_COLOR = "#F1DCF5"
+RUBRIC_HEADER = "\033[38;2;197;143;214m"
+RUBRIC_BODY = "\033[38;2;241;220;245m"
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 COLORS = {
@@ -26,6 +30,8 @@ COLORS = {
     "task": "\033[38;2;125;155;209m",
     "task request": "\033[38;2;125;155;209m",
     "system": "\033[38;2;125;155;209m",
+    "rubric review": RUBRIC_HEADER,
+    "goal": RUBRIC_HEADER,
 }
 
 
@@ -89,6 +95,8 @@ def body_color_for_label(label: str, header_color: str) -> str:
     """Return the body color for a block label."""
     if label.strip().lower() == "thinking":
         return THINKING_BODY
+    if label.strip().lower() in {"rubric review", "goal"}:
+        return RUBRIC_BODY
     return header_color
 
 

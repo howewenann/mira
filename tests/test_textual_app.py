@@ -28,8 +28,11 @@ from config.settings import (
     dynamic_subagents_enabled,
     execute_env_settings,
     load_settings,
+    rubric_enabled,
+    rubric_max_iterations,
     save_settings,
     set_dynamic_subagents,
+    set_rubric_enabled,
     tool_always_allow,
     tool_enabled,
 )
@@ -732,6 +735,122 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 [renderable_plain(block) for block in reasoning_blocks],
                 ["first reasoning", "second reasoning"],
             )
+
+    async def test_goal_proposal_and_rubric_result_render_as_dedicated_blocks(self) -> None:
+        app = make_app()
+        proposal = {
+            "id": "proposal-1",
+            "kind": "goal",
+            "original_objective": "Add ranked search.",
+            "objective": "Add ranked search.",
+            "resolved_decisions": [],
+            "criteria": "- Results are ranked.\n- Focused tests pass.",
+            "plan": None,
+            "rubric_iterations": 3,
+        }
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.present_proposal(proposal, active=True)
+            await pilot.pause()
+
+            proposal_blocks = list(chat.query(".proposal"))
+            self.assertEqual(len(proposal_blocks), 1)
+            proposal_text = renderable_plain(proposal_blocks[0].query_one(".proposal-body", Static))
+            self.assertIn("GOAL", proposal_text)
+            self.assertIn("Add ranked search.", proposal_text)
+            self.assertIn("DEFINITION OF DONE", proposal_text)
+            self.assertIn("Rubric iterations: 3", proposal_text)
+            self.assertEqual(len(proposal_blocks[0].query(".proposal-action")), 3)
+
+            initial_children = len(chat.children)
+            app.rubric_evaluation_started("grade-1", 1, 3)
+            await pilot.pause()
+            self.assertEqual(len(chat.children), initial_children + 1)
+            app.rubric_evaluation_finished(
+                {
+                    "grading_run_id": "grade-1",
+                    "iteration": 0,
+                    "result": "needs_revision",
+                    "explanation": "A test is missing.",
+                    "criteria": [
+                        {"name": "Ranked", "passed": True, "gap": ""},
+                        {"name": "Tested", "passed": False, "gap": "No focused test."},
+                    ],
+                },
+                3,
+            )
+            await pilot.pause()
+
+            self.assertEqual(len(chat.children), initial_children + 1)
+            rubric_text = renderable_plain(chat.children[-1])
+            self.assertIn("pass 1 of 3", rubric_text)
+            self.assertIn("1 of 2 criteria satisfied", rubric_text)
+            self.assertIn("No focused test.", rubric_text)
+
+    async def test_prepare_goal_advances_live_mode_to_finalize(self) -> None:
+        app = make_app()
+        service = type("CriteriaService", (), {})()
+        service.generate = AsyncMock(return_value="- Ranked search works.")
+        with patch("ui.app.GoalCriteriaService", return_value=service):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.mode.update(
+                    {
+                        "planning": True,
+                        "rubric_enabled": True,
+                        "active_objective": "Add ranked search.",
+                        "resolved_decisions": [{"question": "Backend?", "answer": "SQLite"}],
+                        "planning_stage": "research",
+                    }
+                )
+                resume = await app.prepare_goal({"type": "prepare_goal"})
+
+        self.assertEqual(app.mode["planning_stage"], "finalize")
+        self.assertEqual(app.mode["pending_criteria"], "- Ranked search works.")
+        self.assertIn("Resolved planning decisions", service.generate.await_args.args[0])
+        self.assertIn("<definition_of_done>\n- Ranked search works.", resume)
+
+    async def test_prepare_goal_shows_definition_and_plan_spinners(self) -> None:
+        app = make_app()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        service = type("CriteriaService", (), {})()
+
+        async def generate(_objective: str) -> str:
+            started.set()
+            await release.wait()
+            return "- Ranked search works."
+
+        service.generate = AsyncMock(side_effect=generate)
+        with patch("ui.app.GoalCriteriaService", return_value=service):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.busy = True
+                app.mode.update(
+                    {
+                        "planning": True,
+                        "rubric_enabled": True,
+                        "active_objective": "Add ranked search.",
+                        "resolved_decisions": [],
+                        "planning_stage": "research",
+                    }
+                )
+                task = asyncio.create_task(app.prepare_goal({"type": "prepare_goal"}))
+                await started.wait()
+                await pilot.pause()
+                self.assertIn(
+                    "drafting Definition of Done...",
+                    renderable_plain(app.query_one(ChatLog).children[-1]),
+                )
+
+                release.set()
+                await task
+                await pilot.pause()
+                self.assertIn("drafting plan...", renderable_plain(app.query_one(ChatLog).children[-1]))
+                app.finish_turn()
+                app.busy = False
 
     async def test_cancel_turn_detaches_reasoning_and_assistant_blocks(self) -> None:
         """New streamed output after cancellation should start fresh main bubbles."""
@@ -1534,6 +1653,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/compact", output)
             self.assertIn("/subagents", output)
 
+    async def test_goal_command_disabled_message_does_not_start_a_turn(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/goal add search"))
+            await pilot.pause()
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("enable Rubric Middleware in /settings to use /goal", rendered)
+            self.assertFalse(app.busy)
+            self.assertEqual(app.session.get("turns", 0), 0)
+
     async def test_compact_command_updates_action_thread_without_adding_turn(self) -> None:
         app = make_app()
         compact_result = PostTurnCompactionResult(compacted=True, reason="compacted")
@@ -2309,6 +2442,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("Response schemas", rendered)
+                self.assertIn("Rubric Middleware", rendered)
+                self.assertIn("Maximum iterations", rendered)
                 self.assertIn("write_file", rendered)
                 self.assertIn("edit_file", rendered)
                 self.assertIn("eval", rendered)
@@ -2317,6 +2452,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
                 self.assertIn("settings-toggle-response_schema-response_schema", buttons)
+                self.assertIn("settings-toggle-rubric-rubric", buttons)
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
@@ -2335,6 +2471,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-response_schema-response_schema"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-rubric-rubric"].label), "no")
+                rubric_input = panel.query_one("#settings-rubric-max-iterations", Input)
+                rubric_toggle = buttons["settings-toggle-rubric-rubric"]
+                self.assertEqual(rubric_input.value, "3")
+                self.assertTrue(rubric_input.disabled)
+                self.assertEqual(rubric_input.styles.width, rubric_toggle.styles.width)
+                self.assertEqual(rubric_input.styles.min_width, rubric_toggle.styles.min_width)
+                self.assertEqual(rubric_input.styles.height, rubric_toggle.styles.height)
+                self.assertEqual(rubric_input.styles.border_top[0], "")
+                self.assertEqual(rubric_input.styles.background, Color.parse("#151a1d"))
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -2347,6 +2493,73 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 self.assertTrue(app.query_one(PromptBox).has_focus)
+
+    async def test_settings_panel_validates_and_persists_rubric_iterations(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            rebuilds = []
+
+            async def rebuild() -> None:
+                rebuilds.append(True)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query(Button)) >= 10)
+                toggle = panel.query_one("#settings-toggle-rubric-rubric", Button)
+                control = panel.query_one("#settings-rubric-max-iterations", Input)
+
+                self.assertTrue(control.disabled)
+                toggle.press()
+                await pilot.pause()
+                self.assertFalse(control.disabled)
+                self.assertTrue(rubric_enabled(load_settings(workspace)))
+
+                control.value = "21"
+                await panel.submit_execute_env_input(Input.Submitted(control, "21"))
+                self.assertEqual(control.value, "3")
+                self.assertEqual(rubric_max_iterations(load_settings(workspace)), 3)
+
+                control.value = "5"
+                await panel.submit_execute_env_input(Input.Submitted(control, "5"))
+                self.assertEqual(control.value, "5")
+                self.assertEqual(rubric_max_iterations(load_settings(workspace)), 5)
+                self.assertEqual(len(rebuilds), 2)
+
+    async def test_rubric_setting_change_invalidates_pending_proposal(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = AsyncMock()
+                app._present_proposal(
+                    {
+                        "id": "proposal-1",
+                        "kind": "goal",
+                        "original_objective": "Add search.",
+                        "objective": "Add search.",
+                        "resolved_decisions": [],
+                        "criteria": "- Search works.",
+                        "plan": None,
+                        "rubric_iterations": 3,
+                    }
+                )
+                await pilot.pause()
+
+                updated = set_rubric_enabled(app.config["settings"], True)
+                ok, _ = await app._apply_settings(updated)
+
+                self.assertTrue(ok)
+                self.assertIsNone(app.mode["current_proposal"])
+                proposal_events = [event for event in app.session["events"] if event.get("type") == "proposal"]
+                self.assertEqual(proposal_events[-1]["status"], "settings changed")
+                app._rebuild_agents.assert_awaited_once()
 
     async def test_tool_section_headers_match_system_spacing(self) -> None:
         """Tool tables should use the compact System Settings row progression."""
@@ -2398,7 +2611,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 execute_section = labels["Execute Environment"]
                 inbuilt_section = labels["Inbuilt Tools"]
-                last_system_row = labels["Response schemas"]
+                last_system_row = labels["Enter a whole number from 1 to 20."]
                 last_inbuilt_row = labels["execute"]
                 run_commands = labels["Run commands in"]
                 execute_help = labels["Examples only. Use comma-separated names."]

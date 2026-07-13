@@ -11,7 +11,7 @@ from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
-from agent.plan_policy import (
+from agent.planning.policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
     PLAN_BEHAVIOR_POLICY,
     PLAN_BLOCKED_RESULT_MARKERS,
@@ -19,7 +19,10 @@ from agent.plan_policy import (
     PLAN_OUTPUT_TEMPLATE,
     PLAN_PROJECT_WRITE_TOOLS,
     PLAN_TERMINAL_REMINDER,
+    PLANNING_STAGE_FINALIZE,
+    PLANNING_STAGE_RESEARCH,
     PRESENT_PLAN_TOOL,
+    RUBRIC_PLAN_RESEARCH_REMINDER,
     plan_disabled_tools_text,
 )
 from runtime.context_usage import context_usage_scope
@@ -27,6 +30,7 @@ from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.context import mark_resume_context_pending, update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
+from config.settings import rubric_enabled, rubric_max_iterations
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -46,6 +50,33 @@ User feedback:
 {feedback}
 
 Create a revised plan using present_plan when ready. Preserve the existing intent unless the feedback explicitly changes it."""
+
+RUBRIC_PLAN_REVISION_TEMPLATE = """Revise this structured plan using the already revised Definition of Done.
+
+The original user objective is authoritative.
+
+<objective>
+{objective}
+</objective>
+
+<previous_plan>
+{plan}
+</previous_plan>
+
+<definition_of_done>
+{criteria}
+</definition_of_done>
+
+<user_feedback>
+{feedback}
+</user_feedback>
+
+Return the complete revised plan through present_plan.
+Update the plan as needed to satisfy the revised acceptance criteria and the user's feedback.
+Preserve valid existing content where practical.
+Do not add deliverables, constraints, or scope beyond the objective, revised criteria, and feedback.
+If no plan change is required, return the previous plan unchanged.
+Do not call prepare_goal because the Definition of Done has already been revised."""
 
 PLAN_REQUEST_TEMPLATE = """You are in planning mode.
 The following tools are disabled: {disabled_tools}.
@@ -70,6 +101,7 @@ COMMAND_HELP = {
     "/skills": "list loaded skills and replacements",
     "/subagents": "list loaded subagents and replacements",
     "/plan": "enter safe planning mode; mutating and delegation tools are disabled",
+    "/goal <prompt>": "review a Definition of Done before action when rubric grading is enabled",
     "/act": "return to action mode",
     "/session": "show session id, mode, workspace, and turn count",
     "/model": "show the configured model name",
@@ -103,12 +135,20 @@ DEFAULT_TOOL_SPECS = [
 ]
 
 
-def initial_mode(agent: Any, plan_agent: Any) -> dict[str, Any]:
+def initial_mode(agent: Any, plan_agent: Any, settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the mutable interactive state for one TUI session."""
     return {
         "planning": False,
         "current_plan": None,
         "approved_plan": None,
+        "current_proposal": None,
+        "approved_proposal": None,
+        "active_objective": "",
+        "resolved_decisions": [],
+        "pending_criteria": "",
+        "planning_stage": None,
+        "rubric_enabled": rubric_enabled(settings),
+        "rubric_max_iterations": rubric_max_iterations(settings),
         "plan_counter": 0,
         "plan_runs": 0,
         "action_tools": tool_specs(agent),
@@ -171,17 +211,33 @@ async def run_user_turn(
         if callable(usage_updated):
             usage_updated()
 
+    approved_rubric: str | None = None
     if mode["planning"]:
         active_agent = plan_agent
         thread_id = mode["plan_thread_id"]
         mode_name = "planning"
-        request_text = with_resume_context(session, plan_request_text(text))
+        planning_stage = (
+            str(mode.get("planning_stage") or PLANNING_STAGE_RESEARCH)
+            if mode.get("rubric_enabled")
+            else None
+        )
+        request_text = with_resume_context(
+            session,
+            plan_request_text(text, rubric_research=planning_stage == PLANNING_STAGE_RESEARCH),
+        )
     else:
         active_agent = agent
         thread_id = session["id"]
         mode_name = "action"
+        approved_proposal = mode.get("approved_proposal")
+        approved_rubric = (
+            str(approved_proposal.get("criteria") or "")
+            if isinstance(approved_proposal, dict)
+            else None
+        )
         action_text = action_request_text(mode, text)
         request_text = with_resume_context(session, action_text)
+        planning_stage = None
 
     ensure_dashboard(
         session,
@@ -214,6 +270,10 @@ async def run_user_turn(
                 renderer=wrapped_renderer,
                 thread_id=thread_id,
                 usage_callback=apply_live_usage,
+                rubric=approved_rubric,
+                rubric_max_iterations=int(mode.get("rubric_max_iterations") or 3),
+                include_rubric_state=bool(mode.get("rubric_enabled")) and mode_name == "action",
+                planning_stage=planning_stage,
             )
     except asyncio.CancelledError:
         await sync_compaction_safely(recorder, active_agent, thread_id)
@@ -299,6 +359,7 @@ async def handle_command(
 
     if text == "/plan":
         mode["planning"] = True
+        mode["planning_stage"] = PLANNING_STAGE_RESEARCH if mode.get("rubric_enabled") else None
         mode["plan_runs"] = mode.get("plan_runs", 0) + 1
         mode["plan_thread_id"] = plan_thread_id(session, mode["plan_runs"])
         mark_resume_context_pending(session, resumed=True)
@@ -307,6 +368,7 @@ async def handle_command(
 
     if text == "/act":
         mode["planning"] = False
+        mode["planning_stage"] = None
         write_line(renderer, "action mode", kind="status")
         return True
 
@@ -429,7 +491,12 @@ def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, s
     key = "planning_tools" if planning else "action_tools"
     tools = mode.get(key)
     if isinstance(tools, list) and tools:
-        return normalize_tool_specs(tools)
+        normalized = normalize_tool_specs(tools)
+        if planning and mode.get("rubric_enabled"):
+            if mode.get("planning_stage") == PLANNING_STAGE_FINALIZE:
+                return [tool for tool in normalized if tool["name"] == PRESENT_PLAN_TOOL]
+            return [tool for tool in normalized if tool["name"] != PRESENT_PLAN_TOOL]
+        return normalized
 
     if not planning:
         blocked = {PRESENT_PLAN_TOOL}
@@ -593,8 +660,17 @@ def write_was_blocked(result: TurnResult) -> bool:
     return any(marker in value.lower() for value in tool_results for marker in PLAN_BLOCKED_RESULT_MARKERS)
 
 
-def plan_request_text(text: str) -> str:
+def plan_request_text(text: str, *, rubric_research: bool = False) -> str:
     """Wrap user input in the planning-mode instruction template."""
+    if rubric_research:
+        return f"""You are in rubric-enabled planning research mode.
+The following tools are disabled: {plan_disabled_tools_text()}.
+Do not call a disabled tool or attempt the requested change.
+
+User request:
+{text}
+
+{RUBRIC_PLAN_RESEARCH_REMINDER}"""
     return PLAN_REQUEST_TEMPLATE.format(
         disabled_tools=plan_disabled_tools_text(),
         behavior_policy=PLAN_BEHAVIOR_POLICY,
@@ -609,8 +685,30 @@ def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:
     return PLAN_REVISION_TEMPLATE.format(plan=plan_text(plan), feedback=feedback.strip())
 
 
+def rubric_plan_revision_text(value: dict[str, Any], feedback: str) -> str:
+    """Return a plan-only revision request after criteria were revised separately."""
+    plan = value.get("plan") if isinstance(value.get("plan"), dict) else {}
+    return RUBRIC_PLAN_REVISION_TEMPLATE.format(
+        objective=str(value.get("objective") or value.get("original_objective") or "").strip(),
+        plan=plan_text(plan),
+        criteria=str(value.get("criteria") or "").strip(),
+        feedback=feedback.strip(),
+    )
+
+
 def action_request_text(mode: dict[str, Any], text: str) -> str:
     """Inject an explicitly approved plan into one action-mode request."""
+    proposal = mode.get("approved_proposal")
+    if isinstance(proposal, dict):
+        mode["approved_proposal"] = None
+        plan = proposal.get("plan")
+        if not isinstance(plan, dict):
+            return text
+        return PLAN_CONTEXT_TEMPLATE.format(
+            plan=plan_text(plan),
+            execution_instructions=APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+            text=text,
+        )
     plan = mode.get("approved_plan")
     if not isinstance(plan, dict):
         return text
