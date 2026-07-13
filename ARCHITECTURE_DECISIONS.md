@@ -248,6 +248,14 @@ for the plan explicitly. Material questions must use `ask_user` choices rather
 than an open-ended assistant message. At the start of each turn, the planning
 prompt requires a semantic classification: safe conversation may end in prose,
 while implementation intent must end through `ask_user` or `present_plan`.
+Material decisions are defined generically: reasonable interpretations or
+choices that produce meaningfully different outcomes, scope, audience,
+priorities, behavior, presentation, constraints, resources, compatibility, or
+risk. MIRA separates discoverable facts from preferences and resolves the
+latter before dependent research. `ask_user` is an intermediate step whose
+answer preserves implementation intent until `present_plan`, and user-supplied
+alternatives remain separate choices. This policy applies to any planned
+change, not only software work.
 Each wrapped planning request repeats this terminal contract after the user's
 text so lengthy repository research does not displace it from the model's final
 output decision.
@@ -256,7 +264,10 @@ classification or an extra model-judge request.
 Structured plans are shown as ephemeral plan bubbles with explicit Implement,
 Revise, and Discard actions. Their compact one-row styling and visible keyboard
 shortcut labels intentionally mirror prompt-panel choices without changing
-PromptPanel itself.
+PromptPanel itself. An active plan focuses Implement after mounting, Left/Right
+wraps through its action row, and Escape returns focus to the prompt; shortcuts
+remain local to the plan controls so typing cannot resolve a plan accidentally.
+Clicking the active plan bubble restores its most recently focused action.
 Every structured plan includes Summary, Key Changes, Test Plan, and
 Assumptions. Planning prompts include an exact content template so Summary names
 goal, context, and success criteria; Key Changes name concrete implementation

@@ -12,7 +12,7 @@ from typing import Any
 from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Key
+from textual.events import Click, DescendantFocus, Key
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
@@ -1057,6 +1057,12 @@ class PlanActionButton(Button):
     SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "d": "discard"}
 
     def on_key(self, event: Key) -> None:
+        bubble = self._plan_bubble()
+        if event.key in {"left", "right"} and bubble is not None:
+            event.stop()
+            bubble.focus_action_offset(self, -1 if event.key == "left" else 1)
+            return
+
         if event.key == "enter":
             event.stop()
             self.press()
@@ -1066,14 +1072,19 @@ class PlanActionButton(Button):
         if action is None:
             return
 
-        bubble: Any = self.parent
-        while bubble is not None and not isinstance(bubble, PlanBubble):
-            bubble = bubble.parent
+        bubble = self._plan_bubble()
         if bubble is None:
             return
 
         event.stop()
         bubble.query_one(f"#plan-{action}-{bubble.plan_id}", Button).press()
+
+    def _plan_bubble(self) -> PlanBubble | None:
+        """Return the plan bubble containing this action button."""
+        bubble: Any = self.parent
+        while bubble is not None and not isinstance(bubble, PlanBubble):
+            bubble = bubble.parent
+        return bubble
 
 
 class PlanBubble(Vertical):
@@ -1084,6 +1095,7 @@ class PlanBubble(Vertical):
         self.plan = plan
         self.status = status
         self.active = active
+        self._last_action_id = f"plan-implement-{self.plan_id}"
         self.border_title = "plan" if status == "pending" else f"plan - {status}"
 
     def compose(self) -> Any:
@@ -1102,6 +1114,30 @@ class PlanBubble(Vertical):
                 yield PlanActionButton(
                     "Discard (d)", id=f"plan-discard-{self.plan_id}", classes="plan-action", compact=True
                 )
+
+    def on_mount(self) -> None:
+        """Focus the first action after an active plan is fully mounted."""
+        if self.active:
+            self.call_after_refresh(self.query_one(f"#plan-implement-{self.plan_id}", Button).focus)
+
+    def on_descendant_focus(self, event: DescendantFocus) -> None:
+        """Remember the most recently focused plan action."""
+        if isinstance(event.widget, PlanActionButton) and event.widget.id:
+            self._last_action_id = event.widget.id
+
+    def on_click(self, event: Click) -> None:
+        """Restore the last plan action when the active bubble is clicked."""
+        if not self.active or isinstance(event.widget, Button):
+            return
+        event.stop()
+        self.query_one(f"#{self._last_action_id}", Button).focus()
+
+    def focus_action_offset(self, focused: Button, offset: int) -> None:
+        """Move focus through the one-row plan actions with wrapping."""
+        buttons = list(self.query(PlanActionButton))
+        if not buttons or focused not in buttons:
+            return
+        buttons[(buttons.index(focused) + offset) % len(buttons)].focus()
 
     @property
     def plan_id(self) -> str:

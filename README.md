@@ -122,7 +122,10 @@ should be run as workspace-relative paths such as `python tmp.py`.
   planning agent. Explanations and read-only findings may remain normal chat;
   requests that imply implementation should proactively become plan bubbles
   without requiring a follow-up such as "show me the plan." Material decisions
-  should use `ask_user` choices instead of open-ended chat questions. Use
+  should use `ask_user` choices instead of open-ended chat questions. Explicit
+  unresolved preferences are asked before direction-dependent research, and a
+  selected answer remains part of the original implementation request until a
+  structured plan is presented. Use
   Implement to run the plan, Revise to give targeted feedback with the previous
   plan kept in context, or Discard to close it. Plan bubbles include Summary,
   Key Changes, Test Plan, and Assumptions. Test Plan items should name the exact
@@ -133,7 +136,11 @@ should be run as workspace-relative paths such as `python tmp.py`.
   are included in lightweight resume context so MIRA can answer follow-ups like
   "show me the previous plan" after switching modes or resuming a session.
   Implement, Revise, and Discard use the same compact one-row button treatment
-  as prompt-panel choices.
+  as prompt-panel choices. New plan bubbles focus Implement automatically;
+  Left/Right moves between actions, `i`/`r`/`d` selects an action, Enter
+  activates the focused action, and Escape returns to the prompt.
+  Clicking an active plan bubble restores focus to its most recently focused
+  action after the prompt or another control has been selected.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
   active agents without restarting the TUI.

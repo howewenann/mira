@@ -276,6 +276,11 @@ Expected:
 - MIRA shows a structured plan bubble with Implement, Revise, and Discard.
 - Implement, Revise, and Discard are compact, borderless one-row buttons that
   match the prompt-panel button treatment.
+- Implement receives focus when the plan appears; Left/Right wraps across the
+  actions, `i`/`r`/`d` activates the matching action, and Escape returns focus
+  to the prompt.
+- After clicking the prompt, clicking the active plan body restores the last
+  focused action and makes the plan shortcuts active again.
 - The plan bubble includes Summary, Key Changes, Test Plan, and Assumptions.
 - The Test Plan names an exact command/check to run and an expected result.
 - MIRA does not write or edit `test.txt` until Implement is chosen.
@@ -358,6 +363,40 @@ Expected:
 - MIRA includes the plan status such as discarded, revision requested, or approved for implementation.
 
 ## Ask User Prompt Layout
+
+### Autonomous Planning Decisions
+
+Run each prompt in a fresh `/plan` thread. MIRA should call `ask_user` before
+showing alternatives in prose. Select the recommended or first option; the
+resumed turn should finish with `present_plan`.
+
+1. `Plan making the codebase neater. The work can focus on runtime architecture, code-quality standardization, or UI cleanup; none has been selected.`
+2. `Plan replacing session storage. JSON Lines and SQLite are both acceptable, and the persistence tradeoff has not been decided.`
+3. `Plan adding authentication to the API. API keys and OAuth are both viable, and the intended client type is not established.`
+4. `Plan renaming the public CLI flags. We have not decided whether backward-compatible aliases are required.`
+5. `Plan migrating persisted settings to a new schema. The acceptable choice between automatic migration and explicit user migration is unresolved.`
+6. `Plan changing the runtime event API. We have not decided whether compatibility with third-party consumers outweighs a cleaner breaking design.`
+7. `Plan redesigning plan-bubble shortcuts. Automatic focus and modifier-based global shortcuts are both viable, and the desired interaction has not been chosen.`
+8. `Plan adding diagnostics telemetry. Whether collection is disabled, opt-in, or enabled by default is a product decision.`
+9. `Plan adding a cache. An external dependency and a small built-in implementation have different maintenance tradeoffs, and no preference is established.`
+10. `Plan parallelizing repository analysis. Threads, processes, and asyncio have materially different constraints, and the workload assumptions are unknown.`
+11. `Plan changing API error responses. A clean new envelope conflicts with preserving the current wire format.`
+12. `Plan supporting multiple Python versions. The minimum supported version and willingness to use newer language features have not been decided.`
+
+For every case verify that the initial tool call is `ask_user`, its question
+does not enumerate its 1-3 concise choices, the selected answer remains in the
+same planning thread, the resumed outcome is `present_plan`, and no disabled
+planning tool is called.
+
+Final broad-goal regression (this exact wording is intentionally test-only):
+
+```text
+find a way to make the code base neater
+```
+
+Expected: MIRA recognizes that the intended outcome is subjective, calls
+`ask_user` before research to choose among distinct directions, then calls
+`present_plan` after the choice is selected.
 
 ```text
 Use the ask_user tool to ask me which implementation path to take. Use exactly these options: minimal change (Recommended), focused refactor, planning only. Put only the question in the question field and only the answers in options.

@@ -3892,7 +3892,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Status: discarded", rendered)
 
     async def test_present_plan_shortcuts_match_visible_button_labels(self) -> None:
-        """Focused plan controls should honor the shortcuts shown in their labels."""
+        """Presented plan controls should focus and honor visible keyboard controls."""
         app = make_app()
         interrupt = {
             "type": "present_plan",
@@ -3909,7 +3909,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             first_button = app.query_one("#plan-implement-plan-1", Button)
-            first_button.focus()
+            await wait_until(lambda: first_button.has_focus)
+
+            revise_button = app.query_one("#plan-revise-plan-1", Button)
+            discard_button = app.query_one("#plan-discard-plan-1", Button)
+            await pilot.press("right")
+            await wait_until(lambda: revise_button.has_focus)
+            await pilot.press("right")
+            await wait_until(lambda: discard_button.has_focus)
+            await pilot.press("right")
+            await wait_until(lambda: first_button.has_focus)
+            await pilot.press("left")
+            await wait_until(lambda: discard_button.has_focus)
+            await pilot.press("right")
+            await wait_until(lambda: first_button.has_focus)
+
+            app.query_one("#prompt").focus()
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
+            await pilot.click(".plan-body")
             await wait_until(lambda: first_button.has_focus)
 
             with patch.object(app, "_handle_plan_action", new_callable=AsyncMock) as handle_action:
@@ -3924,6 +3941,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await wait_until(lambda: handle_action.await_count == 4)
                 self.assertEqual(handle_action.await_args_list[-1].args, ("implement", "plan-1"))
+
+            await pilot.press("escape")
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
 
     async def test_cancel_turn_keeps_unrelated_plan_bubble_active(self) -> None:
         """Cancelling a later turn should not discard an active plan bubble."""
