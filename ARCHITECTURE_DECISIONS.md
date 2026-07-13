@@ -352,7 +352,10 @@ summarization defaults, then observes that middleware's `_count_tokens` result
 so the UI can show context pressure. MIRA does not run a parallel dashboard
 counter, compute provider prompt tokens, or decide when to compact. Provider
 `In` and `Out` usage are cumulative per-call totals, not current context
-occupancy.
+occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
+response metadata required by DeepAgents' reported-token validation. MIRA's
+model-response normalization fills only that missing integration identity and
+leaves DeepAgents' eligibility thresholds unchanged.
 Regular subagent completions remain durable `subagent` transcript events so
 past sessions can replay them and resume context can refer to their outputs.
 The live panel's open/collapsed/closed state and row layout are intentionally
@@ -361,7 +364,7 @@ events back into chat transcript blocks rather than reconstructing the old live
 panel. Eval-created subagent rows are not stored separately; their durable
 history is the surrounding eval tool call/result plus the assistant's summary.
 
-**Where to check:** `agent/compaction.py`, `session/store.py`,
+**Where to check:** `agent/compaction.py`, `agent/middleware.py`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
 `runtime/context_usage.py`, `runtime/compaction_filter.py`.
 

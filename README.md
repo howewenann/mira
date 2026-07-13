@@ -232,8 +232,11 @@ what MIRA loaded and which project resources replaced defaults.
 - Project-level memories, skills, subagents, and tools.
 - Session resume from `.mira/_sessions/`.
 - Context pressure display from DeepAgents' own summarization count, plus
-  DeepAgents-backed context compaction. `In` and `Out` are cumulative provider
-  token totals; `Ctx` is the latest DeepAgents context estimate.
+  DeepAgents-backed automatic and on-demand context compaction. MIRA fills the
+  provider identity omitted by ChatAnyLLM so DeepAgents can validate reported
+  token usage; DeepAgents still decides when compaction is eligible. `In` and
+  `Out` are cumulative provider token totals; `Ctx` is the latest DeepAgents
+  context estimate.
 - Default memory plus `grep`, `ask_user`, and `present_plan` tools for search,
   concrete user decisions, and structured plan review. `ask_user` should put
   only the direct question in its prompt text and keep answer choices in
@@ -265,7 +268,10 @@ records visible compaction markers and archive paths in the session file. The
 status line's `Ctx` value is the latest DeepAgents summarization count MIRA has
 observed. `In` and `Out` are cumulative provider usage totals across every
 model call in the session, including repeated conversation history, so `In +
-Out` is not expected to equal current context after multiple turns.
+Out` is not expected to equal current context after multiple turns. MIRA
+normalizes ChatAnyLLM responses with the missing provider identity before they
+enter agent state, allowing DeepAgents to trust reported usage without changing
+its compaction thresholds.
 
 ## Error Reports And Trace
 

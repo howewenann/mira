@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
 from agent.factory import _write_interrupts
-from agent.middleware import FilesystemToolCallArgsMiddleware
+from agent.middleware import ModelResponseNormalizationMiddleware
 from agent.resources import build_resources
 from runtime.runner import run_turn
 from session.checkpoint import make_checkpointer
@@ -66,9 +67,13 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-            update = FilesystemToolCallArgsMiddleware(workspace).after_model({"messages": [message]}, None)
+            response = ModelResponse(result=[message])
+            normalized = ModelResponseNormalizationMiddleware(workspace).wrap_model_call(
+                None,
+                lambda _request: response,
+            )
 
-            self.assertIsNotNone(update)
+            self.assertIs(normalized, response)
             self.assertEqual(message.tool_calls[0]["args"], {"content": "hello", "file_path": "/nested/note.txt"})
 
     async def test_write_and_read_succeed_when_model_uses_path_arg(self) -> None:
@@ -112,7 +117,7 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
             agent = create_deep_agent(
                 model=model,
                 backend=resources.backend,
-                middleware=[FilesystemToolCallArgsMiddleware(workspace)],
+                middleware=[ModelResponseNormalizationMiddleware(workspace)],
                 tools=resources.tools,
                 skills=resources.skills,
                 memory=resources.memory,

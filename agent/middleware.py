@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, ModelResponse
 from langchain_core.messages import AIMessage
 from langchain_quickjs import CodeInterpreterMiddleware
 
@@ -124,7 +124,7 @@ def build_agent_middleware(
     summarization_tool_middleware = create_mira_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
         summarization_middleware,
-        FilesystemToolCallArgsMiddleware(Path(workspace)),
+        ModelResponseNormalizationMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
         CodeInterpreterMiddleware(
             ptc=list(QUICKJS_PTC_TOOLS),
@@ -204,43 +204,77 @@ class ModelToolVisibilityMiddleware(AgentMiddleware[Any, Any, Any]):
         return request.override(tools=tools)
 
 
-class FilesystemToolCallArgsMiddleware(AgentMiddleware[Any, Any, Any]):
-    """Normalize common file-tool arg shapes before HITL and execution."""
+class ModelResponseNormalizationMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Correct known model-response incompatibilities before MIRA uses them.
 
+    This fixes two issues:
+
+    1. ChatAnyLLM omits the model provider metadata that DeepAgents needs
+       to validate token usage before compacting the conversation.
+
+    2. Models sometimes use ``path`` instead of ``file_path``, or return a
+       host path that MIRA's filesystem tools cannot use directly.
+
+    These values are corrected before tool approval and execution.
+    """
+
+    MODEL_PROVIDER = "anyllm"
     FILE_PATH_TOOLS = {"read_file", "write_file", "edit_file"}
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
 
-    def after_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
-        if not messages:
-            return None
+    def wrap_model_call(self, request: Any, handler: Any) -> ModelResponse[Any]:
+        """Normalize the result of a synchronous model call."""
+        response = handler(request)
+        self._normalize_response(response)
+        return response
 
-        last_ai_msg = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
-        if last_ai_msg is None or not last_ai_msg.tool_calls:
-            return None
+    async def awrap_model_call(self, request: Any, handler: Any) -> ModelResponse[Any]:
+        """Normalize the result of an asynchronous model call."""
+        response = await handler(request)
+        self._normalize_response(response)
+        return response
+
+    def _normalize_response(self, response: ModelResponse[Any]) -> None:
+        """Apply compatibility corrections to every returned AI message."""
+        for message in response.result:
+            # Only assistant messages contain the metadata and model-made tool
+            # calls that need these compatibility corrections.
+            if not isinstance(message, AIMessage):
+                continue
+            self._normalize_metadata(message)
+            self._normalize_file_tool_calls(message)
+
+    def _normalize_metadata(self, message: AIMessage) -> None:
+        """Fill response metadata omitted by ChatAnyLLM."""
+        # ChatAnyLLM reports token usage but omits the matching provider name.
+        # DeepAgents requires both before it trusts that usage for compaction.
+        message.response_metadata.setdefault("model_provider", self.MODEL_PROVIDER)
+
+    def _normalize_file_tool_calls(self, message: AIMessage) -> None:
+        """Normalize file-tool arguments in canonical calls and content."""
+        if not message.tool_calls:
+            return
 
         changed = False
         normalized_calls = []
-        for call in last_ai_msg.tool_calls:
+        for call in message.tool_calls:
             normalized, call_changed = self._normalize_tool_call(call)
             normalized_calls.append(normalized)
             changed = changed or call_changed
 
-        normalized_content, content_changed = self._normalize_content_blocks(last_ai_msg.content)
+        # LangChain may store tool calls both in the canonical list and in
+        # content blocks. Keep the two representations consistent.
+        normalized_content, content_changed = self._normalize_content_blocks(message.content)
         changed = changed or content_changed
 
         if not changed:
-            return None
+            return
 
-        last_ai_msg.tool_calls = normalized_calls
+        message.tool_calls = normalized_calls
         if content_changed:
-            last_ai_msg.content = normalized_content
-        return {"messages": [last_ai_msg]}
-
-    async def aafter_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        return self.after_model(state, runtime)
+            message.content = normalized_content
 
     def _normalize_tool_call(self, call: Any) -> tuple[Any, bool]:
         if not isinstance(call, dict):
@@ -254,6 +288,8 @@ class FilesystemToolCallArgsMiddleware(AgentMiddleware[Any, Any, Any]):
 
         normalized_args = dict(args)
         changed = False
+        # Models commonly guess `path`, while DeepAgents' filesystem tools
+        # require the schema-defined argument name `file_path`.
         if "file_path" not in normalized_args and "path" in normalized_args:
             normalized_args["file_path"] = normalized_args.pop("path")
             changed = True
@@ -283,27 +319,32 @@ class FilesystemToolCallArgsMiddleware(AgentMiddleware[Any, Any, Any]):
         return normalized_blocks, changed
 
     def _normalize_workspace_path(self, value: str) -> str:
+        # Leading-slash paths are already MIRA/DeepAgents virtual paths.
         if value.startswith("/"):
             return value
         try:
             path = Path(value).expanduser()
         except (OSError, RuntimeError):
             return value
+        # Relative paths are already usable and should remain unchanged.
         if not path.is_absolute():
             return value
 
         try:
             relative = path.resolve().relative_to(self.workspace)
         except (OSError, RuntimeError, ValueError):
+            # Never redirect an absolute path from outside the workspace.
             return value
+        # DeepAgents' filesystem backend expects a workspace-relative virtual
+        # path rather than the host path returned by the model.
         return f"/{relative.as_posix()}"
 
 
 __all__ = [
     "AgentMiddlewareStack",
     "ExecuteToolPromptMiddleware",
-    "FilesystemToolCallArgsMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
+    "ModelResponseNormalizationMiddleware",
     "ModelToolVisibilityMiddleware",
     "QUICKJS_PTC_TOOLS",
     "build_agent_middleware",
