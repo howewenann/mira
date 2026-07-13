@@ -144,7 +144,8 @@ should be run as workspace-relative paths such as `python tmp.py`.
   Left/Right moves between actions, `i`/`r`/`d` selects an action, Enter
   activates the focused action, and Escape returns to the prompt.
   Clicking an active plan bubble restores focus to its most recently focused
-  action after the prompt or another control has been selected.
+  action after the prompt or another control has been selected. Discarding a
+  plan returns focus to the prompt.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
   active agents without restarting the TUI.
@@ -281,6 +282,9 @@ turns. MIRA
 normalizes ChatAnyLLM responses with the missing provider identity before they
 enter agent state, allowing DeepAgents to trust reported usage without changing
 its compaction thresholds.
+Live summary-model output is identified through DeepAgents' structural
+`lc_source="summarization"` metadata, so its internal reasoning stays out of the
+transcript without guessing from words such as "compact" or "summary."
 
 ## Error Reports And Trace
 

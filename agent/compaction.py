@@ -16,7 +16,6 @@ from deepagents.middleware.summarization import (
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 
 from runtime.context_usage import record_deepagents_context_tokens
-from runtime.compaction_state import compaction_scope
 
 
 def create_mira_summarization_middleware(model: Any, backend: Any) -> Any:
@@ -32,15 +31,15 @@ def create_mira_summarization_middleware(model: Any, backend: Any) -> Any:
         trim_tokens_to_summarize=None,
         truncate_args_settings=defaults["truncate_args_settings"],
     )
-    mark_summarization_engine(middleware)
+    prepare_summarization_engine(middleware)
     observe_summarization_counts(middleware)
     return middleware
 
 
 def create_mira_summarization_tool_middleware(model: Any, backend: Any) -> Any:
-    """Create DeepAgents summarization middleware with an explicit live marker."""
+    """Create DeepAgents tool-based summarization with replay-safe messages."""
     middleware = create_summarization_tool_middleware(model=model, backend=backend)
-    mark_summarization_engine(getattr(middleware, "_summarization", None))
+    prepare_summarization_engine(getattr(middleware, "_summarization", None))
     return middleware
 
 
@@ -96,9 +95,8 @@ async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionRe
         backend = getattr(summarization, "_backend", None)
         if callable(backend):
             return PostTurnCompactionResult(reason="backend_unavailable")
-        with compaction_scope():
-            summary = await summarization._acreate_summary(to_summarize)
-            file_path = await summarization._aoffload_to_backend(backend, to_summarize)
+        summary = await summarization._acreate_summary(to_summarize)
+        file_path = await summarization._aoffload_to_backend(backend, to_summarize)
     finally:
         if callable(original_get_thread_id):
             setattr(summarization, "_get_thread_id", original_get_thread_id)
@@ -119,30 +117,10 @@ async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionRe
     )
 
 
-def mark_summarization_engine(summarization: Any) -> None:
-    """Wrap DeepAgents summary generation methods so MIRA can filter their stream."""
-    if summarization is None or getattr(summarization, "_mira_compaction_marked", False):
+def prepare_summarization_engine(summarization: Any) -> None:
+    """Keep DeepAgents archives and summary replay provider-safe."""
+    if summarization is None or getattr(summarization, "_mira_compaction_prepared", False):
         return
-
-    create_summary = getattr(summarization, "_create_summary", None)
-    if callable(create_summary):
-
-        @wraps(create_summary)
-        def wrapped_create_summary(*args: Any, **kwargs: Any) -> Any:
-            with compaction_scope():
-                return create_summary(*args, **kwargs)
-
-        setattr(summarization, "_create_summary", wrapped_create_summary)
-
-    acreate_summary = getattr(summarization, "_acreate_summary", None)
-    if callable(acreate_summary):
-
-        @wraps(acreate_summary)
-        async def wrapped_acreate_summary(*args: Any, **kwargs: Any) -> Any:
-            with compaction_scope():
-                return await acreate_summary(*args, **kwargs)
-
-        setattr(summarization, "_acreate_summary", wrapped_acreate_summary)
 
     offload = getattr(summarization, "_offload_to_backend", None)
     if callable(offload):
@@ -180,7 +158,7 @@ def mark_summarization_engine(summarization: Any) -> None:
 
         setattr(summarization, "_apply_event_to_messages", wrapped_apply_event_to_messages)
 
-    setattr(summarization, "_mira_compaction_marked", True)
+    setattr(summarization, "_mira_compaction_prepared", True)
 
 
 def observe_summarization_counts(summarization: Any) -> None:
@@ -329,7 +307,7 @@ __all__ = [
     "compact_after_turn",
     "create_mira_summarization_middleware",
     "create_mira_summarization_tool_middleware",
-    "mark_summarization_engine",
     "observe_summarization_counts",
+    "prepare_summarization_engine",
     "sanitize_messages_for_archive",
 ]

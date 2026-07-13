@@ -6,8 +6,8 @@ import json
 import re
 from typing import Any
 
-from runtime.compaction_filter import call_renderer
 from runtime.protocol_events import event_delta, is_tool_call_delta
+from runtime.renderer_calls import call_renderer
 
 
 class ToolCallDrafts:

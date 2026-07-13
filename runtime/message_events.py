@@ -6,19 +6,14 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from runtime.compaction_filter import (
-    ReasoningFilter,
-    TextFilter,
-    call_renderer,
-)
-from runtime.compaction_state import compaction_active
+from runtime.message_metadata import MessageInvocationMetadata
 from runtime.output_events import (
     is_summarization_metadata_message,
     normalize_response_delta,
-    strip_compaction_summary_prefix,
     visible_message_text,
 )
 from runtime.protocol_events import event_delta, is_raw_message_stream, is_tool_call_delta
+from runtime.renderer_calls import call_renderer
 from runtime.tool_call_args import ToolCallDrafts, normalized_call, tool_call_name
 from runtime.usage import has_usage, usage_from_message
 
@@ -29,6 +24,7 @@ async def consume_messages(
     result: Any | None = None,
     *,
     render_normal_tools: bool = True,
+    invocation_metadata: MessageInvocationMetadata | None = None,
 ) -> None:
     """Consume coordinator messages and fallback provider tool-call chunks.
 
@@ -37,25 +33,29 @@ async def consume_messages(
     as a provider fallback for live draft UI when exposed by a chat model.
     """
     async for message in messages:
+        is_compaction = (
+            invocation_metadata is not None and invocation_metadata.is_summarization(message)
+        ) or is_summarization_metadata_message(message)
+        if is_compaction:
+            await _consume_compaction_message(message, renderer)
+            call_renderer(renderer, "model_stream_finished")
+            call_list = await _finalized_tool_calls(message, renderer)
+            if call_list:
+                render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
+            if result is not None:
+                usage = usage_from_message(message)
+                if has_usage(usage):
+                    result.add_stream_usage(usage)
+            continue
+
         if is_raw_message_stream(message):
             await _consume_ordered_message_stream(message, renderer)
             call_renderer(renderer, "model_stream_finished")
             call_list = await _finalized_tool_calls(message, renderer)
         else:
-            if compaction_active():
-                await _consume_compaction_message(message, renderer)
-                call_renderer(renderer, "model_stream_finished")
-                call_list = await _finalized_tool_calls(message, renderer)
-                if call_list:
-                    render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
-                if result is not None:
-                    usage = usage_from_message(message)
-                    if has_usage(usage):
-                        result.add_stream_usage(usage)
-                continue
             call_task = asyncio.create_task(_finalized_tool_calls(message, renderer))
-            compacting = await _consume_reasoning(message, renderer)
-            await _consume_text(message, renderer, allow_compaction_summary=compacting)
+            await _consume_reasoning(message, renderer)
+            await _consume_text(message, renderer)
             call_renderer(renderer, "model_stream_finished")
             call_list = await call_task
 
@@ -68,62 +68,37 @@ async def consume_messages(
                 result.add_stream_usage(usage)
 
 
-async def _consume_reasoning(message: Any, renderer: Any) -> bool:
+async def _consume_reasoning(message: Any, renderer: Any) -> None:
     """Render reasoning deltas from a streamed message."""
     reasoning = getattr(message, "reasoning", None)
     if reasoning is None:
-        return False
-
-    if compaction_active():
-        call_renderer(renderer, "compaction_started")
-        async for _ in _text_deltas(reasoning):
-            pass
-        call_renderer(renderer, "compaction_finished")
-        return True
-
-    reasoning_filter = ReasoningFilter(renderer)
+        return
     async for delta in _text_deltas(reasoning):
-        reasoning_filter.push(str(delta))
-
-    reasoning_filter.finish()
-    return reasoning_filter.was_compaction
+        renderer.reasoning_delta(str(delta))
 
 
 async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
     """Render raw ChatModelStream events in provider order."""
-    if compaction_active():
-        call_renderer(renderer, "compaction_started")
-        async for _ in message:
-            pass
-        call_renderer(renderer, "compaction_finished")
-        return
-
-    reasoning_filter = ReasoningFilter(renderer)
-    text_filter = TextFilter(renderer, allow_compaction_summary=lambda: reasoning_filter.compacting)
     tool_drafts = ToolCallDrafts(renderer)
+    visible_text = ""
 
     async for event in message:
         delta = event_delta(event)
         delta_type = str(delta.get("type") or "")
         if delta_type == "reasoning-delta":
-            reasoning_filter.push(str(delta.get("reasoning") or delta.get("text") or ""))
+            renderer.reasoning_delta(str(delta.get("reasoning") or delta.get("text") or ""))
         elif delta_type == "text-delta":
-            text_filter.push(str(delta.get("text") or ""))
+            text = normalize_response_delta(visible_text, delta.get("text"))
+            if text:
+                renderer.text_delta(text)
+                visible_text += text
         elif is_tool_call_delta(delta_type):
             tool_drafts.push(event)
 
-    reasoning_filter.finish()
-    text_filter.finish()
 
-
-async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
+async def _consume_text(message: Any, renderer: Any) -> None:
     """Render assistant text deltas from a streamed message."""
     if is_summarization_metadata_message(message):
-        return
-    if compaction_active():
-        call_renderer(renderer, "compaction_started")
-        await _drain_message_text(message)
-        call_renderer(renderer, "compaction_finished")
         return
 
     msg_text = getattr(message, "text", None)
@@ -134,41 +109,40 @@ async def _consume_text(message: Any, renderer: Any, *, allow_compaction_summary
         return
 
     if hasattr(msg_text, "__aiter__"):
-        await _consume_streamed_text(msg_text, renderer, allow_compaction_summary=allow_compaction_summary)
+        await _consume_streamed_text(msg_text, renderer)
         return
 
     text = await msg_text if hasattr(msg_text, "__await__") else msg_text
     text = normalize_response_delta("", text)
-    visible, had_summary = strip_compaction_summary_prefix(str(text or ""))
-    if had_summary:
-        if not allow_compaction_summary:
-            call_renderer(renderer, "compaction_started")
-            call_renderer(renderer, "compaction_finished")
-        if visible:
-            renderer.text_delta(visible)
-        return
-
     if text:
         renderer.text_delta(str(text))
 
 
-async def _consume_streamed_text(value: Any, renderer: Any, *, allow_compaction_summary: bool = False) -> None:
-    """Render streamed text while stripping a leading compaction summary."""
-    text_filter = TextFilter(renderer, allow_compaction_summary=lambda: allow_compaction_summary)
+async def _consume_streamed_text(value: Any, renderer: Any) -> None:
+    """Render streamed assistant text."""
+    visible_text = ""
     async for delta in _text_deltas(value):
-        text_filter.push(delta)
-    text_filter.finish()
+        text = normalize_response_delta(visible_text, delta)
+        if text:
+            renderer.text_delta(text)
+            visible_text += text
 
 
 async def _consume_compaction_message(message: Any, renderer: Any) -> None:
     """Drain a live compaction message without recording reasoning or text."""
     call_renderer(renderer, "compaction_started")
-    reasoning = getattr(message, "reasoning", None)
-    if reasoning is not None:
-        async for _ in _text_deltas(reasoning):
-            pass
-    await _drain_message_text(message)
-    call_renderer(renderer, "compaction_finished")
+    try:
+        if is_raw_message_stream(message):
+            async for _ in message:
+                pass
+        else:
+            reasoning = getattr(message, "reasoning", None)
+            if reasoning is not None:
+                async for _ in _text_deltas(reasoning):
+                    pass
+            await _drain_message_text(message)
+    finally:
+        call_renderer(renderer, "compaction_finished")
 
 
 async def _drain_message_text(message: Any) -> None:

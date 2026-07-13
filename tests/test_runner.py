@@ -13,14 +13,14 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from agent.compaction import (
     MiraSummarizationMiddleware,
-    mark_summarization_engine,
     observe_summarization_counts,
+    prepare_summarization_engine,
     sanitize_messages_for_archive,
 )
 from runtime.context_usage import context_usage_scope
-from runtime.compaction_state import compaction_active, compaction_scope
 from runtime import runner
 from runtime.message_events import consume_messages
+from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
 from runtime.tool_events import consume_tool_calls
@@ -81,25 +81,54 @@ class Message:
         reasoning: Any | None = None,
         text: Any | None = None,
         additional_kwargs: dict[str, Any] | None = None,
+        message_id: str = "",
+        usage_metadata: dict[str, int] | None = None,
     ) -> None:
         self.tool_calls = tool_calls or []
         self.reasoning = reasoning
         self.text = text
         self.additional_kwargs = additional_kwargs or {}
+        self.message_id = message_id
+        self.usage_metadata = usage_metadata or {}
+
+
+class CompactionMessage(Message):
+    """Fake finalized summary message carrying DeepAgents source metadata."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["additional_kwargs"] = {"lc_source": "summarization"}
+        super().__init__(*args, **kwargs)
 
 
 class RawMessageStream:
     """Fake ChatModelStream exposing ordered raw protocol events."""
 
-    def __init__(self, events: list[dict[str, Any]], tool_calls: Any | None = None) -> None:
+    def __init__(
+        self,
+        events: list[dict[str, Any]],
+        tool_calls: Any | None = None,
+        *,
+        message_id: str = "",
+        additional_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self.events = events
         self.text = AsyncItems([])
         self.reasoning = AsyncItems([])
         self.tool_calls = tool_calls or []
+        self.message_id = message_id
+        self.additional_kwargs = additional_kwargs or {}
 
     async def __aiter__(self) -> Any:
         for event in self.events:
             yield event
+
+
+class CompactionRawMessageStream(RawMessageStream):
+    """Fake raw summary stream carrying DeepAgents source metadata."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["additional_kwargs"] = {"lc_source": "summarization"}
+        super().__init__(*args, **kwargs)
 
 
 class OutputMessage:
@@ -893,13 +922,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "",
         )
 
-    def test_final_text_strips_unmarked_compaction_summary_prefix(self) -> None:
-        """Structured compaction summaries should be hidden even without metadata."""
-        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), "The rain tapped against the window.")
+    def test_final_text_keeps_unmarked_summary_shaped_reply(self) -> None:
+        """Summary-shaped replies remain visible without structural metadata."""
+        self.assertEqual(final_text({"messages": [OutputMessage(SUMMARY_THEN_ANSWER)]}), SUMMARY_THEN_ANSWER)
 
-    def test_final_text_returns_empty_for_unmarked_compaction_summary(self) -> None:
-        """A compaction-only output should not become an assistant reply without metadata."""
-        self.assertEqual(final_text({"messages": [OutputMessage(COMPACTION_SUMMARY)]}), "")
+    def test_final_text_keeps_unmarked_summary_only_reply(self) -> None:
+        """Compaction wording alone must not hide an assistant reply."""
+        self.assertEqual(final_text({"messages": [OutputMessage(COMPACTION_SUMMARY)]}), COMPACTION_SUMMARY)
 
     def test_final_text_skips_langchain_summarization_message(self) -> None:
         """DeepAgents summary metadata should hide a summary regardless of text shape."""
@@ -1593,11 +1622,78 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [])
 
-    async def test_compaction_reasoning_is_hidden_behind_status(self) -> None:
+    async def test_invocation_metadata_hides_arbitrary_summary_stream_and_keeps_usage(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        registry = MessageInvocationMetadata()
+        registry.record("summary-1", {"lc_source": "summarization"})
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(["This wording has no compaction markers."]),
+                    text=AsyncItems(["Nor does this output."]),
+                    message_id="summary-1",
+                    usage_metadata={"input_tokens": 30, "output_tokens": 10, "total_tokens": 40},
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, result, invocation_metadata=registry)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+        self.assertEqual(result._stream_usage["total_tokens"], 40)
+
+    async def test_compaction_words_in_normal_reasoning_and_text_remain_visible(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
                 Message(
+                    reasoning=AsyncItems(["I should summarize and compact this explanation."]),
+                    text=AsyncItems(["Here is the compact conversation summary."]),
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("reasoning", "I should summarize and compact this explanation."),
+                ("text", "Here is the compact conversation summary."),
+            ],
+        )
+
+    async def test_metadata_transformer_records_summary_source_before_message_consumption(self) -> None:
+        registry = MessageInvocationMetadata()
+        transformer = MessageInvocationMetadataTransformer((), registry)
+        transformer.process(
+            {
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": (
+                        {"event": "message-start", "id": "summary-raw"},
+                        {"lc_source": "summarization", "langgraph_node": "tools"},
+                    ),
+                },
+            }
+        )
+        message = RawMessageStream(
+            [{"delta": {"type": "reasoning-delta", "reasoning": "arbitrary internal work"}}],
+            message_id="summary-raw",
+        )
+        renderer = RecordingRenderer()
+
+        await consume_messages(AsyncItems([message]), renderer, invocation_metadata=registry)
+
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
+
+    async def test_metadata_marked_compaction_reasoning_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "Thinking Process:\n\n1. **Analyze the Request:**\n",
@@ -1614,11 +1710,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_leaked_compaction_reasoning_shape_is_hidden_behind_status(self) -> None:
+    async def test_metadata_hides_compaction_reasoning_regardless_of_shape(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "Thinking Process:\n\n",
@@ -1636,11 +1732,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_long_compaction_reasoning_preamble_is_buffered_until_classified(self) -> None:
+    async def test_metadata_hides_long_compaction_reasoning_preamble(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "Thinking Process:\n\n" + ("Review the existing conversation. " * 60),
@@ -1657,11 +1753,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_langchain_default_summary_prompt_reasoning_is_hidden(self) -> None:
+    async def test_metadata_hides_langchain_summary_prompt_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "I need to follow the internal instructions.\n\n",
@@ -1674,43 +1770,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(
-            renderer.events,
-            [
-                ("reasoning", "I need to follow the internal instructions.\n\n"),
-                ("discard_reasoning",),
-                ("compaction_started",),
-                ("compaction_finished",),
-            ],
-        )
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_explicit_compaction_signal_hides_reasoning_and_text(self) -> None:
+    async def test_summarization_metadata_hides_reasoning_and_text(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(["I am extracting context from the transcript."]),
                     text=AsyncItems(["SESSION INTENT\n", "This should not be recorded."]),
                 )
             ]
         )
 
-        with compaction_scope():
-            await consume_messages(messages, renderer)
+        await consume_messages(messages, renderer)
 
         self.assertEqual(
             renderer.events,
             [("compaction_started",), ("compaction_finished",)],
         )
 
-    async def test_normal_turn_after_explicit_compaction_signal_still_renders(self) -> None:
+    async def test_normal_turn_after_summarization_metadata_still_renders(self) -> None:
         renderer = RecordingRenderer()
 
-        with compaction_scope():
-            await consume_messages(
-                AsyncItems([Message(reasoning=AsyncItems(["internal summary"]), text=AsyncItems(["hidden"]))]),
-                renderer,
-            )
+        await consume_messages(
+            AsyncItems([CompactionMessage(reasoning=AsyncItems(["internal summary"]), text=AsyncItems(["hidden"]))]),
+            renderer,
+        )
         await consume_messages(
             AsyncItems([Message(reasoning=AsyncItems(["thinking"]), text=AsyncItems(["visible answer"]))]),
             renderer,
@@ -1726,11 +1812,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_explicit_compaction_signal_hides_raw_message_stream(self) -> None:
+    async def test_summarization_metadata_hides_raw_message_stream(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                RawMessageStream(
+                CompactionRawMessageStream(
                     [
                         {"type": "reasoning-delta", "reasoning": "internal"},
                         {"type": "text-delta", "text": "hidden"},
@@ -1739,8 +1825,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        with compaction_scope():
-            await consume_messages(messages, renderer)
+        await consume_messages(messages, renderer)
 
         self.assertEqual(
             renderer.events,
@@ -1752,8 +1837,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         result = runner.TurnResult()
 
         await consume_tool_calls(AsyncItems([ToolCall("read_file", {"path": "x"}, "contents", "call-1")]), renderer, result)
-        with compaction_scope():
-            await consume_messages(AsyncItems([Message(text=AsyncItems(["internal summary"]))]), renderer)
+        await consume_messages(AsyncItems([CompactionMessage(text=AsyncItems(["internal summary"]))]), renderer)
         await consume_messages(AsyncItems([Message(text=AsyncItems(["now answering"]))]), renderer)
 
         self.assertEqual(
@@ -1767,20 +1851,22 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_summarization_engine_wrapper_marks_sync_and_async_summary_calls(self) -> None:
+    async def test_summarization_engine_preparation_does_not_wrap_summary_calls(self) -> None:
         class Engine:
-            def _create_summary(self) -> bool:
-                return compaction_active()
+            def __init__(self) -> None:
+                self.calls = 0
 
-            async def _acreate_summary(self) -> bool:
-                return compaction_active()
+            async def _acreate_summary(self) -> str:
+                self.calls += 1
+                return "summary"
 
         engine = Engine()
-        mark_summarization_engine(engine)
+        original = engine._acreate_summary
+        prepare_summarization_engine(engine)
 
-        self.assertTrue(engine._create_summary())
-        self.assertTrue(await engine._acreate_summary())
-        self.assertFalse(compaction_active())
+        self.assertEqual(await engine._acreate_summary(), "summary")
+        self.assertEqual(engine.calls, 1)
+        self.assertEqual(engine._acreate_summary, original)
 
     def test_compaction_archive_sanitizer_strips_reasoning_internals(self) -> None:
         message = AIMessage(
@@ -1816,11 +1902,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("internal chain", rendered)
         self.assertNotIn("ChoiceDeltaToolCall", rendered)
 
-    async def test_summary_extraction_reasoning_after_compaction_is_hidden(self) -> None:
+    async def test_metadata_hides_summary_extraction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "The user wants me to extract context from a conversation history that has already been summarized. ",
@@ -1837,11 +1923,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_partial_summary_extraction_reasoning_is_hidden_on_finish(self) -> None:
+    async def test_metadata_hides_partial_summary_extraction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "The user is asking me to extract context from a conversation history that has already ",
@@ -1856,11 +1942,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_leaked_session_compaction_reasoning_shape_is_hidden(self) -> None:
+    async def test_metadata_hides_session_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "The user wants me to extract context from the conversation history. Looking at the messages provided:\n\n",
@@ -1881,11 +1967,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_screenshot_style_compaction_reasoning_is_hidden(self) -> None:
+    async def test_metadata_hides_screenshot_style_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             'The user wants me to extract context from the conversation history provided. This is a "context compaction test" ',
@@ -1904,11 +1990,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_late_compaction_detection_discards_visible_reasoning(self) -> None:
+    async def test_metadata_hides_entire_reasoning_stream_from_first_delta(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "I am reviewing a normal request. " * 50,
@@ -1921,21 +2007,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(
-            renderer.events,
-            [
-                ("reasoning", "I am reviewing a normal request. " * 50),
-                ("discard_reasoning",),
-                ("compaction_started",),
-                ("compaction_finished",),
-            ],
-        )
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_most_important_context_compaction_reasoning_is_hidden(self) -> None:
+    async def test_metadata_hides_most_important_context_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "The user wants me to extract the most important context from this conversation history. ",
@@ -1958,11 +2036,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_long_summary_extraction_reasoning_with_visible_headings_is_hidden(self) -> None:
+    async def test_metadata_hides_long_summary_reasoning_with_headings(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "The user wants me to extract context from the conversation history. ",
@@ -1984,15 +2062,15 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
+    async def test_metadata_hides_streamed_structured_summary_text(self) -> None:
         renderer = RecordingRenderer()
-        messages = AsyncItems([Message(text=COMPACTION_SUMMARY)])
+        messages = AsyncItems([CompactionMessage(text=COMPACTION_SUMMARY)])
 
         await consume_messages(messages, renderer)
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_summary_heading_variants_are_hidden(self) -> None:
+    async def test_metadata_hides_streamed_summary_heading_variants(self) -> None:
         renderer = RecordingRenderer()
         summary = """### Session Intent
 User requested a story.
@@ -2006,17 +2084,17 @@ None.
 ### Next Steps
 Await further instructions.
 """
-        messages = AsyncItems([Message(text=summary)])
+        messages = AsyncItems([CompactionMessage(text=summary)])
 
         await consume_messages(messages, renderer)
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
+    async def test_metadata_hides_summary_text_and_reasoning_together(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "Thinking Process:\n\n",
@@ -2034,11 +2112,11 @@ Await further instructions.
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_streamed_compaction_summary_prefix_keeps_following_answer_text_after_signal(self) -> None:
+    async def test_metadata_hides_entire_summary_stream_including_text_tail(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     reasoning=AsyncItems(
                         [
                             "Thinking Process:\n\n",
@@ -2061,15 +2139,7 @@ Await further instructions.
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(
-            renderer.events,
-            [
-                ("compaction_started",),
-                ("compaction_finished",),
-                ("text", "The rain tapped against the window."),
-                ("text", " More story followed."),
-            ],
-        )
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
     async def test_raw_message_stream_preserves_provider_order(self) -> None:
         renderer = RecordingRenderer()
@@ -2494,11 +2564,11 @@ Await further instructions.
         reasoning.release.set()
         await task
 
-    async def test_raw_compaction_reasoning_is_hidden_behind_status(self) -> None:
+    async def test_metadata_hides_raw_compaction_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                RawMessageStream(
+                CompactionRawMessageStream(
                     [
                         {"delta": {"type": "reasoning-delta", "reasoning": "Thinking Process:\n\n"}},
                         {
@@ -2523,11 +2593,11 @@ Await further instructions.
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_raw_structured_summary_text_is_hidden_without_compaction_signal(self) -> None:
+    async def test_metadata_hides_raw_structured_summary_text(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                RawMessageStream(
+                CompactionRawMessageStream(
                     [
                         {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[:120]}},
                         {"delta": {"type": "text-delta", "text": COMPACTION_SUMMARY[120:]}},
@@ -2540,11 +2610,11 @@ Await further instructions.
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
-    async def test_raw_compaction_summary_text_is_hidden_after_compaction_reasoning(self) -> None:
+    async def test_metadata_hides_raw_summary_text_and_reasoning(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                RawMessageStream(
+                CompactionRawMessageStream(
                     [
                         {"delta": {"type": "reasoning-delta", "reasoning": "Thinking Process:\n\n"}},
                         {
@@ -2596,11 +2666,11 @@ Await further instructions.
 
         self.assertEqual(renderer.events, [("text", "## Summary"), ("text", "\n\nBody text.")])
 
-    async def test_long_streamed_summary_prefix_hides_summary_and_renders_tail(self) -> None:
+    async def test_metadata_hides_long_streamed_summary_and_tail(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
-                Message(
+                CompactionMessage(
                     text=AsyncItems(
                         [
                             COMPACTION_SUMMARY[:120],
@@ -2614,14 +2684,7 @@ Await further instructions.
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(
-            renderer.events,
-            [
-                ("compaction_started",),
-                ("compaction_finished",),
-                ("text", "Visible answer."),
-            ],
-        )
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
     async def test_streamed_summarization_metadata_text_is_hidden(self) -> None:
         renderer = RecordingRenderer()
@@ -2629,7 +2692,7 @@ Await further instructions.
 
         await consume_messages(messages, renderer)
 
-        self.assertEqual(renderer.events, [])
+        self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
 
     async def test_streamed_normal_markdown_heading_text_still_renders(self) -> None:
         renderer = RecordingRenderer()
@@ -2659,7 +2722,10 @@ Await further instructions.
 
         self.assertEqual(
             renderer.events,
-            [("reasoning", "Thinking Process:\n\nThe user asked for a greeting, so I can answer briefly.")],
+            [
+                ("reasoning", "Thinking Process:\n\n"),
+                ("reasoning", "The user asked for a greeting, so I can answer briefly."),
+            ],
         )
 
     async def test_terminal_renderer_preserves_hitl_style_reasoning_newline_chunks(self) -> None:

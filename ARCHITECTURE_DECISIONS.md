@@ -268,6 +268,8 @@ PromptPanel itself. An active plan focuses Implement after mounting, Left/Right
 wraps through its action row, and Escape returns focus to the prompt; shortcuts
 remain local to the plan controls so typing cannot resolve a plan accidentally.
 Clicking the active plan bubble restores its most recently focused action.
+Discarding a plan resolves the bubble in place and returns keyboard focus to
+the prompt so the next request can be typed immediately.
 Every structured plan includes Summary, Key Changes, Test Plan, and
 Assumptions. Planning prompts include an exact content template so Summary names
 goal, context, and success criteria; Key Changes name concrete implementation
@@ -362,6 +364,12 @@ occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
 response metadata required by DeepAgents' reported-token validation. MIRA's
 model-response normalization fills only that missing integration identity and
 leaves DeepAgents' eligibility thresholds unchanged.
+DeepAgents marks summary-model invocations with `lc_source="summarization"`.
+MIRA observes that invocation metadata before LangGraph publishes each message
+stream and drains marked streams without rendering or recording their internal
+reasoning or summary text. Compaction classification never depends on model
+wording, prompt fragments, or task-local flags; unmarked reasoning and replies
+remain visible even when they discuss compaction or summarization.
 Regular subagent completions remain durable `subagent` transcript events so
 past sessions can replay them and resume context can refer to their outputs.
 The live panel's open/collapsed/closed state and row layout are intentionally
@@ -372,7 +380,7 @@ history is the surrounding eval tool call/result plus the assistant's summary.
 
 **Where to check:** `agent/compaction.py`, `agent/middleware.py`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
-`runtime/context_usage.py`, `runtime/compaction_filter.py`.
+`runtime/context_usage.py`, `runtime/message_metadata.py`.
 
 **Update this when:** Session JSON shape changes, compaction ownership changes,
 or replay context starts depending on a new source of truth.

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from agent.compaction import PostTurnCompactionResult, compact_after_turn, mark_summarization_engine
+from agent.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
 from langchain_core.messages import AIMessage, HumanMessage
 
 from session import context
@@ -18,7 +18,16 @@ from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from session.store import SessionStore
 from runtime import runner
-from tests.test_runner import COMPACTION_SUMMARY, FakeAgent, FakeStream, Message as StreamMessage, RunTurnRenderer
+from runtime.message_events import consume_messages
+from runtime.message_metadata import MessageInvocationMetadata
+from tests.test_runner import (
+    AsyncItems,
+    COMPACTION_SUMMARY,
+    FakeAgent,
+    FakeStream,
+    Message as StreamMessage,
+    RunTurnRenderer,
+)
 from ui.repl import run_user_turn
 
 
@@ -424,7 +433,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_post_turn_compaction_updates_summary_event_and_sanitizes_archive_messages(self) -> None:
         summarization = FakeSummarization()
-        mark_summarization_engine(summarization)
+        prepare_summarization_engine(summarization)
         agent = AgentWithMutableState(
             {
                 "messages": [
@@ -498,7 +507,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
     def test_checkpointed_summary_event_replays_as_human_message(self) -> None:
         summarization = FakeSummarization()
-        mark_summarization_engine(summarization)
+        prepare_summarization_engine(summarization)
         event = {
             "cutoff_index": 1,
             "file_path": "/.mira/conversation_history/thread-1.md",
@@ -527,7 +536,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
     def test_openai_style_summary_event_dict_is_normalized(self) -> None:
         summarization = FakeSummarization()
-        mark_summarization_engine(summarization)
+        prepare_summarization_engine(summarization)
         event = {
             "cutoff_index": 0,
             "summary_message": {
@@ -545,7 +554,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_post_turn_compaction_accepts_checkpointed_summary_event(self) -> None:
         summarization = FakeSummarization()
-        mark_summarization_engine(summarization)
+        prepare_summarization_engine(summarization)
         agent = AgentWithMutableState(
             {
                 "messages": [HumanMessage(content="old"), HumanMessage(content="recent")],
@@ -569,7 +578,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Checkpointed summary.", rendered_archive)
         self.assertNotIn("{'type': 'human'", rendered_archive)
 
-    async def test_compaction_sync_scrubs_leaked_reasoning_events(self) -> None:
+    async def test_compaction_sync_does_not_guess_event_type_from_wording(self) -> None:
         record = {
             "events": [
                 {
@@ -616,10 +625,10 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         changed = await context.sync_deepagents_compaction(record, agent, "thread-1")
 
-        self.assertTrue(changed)
-        self.assertEqual([event["type"] for event in record["events"]], ["compaction"])
+        self.assertFalse(changed)
+        self.assertEqual([event["type"] for event in record["events"]], ["reasoning", "compaction", "info"])
 
-    def test_recorder_does_not_save_compaction_reasoning_as_info(self) -> None:
+    def test_recorder_saves_info_regardless_of_compaction_wording(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
 
@@ -628,7 +637,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             "Key information to extract: Session intent, Summary, Artifacts, Next Steps."
         )
 
-        self.assertEqual(record["events"], [])
+        self.assertEqual(record["events"][0]["type"], "info")
+        self.assertIn("Key information to extract", record["events"][0]["text"])
 
     def test_recorder_does_not_duplicate_streamed_assistant_final_text(self) -> None:
         record = {"events": []}
@@ -937,7 +947,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(delegations[0]["calls"]), 2)
         self.assertEqual(delegations[1]["calls"][0]["args"]["description"], "three")
 
-    def test_recorder_does_not_temporarily_save_compaction_reasoning(self) -> None:
+    def test_recorder_saves_reasoning_without_phrase_detection(self) -> None:
         record = {"events": []}
         store = Store()
         recorder = SessionRecorder(record, store, "action")
@@ -945,10 +955,34 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recorder.reasoning_delta("The user wants me to extract context from the conversation history. ")
         recorder.reasoning_delta("Key information to extract: Session intent, Summary, Artifacts, Next Steps.")
 
-        self.assertEqual(record["events"], [])
-        self.assertEqual(store.saved, [])
+        self.assertEqual(record["events"][0]["type"], "reasoning")
+        self.assertIn("Key information to extract", record["events"][0]["text"])
+        self.assertTrue(store.saved)
 
-    def test_recorder_drops_compaction_tail_fragment(self) -> None:
+    async def test_metadata_marked_summary_stream_is_not_recorded(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+        registry = MessageInvocationMetadata()
+        registry.record("summary-1", {"lc_source": "summarization"})
+
+        await consume_messages(
+            AsyncItems(
+                [
+                    StreamMessage(
+                        reasoning=AsyncItems(["arbitrary hidden reasoning"]),
+                        text=AsyncItems(["arbitrary hidden summary"]),
+                        message_id="summary-1",
+                    )
+                ]
+            ),
+            renderer,
+            invocation_metadata=registry,
+        )
+
+        self.assertEqual(record["events"], [])
+
+    def test_recorder_keeps_reasoning_tail_without_phrase_detection(self) -> None:
         record = {"events": []}
         store = Store()
         recorder = SessionRecorder(record, store, "action")
@@ -956,8 +990,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recorder.reasoning_delta(": None - the task is complete")
         recorder.finish_main()
 
-        self.assertEqual(record["events"], [])
-        self.assertEqual(store.saved, [])
+        self.assertEqual(record["events"][0]["text"], ": None - the task is complete")
+        self.assertTrue(store.saved)
 
     async def test_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
         record = {"events": []}
@@ -987,7 +1021,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(context.normalize_messages(record["events"]), [])
 
-    async def test_unmarked_compaction_summary_final_text_is_not_persisted_as_assistant(self) -> None:
+    async def test_unmarked_summary_shaped_text_is_persisted_as_assistant(self) -> None:
         record = {"events": []}
         store = Store()
         recorder = SessionRecorder(record, store, "action")
@@ -1000,7 +1034,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         recorder.ensure_assistant(result.final_text)
 
-        self.assertEqual(context.normalize_messages(record["events"]), [])
+        self.assertEqual(context.normalize_messages(record["events"])[0]["content"], COMPACTION_SUMMARY.strip())
 
     async def test_ai_message_tool_call_repr_is_not_persisted_as_assistant(self) -> None:
         record = {"events": []}

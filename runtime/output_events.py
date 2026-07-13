@@ -7,13 +7,6 @@ from typing import Any
 
 from runtime.usage import field
 
-COMPACTION_SUMMARY_HEADINGS = (
-    "session intent",
-    "summary",
-    "artifacts",
-    "next steps",
-)
-COMPACTION_HEADING_RE_TEMPLATE = r"(?im)^\s{{0,3}}(?:#{{1,6}}\s*)?(?:\*\*)?{heading}(?:\*\*)?\s*:?\b"
 LEADING_REPLY_GAP_RE = re.compile(r"^\s*\n+\s*")
 
 
@@ -47,11 +40,6 @@ def final_text(output: Any) -> str:
     return ""
 
 
-def is_compaction_summary_message(message: Any) -> bool:
-    """Return whether a message is an internal DeepAgents compaction summary."""
-    return is_summarization_metadata_message(message) or text_has_compaction_summary_shape(message_text(message))
-
-
 def is_summarization_metadata_message(message: Any) -> bool:
     """Return whether message metadata marks a DeepAgents summary."""
     kwargs = field(message, "additional_kwargs")
@@ -64,9 +52,7 @@ def visible_message_text(message: Any) -> str:
         return ""
     if is_summarization_metadata_message(message):
         return ""
-    text = message_text(message)
-    visible, had_summary = strip_compaction_summary_prefix(text)
-    return normalize_response_delta("", visible if had_summary else text)
+    return normalize_response_delta("", message_text(message))
 
 
 def normalize_response_delta(existing_text: str, delta: Any) -> str:
@@ -79,74 +65,6 @@ def normalize_response_delta(existing_text: str, delta: Any) -> str:
         if not text.strip():
             return ""
     return text
-
-
-def strip_compaction_summary_prefix(text: str) -> tuple[str, bool]:
-    """Remove a leading structured compaction summary from text."""
-    if not text:
-        return "", False
-
-    positions = compaction_heading_positions(text)
-    first_heading = positions[0] if positions else -1
-    if first_heading < 0 or first_heading > 240:
-        return text, False
-
-    if len(positions) != len(COMPACTION_SUMMARY_HEADINGS):
-        return text, False
-
-    match = compaction_heading_match(text, COMPACTION_SUMMARY_HEADINGS[-1])
-    if match is None:
-        return "", True
-
-    after_heading = text[match.end() :]
-    paragraph_break = after_heading.find("\n\n")
-    if paragraph_break < 0:
-        return "", True
-
-    return after_heading[paragraph_break:].lstrip(), True
-
-
-def compaction_heading_positions(text: str) -> list[int]:
-    """Return compaction heading positions when all headings appear in order."""
-    position = -1
-    positions = []
-    for heading in COMPACTION_SUMMARY_HEADINGS:
-        match = compaction_heading_match(text, heading, position + 1)
-        if match is None:
-            return []
-        position = match.start()
-        positions.append(position)
-    return positions
-
-
-def compaction_heading_match(text: str, heading: str, pos: int = 0) -> re.Match[str] | None:
-    """Return the next heading match for one compaction section."""
-    pattern = COMPACTION_HEADING_RE_TEMPLATE.format(heading=re.escape(heading).replace(r"\ ", r"\s+"))
-    return re.compile(pattern).search(text, pos)
-
-
-def text_has_compaction_summary_shape(text: str) -> bool:
-    """Return whether text starts with the structured compaction summary shape."""
-    text = text.strip()
-    if not text:
-        return False
-    positions = compaction_heading_positions(text)
-    return bool(positions) and positions[0] <= 240
-
-
-def could_be_compaction_summary_start(text: str) -> bool:
-    """Return whether streamed text may still become a compaction summary."""
-    stripped = text.lstrip().lower()
-    if not stripped:
-        return True
-
-    candidate = re.sub(r"^#{1,6}\s*", "", stripped).strip()
-    candidate = candidate.strip("* ")
-    if not candidate:
-        return stripped.startswith("#")
-
-    marker = "session intent"
-    return marker.startswith(candidate) or candidate.startswith(marker)
 
 
 def message_text(message: Any) -> str:

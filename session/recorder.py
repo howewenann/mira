@@ -8,12 +8,6 @@ from inspect import Parameter, signature
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
-from runtime.compaction_filter import (
-    is_compaction_reasoning,
-    is_compaction_reasoning_fragment,
-    is_compaction_tail_fragment,
-    should_flush_reasoning_probe,
-)
 from runtime.output_events import normalize_response_delta
 from runtime.tool_events import CONTROL_TOOLS
 from session.context import append_event, sync_deepagents_compaction, update_event_text
@@ -34,7 +28,6 @@ class SessionRecorder:
         self._last_assistant_id: int | None = None
         self._reasoning_id: int | None = None
         self._reasoning_text = ""
-        self._reasoning_pending = ""
         self._running_subagents: dict[str, str] = {}
         self._running_subagent_origins: dict[str, str] = {}
         self._running_subagent_event_ids: dict[str, int] = {}
@@ -66,20 +59,7 @@ class SessionRecorder:
     def reasoning_delta(self, delta: str) -> dict[str, Any] | None:
         if not delta:
             return None
-        self._reasoning_pending += str(delta)
-        if is_compaction_tail_fragment(self._reasoning_pending):
-            self._reasoning_pending = ""
-            self._delete_reasoning_event()
-            return None
-        if is_compaction_reasoning(self._reasoning_pending):
-            self._reasoning_pending = ""
-            self._delete_reasoning_event()
-            return None
-        if not should_flush_reasoning_probe(self._reasoning_pending):
-            return None
-        delta = self._reasoning_pending
-        self._reasoning_pending = ""
-        return self._append_reasoning(delta)
+        return self._append_reasoning(str(delta))
 
     def _append_reasoning(self, delta: str) -> dict[str, Any] | None:
         self._close_assistant_phase()
@@ -216,9 +196,7 @@ class SessionRecorder:
         self.save()
         return stored
 
-    def info(self, text: str) -> dict[str, Any] | None:
-        if is_compaction_notice(text):
-            return None
+    def info(self, text: str) -> dict[str, Any]:
         self.finish_main()
         stored = append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
         self.save()
@@ -247,14 +225,6 @@ class SessionRecorder:
         self._close_assistant_phase()
 
     def _close_reasoning_phase(self) -> None:
-        if self._reasoning_pending:
-            if is_compaction_reasoning_fragment(self._reasoning_pending) or is_compaction_tail_fragment(
-                self._reasoning_pending
-            ):
-                self._delete_reasoning_event()
-            else:
-                self._append_reasoning(self._reasoning_pending)
-            self._reasoning_pending = ""
         self._reasoning_id = None
         self._reasoning_text = ""
 
@@ -294,8 +264,7 @@ class SessionRecorder:
         events.append(event)
 
     def discard_reasoning(self) -> None:
-        """Remove the currently streamed reasoning block after late compaction detection."""
-        self._reasoning_pending = ""
+        """Remove the currently streamed reasoning block."""
         self._delete_reasoning_event()
 
     def _delete_reasoning_event(self) -> None:
@@ -546,7 +515,7 @@ class RecordingRenderer:
 
     def _render_context_notice(self, notice: str) -> bool:
         """Render one context-pressure notice at most once per turn."""
-        if not notice or self._context_notice_rendered or is_compaction_notice(notice):
+        if not notice or self._context_notice_rendered:
             return False
         self._context_notice_rendered = True
         self.system_message(notice, kind="info")
@@ -573,11 +542,6 @@ def json_value(value: Any) -> Any:
         if isinstance(value, list | tuple):
             return [json_value(item) for item in value]
         return str(value)
-
-
-def is_compaction_notice(text: str) -> bool:
-    """Return whether an info notice is really leaked compaction reasoning."""
-    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
 
 
 def update_event_field(record: dict[str, Any], event_id: int, key: str, value: Any) -> None:

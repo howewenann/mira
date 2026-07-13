@@ -28,7 +28,6 @@ from config.settings import (
     save_settings,
     tool_enabled,
 )
-from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from runtime.diagnostics import get_diagnostics_logger
 from runtime.error_report import clear_error_reports, write_error_report
 from runtime.trace_stream import TraceStream
@@ -485,6 +484,7 @@ class MiraApp(App[None]):
         if action == "discard":
             self._resolve_current_plan("discarded")
             self.system_message(f"discarded plan \"{plan_title(plan)}\"", kind="muted")
+            self.action_focus_prompt()
             return
 
         if action == "revise":
@@ -731,7 +731,7 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self.waiting_finished()
         notice = pop_context_overflow_notice()
-        if notice and not is_compaction_notice(notice):
+        if notice:
             self.query_one(ChatLog).system_message(notice, kind="info")
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running", detail="compacting context...")
@@ -1708,11 +1708,6 @@ def append_prompt_history(path: Path, text: str) -> None:
         handle.write(f"\n# {timestamp}\n")
         for line in entry.splitlines():
             handle.write(f"+{line}\n")
-
-
-def is_compaction_notice(text: str) -> bool:
-    """Return whether an info notice is really leaked compaction reasoning."""
-    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)
 
 
 def plan_title(plan: dict[str, Any]) -> str:

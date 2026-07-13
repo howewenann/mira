@@ -281,6 +281,7 @@ Expected:
   to the prompt.
 - After clicking the prompt, clicking the active plan body restores the last
   focused action and makes the plan shortcuts active again.
+- Discarding a plan returns focus to the prompt immediately.
 - The plan bubble includes Summary, Key Changes, Test Plan, and Assumptions.
 - The Test Plan names an exact command/check to run and an expected result.
 - MIRA does not write or edit `test.txt` until Implement is chosen.
@@ -543,3 +544,13 @@ Expected:
 - `/session` reports the same turn count as before `/compact`.
 - A subsequent topic-switch prompt starts a normal turn and retains relevant
   information from the generated summary.
+- Summary-model reasoning and generated summary text never appear as reasoning
+  or assistant bubbles while compaction is running.
+
+Afterward, enter a normal prompt that explicitly asks MIRA to discuss the words
+"compact conversation" and "summarize" without invoking compaction.
+
+Expected:
+
+- The ordinary reasoning and reply remain visible; wording alone does not make
+  MIRA classify the model call as compaction.

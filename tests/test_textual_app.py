@@ -1046,8 +1046,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("compacting context...", renderable_plain(compaction))
             self.assertNotIn("Provider context limit", renderable_plain(compaction))
 
-    async def test_compaction_reasoning_notice_is_not_rendered_as_info(self) -> None:
-        """Leaked compaction reasoning must not render as an info notice."""
+    async def test_context_notice_is_not_classified_by_compaction_wording(self) -> None:
+        """Context notices should render without phrase-based classification."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -1061,9 +1061,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             blocks = list(app.query_one(ChatLog).children)
+            self.assertEqual(str(getattr(blocks[-2], "border_title", "")), "info")
+            self.assertIn("Key information to extract", renderable_plain(blocks[-2]))
             self.assertEqual(str(getattr(blocks[-1], "border_title", "")), "mira")
             self.assertIn("compacting context...", renderable_plain(blocks[-1]))
-            self.assertNotIn("Key information to extract", "\n".join(renderable_plain(block) for block in blocks))
 
     async def test_escaped_context_overflow_renders_info_and_ready_state(self) -> None:
         """An escaped context overflow should not become a red error block."""
@@ -3973,8 +3974,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.click("#plan-discard-plan-1")
             await wait_until(lambda: app.mode["current_plan"] is None)
+            await wait_until(lambda: app.query_one(PromptBox).has_focus)
 
             self.assertIsNone(app.mode["current_plan"])
+            self.assertTrue(app.query_one(PromptBox).has_focus)
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Status: discarded", rendered)

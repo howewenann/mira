@@ -8,7 +8,6 @@ from itertools import count
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
-from runtime.compaction_filter import is_compaction_reasoning, is_compaction_reasoning_fragment
 from ui.terminal_colors import TerminalColorizer, enable_console_colors
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -70,7 +69,7 @@ class Renderer:
     def compaction_started(self) -> None:
         """Print a context compaction status."""
         notice = pop_context_overflow_notice()
-        if notice and not is_compaction_notice(notice):
+        if notice:
             self.system_message(notice, kind="info")
         self.transcript.compaction_started()
 
@@ -213,8 +212,3 @@ class Renderer:
     def _write(self, text: str) -> None:
         """Write colored transcript text to stdout."""
         print(self._colorizer.colorize(text), end="", flush=True)
-
-
-def is_compaction_notice(text: str) -> bool:
-    """Return whether an info notice is really leaked compaction reasoning."""
-    return is_compaction_reasoning(text) or is_compaction_reasoning_fragment(text)

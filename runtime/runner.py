@@ -14,6 +14,7 @@ from langgraph.types import Command
 from langgraph.stream.transformers import CustomTransformer
 
 from runtime.message_events import consume_messages
+from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import (
     capture_output,
     collect_interrupts,
@@ -360,11 +361,15 @@ async def run_turn(
     result = TurnResult()
 
     while True:
+        message_metadata = MessageInvocationMetadata()
         stream = await agent.astream_events(
             payload,
             config=config,
             version="v3",
-            transformers=[CustomTransformer],
+            transformers=[
+                CustomTransformer,
+                lambda scope: MessageInvocationMetadataTransformer(scope, message_metadata),
+            ],
         )
         event_renderer = SubagentRequestRenderer(renderer)
         output: dict[str, Any] = {}
@@ -375,7 +380,13 @@ async def run_turn(
 
         await asyncio.gather(
             consume_custom_events(stream.custom, event_renderer),
-            consume_messages(stream.messages, event_renderer, result, render_normal_tools=False),
+            consume_messages(
+                stream.messages,
+                event_renderer,
+                result,
+                render_normal_tools=False,
+                invocation_metadata=message_metadata,
+            ),
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),
             capture_output(stream.output(), output),
