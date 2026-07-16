@@ -111,6 +111,7 @@ COMMAND_HELP_SECTIONS = (
             ("/memories", "list loaded memory files and replacements"),
             ("/skills", "list loaded skills and replacements"),
             ("/subagents", "list loaded subagents and replacements"),
+            ("/issues", "repair unavailable project tool files in the TUI"),
         ),
     ),
     (
@@ -414,6 +415,10 @@ async def handle_command(
 
     if text == "/reload":
         write_line(renderer, "/reload is available in the Textual app", kind="warning")
+        return True
+
+    if text == "/issues":
+        write_line(renderer, "/issues is available in the Textual app", kind="warning")
         return True
 
     if text == "/runtime":

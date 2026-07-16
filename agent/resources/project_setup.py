@@ -13,17 +13,20 @@ def ensure_project_examples(workspace: Path) -> None:
     skills_dir = mira_dir / SKILLS_DIR / "example-skill"
     subagents_dir = mira_dir / SUBAGENTS_DIR
     tools_dir = mira_dir / TOOLS_DIR
+    tool_examples_dir = mira_dir / "examples" / TOOLS_DIR
 
     memories_dir.mkdir(parents=True, exist_ok=True)
     skills_dir.mkdir(parents=True, exist_ok=True)
     subagents_dir.mkdir(parents=True, exist_ok=True)
     tools_dir.mkdir(parents=True, exist_ok=True)
+    tool_examples_dir.mkdir(parents=True, exist_ok=True)
 
     write_example(mira_dir / "README.md", PROJECT_README)
     write_example(memories_dir / "AGENTS.md", EXAMPLE_MEMORY)
     write_example(skills_dir / "SKILL.md", EXAMPLE_SKILL)
     write_example(subagents_dir / "example_subagent.py", EXAMPLE_SUBAGENT)
-    write_example(tools_dir / "example_tool.py", EXAMPLE_TOOL)
+    write_example(tool_examples_dir / "mira_runtime_tool.py", MIRA_RUNTIME_TOOL_EXAMPLE)
+    write_example(tool_examples_dir / "project_runtime_tool.py", PROJECT_RUNTIME_TOOL_EXAMPLE)
 
 
 def write_example(path: Path, content: str) -> None:
@@ -43,7 +46,11 @@ MIRA loads project resources from this folder on top of its defaults.
 - `subagents/*.py`: Python files that export `SUBAGENTS = [...]`. Project
   subagents are loaded from these files and may override bundled subagents if
   MIRA adds any later.
-- `tools/*.py`: Python files with module-level LangChain `@tool` objects.
+- `tools/*.py`: active Python tool files. Standard LangChain `@tool` runs in
+  MIRA, while `mira_tool_api.project_tool` runs its function body in the
+  configured project Execute Environment.
+- `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is
+  never scanned as active resources.
   Files can also define `get_tools(project_backend)` for tools that need
   workspace access. Project tools override defaults when the tool `name` is
   the same.
@@ -88,17 +95,59 @@ SUBAGENTS = [
 ]
 '''
 
-EXAMPLE_TOOL = '''"""Example project tool placeholder.
+MIRA_RUNTIME_TOOL_EXAMPLE = '''# Standard MIRA-runtime tool.
+#
+# This file is imported and executed inside MIRA's Python environment.
+# Packages imported here must be installed in MIRA's environment.
+#
+# To use:
+#   1. Copy this file into .mira/tools/
+#   2. Rename and edit the function.
+#   3. Run /reload.
+#
+# If an imported package is missing, MIRA will offer to install it
+# into MIRA's environment.
 
-Edit or delete this file when you know which project helpers you want. Rename
-the tool before using it for real work.
-"""
-
-from langchain.tools import tool
+from langchain_core.tools import tool
 
 
 @tool
-def example_project_note() -> str:
-    """Return a short note proving example project tools are loaded."""
-    return "Example project tool loaded."
+def count_words(text: str) -> int:
+    """Count the number of words in text."""
+    return len(text.split())
+'''
+
+PROJECT_RUNTIME_TOOL_EXAMPLE = '''# Project-runtime tool.
+#
+# The tool is exposed to the agent normally, but its function body runs
+# in the configured project Execute Environment.
+#
+# Use this for:
+#   - Packages installed only in the project's Conda env or venv
+#   - Imports from the current project package
+#
+# Important:
+#   Project-only imports must remain inside the function because MIRA
+#   imports this file first to discover the tool.
+#
+# To use:
+#   1. Copy this file into .mira/tools/
+#   2. Rename and edit the function.
+#   3. Configure the Execute Environment in /settings.
+#   4. Run /reload.
+#
+# Arguments should be JSON-compatible. Return JSON-compatible data or text.
+# Other return values are converted to a readable representation.
+
+from mira_tool_api import project_tool
+
+
+@project_tool
+def inspect_csv(path: str) -> str:
+    """Summarize a CSV using the project environment."""
+
+    import pandas as pd
+
+    dataframe = pd.read_csv(path)
+    return dataframe.describe(include="all").to_string()
 '''

@@ -211,11 +211,38 @@ to inspect.
   name. A project tool can also replace a known DeepAgents built-in tool name,
   which is shown as `replaces: built-in` when no MIRA default tool already
   occupied that name.
+- Default tool-file failures remain fatal because they indicate a broken MIRA
+  installation. Project tool files are attempted independently and failures
+  are retained as structured `ToolLoadFailure` values. Only tools from files
+  that finish loading enter merge, settings, approval, schema, or agent paths;
+  a failed file never creates a disabled placeholder. `/reload` retries all
+  files, and one-shot mode prints one grouped warning while continuing with the
+  successful subset.
+- Standard LangChain `@tool` runs in MIRA's interpreter. The dependency-free
+  `mira_tool_api.project_tool` decorator is an explicit alternative: it leaves
+  the original callable unchanged and adds versioned metadata. The loader
+  derives its LangChain schema from the original signature and registers a
+  `StructuredTool` proxy under the public name. Imported marked functions are
+  ignored, and project-only imports must stay inside the marked function
+  because discovery still imports the containing file in MIRA.
+- A project proxy launches one standard-library child runner per call using the
+  existing Execute Environment selection. It exchanges JSON through temporary
+  request/response files, uses the workspace as cwd and import root, and loads
+  the exact standalone `mira_tool_api.py` bridge file as `mira_tool_api` before
+  importing the source. This exposes neither MIRA's site-packages nor a second
+  environment setting. JSON-compatible results are preserved; other values
+  fall back to `repr`, and child exceptions become normal project-runtime tool
+  errors.
+- A normal `@tool` that delays a missing import until its function body loads
+  successfully and remains outside startup repair; that invocation follows the
+  ordinary tool-error path.
 - Disabled project tools stay in metadata for the settings UI but are not
   exposed to the agent.
 
-**Where to check:** `agent/resources/`, `agent/default_resources/`,
-`tests/test_resources.py`.
+**Where to check:** `mira_tool_api.py`, `agent/resources/tools.py`,
+`agent/resources/tool_failures.py`, `agent/resources/project_tools.py`,
+`agent/resources/project_tool_runner.py`, `agent/default_resources/`,
+`tests/test_resources.py`, `tests/test_project_tools.py`.
 
 **Update this when:** Resource locations, overwrite rules, display metadata, or
 supported export shapes change.
@@ -446,6 +473,14 @@ summarizes durable conversation state, including active goals and plans.
 current session. `/compact` is also TUI-only because it needs the active agent,
 thread, checkpoint, and session store; it runs outside a normal model turn and
 does not create synthetic assistant or tool messages.
+Unavailable project tool files use one narrow TUI-only issue flow rather than a
+general notification system. `App.notify()` announces a new failure fingerprint
+once per session, a compact `Issues N` button and `/issues` open one scrollable
+`ModalScreen`, and a Textual thread worker runs one explicit
+`sys.executable -m pip install ...` argument list. The input and both bottom-row
+buttons are disabled while pip runs. Success reuses `_reload_runtime()` and
+refreshes the open modal; failure retains captured output and re-enables retry.
+Closing never changes settings, session history, or unresolved failures.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
@@ -460,7 +495,7 @@ belong in the panel.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
 
-**Where to check:** `ui/app.py`, `ui/windows_input.py`,
+**Where to check:** `ui/app.py`, `ui/widgets/tool_issues.py`, `ui/windows_input.py`,
 `ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
 `ui/renderer.py`, `runtime/*_events.py`, `tests/test_textual_app.py`.
 

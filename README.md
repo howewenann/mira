@@ -94,6 +94,7 @@ it only with a trusted local endpoint.
 | Create a graded goal | `/goal <prompt>` |
 | Compact older context | `/compact` |
 | Reload configuration and resources | `/reload` |
+| Repair unavailable custom tools | `/issues` |
 
 Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 `/skills`, and `/subagents`. Destructive cleanup commands require confirmation
@@ -112,12 +113,25 @@ MIRA loads project customization from `.mira/`:
   memories/          # always-on Markdown context
   skills/            # DeepAgents SKILL.md folders
   subagents/         # Python SUBAGENTS definitions
-  tools/             # LangChain tools
+  tools/             # active custom tools
+  examples/tools/    # inert MIRA- and project-runtime examples
 ```
 
 Project resources override built-in resources with the same name. Use
 `/memories`, `/skills`, `/subagents`, and `/tools` to inspect what is active.
 Run `/reload` after changing project resources.
+
+Standard LangChain `@tool` functions run inside MIRA, so their imports must be
+installed in MIRA's Python environment. A bad project tool file is isolated and
+kept out of the agent; `/issues` can install all detected missing packages into
+MIRA and reload, while `/reload` retries every failed file. See
+`.mira/examples/tools/mira_runtime_tool.py`.
+
+Use `mira_tool_api.project_tool` when a function body must run in the configured
+project Execute Environment. Keep project-only imports inside that function;
+MIRA still imports the file to discover it. The project environment needs
+neither LangChain nor MIRA installed. See
+`.mira/examples/tools/project_runtime_tool.py`.
 
 ## Safety and Local Data
 

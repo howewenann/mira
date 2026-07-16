@@ -62,7 +62,17 @@ from ui.repl import (
     run_user_turn,
 )
 from ui.runtime_snapshot import runtime_report
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets import (
+    ChatLog,
+    PromptBox,
+    PromptPanel,
+    SessionHistory,
+    SettingsPanel,
+    StatusBar,
+    SubagentsPanel,
+    ToolIssuesScreen,
+)
+from ui.widgets.tool_issues import PipInstallResult
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 from ui.windows_clipboard import set_windows_clipboard
@@ -135,6 +145,8 @@ class MiraApp(App[None]):
         self._waiting_label = "working..."
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
+        self.tool_failures: list[Any] = []
+        self._notified_tool_failure_sets: set[tuple[str, ...]] = set()
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
 
@@ -147,7 +159,9 @@ class MiraApp(App[None]):
                     yield Button("+ New", id="new-chat")
                 yield SessionHistory(id="sessions")
             with Vertical(id="main-panel"):
-                yield StatusBar(id="status")
+                with Horizontal(id="status-row"):
+                    yield StatusBar(id="status")
+                    yield Button("Issues 0", id="tool-issues-button")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
@@ -209,6 +223,7 @@ class MiraApp(App[None]):
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
         self.checkpointer = state.get("checkpointer")
+        self.tool_failures = list(state.get("tool_failures") or getattr(self.agent, "mira_tool_failures", []))
         self.runtime_snapshot = build_runtime_snapshot(
             self.config or {},
             self.launch_options,
@@ -239,6 +254,7 @@ class MiraApp(App[None]):
         chat.restore_session(self.session)
         self._refresh_sessions()
         self._set_status(state="ready")
+        self._sync_tool_issues(notify=True)
         self.action_focus_prompt()
 
     def _write_error_report(
@@ -291,6 +307,11 @@ class MiraApp(App[None]):
 
         if text == "/settings":
             self.run_worker(self._run_settings_command(), name="settings-command", exclusive=False)
+            return
+
+        if text == "/issues":
+            self._open_tool_issues()
+            self.action_focus_prompt()
             return
 
         if text == "/reload":
@@ -1257,6 +1278,7 @@ class MiraApp(App[None]):
         self.context_limit_source = metadata.context_source
         self.agent = agent
         self.plan_agent = plan_agent
+        self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
         self.mode.update(mode_updates)
         self.runtime_snapshot = snapshot
         ensure_dashboard(
@@ -1269,6 +1291,7 @@ class MiraApp(App[None]):
             self.store.save(self.session)
         self._refresh_startup_splash()
         self._set_status(state=self.status_state)
+        self._sync_tool_issues(notify=True)
         return snapshot
 
     def _render_runtime_snapshot(
@@ -1956,6 +1979,75 @@ class MiraApp(App[None]):
             turns=int(self.session.get("turns") or 0),
             detail=detail,
         )
+        self._sync_tool_issues_button()
+
+    @on(Button.Pressed, "#tool-issues-button")
+    def press_tool_issues(self, event: Button.Pressed) -> None:
+        """Open current project tool failures without recording chat history."""
+        event.stop()
+        self._open_tool_issues()
+
+    def _open_tool_issues(self) -> None:
+        if not self.tool_failures:
+            self.notify("No unresolved custom tool files.", title="Custom tools")
+            return
+        if isinstance(self.screen, ToolIssuesScreen):
+            self.screen.update_failures(self.tool_failures)
+            return
+        self.push_screen(ToolIssuesScreen(self.tool_failures))
+
+    def _sync_tool_issues(self, *, notify: bool) -> None:
+        """Refresh the compact entry point, open modal, and grouped toast."""
+        if not self.is_mounted:
+            return
+        self._sync_tool_issues_button()
+        if isinstance(self.screen, ToolIssuesScreen):
+            if self.tool_failures:
+                self.screen.update_failures(self.tool_failures)
+            elif not self.screen.installing:
+                self.screen.dismiss()
+        fingerprint = tuple(sorted(str(failure.identifier) for failure in self.tool_failures))
+        if notify and fingerprint and fingerprint not in self._notified_tool_failure_sets:
+            self._notified_tool_failure_sets.add(fingerprint)
+            count = len(self.tool_failures)
+            self.notify(
+                f"{count} project tool file{'s' if count != 1 else ''} could not be loaded.\n"
+                "Open Issues to repair them.",
+                title="Custom tools unavailable",
+                severity="warning",
+            )
+
+    def _sync_tool_issues_button(self) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            button = self.query_one("#tool-issues-button", Button)
+        except NoMatches:
+            return
+        count = len(self.tool_failures)
+        button.label = f"Issues {count}"
+        button.display = count > 0
+
+    async def reload_after_tool_install(
+        self,
+        screen: ToolIssuesScreen,
+        result: PipInstallResult,
+    ) -> None:
+        """Reuse runtime reload after an explicit successful pip repair."""
+        try:
+            await self._reload_runtime()
+        except BaseException as error:
+            screen.installing = False
+            screen.install_details = f"Packages installed, but reload failed:\n{type(error).__name__}: {error}"
+            screen.query_one("#tool-issues-summary", Static).update(screen.summary_text())
+            screen._sync_controls()
+            return
+        screen.installing = False
+        self._sync_tool_issues(notify=False)
+        if not self.tool_failures:
+            self.notify("All project tool files loaded successfully.", title="Custom tools")
+            return
+        screen.update_failures(self.tool_failures)
 
     @on(ListView.Selected, "#sessions")
     def select_session(self, event: ListView.Selected) -> None:
@@ -2040,7 +2132,9 @@ class MiraApp(App[None]):
         mode_updates = self._agent_mode_updates(agent, plan_agent, self.config)
         self.agent = agent
         self.plan_agent = plan_agent
+        self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
         self.mode.update(mode_updates)
+        self._sync_tool_issues(notify=True)
 
     def _build_agent_pair(self, *, config: dict[str, Any], metadata: Any | None) -> tuple[Any, Any]:
         """Build both agents without replacing the active pair."""

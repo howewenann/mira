@@ -715,3 +715,130 @@ encoded VT Shift+Enter sequence should remain unchanged.
 Expected: the exact selected text appears in the external editor, each command
 performs one clipboard write, no terminal-native selection shortcut is needed,
 and Ctrl+C with no selection does not change the prompt, cancel work, or quit.
+
+## Resilient Custom Tools Matrix
+
+Run every scenario from a disposable Git workspace with the current checkout:
+
+```powershell
+conda run --no-capture-output -n ai_agents python -m cli.main --workspace <workspace>
+```
+
+### 1. Missing MIRA dependency does not block startup
+
+Create `local_packages/mira_manual_dep/pyproject.toml` for a setuptools project
+named `mira-manual-dep`, and add
+`mira_manual_dep/__init__.py` containing a `decorate(text)` function. Create
+`.mira/tools/manual_mira_tool.py` with a module-scope `import mira_manual_dep`
+and a normal LangChain `@tool` named `manual_mira_tool` that calls it.
+
+Expected: startup succeeds, one warning and `Issues 1` appear, and `/tools`
+does not expose the tool. Open Issues, confirm the source/import and project-tool
+guidance, replace the package input with `./local_packages/mira_manual_dep`, and
+choose Install All and Reload. The UI remains responsive, the issue disappears,
+`/tools` exposes the tool, and invocation returns `manual:<text>`. Uninstall
+`mira-manual-dep` from `ai_agents` afterward.
+
+### 2. Multiple packages plus a syntax error
+
+Create two analogous local packages, `mira_manual_alpha` and
+`mira_manual_beta`, and two normal `@tool` files that import them. Add
+`.mira/tools/manual_syntax_error.py` containing `def broken(` followed by an
+invalid return statement.
+
+Expected: one screen lists all three files and shows project-runtime guidance
+once. Its input contains both modules, not the syntax error. Replace them with
+both local package paths and install once. Both tools recover and appear in
+`/tools`; only the syntax file remains and contributes no agent tool.
+
+### 3. Shared dependency is deduplicated
+
+Create two tool files that import the same missing local module.
+
+Expected: `Issues 2` counts files, both files are listed, the package input has
+one module name, and one installation/reload recovers both.
+
+### 4. Close and repair later
+
+With one unresolved dependency, open Issues, Close, continue chatting, reopen
+from `Issues 1`, Close again, then reopen with `/issues` and repair it.
+
+Expected: Close creates no chat bubble or session event, the indicator remains,
+all normal chat works, each open reflects current failures, and repair removes
+the indicator.
+
+### 5. Broken tools are invisible
+
+Create one successful tool file and one import-failing file. Inspect `/tools`,
+then ask the model to call the expected broken tool name. Repair and `/reload`.
+
+Expected: only the successful tool schema is available before repair; the model
+cannot call the broken name. The repaired tool appears only after successful
+loading.
+
+### 6. Project-runtime tool
+
+Create `project_only_module.py` with `decorate(text)` returning
+`project:<text>`. Create `.mira/tools/manual_project_tool.py`:
+
+```python
+from mira_tool_api import project_tool
+
+@project_tool
+def manual_project_tool(text: str) -> str:
+    """Test execution in the configured project environment."""
+    from project_only_module import decorate
+    return decorate(text)
+```
+
+Configure an Execute Environment, `/reload`, inspect `/tools`, and invoke it.
+Expected: the public name, Runtime `Project`, and selected environment appear;
+the result is `project:<text>`, the internal proxy name never appears, and the
+project environment needs neither LangChain nor MIRA. Move the project-only
+import to module scope where it is unavailable to MIRA: discovery then fails
+and Issues explains the inside-function rule and example path.
+
+### 7. Project tool exception
+
+Change that function body to `raise RuntimeError("manual project failure")`.
+
+Expected: the tool remains available, invocation becomes a normal tool error
+identifying Runtime `Project`, MIRA stays open, and no MIRA package install is
+offered.
+
+### 8. Pip failure
+
+Enter an obviously nonexistent requirement in Issues and install.
+
+Expected: captured pip failure details appear in the scrollable body, reload is
+not called, input and both buttons are restored, Close works, and the issue
+remains.
+
+### 9. Cascading dependency
+
+Create one normal tool file that imports missing local packages A then B.
+Install A through Issues, then install B after reload discovers it.
+
+Expected: the same modal refreshes from A to B and the tool appears after the
+second install/reload.
+
+### 10. Narrow terminal
+
+Shrink the terminal while a mixed Issues screen is open.
+
+Expected: the body scrolls, both action buttons stay together at the bottom,
+Escape closes only while idle, and `/issues` remains a reliable fallback.
+
+### 11. One-shot mode
+
+Add one successful tool file, one missing-dependency file, and one syntax-error
+file, then run:
+
+```powershell
+conda run -n ai_agents python -m cli.main --workspace <workspace> -p "use the available custom tool"
+```
+
+Expected: one grouped warning names both failed files and deduplicated missing
+modules, states normal `@tool` ownership and the project example path, performs
+no installation, creates no optional-resource crash report, and continues with
+the successful tool available.

@@ -176,6 +176,7 @@ def _build_agent(
         ),
     )
     _attach_resources(agent, resources.metadata)
+    _attach_tool_failures(agent, resources.tool_failures)
     _attach_backend(agent, backend)
     _attach_summarization(agent, middleware_stack.summarization)
     return agent
@@ -314,6 +315,14 @@ def _attach_resources(agent: Any, resources: dict[str, list[dict[str, str]]]) ->
     """Attach resource display metadata used by the REPL."""
     try:
         agent.mira_resources = resources
+    except AttributeError:
+        return
+
+
+def _attach_tool_failures(agent: Any, failures: list[Any]) -> None:
+    """Attach optional project resource failures for terminal and TUI surfaces."""
+    try:
+        agent.mira_tool_failures = list(failures)
     except AttributeError:
         return
 

@@ -111,6 +111,11 @@ async def _run(
         raise typer.Exit(code=1)
 
     app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
+    from agent.resources.tool_failures import one_shot_warning
+
+    warning = one_shot_warning(app.get("tool_failures") or [])
+    if warning:
+        renderer.system_message(warning, kind="warning")
     await _run_one_shot(app, prompt)
 
 
@@ -303,6 +308,7 @@ async def _bootstrap(
         "store": store,
         "workspace": workspace,
         "checkpointer": checkpointer,
+        "tool_failures": list(getattr(agent, "mira_tool_failures", [])),
     }
 
 

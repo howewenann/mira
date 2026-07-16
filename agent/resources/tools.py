@@ -16,6 +16,9 @@ from agent.resources.paths import (
     project_virtual_dir,
 )
 from agent.resources.python_files import import_python_file
+from agent.resources.project_tools import project_tools_from_module
+from agent.resources.tool_failures import ToolLoadFailure, tool_load_failure
+from mira_tool_api import PROJECT_TOOL_METADATA_ATTRIBUTE
 
 BUILT_IN_TOOL_NAMES = {
     "write_todos",
@@ -30,50 +33,102 @@ BUILT_IN_TOOL_NAMES = {
 }
 
 
-def load_tools(workspace: Path, project_backend: Any) -> tuple[list[Any], list[dict[str, str]]]:
+def load_tools(
+    workspace: Path,
+    project_backend: Any,
+    settings: dict[str, Any] | None = None,
+) -> tuple[list[Any], list[dict[str, str]], list[ToolLoadFailure]]:
     """Load default tools first, then project tools."""
-    defaults = tool_files(default_dir(TOOLS_DIR), default_virtual_dir(TOOLS_DIR), "default", project_backend)
-    projects = tool_files(project_dir(workspace, TOOLS_DIR), project_virtual_dir(TOOLS_DIR), "project", project_backend)
+    defaults, _ = tool_files(
+        default_dir(TOOLS_DIR),
+        default_virtual_dir(TOOLS_DIR),
+        "default",
+        project_backend,
+        workspace=workspace,
+        settings=settings,
+    )
+    projects, failures = tool_files(
+        project_dir(workspace, TOOLS_DIR),
+        project_virtual_dir(TOOLS_DIR),
+        "project",
+        project_backend,
+        workspace=workspace,
+        settings=settings,
+    )
     merged = merge_tool_items(defaults, projects)
-    return [item["tool"] for item in merged], [display_item(item) for item in merged]
+    return [item["tool"] for item in merged], [display_item(item) for item in merged], failures
 
 
-def tool_files(root: Path, virtual_root: str, source: str, project_backend: Any) -> list[dict[str, Any]]:
+def tool_files(
+    root: Path,
+    virtual_root: str,
+    source: str,
+    project_backend: Any,
+    *,
+    workspace: Path,
+    settings: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[ToolLoadFailure]]:
     """Return all tools exported by Python files in one folder."""
     if not root.exists():
-        return []
+        return [], []
 
     items = []
+    failures: list[ToolLoadFailure] = []
     for path in sorted(root.glob("*.py")):
-        for tool in tools_from_file(path, project_backend):
-            items.append(
-                {
-                    "name": tool_name(tool),
-                    "path": f"{virtual_root}/{path.name}",
-                    "source": source,
-                    "replaces": "",
-                    "tool": tool,
-                }
+        try:
+            tools = tools_from_file(
+                path,
+                project_backend,
+                workspace=workspace,
+                settings=settings,
+                discover_project_tools=source == "project",
             )
-    return items
+        except BaseException as error:
+            if source != "project":
+                raise
+            failures.append(tool_load_failure(path, workspace, error))
+            continue
+        for tool in tools:
+            item = {
+                "name": tool_name(tool),
+                "path": f"{virtual_root}/{path.name}",
+                "source": source,
+                "replaces": "",
+                "tool": tool,
+            }
+            if getattr(tool, "__mira_project_runtime__", False):
+                item["runtime"] = "Project"
+                item["environment"] = getattr(tool, "__mira_project_environment__", "")
+            items.append(item)
+    return items, failures
 
 
-def tools_from_file(path: Path, project_backend: Any) -> list[Any]:
+def tools_from_file(
+    path: Path,
+    project_backend: Any,
+    *,
+    workspace: Path | None = None,
+    settings: dict[str, Any] | None = None,
+    discover_project_tools: bool = False,
+) -> list[Any]:
     """Return decorated module tools, TOOLS, and get_tools(project_backend)."""
     module = import_python_file(path, "mira_resource_tools")
     tools = module_tools(module)
+    if discover_project_tools:
+        project_tools = project_tools_from_module(module, path, workspace or path.parent, settings)
+        tools.extend(project_tools)
     declared = getattr(module, "TOOLS", [])
     if declared:
         if not isinstance(declared, list | tuple):
             raise TypeError(f"{path} must define TOOLS as a list")
-        tools.extend(declared)
+        tools.extend(tool for tool in declared if not is_project_tool_callable(tool))
 
     get_tools = getattr(module, "get_tools", None)
     if callable(get_tools):
         created = get_tools(project_backend)
         if not isinstance(created, list | tuple):
             raise TypeError(f"{path} get_tools() must return a list")
-        tools.extend(created)
+        tools.extend(tool for tool in created if not is_project_tool_callable(tool))
 
     return deduplicate_tools(tools)
 
@@ -85,6 +140,11 @@ def module_tools(module: Any) -> list[Any]:
         for value in vars(module).values()
         if isinstance(value, BaseTool)
     ]
+
+
+def is_project_tool_callable(value: Any) -> bool:
+    """Keep marked originals out of direct LangChain registration paths."""
+    return callable(value) and isinstance(getattr(value, PROJECT_TOOL_METADATA_ATTRIBUTE, None), dict)
 
 
 def deduplicate_tools(tools: list[Any]) -> list[Any]:

@@ -30,8 +30,7 @@ build-backend = "hatchling.build"
 packages = ["agent", "cli", "config", "runtime", "session", "ui"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"agent/default_resources" = "agent/default_resources"
-"ui/styles/mira.tcss" = "ui/styles/mira.tcss"
+"mira_tool_api.py" = "mira_tool_api.py"
 ".env.example" = ".env.example"
 
 [tool.hatch.version]

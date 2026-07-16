@@ -87,11 +87,85 @@ Screen {
     color: #7d8b95;
 }
 
-#status {
+#status-row {
     height: 1;
+    width: 1fr;
     padding: 0 1;
     background: #17313a;
     color: #eef7f8;
+}
+
+#status {
+    width: 1fr;
+    height: 1;
+}
+
+#tool-issues-button {
+    display: none;
+    width: 10;
+    min-width: 10;
+    height: 1;
+    padding: 0;
+    border: none;
+    background: #6b4f20;
+    color: #fff0bd;
+    text-style: bold;
+}
+
+ToolIssuesScreen {
+    align: center middle;
+    background: rgba(4, 7, 8, 0.72);
+}
+
+#tool-issues-dialog {
+    width: 76;
+    max-width: 94%;
+    height: 80%;
+    min-height: 18;
+    padding: 1 2;
+    border: heavy #d2a957;
+    background: #101516;
+}
+
+#tool-issues-title {
+    height: 2;
+    color: #fff0bd;
+    text-style: bold;
+}
+
+#tool-issues-scroll {
+    height: 1fr;
+    scrollbar-color: #d2a957;
+    scrollbar-background: #20272b;
+}
+
+#tool-issues-summary {
+    height: auto;
+    padding: 0 1 1 0;
+}
+
+#tool-issues-package-label {
+    height: 1;
+    color: #b8c1c7;
+}
+
+#tool-issues-packages {
+    height: 3;
+}
+
+#tool-issues-loading {
+    display: none;
+    height: 1;
+}
+
+#tool-issues-actions {
+    height: 3;
+    align-horizontal: right;
+}
+
+#tool-issues-actions Button {
+    min-width: 12;
+    margin-left: 1;
 }
 
 #chat-log {

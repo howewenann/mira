@@ -40,7 +40,9 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertTrue((workspace / ".mira" / "README.md").exists())
             self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
             self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
-            self.assertTrue((workspace / ".mira" / "tools" / "example_tool.py").exists())
+            self.assertEqual(list((workspace / ".mira" / "tools").glob("*.py")), [])
+            self.assertTrue((workspace / ".mira" / "examples" / "tools" / "mira_runtime_tool.py").exists())
+            self.assertTrue((workspace / ".mira" / "examples" / "tools" / "project_runtime_tool.py").exists())
             self.assertIn(
                 "Example Skill",
                 (workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").read_text(encoding="utf-8"),
@@ -50,8 +52,10 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 (workspace / ".mira" / "subagents" / "example_subagent.py").read_text(encoding="utf-8"),
             )
             self.assertIn(
-                "example_project_note",
-                (workspace / ".mira" / "tools" / "example_tool.py").read_text(encoding="utf-8"),
+                "project_tool",
+                (workspace / ".mira" / "examples" / "tools" / "project_runtime_tool.py").read_text(
+                    encoding="utf-8"
+                ),
             )
 
     def test_default_memory_loads_without_project_memory(self) -> None:
@@ -588,7 +592,7 @@ def get_tools(project_backend):
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")
         self.assertTrue(any(subagent["name"] == "example-project-guide" for subagent in kwargs["subagents"]))
         self.assertTrue(any(tool.name == "grep" for tool in kwargs["tools"]))
-        self.assertTrue(any(tool.name == "example_project_note" for tool in kwargs["tools"]))
+        self.assertFalse(any(tool.name == "example_project_note" for tool in kwargs["tools"]))
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])

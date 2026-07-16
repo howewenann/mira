@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from agent.resources.project_setup import ensure_project_examples
 from agent.resources.skills import load_skills
 from agent.resources.subagents import load_subagents
 from agent.resources.tools import load_tools, tool_name
+from agent.resources.tool_failures import ToolLoadFailure
 from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
 DEFAULT_EXECUTE_ENV_KEYS = (
@@ -47,6 +49,7 @@ class ResourceBundle:
     subagents: list[Any]
     tools: list[Any]
     metadata: dict[str, list[dict[str, str]]]
+    tool_failures: list[ToolLoadFailure]
 
 
 @dataclass(frozen=True)
@@ -74,7 +77,7 @@ def build_resources(
     memories = load_memories(workspace)
     skill_sources, skills = load_skills(workspace)
     subagents, subagent_info = load_subagents(workspace)
-    tools, tool_info = load_tools(workspace, backends.project)
+    tools, tool_info, tool_failures = load_tools(workspace, backends.project, settings)
     active_tools = enabled_tools(tools, tool_info, settings)
 
     return ResourceBundle(
@@ -89,6 +92,7 @@ def build_resources(
             "subagents": subagent_info,
             "tools": tool_info,
         },
+        tool_failures=tool_failures,
     )
 
 
@@ -173,12 +177,10 @@ class ProjectShellBackend(LocalShellBackend):
 
 def wrap_execute_command(command: str, settings: dict[str, Any] | None) -> str:
     """Return a shell command wrapped for the configured execute environment."""
-    env_settings = execute_env_settings({"hitl": {"execute_env": settings or {}}})
-    mode = env_settings.get("mode")
-    if mode == "conda_name" and env_settings.get("name"):
-        return f"conda run -n {shell_arg(env_settings['name'])} {shell_command(command)}"
-    if mode == "conda_prefix" and env_settings.get("prefix"):
-        return f"conda run -p {shell_arg(env_settings['prefix'])} {shell_command(command)}"
+    prefix = conda_command_prefix({"hitl": {"execute_env": settings or {}}})
+    if prefix:
+        wrapped_prefix = " ".join(shell_arg(part) for part in prefix)
+        return f"{wrapped_prefix} {shell_command(command)}"
     return command
 
 
@@ -211,6 +213,45 @@ def resolve_venv_paths(workspace: Path, value: str) -> tuple[Path, Path | None]:
 
     scripts = path / ("Scripts" if os.name == "nt" else "bin")
     return path, scripts
+
+
+def project_python_command(settings: dict[str, Any] | None, workspace: Path) -> list[str]:
+    """Return an argument-list prefix for Python in the configured execute environment."""
+    selected = execute_env_settings(settings)
+    prefix = conda_command_prefix(settings)
+    if prefix:
+        return [*prefix, "python"]
+    mode = selected.get("mode")
+    if mode == "venv" and selected.get("path"):
+        root, bin_dir = resolve_venv_paths(workspace, str(selected["path"]))
+        if bin_dir is not None:
+            return [str(bin_dir / ("python.exe" if os.name == "nt" else "python"))]
+        return [str(root)]
+    return [sys.executable]
+
+
+def conda_command_prefix(settings: dict[str, Any] | None) -> list[str]:
+    """Return the shared Conda argument prefix for execute and project tools."""
+    selected = execute_env_settings(settings)
+    mode = selected.get("mode")
+    if mode == "conda_name" and selected.get("name"):
+        return ["conda", "run", "-n", str(selected["name"])]
+    if mode == "conda_prefix" and selected.get("prefix"):
+        return ["conda", "run", "-p", str(selected["prefix"])]
+    return []
+
+
+def project_environment_label(settings: dict[str, Any] | None, workspace: Path) -> str:
+    """Return a concise display label for the configured execute environment."""
+    selected = execute_env_settings(settings)
+    mode = selected.get("mode")
+    if mode == "conda_name":
+        return str(selected.get("name") or "Conda (name not configured)")
+    if mode == "conda_prefix":
+        return str(selected.get("prefix") or "Conda (path not configured)")
+    if mode == "venv":
+        return str(selected.get("path") or "Venv (path not configured)")
+    return "System"
 
 
 def shell_arg(value: str) -> str:

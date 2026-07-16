@@ -22,9 +22,13 @@ def merge_project_overrides(
 
 
 def display_item(item: dict[str, Any]) -> dict[str, str]:
-    return {
+    displayed = {
         "name": str(item["name"]),
         "path": str(item["path"]),
         "source": str(item["source"]),
         "replaces": str(item.get("replaces") or ""),
     }
+    for key in ("runtime", "environment"):
+        if item.get(key):
+            displayed[key] = str(item[key])
+    return displayed

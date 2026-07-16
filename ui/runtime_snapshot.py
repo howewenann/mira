@@ -48,9 +48,11 @@ def tools_table(tools: Sequence[Mapping[str, str]], *, planning: bool) -> Table:
     table.add_column("Source", no_wrap=True)
     table.add_column("Replaces", no_wrap=True)
     table.add_column("Path")
+    table.add_column("Runtime", no_wrap=True)
+    table.add_column("Environment", no_wrap=True)
     table.add_column("Description")
     if not tools:
-        table.add_row("none loaded", "-", "-", "-", "-")
+        table.add_row("none loaded", "-", "-", "-", "-", "-", "-")
         return table
 
     for tool in tools:
@@ -59,6 +61,8 @@ def tools_table(tools: Sequence[Mapping[str, str]], *, planning: bool) -> Table:
             str(tool.get("source") or "-"),
             str(tool.get("replaces") or "-"),
             str(tool.get("path") or "-"),
+            str(tool.get("runtime") or "MIRA"),
+            str(tool.get("environment") or "-"),
             str(tool.get("description") or "-"),
         )
     return table
