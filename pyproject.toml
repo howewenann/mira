@@ -15,7 +15,7 @@ dependencies = [
     "PyYAML>=6.0.0",
     "python-dotenv>=1.2.2",
     "rich>=15.0.0",
-    "textual>=8.2.7",
+    "textual==8.2.7",
     "typer>=0.24.2,<0.25.0",
 ]
 

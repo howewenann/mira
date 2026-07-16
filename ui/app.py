@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -64,6 +65,8 @@ from ui.runtime_snapshot import runtime_report
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
+from ui.windows_clipboard import set_windows_clipboard
+from ui.windows_input import driver_class_for_platform
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
@@ -96,7 +99,7 @@ class MiraApp(App[None]):
         prebuilt: dict[str, Any] | None = None,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
     ) -> None:
-        super().__init__()
+        super().__init__(driver_class=driver_class_for_platform(sys.platform))
         self.workspace = workspace.expanduser().resolve() if workspace is not None else Path.cwd()
         self.resume = resume
         self.session_id = session_id
@@ -964,12 +967,32 @@ class MiraApp(App[None]):
         self._set_status(state="ready")
 
     def action_copy(self) -> None:
-        """Copy the current widget selection without treating it as interrupt."""
+        """Copy screen text first, then the focused widget selection."""
+        selected_text = self.screen.get_selected_text()
+        if selected_text:
+            self.copy_to_clipboard(selected_text)
+            return
+
         focused = self.focused
         copy_action = getattr(focused, "action_copy", None)
         if copy_action is None:
-            raise SkipAction()
-        copy_action()
+            return
+        try:
+            copy_action()
+        except SkipAction:
+            return
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text with a native Windows path and Textual elsewhere."""
+        if sys.platform != "win32":
+            super().copy_to_clipboard(text)
+            return
+
+        self._clipboard = text
+        try:
+            set_windows_clipboard(text)
+        except OSError as error:
+            get_diagnostics_logger().warning("Windows clipboard copy failed: %s", error)
 
     def action_focus_prompt(self) -> None:
         """Focus the prompt input."""

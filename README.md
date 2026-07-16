@@ -126,6 +126,11 @@ should be run as workspace-relative paths such as `python tmp.py`.
 ## Everyday Use
 
 - Chat in the TUI by running `mira`.
+- Press Enter to submit the prompt and Shift+Enter to insert a newline. MIRA
+  does not assign Ctrl+Enter a prompt-editing shortcut.
+- Press Ctrl+C to copy selected chat or prompt text. A rendered chat selection
+  takes priority over any prompt selection; with no selection, Ctrl+C does
+  nothing. Use Alt+Q to cancel the active turn or quit.
 - Use `mira -p "..."` for one-shot terminal output.
 - Use `mira -f prompt.md` to read a Markdown file as a one-shot prompt.
 - Resume the latest session with `mira -r`.

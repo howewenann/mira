@@ -408,6 +408,23 @@ text through `--prompt/-p` or explicit Markdown prompt files through
 progress, settings, and session history in one place. The one-shot renderer
 stays simpler for scripts and quick prompts.
 
+On Windows, MIRA pins Textual 8.2.7 and selects a narrow Windows driver adapter.
+Textual's Win32 event monitor normally reduces each `KEY_EVENT_RECORD` to its
+Unicode character before parsing, which loses the Shift state on Return in
+classic Console Host. MIRA preserves Textual's existing parsing for every
+other record, but encodes raw Shift+Return as Textual's enhanced
+`shift+enter` sequence before that state is discarded. This boundary could
+normalize other raw modifier combinations later, but MIRA currently limits it
+to Shift+Enter.
+
+The prompt owns only Enter submission and Shift+Enter newline insertion. The
+application's priority Ctrl+C binding first copies Textual's screen-level
+rendered selection, then falls back to the focused widget's internal selection,
+and quietly consumes the shortcut if neither exists. Windows clipboard writes
+use `CF_UNICODETEXT` directly while keeping Textual's in-process clipboard in
+sync, so copying does not depend on terminal selection mode or OSC 52 support.
+Non-Windows launches retain Textual's default driver and clipboard behavior.
+
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
@@ -437,11 +454,13 @@ belong in the panel.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
 
-**Where to check:** `ui/app.py`, `ui/widgets/`, `ui/renderer.py`,
-`runtime/*_events.py`, `tests/test_textual_app.py`.
+**Where to check:** `ui/app.py`, `ui/windows_input.py`,
+`ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
+`ui/renderer.py`, `runtime/*_events.py`, `tests/test_textual_app.py`.
 
-**Update this when:** Rendering responsibility moves, a new UI mode appears, or
-tool/subagent events are projected differently.
+**Update this when:** Rendering responsibility moves, a new UI mode appears,
+keyboard or clipboard ownership changes, or tool/subagent events are projected
+differently.
 
 ## Sessions And Compaction
 

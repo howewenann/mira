@@ -652,3 +652,54 @@ and no synthetic grader feedback appears as user chat. Submit an ordinary
 action prompt while rubric remains enabled; MIRA sends explicit `rubric=None`
 and performs no grading. Changing either rubric setting while a proposal is
 pending resolves it as `settings changed` and rebuilds both agents.
+
+## Windows TUI Keyboard And Copy Matrix
+
+Run the current checkout from a disposable Git workspace with:
+
+```powershell
+conda run --no-capture-output -n ai_agents python -m cli.main --workspace <workspace>
+```
+
+Repeat the checks in each terminal host with both `cmd.exe` and Windows
+PowerShell where available:
+
+- Classic Windows Console Host (`conhost.exe`)
+- Windows Terminal
+- VS Code integrated terminal
+
+Record the terminal host separately from the shell, along with its version and
+the active Textual driver.
+
+### Enter and Shift+Enter
+
+1. Type `line one`, press left Shift+Enter, and confirm the prompt is not
+   submitted.
+2. Type `line two` and confirm the prompt contains exactly two lines.
+3. Press ordinary Enter and confirm the complete prompt submits exactly once.
+4. Submit a separate one-line prompt with Enter.
+5. Repeat the multiline check with right Shift+Enter.
+6. Confirm Ctrl+Enter has no MIRA-specific newline behavior.
+
+Expected: Enter always submits, each Shift+Enter inserts one newline and never
+submits, and both physical Shift keys behave identically. Classic Console Host
+should use MIRA's raw `VK_RETURN`/`SHIFT_PRESSED` normalization; an already
+encoded VT Shift+Enter sequence should remain unchanged.
+
+### Ctrl+C selections
+
+1. Generate multiline user and assistant bubbles.
+2. With PromptBox still focused, select part of each bubble, press Ctrl+C, and
+   paste into an external editor.
+3. Click a bubble so PromptBox loses focus, select bubble text, and repeat.
+4. Repeat with the chat container focused and with no widget focused.
+5. Select across multiple rendered chat widgets and verify Textual's combined
+   selected text is copied in display order.
+6. Select prompt text with no chat selection and verify prompt copying.
+7. Leave both a prompt selection and a chat selection; verify chat text wins.
+8. Press Ctrl+C with no selection while idle and during an active turn.
+9. Verify Ctrl+X and Ctrl+V still cut and paste prompt text.
+
+Expected: the exact selected text appears in the external editor, each command
+performs one clipboard write, no terminal-native selection shortcut is needed,
+and Ctrl+C with no selection does not change the prompt, cancel work, or quit.

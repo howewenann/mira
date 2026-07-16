@@ -16,8 +16,10 @@ from pyfiglet import Figlet
 from rich.cells import cell_len
 from rich.console import Console
 from rich.text import Text
+from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.selection import SELECT_ALL
 from textual.widgets import Button, Input, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
@@ -105,6 +107,20 @@ class FakeWorker:
 
     def cancel(self) -> None:
         self.cancelled = True
+
+
+class PromptBoxTestApp(App[None]):
+    """Minimal app for testing PromptBox key dispatch without runtime work."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submissions: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield PromptBox()
+
+    def on_prompt_box_submitted(self, message: PromptBox.Submitted) -> None:
+        self.submissions.append(message.value)
 
 
 def renderable_plain(widget: Any) -> str:
@@ -196,6 +212,56 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(app.launch_options, LaunchOptions())
         self.assertFalse(app.launch_options.llm_direct)
+
+    async def test_prompt_box_enter_submits_exactly_once(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "submit me"
+            await pilot.press("enter")
+            await pilot.pause()
+
+            self.assertEqual(app.submissions, ["submit me"])
+            self.assertEqual(prompt.value, "submit me")
+
+    async def test_prompt_box_shift_enter_inserts_one_newline_without_submission(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "line one"
+            await pilot.press("shift+enter")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "line one\n")
+            self.assertEqual(app.submissions, [])
+
+    async def test_prompt_box_ctrl_enter_has_no_mira_newline_behavior(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "unchanged"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "unchanged")
+            self.assertEqual(app.submissions, [])
+
+    async def test_prompt_box_shift_enter_preserves_multiline_cursor_editing(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "first\nsecond"
+            prompt.cursor_location = (1, 3)
+            await pilot.press("shift+enter")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "first\nsec\nond")
+            self.assertEqual(prompt.cursor_location, (2, 0))
+            self.assertEqual(app.submissions, [])
 
     def test_runtime_report_uses_sanitized_snapshot(self) -> None:
         """Runtime inspection should expose only the allowlisted fields."""
@@ -1443,8 +1509,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 exit_app.assert_called_once()
 
-    async def test_ctrl_c_copies_prompt_selection(self) -> None:
-        """Ctrl+C should copy focused text instead of interrupting."""
+    async def test_ctrl_c_copies_prompt_selection_through_priority_binding(self) -> None:
+        """Ctrl+C should copy focused prompt text instead of interrupting."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -1453,12 +1519,199 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "copy this"
             prompt.select_all()
 
-            with patch.object(app, "action_interrupt_or_quit") as interrupt:
+            with (
+                patch.object(app, "copy_to_clipboard") as copy,
+                patch.object(app, "action_interrupt_or_quit") as interrupt,
+            ):
                 await pilot.press("ctrl+c")
                 await pilot.pause()
 
-            self.assertEqual(getattr(app, "_clipboard", ""), "copy this")
+            copy.assert_called_once_with("copy this")
             interrupt.assert_not_called()
+
+    async def test_ctrl_c_prefers_user_and_assistant_screen_selections_while_prompt_focused(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.user_message("selected user text")
+            chat.assistant_message("selected assistant text")
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            prompt.value = "stale prompt selection"
+            prompt.select_all()
+            prompt.focus()
+            user_block = chat.query_one(".message.user", Static)
+            assistant_block = chat.query_one(".message.assistant", Static)
+
+            for block, expected in (
+                (user_block, "selected user text"),
+                (assistant_block, "selected assistant text"),
+            ):
+                app.screen.selections = {block: SELECT_ALL}
+                with patch.object(app, "copy_to_clipboard") as copy:
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+                copy.assert_called_once_with(expected)
+
+    async def test_ctrl_c_copies_chat_selection_after_bubble_click(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.assistant_message("clicked assistant text")
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            assistant_block = chat.query_one(".message.assistant", Static)
+
+            prompt.focus()
+            await pilot.click(assistant_block, offset=(1, 1))
+            await pilot.pause()
+            self.assertFalse(prompt.has_focus)
+            app.screen.selections = {assistant_block: SELECT_ALL}
+
+            with patch.object(app, "copy_to_clipboard") as copy:
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+            copy.assert_called_once_with("clicked assistant text")
+
+    async def test_ctrl_c_copies_chat_selection_with_container_or_no_focus(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.user_message("focus independent")
+            await pilot.pause()
+            user_block = chat.query_one(".message.user", Static)
+
+            for focus in (chat, None):
+                if focus is None:
+                    app.screen.set_focus(None)
+                else:
+                    focus.focus()
+                app.screen.selections = {user_block: SELECT_ALL}
+                with patch.object(app, "copy_to_clipboard") as copy:
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+                copy.assert_called_once_with("focus independent")
+
+    async def test_ctrl_c_copies_multi_widget_screen_selection_once(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.user_message("first selected block")
+            chat.assistant_message("second selected block")
+            await pilot.pause()
+            user_block = chat.query_one(".message.user", Static)
+            assistant_block = chat.query_one(".message.assistant", Static)
+            app.screen.selections = {
+                user_block: SELECT_ALL,
+                assistant_block: SELECT_ALL,
+            }
+
+            with patch.object(app, "copy_to_clipboard") as copy:
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+            copy.assert_called_once_with("first selected block\nsecond selected block")
+
+    async def test_ctrl_c_treats_empty_screen_selection_as_prompt_fallback(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            prompt.value = "prompt fallback"
+            prompt.select_all()
+            prompt.focus()
+
+            with (
+                patch.object(app.screen, "get_selected_text", return_value=""),
+                patch.object(app, "copy_to_clipboard") as copy,
+            ):
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+            copy.assert_called_once_with("prompt fallback")
+
+    async def test_ctrl_c_with_no_selection_is_a_quiet_no_op(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            prompt.value = "keep prompt"
+            prompt.cursor_location = prompt.document.end
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+
+            with (
+                patch.object(app, "copy_to_clipboard") as copy,
+                patch.object(app, "exit") as exit_app,
+            ):
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+
+            copy.assert_not_called()
+            exit_app.assert_not_called()
+            self.assertFalse(worker.cancelled)
+            self.assertEqual(prompt.value, "keep prompt")
+
+    async def test_ctrl_x_and_ctrl_v_prompt_behavior_is_unchanged(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            prompt.value = "cut this"
+            prompt.select_all()
+
+            with patch.object(app, "copy_to_clipboard") as copy:
+                await pilot.press("ctrl+x")
+                await pilot.pause()
+
+            copy.assert_called_once_with("cut this")
+            self.assertEqual(prompt.value, "")
+
+            app._clipboard = "paste this"
+            await pilot.press("ctrl+v")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "paste this")
+
+    async def test_windows_clipboard_updates_textual_state_and_writes_once(self) -> None:
+        app = make_app()
+
+        with patch("ui.app.set_windows_clipboard") as native_copy:
+            app.copy_to_clipboard("native copy")
+
+        self.assertEqual(app.clipboard, "native copy")
+        native_copy.assert_called_once_with("native copy")
+
+    async def test_windows_clipboard_failure_does_not_escape(self) -> None:
+        app = make_app()
+
+        with patch("ui.app.set_windows_clipboard", side_effect=OSError("busy")):
+            app.copy_to_clipboard("kept internally")
+
+        self.assertEqual(app.clipboard, "kept internally")
+
+    async def test_non_windows_clipboard_keeps_textual_behavior(self) -> None:
+        app = make_app()
+
+        with (
+            patch("ui.app.sys.platform", "linux"),
+            patch.object(App, "copy_to_clipboard") as textual_copy,
+        ):
+            app.copy_to_clipboard("portable copy")
+
+        textual_copy.assert_called_once_with("portable copy")
 
     async def test_alt_q_cancels_running_turn_during_prompt(self) -> None:
         """Alt+Q should still cancel when another in-window prompt is active."""

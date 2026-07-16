@@ -51,11 +51,13 @@ class PromptBox(TextArea):
         """Submit prompts and navigate history."""
         if event.key == "enter":
             event.stop()
+            event.prevent_default()
             self.post_message(self.Submitted(self, self.value))
             return
 
-        if event.key in {"shift+enter", "ctrl+enter"}:
+        if event.key == "shift+enter":
             event.stop()
+            event.prevent_default()
             self.insert("\n")
             return
 
