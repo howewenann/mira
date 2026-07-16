@@ -224,6 +224,83 @@ class BlockingOutput:
         return "blocked task output"
 
 
+class LiveToolCall:
+    """Incomplete tool handle that becomes terminal when explicitly released."""
+
+    def __init__(
+        self,
+        name: str,
+        args: dict[str, Any],
+        output: str,
+        call_id: str,
+        *,
+        error: str = "",
+    ) -> None:
+        self.tool_name = name
+        self.input = args
+        self.id = call_id
+        self.completed = False
+        self.output: str | None = None
+        self.error: str | None = None
+        self.final_output = output
+        self.final_error = error
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+        self.cancelled = False
+        self.output_deltas = self._completion_stream()
+
+    async def _completion_stream(self) -> Any:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        self.completed = True
+        if self.final_error:
+            self.error = self.final_error
+        else:
+            self.output = self.final_output
+        if False:
+            yield ""
+
+
+class FailingToolCall(LiveToolCall):
+    """Tool handle whose completion subscription fails unexpectedly."""
+
+    async def _completion_stream(self) -> Any:
+        self.started.set()
+        raise RuntimeError("broken completion channel")
+        if False:
+            yield ""
+
+
+class OpenToolCalls:
+    """Tool-call stream that remains open until cancelled or released."""
+
+    def __init__(self, call: Any) -> None:
+        self.call = call
+        self.release = asyncio.Event()
+
+    async def __aiter__(self) -> Any:
+        yield self.call
+        await self.release.wait()
+
+
+class BlockingItems:
+    """Empty async stream that holds an overall turn open."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+
+    async def __aiter__(self) -> Any:
+        self.started.set()
+        await self.release.wait()
+        if False:
+            yield None
+
+
 class AsyncToolCallList:
     """Tool call list that streams chunks before exposing finalized calls."""
 
@@ -1655,6 +1732,108 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.tool_calls, ["write_file"])
         self.assertEqual(result.tool_results, [])
         self.assertEqual(renderer.events, [("tool_call", "write_file", {"file_path": "/x"}, "call-1")])
+
+    async def test_incomplete_tool_completion_does_not_block_later_call(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        first = LiveToolCall("read_file", {"path": "one"}, "one", "call-one")
+        second = ToolCall("read_file", {"path": "two"}, "two", "call-two")
+
+        consuming = asyncio.create_task(consume_tool_calls(AsyncItems([first, second]), renderer, result))
+        await asyncio.wait_for(first.started.wait(), timeout=1)
+
+        self.assertIn(("tool_call", "read_file", {"path": "two"}, "call-two"), renderer.events)
+        first.release.set()
+        await consuming
+
+        self.assertEqual(result.tool_results, ["two", "one"])
+
+    async def test_live_tool_results_render_in_reverse_completion_order(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        first = LiveToolCall("read_file", {"path": "one"}, "one", "call-one")
+        second = LiveToolCall("read_file", {"path": "two"}, "two", "call-two")
+
+        consuming = asyncio.create_task(consume_tool_calls(AsyncItems([first, second]), renderer, result))
+        await asyncio.wait_for(asyncio.gather(first.started.wait(), second.started.wait()), timeout=1)
+        second.release.set()
+        await asyncio.sleep(0)
+        first.release.set()
+        await consuming
+
+        result_events = [event for event in renderer.events if event[0] == "tool_result"]
+        self.assertEqual(
+            result_events,
+            [
+                ("tool_result", "read_file", "two", "call-two"),
+                ("tool_result", "read_file", "one", "call-one"),
+            ],
+        )
+
+    async def test_live_tool_error_renders_when_call_finishes(self) -> None:
+        renderer = RecordingRenderer()
+        call = LiveToolCall("execute", {"command": "bad"}, "", "call-error", error="boom")
+
+        consuming = asyncio.create_task(consume_tool_calls(AsyncItems([call]), renderer))
+        await asyncio.wait_for(call.started.wait(), timeout=1)
+        call.release.set()
+        await consuming
+
+        self.assertIn(("tool_result", "execute", "boom", "call-error"), renderer.events)
+
+    async def test_watcher_failure_is_collected_without_stopping_other_results(self) -> None:
+        renderer = RecordingRenderer()
+        broken = FailingToolCall("read_file", {"path": "bad"}, "", "call-bad")
+        good = ToolCall("read_file", {"path": "good"}, "contents", "call-good")
+
+        await consume_tool_calls(AsyncItems([broken, good]), renderer)
+
+        self.assertIn(("tool_result", "read_file", "contents", "call-good"), renderer.events)
+
+    async def test_broken_watcher_is_cancelled_after_bounded_shutdown(self) -> None:
+        renderer = RecordingRenderer()
+        call = LiveToolCall("read_file", {"path": "never"}, "never", "call-never")
+        started = asyncio.get_running_loop().time()
+
+        await consume_tool_calls(AsyncItems([call]), renderer)
+
+        elapsed = asyncio.get_running_loop().time() - started
+        self.assertTrue(call.cancelled)
+        self.assertLess(elapsed, 0.5)
+
+    async def test_cancelling_tool_stream_cleans_up_completion_watcher(self) -> None:
+        renderer = RecordingRenderer()
+        call = LiveToolCall("read_file", {"path": "never"}, "never", "call-never")
+        stream = OpenToolCalls(call)
+        consuming = asyncio.create_task(consume_tool_calls(stream, renderer))
+        await asyncio.wait_for(call.started.wait(), timeout=1)
+
+        consuming.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await consuming
+
+        self.assertTrue(call.cancelled)
+
+    async def test_live_result_arrives_before_overall_turn_finishes(self) -> None:
+        call = LiveToolCall("read_file", {"path": "README.md"}, "contents", "call-read")
+        stream = FakeStream(output={"messages": [OutputMessage("Done.")]}, tool_calls=[call])
+        stream.messages = BlockingItems()
+        agent = FakeAgent([stream])
+        renderer = RunTurnRenderer()
+        turn = asyncio.create_task(runner.run_turn(agent, "read", renderer, "thread-1"))
+        await asyncio.wait_for(call.started.wait(), timeout=1)
+
+        call.release.set()
+        for _ in range(20):
+            if ("tool_result", "read_file", "contents", "call-read") in renderer.events:
+                break
+            await asyncio.sleep(0)
+
+        self.assertIn(("tool_result", "read_file", "contents", "call-read"), renderer.events)
+        self.assertFalse(turn.done())
+        stream.messages.release.set()
+        result = await turn
+        self.assertEqual(result.final_text, "Done.")
 
     async def test_task_tool_calls_emit_immediately_without_waiting_for_output(self) -> None:
         renderer = RecordingRenderer()

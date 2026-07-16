@@ -371,6 +371,18 @@ class ChatLog(VerticalScroll):
         block["result"] = result
         self._update_tool_block(key)
 
+    def completed_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Update an existing tool block without disturbing active model output."""
+        if not result:
+            return
+        key = self._resolve_tool_key(name, call_id)
+        if key is None:
+            self._queue_pending_tool_result(name, result, call_id, created_at=created_at)
+            return
+        block = self._tool_blocks[key]
+        block["result"] = result
+        self._update_tool_block(key, scroll=False)
+
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Append a compact task delegation summary."""
         new_calls = self._new_delegation_calls(calls)
@@ -1129,7 +1141,7 @@ class ChatLog(VerticalScroll):
             return
         self._tool_name_queues[name] = deque(item for item in queue if item != key)
 
-    def _update_tool_block(self, key: str) -> None:
+    def _update_tool_block(self, key: str, *, scroll: bool = True) -> None:
         block = self._tool_blocks[key]
         text = Text()
         label = "draft" if block.get("draft") else "call"
@@ -1141,7 +1153,8 @@ class ChatLog(VerticalScroll):
             text.append("\noutput:\n", style="bold cyan")
             text.append(self.truncate_multiline(block["result"]), style="dim")
         block["widget"].update(text)
-        self._scroll_to_end()
+        if scroll:
+            self._scroll_to_end()
 
 
 def timestamp_text(value: Any) -> str:

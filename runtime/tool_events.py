@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from langgraph.types import Command
@@ -10,43 +11,97 @@ from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
 CONTROL_TOOLS = {"present_plan", "prepare_goal"}
+WATCHER_SHUTDOWN_SECONDS = 0.1
 
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
     """Consume DeepAgents tool-call projections and render starts promptly."""
-    async for call in tool_calls:
-        normalized = normalized_call(call)
-        name = str(normalized["name"])
-        call_id = str(normalized.get("id") or "")
-        is_new_call = True
-        if result is not None:
-            is_new_call = result.record_tool_call(name, call_id)
-
-        if name == "task":
-            if is_new_call:
-                renderer.delegation_started([normalized])
-            continue
-
-        if name in CONTROL_TOOLS:
-            continue
-
-        if is_new_call:
-            renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
-
-        if field(call, "completed") is False:
-            continue
-
-        output = await tool_call_output(call)
-        if isinstance(output, Command):
-            continue
-
-        if output:
-            text = tool_output_text(output)
-            recorded = True
+    watchers: set[asyncio.Task[None]] = set()
+    try:
+        async for call in tool_calls:
+            normalized = normalized_call(call)
+            name = str(normalized["name"])
+            call_id = str(normalized.get("id") or "")
+            is_new_call = True
             if result is not None:
-                recorded = result.record_tool_result(text, call_id, name)
-            if name != "task" and recorded:
-                renderer.tool_result(name, text, call_id=call_id)
+                is_new_call = result.record_tool_call(name, call_id)
+
+            if name == "task":
+                if is_new_call:
+                    renderer.delegation_started([normalized])
+                continue
+
+            if name in CONTROL_TOOLS:
+                continue
+
+            if is_new_call:
+                renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
+
+            if not supports_completion_watch(call):
+                continue
+            watchers.add(
+                asyncio.create_task(
+                    watch_tool_result(call, name, call_id, renderer, result),
+                    name=f"mira-tool-result-{call_id or name}",
+                )
+            )
+    except BaseException:
+        await cancel_watchers(watchers)
+        raise
+    else:
+        await finish_watchers(watchers)
+
+
+def supports_completion_watch(call: Any) -> bool:
+    """Return whether a call is terminal or exposes a supported completion stream."""
+    if field(call, "completed") is not False:
+        return True
+    return field(call, "output_deltas") is not None or hasattr(call, "__aiter__")
+
+
+async def watch_tool_result(
+    call: Any,
+    name: str,
+    call_id: str,
+    renderer: Any,
+    result: Any | None,
+) -> None:
+    """Follow one ordinary call to completion and deliver its final result."""
+    output = await tool_call_output(call)
+    if isinstance(output, Command) or not output:
+        return
+
+    text = tool_output_text(output)
+    recorded = True
+    if result is not None:
+        recorded = result.record_tool_result(text, call_id, name)
+    if not recorded:
+        return
+
+    callback = getattr(renderer, "completed_tool_result", None)
+    if callable(callback):
+        callback(name, text, call_id=call_id)
+    else:
+        renderer.tool_result(name, text, call_id=call_id)
+
+
+async def finish_watchers(watchers: set[asyncio.Task[None]]) -> None:
+    """Collect owned watchers, bounding cleanup if a provider never terminates one."""
+    if not watchers:
+        return
+    done, pending = await asyncio.wait(watchers, timeout=WATCHER_SHUTDOWN_SECONDS)
+    await asyncio.gather(*done, return_exceptions=True)
+    await cancel_watchers(pending)
+
+
+async def cancel_watchers(watchers: set[asyncio.Task[None]]) -> None:
+    """Cancel and collect owned watchers without leaking task exceptions."""
+    if not watchers:
+        return
+    for task in watchers:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*watchers, return_exceptions=True)
 
 
 async def tool_call_output(call: Any) -> Any:

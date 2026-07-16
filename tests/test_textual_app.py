@@ -3696,6 +3696,54 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("call:", text)
             self.assertIn("output:", text)
 
+    async def test_completed_tool_result_updates_in_place_without_splitting_assistant(self) -> None:
+        """An asynchronous completion should not close or move active assistant output."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+            app.text_delta("The answer")
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            assistant = [block for block in chat.children if "assistant" in block.classes][-1]
+            scroll = Mock()
+            chat._scroll_to_end = scroll
+
+            app.completed_tool_result("read_file", "contents", call_id="call-read")
+            await pilot.pause()
+
+            self.assertIs([block for block in chat.children if "assistant" in block.classes][-1], assistant)
+            self.assertEqual(len([block for block in chat.children if "assistant" in block.classes]), 1)
+            self.assertFalse(scroll.called)
+            tool = [block for block in chat.children if "tool-call" in block.classes][-1]
+            self.assertIn("contents", renderable_plain(tool))
+
+            app.text_delta(" continues.")
+            await pilot.pause()
+            self.assertEqual(len([block for block in chat.children if "assistant" in block.classes]), 1)
+            self.assertIn("The answer continues.", renderable_plain(assistant))
+
+    async def test_completed_tool_result_does_not_split_reasoning(self) -> None:
+        """An asynchronous completion should leave the active reasoning block open."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+            app.reasoning_delta("First thought")
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            reasoning = [block for block in chat.children if "reasoning" in block.classes][-1]
+
+            app.completed_tool_result("read_file", "contents", call_id="call-read")
+            app.reasoning_delta(" and second thought")
+            await pilot.pause()
+
+            reasoning_blocks = [block for block in chat.children if "reasoning" in block.classes]
+            self.assertEqual(reasoning_blocks, [reasoning])
+            self.assertIn("First thought and second thought", renderable_plain(reasoning))
+
     async def test_tool_call_delta_updates_in_place_when_final_call_arrives(self) -> None:
         """Draft tool-call args should finalize in the same transcript block."""
         app = make_app()
@@ -4001,6 +4049,52 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("output:", text)
             self.assertIn("second line", text)
 
+    async def test_completed_tool_result_waits_for_call_and_then_attaches(self) -> None:
+        """A live completion arriving first should retain the existing pending association."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            app.completed_tool_result("eval", "<result>5</result>", call_id="call-live")
+            app.tool_call("eval", {"code": "2 + 3"}, call_id="call-live")
+            await pilot.pause()
+
+            tool = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes][-1]
+            self.assertIn("<result>5</result>", renderable_plain(tool))
+
+    async def test_replayed_tool_result_attaches_to_original_call_block(self) -> None:
+        """Saved call/result events should replay as one grouped tool block."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(ChatLog).restore_session(
+                {
+                    "events": [
+                        {
+                            "type": "tool_call",
+                            "mode": "action",
+                            "name": "read_file",
+                            "args": {"path": "README.md"},
+                            "call_id": "call-read",
+                        },
+                        {
+                            "type": "tool_result",
+                            "mode": "action",
+                            "name": "read_file",
+                            "output": "contents",
+                            "call_id": "call-read",
+                        },
+                    ]
+                }
+            )
+            await pilot.pause()
+
+            tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 1)
+            self.assertIn("contents", renderable_plain(tools[0]))
+
     async def test_tool_results_without_ids_attach_by_name_order(self) -> None:
         """Tool results without ids should attach to the oldest unresolved matching call."""
         app = make_app()
@@ -4184,6 +4278,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(cell_len(value), 12)
         self.assertTrue(value.endswith("..."))
+
+    def test_dynamic_subagent_truncated_fallback_label_keeps_ellipsis(self) -> None:
+        """A capped event label should still advertise its missing task text."""
+        panel = SubagentsPanel()
+        task = "Write a high-quality haiku about pancakes. A haiku is a 3-line poem."
+
+        panel.start_subagent(
+            "general-purpose [haiku]",
+            task,
+            eval_id="eval-haiku",
+            row_id="row-haiku",
+            label=task[:60],
+        )
+
+        self.assertEqual(panel._records["row-haiku"].hint, f"{task[:60]}...")
+
+    def test_normal_subagent_truncated_task_keeps_ellipsis(self) -> None:
+        """An ordinary task row should advertise task text beyond its cap."""
+        panel = SubagentsPanel()
+        task = "Write a high-quality haiku about pancakes. A haiku is a 3-line poem."
+
+        panel.start_subagent("general-purpose [haiku]", task)
+
+        record = panel._record_for_name("general-purpose [haiku]")
+        self.assertIsNotNone(record)
+        self.assertEqual(record.hint, f"{task[:60]}...")
 
     def test_subagent_group_status_icons_have_status_colours(self) -> None:
         """Group status icons should mirror task-row status colours."""

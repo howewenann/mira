@@ -26,6 +26,7 @@ class TerminalTranscript:
         self.tool_output_chars = int(tool_output_chars)
         self._section = ""
         self._reasoning_text = ""
+        self._pending_tool_results: list[tuple[str, Any]] = []
         self._subagent_labels: dict[int, str] = {}
         self._slug_fallback = slug_fallback
 
@@ -53,6 +54,15 @@ class TerminalTranscript:
         """Write a compact tool result line."""
         if result:
             self.line(f"{name} output: {self.truncate(result)}")
+
+    def completed_tool_result(self, name: str, result: Any) -> None:
+        """Write a completion now, or defer it past active streamed model text."""
+        if not result:
+            return
+        if self._section == "mira" or self._reasoning_text:
+            self._pending_tool_results.append((name, result))
+            return
+        self.tool_result(name, result)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Write a compact task delegation block."""
@@ -132,6 +142,10 @@ class TerminalTranscript:
         if self._section:
             self.write("\n")
         self._section = ""
+        pending = self._pending_tool_results
+        self._pending_tool_results = []
+        for name, result in pending:
+            self.write(f"{name} output: {self.truncate(result)}\n")
 
     def stream(self, title: str, text: str) -> None:
         """Write streamed text under a simple section heading."""

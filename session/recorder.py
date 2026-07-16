@@ -96,6 +96,18 @@ class SessionRecorder:
         self.save()
         return stored
 
+    def completed_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
+        """Persist a live completion beside its call without closing model output."""
+        if name in CONTROL_TOOLS:
+            return {}
+        event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
+        if call_id:
+            event["call_id"] = call_id
+        stored = append_event(self.record, event)
+        self._move_result_after_call(stored, name, call_id)
+        self.save()
+        return stored
+
     def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
         """Persist a late-discovered tool result before the last assistant reply."""
         if name in CONTROL_TOOLS:
@@ -297,6 +309,50 @@ class SessionRecorder:
                 return
         events.append(event)
 
+    def _move_result_after_call(self, event: dict[str, Any], name: str, call_id: str) -> None:
+        """Place one result directly after its stable call, with name-order fallback."""
+        events = self.record.get("events", [])
+        if not isinstance(events, list):
+            return
+        try:
+            events.remove(event)
+        except ValueError:
+            return
+
+        target_index = None
+        if call_id:
+            for index, item in enumerate(events):
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "tool_call"
+                    and str(item.get("call_id") or "") == call_id
+                ):
+                    target_index = index
+                    break
+        else:
+            calls = [
+                index
+                for index, item in enumerate(events)
+                if isinstance(item, dict)
+                and item.get("type") == "tool_call"
+                and str(item.get("name") or "") == name
+            ]
+            completed = sum(
+                1
+                for item in events
+                if isinstance(item, dict)
+                and item.get("type") == "tool_result"
+                and str(item.get("name") or "") == name
+                and not item.get("call_id")
+            )
+            if completed < len(calls):
+                target_index = calls[completed]
+
+        if target_index is None:
+            events.append(event)
+        else:
+            events.insert(target_index + 1, event)
+
     def discard_reasoning(self) -> None:
         """Remove the currently streamed reasoning block."""
         self._delete_reasoning_event()
@@ -354,6 +410,17 @@ class RecordingRenderer:
             return
         event = self.recorder.tool_result(name, result, call_id=call_id)
         call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+
+    def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        """Record and update a completed tool without ending active model output."""
+        if name in CONTROL_TOOLS:
+            return
+        event = self.recorder.completed_tool_result(name, result, call_id=call_id)
+        callback = getattr(self.renderer, "completed_tool_result", None)
+        if callable(callback):
+            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
+        else:
+            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
 
     def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render and record a late-discovered tool result."""

@@ -720,6 +720,46 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
+    def test_completed_tool_result_preserves_active_assistant_and_call_grouping(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+        recording.text_delta("The answer")
+        recording.completed_tool_result("read_file", "contents", call_id="call-read")
+        recording.text_delta(" continues.")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
+        self.assertEqual(events[1]["call_id"], "call-read")
+        self.assertEqual(events[2]["text"], "The answer continues.")
+        self.assertEqual(
+            [event for event in renderer.events if event[0] == "tool_result"],
+            [("tool_result", "read_file", "contents", "call-read")],
+        )
+
+    def test_completed_idless_results_group_by_original_call_order(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+
+        recorder.tool_call("read_file", {"path": "one"})
+        recorder.tool_call("read_file", {"path": "two"})
+        recorder.completed_tool_result("read_file", "one")
+        recorder.completed_tool_result("read_file", "two")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual(
+            [(event["type"], event.get("output")) for event in events],
+            [
+                ("tool_call", None),
+                ("tool_result", "one"),
+                ("tool_call", None),
+                ("tool_result", "two"),
+            ],
+        )
+
     def test_present_plan_tool_events_are_not_persisted_or_rendered(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
@@ -728,6 +768,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         recording.tool_call("present_plan", {"title": "Plan"}, call_id="call-plan")
         recording.tool_result("present_plan", "interrupt", call_id="call-plan")
+        recording.completed_tool_result("present_plan", "interrupt", call_id="call-plan")
         recording.recovered_tool_result("present_plan", "interrupt", call_id="call-plan")
 
         self.assertEqual(renderer.events, [])

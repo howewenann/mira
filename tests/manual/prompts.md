@@ -185,6 +185,155 @@ Expected:
 - MIRA answers briefly using information from `README.md`.
 - The turn does not fail with an LM Studio native SDK tool-calling error.
 
+## Immediate Ordinary Tool Results
+
+Use a disposable Git workspace so the timing tools and session files can be
+removed after the check. Add `.mira/tools/result_timing.py`:
+
+```python
+import time
+
+from langchain_core.tools import tool
+
+
+@tool
+def timing_result(label: str, delay_seconds: float = 0.0) -> str:
+    """Return a labeled result after a short configurable delay."""
+    time.sleep(delay_seconds)
+    return f"{label} finished"
+```
+
+Enable and always allow only this disposable tool in `.mira/settings.yml`:
+
+```yaml
+hitl:
+  tools:
+    timing_result:
+      enabled: true
+      always_allow: true
+```
+
+Initialize the workspace and launch the current checkout:
+
+```powershell
+git init .tmp_tool_results_manual
+conda run --no-capture-output -n ai_agents python -m cli.main --workspace .tmp_tool_results_manual
+```
+
+### Parallel completion and original-block updates
+
+Enter:
+
+```text
+Call timing_result twice in parallel. Start the slow call first with label slow
+and delay_seconds 4, then the fast call with label fast and delay_seconds 0.2.
+Wait for both and report their completion order.
+```
+
+Expected:
+
+- Both ordinary tool-call bubbles appear without waiting for the slow call.
+- Although the slow call was requested first, `fast finished` appears while the
+  slow call is still running, followed later by `slow finished`.
+- Each output updates its own existing bubble by call identity. No result bubble
+  is appended at the current bottom or moved to completion-time order.
+- The final assistant answer appears only after both results and names the fast
+  completion first.
+- Any active assistant or thinking bubble remains one continuous bubble when an
+  older tool block updates. Waiting/model activity is not cleared by that update.
+- Cancelling the turn while the slow call is running leaves no later result,
+  orphan watcher, or `Task exception was never retrieved` warning.
+
+Repeat with three calls whose delays are 3, 1, and 2 seconds. Verify every
+result attaches to the matching label and appears in completion order without
+blocking discovery of later calls.
+
+### One-shot terminal ordering
+
+Run the same two-call prompt in one-shot mode:
+
+```powershell
+conda run --no-capture-output -n ai_agents python -m cli.main --workspace .tmp_tool_results_manual -p "Call timing_result twice in parallel. Start slow with delay_seconds 4, then fast with delay_seconds 0.2. Wait for both and report their completion order."
+```
+
+Expected:
+
+- `fast finished` prints before `slow finished`, and both print before the final
+  answer.
+- Streamed assistant or reasoning text is never corrupted or interleaved inside
+  a line. A result may wait for the next safe terminal boundary.
+- There is one readable output line per tool result and no duplicate recovered
+  result at turn end.
+
+### Persistence and replay
+
+After the parallel TUI case finishes, note the session id, close MIRA, and
+resume that session.
+
+Expected:
+
+- Each tool bubble still contains exactly one matching result.
+- Results remain grouped with their original calls rather than replaying as
+  completion-time bubbles.
+- Session JSON contains one `tool_result` event per `call_id`; the final-state
+  recovery path did not persist a duplicate.
+
+### Plan and goal isolation
+
+Run these checks in the same build, but treat them as regressions only: ordinary
+tool-result timing must not change their event sequence or visible surfaces.
+
+Enter `/plan`, then:
+
+```text
+Plan a small improvement to README navigation without editing files yet.
+```
+
+Expected:
+
+- The existing actionable plan bubble appears with Implement, Revise, and
+  Discard exactly as before.
+- `present_plan` never appears as an ordinary tool-call/result bubble.
+- No partial plan content or new plan status block appears.
+
+Choose Revise and enter `Keep the same scope but add an exact verification
+command.` Verify one replacement plan appears and the old plan becomes inactive.
+
+With Rubric Middleware enabled, enter:
+
+```text
+/goal create a small typed slug helper with focused tests
+```
+
+Expected:
+
+- The existing Definition-of-Done drafting indicator is followed by one
+  actionable goal proposal.
+- `prepare_goal` and goal-generation internals never appear as ordinary
+  tool-call/result bubbles.
+- No partial criteria, partial goal, or additional goal status block appears.
+
+Choose Revise and enter `Require Unicode examples.` Verify the existing goal
+revision path produces one replacement proposal without any ordinary control-
+tool result.
+
+Finally, with Rubric Middleware still enabled, enter `/plan`, then:
+
+```text
+Plan a searchable notes index with focused tests. Use SQLite unless repository
+inspection proves it incompatible.
+```
+
+Expected:
+
+- The combined plan-and-goal flow retains its existing Definition of Done,
+  finalized plan, controls, ordering, and revision behavior.
+- Neither `prepare_goal` nor `present_plan` is rendered through the immediate
+  ordinary-result path.
+
+Delete `.tmp_tool_results_manual` after completing the checks. Do not copy its
+`.mira/_sessions` or timing tool into the repository.
+
 ## One-Shot Markdown File Prompt
 
 ```powershell

@@ -1571,6 +1571,11 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
         self._rearm_waiting_if_busy()
 
+    def completed_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Update a finished ordinary tool without closing active model output."""
+        self.trace.completed_tool_result(name, result)
+        self.query_one(ChatLog).completed_tool_result(name, result, call_id=call_id, created_at=created_at)
+
     def recovered_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Render a late-discovered tool result in session transcript order."""
         self.trace.recovered_tool_result(name, result)

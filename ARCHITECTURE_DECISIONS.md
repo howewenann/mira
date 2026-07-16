@@ -441,6 +441,10 @@ text through `--prompt/-p` or explicit Markdown prompt files through
 progress, settings, and session history in one place. The one-shot renderer
 stays simpler for scripts and quick prompts.
 
+Completed ordinary tool results update their original tool blocks before the
+overall turn ends when the provider exposes a live terminal tool event. Final
+graph-state recovery remains the fallback for providers that do not.
+
 On Windows, MIRA pins Textual 8.2.7 and selects a narrow Windows driver adapter.
 Textual's Win32 event monitor normally reduces each `KEY_EVENT_RECORD` to its
 Unicode character before parsing, which loses the Shift state on Return in

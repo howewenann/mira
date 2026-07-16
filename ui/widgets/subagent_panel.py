@@ -176,7 +176,7 @@ class SubagentsPanel(Vertical):
         self._records[key] = SubagentRecord(
             key=key,
             name=sanitize(display_name, max_chars=MAX_LABEL_CHARS),
-            hint=compact_hint(label or task),
+            hint=compact_subagent_hint(label, task),
             group_key=group_key,
         )
         self._show()
@@ -554,6 +554,15 @@ def base_name(label: str) -> str:
 
 def compact_hint(value: Any) -> str:
     return sanitize(value, max_chars=MAX_HINT_CHARS)
+
+
+def compact_subagent_hint(label: Any, task: Any) -> str:
+    """Keep an ellipsis when an event label is a truncated task fallback."""
+    hint = compact_hint(label or task)
+    task_hint = compact_hint(task)
+    if label and task and task_hint == f"{hint}...":
+        return task_hint
+    return hint
 
 
 def sanitize(value: Any, *, max_chars: int) -> str:

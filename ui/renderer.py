@@ -58,6 +58,10 @@ class Renderer:
         """Print a compact tool result."""
         self.transcript.tool_result(name, result)
 
+    def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        """Print a completed tool result at the next safe terminal boundary."""
+        self.transcript.completed_tool_result(name, result)
+
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Print a compact task delegation summary."""
         self.transcript.delegation_started(calls)

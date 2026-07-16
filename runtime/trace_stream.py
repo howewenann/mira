@@ -75,6 +75,10 @@ class TraceStream:
         """Trace a tool result."""
         self._emit("tool_result", name, result)
 
+    def completed_tool_result(self, name: str, result: Any) -> None:
+        """Trace a live completion without interrupting streamed model text."""
+        self._emit("completed_tool_result", name, result)
+
     def recovered_tool_result(self, name: str, result: Any) -> None:
         """Trace a late-discovered tool result using normal terminal ordering."""
         self.tool_result(name, result)

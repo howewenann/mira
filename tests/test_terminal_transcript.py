@@ -52,6 +52,41 @@ class TerminalTranscriptTests(unittest.TestCase):
             "\nread_file:\nargs: {'file_path' ... truncated ...\nread_file output: xxxxxxxxxxxx ... truncated ...\n",
         )
 
+    def test_completed_tool_result_prints_promptly_at_safe_boundary(self) -> None:
+        transcript, chunks = self.make_transcript()
+
+        transcript.tool_call("read_file", {"path": "README.md"})
+        transcript.completed_tool_result("read_file", "contents")
+
+        self.assertTrue("".join(chunks).endswith("read_file output: contents\n"))
+
+    def test_completed_tool_result_waits_until_assistant_stream_finishes(self) -> None:
+        transcript, chunks = self.make_transcript()
+
+        transcript.text_delta("The answer")
+        transcript.completed_tool_result("read_file", "contents")
+        transcript.text_delta(" continues.")
+
+        self.assertEqual("".join(chunks), "\nmira:\nThe answer continues.")
+        transcript.finish_main()
+        self.assertEqual(
+            "".join(chunks),
+            "\nmira:\nThe answer continues.\nread_file output: contents\n",
+        )
+
+    def test_completed_tool_result_waits_until_reasoning_finishes(self) -> None:
+        transcript, chunks = self.make_transcript()
+
+        transcript.reasoning_delta("Still thinking")
+        transcript.completed_tool_result("read_file", "contents")
+
+        self.assertEqual(chunks, [])
+        transcript.finish_main()
+        self.assertEqual(
+            "".join(chunks),
+            "\nthinking:\nStill thinking\nread_file output: contents\n",
+        )
+
     def test_delegation_and_subagents_match_terminal_spacing(self) -> None:
         transcript, chunks = self.make_transcript(output_chars=32)
 
