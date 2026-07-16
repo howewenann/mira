@@ -233,6 +233,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["title"], "Untitled session")
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
+        self.assertNotIn("llm_direct", record)
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))

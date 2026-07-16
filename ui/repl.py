@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
+from rich.text import Text
 
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.planning.policy import (
@@ -31,6 +32,7 @@ from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dash
 from session.context import mark_resume_context_pending, update_title, with_resume_context
 from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
 from config.settings import rubric_enabled, rubric_max_iterations
+from ui.runtime_snapshot import resources_table, tools_table
 
 PLAN_CONTEXT_TEMPLATE = """Previous planning context:
 {plan}
@@ -91,28 +93,54 @@ User request:
 
 {terminal_reminder}"""
 
-COMMAND_HELP = {
-    "/help": "show commands and what they do",
-    "/compact": "summarize older context now",
-    "/tools": "list tools available in the current mode",
-    "/settings": "configure tool approvals in the TUI",
-    "/reload": "reload .env/project resources and rebuild agents in the TUI",
-    "/memories": "list loaded memory files and replacements",
-    "/skills": "list loaded skills and replacements",
-    "/subagents": "list loaded subagents and replacements",
-    "/plan": "enter safe planning mode; mutating and delegation tools are disabled",
-    "/goal <prompt>": "review a Definition of Done before action when rubric grading is enabled",
-    "/act": "return to action mode",
-    "/session": "show session id, mode, workspace, and turn count",
-    "/model": "show the configured model name",
-    "/new-chat": "start a fresh saved chat session in the TUI",
-    "/clear": "clear the log",
-    "/clear-chat": "clear the current saved chat transcript in the TUI",
-    "/clear-all-chats": "delete all saved chat sessions in the TUI",
-    "/clear-errors": "delete saved error reports in the TUI",
-    "/clear-prompts": "clear prompt input history in the TUI",
-    "/exit": "quit MIRA",
-}
+HELP_SECTION_STYLE = "bold #7aa2f7"
+COMMAND_HELP_SECTIONS = (
+    (
+        "General",
+        (
+            ("/help", "show commands and what they do"),
+            ("/session", "show conversation identity, mode, goals, plans, workspace, and turns"),
+            ("/exit", "quit MIRA"),
+        ),
+    ),
+    (
+        "Inspect",
+        (
+            ("/runtime", "inspect the active model, connection, and launch options"),
+            ("/tools", "list tools available in the current mode"),
+            ("/memories", "list loaded memory files and replacements"),
+            ("/skills", "list loaded skills and replacements"),
+            ("/subagents", "list loaded subagents and replacements"),
+        ),
+    ),
+    (
+        "Workflow",
+        (
+            ("/plan", "enter safe planning mode; mutating and delegation tools are disabled"),
+            ("/goal <prompt>", "review a Definition of Done before action when rubric grading is enabled"),
+            ("/act", "return to action mode"),
+        ),
+    ),
+    (
+        "Configuration",
+        (
+            ("/settings", "configure tool approvals in the TUI"),
+            ("/reload", "reload .env/project resources and rebuild agents in the TUI"),
+        ),
+    ),
+    (
+        "Chat & history",
+        (
+            ("/compact", "summarize older context now"),
+            ("/new-chat", "start a fresh saved chat session in the TUI"),
+            ("/clear", "clear the log"),
+            ("/clear-chat", "clear the current saved chat transcript in the TUI"),
+            ("/clear-all-chats", "delete all saved chat sessions in the TUI"),
+            ("/clear-errors", "delete saved error reports in the TUI"),
+            ("/clear-prompts", "clear prompt input history in the TUI"),
+        ),
+    ),
+)
 
 DEFAULT_TOOL_SPECS = [
     {
@@ -388,16 +416,16 @@ async def handle_command(
         write_line(renderer, "/reload is available in the Textual app", kind="warning")
         return True
 
+    if text == "/runtime":
+        write_line(renderer, "/runtime is available in the Textual app", kind="warning")
+        return True
+
     if text == "/compact":
         write_line(renderer, "/compact is available in the Textual app", kind="warning")
         return True
 
     if text == "/new-chat":
         write_line(renderer, "/new-chat is available in the Textual app", kind="warning")
-        return True
-
-    if text == "/model":
-        write_line(renderer, f"model: {model_name}")
         return True
 
     write_line(renderer, f"unknown command: {text}", kind="muted")
@@ -411,12 +439,21 @@ def print_help(renderer: Any) -> None:
 
 def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
     """Return session details as one command output block."""
+    current_proposal = mode.get("current_proposal")
+    proposal_kind = (
+        str(current_proposal.get("kind") or "")
+        if isinstance(current_proposal, dict)
+        else ""
+    )
+    has_goal = proposal_kind == "goal"
+    has_plan = bool(mode.get("current_plan")) or proposal_kind == "plan"
     return "\n".join(
         [
             f"session: {session['id']}",
             f"title: {session.get('title', 'Untitled session')}",
             f"mode: {'planning' if mode['planning'] else 'action'}",
-            f"current plan: {'yes' if mode.get('current_plan') else 'no'}",
+            f"active goal: {'yes' if has_goal else 'no'}",
+            f"active plan: {'yes' if has_plan else 'no'}",
             f"workspace: {session['workspace']}",
             f"turns: {session['turns']}",
         ]
@@ -424,66 +461,26 @@ def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
 
 
 def help_table() -> Table:
-    """Build a single Rich table for slash-command help."""
+    """Build one Rich help table grouped by command purpose."""
     table = Table(title="Commands", title_style="bold cyan")
     table.add_column("Command", style="cyan", no_wrap=True)
     table.add_column("Description")
-    for command, description in COMMAND_HELP.items():
-        table.add_row(command, description)
+    for section, commands in COMMAND_HELP_SECTIONS:
+        table.add_row(Text(section, style=HELP_SECTION_STYLE), "")
+        for index, (command, description) in enumerate(commands):
+            table.add_row(command, description, end_section=index == len(commands) - 1)
     return table
 
 
 def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
-    """Print tools available in the current mode."""
+    """Print tools available in the current mode as one command block."""
     planning = bool(mode.get("planning"))
-    mode_name = "planning" if planning else "action"
-    write_renderable(renderer, tools_table(f"Tools ({mode_name})", available_tools(mode, planning=planning)))
+    write_renderable(renderer, tools_table(available_tools(mode, planning=planning), planning=planning))
 
 
 def print_resources(renderer: Any, title: str, items: list[dict[str, str]]) -> None:
-    """Print loaded resources for one resource type."""
-    if not items:
-        write_line(renderer, title, kind="heading")
-        write_line(renderer, "none loaded", kind="muted")
-        return
-
+    """Print one loaded-resource type as one command block."""
     write_renderable(renderer, resources_table(title, items))
-
-
-def tools_table(title: str, tools: list[dict[str, str]]) -> Table:
-    """Build a Rich table for tool metadata."""
-    table = Table(title=title, title_style="bold cyan")
-    table.add_column("Tool", style="cyan", no_wrap=True)
-    table.add_column("Source", no_wrap=True)
-    table.add_column("Replaces", no_wrap=True)
-    table.add_column("Description")
-
-    for tool in tools:
-        table.add_row(
-            tool["name"],
-            tool.get("source") or "-",
-            tool.get("replaces") or "-",
-            tool.get("description") or "-",
-        )
-    return table
-
-
-def resources_table(title: str, items: list[dict[str, str]]) -> Table:
-    """Build a Rich table for resource metadata."""
-    table = Table(title=title, title_style="bold cyan")
-    table.add_column("Name", style="cyan", no_wrap=True)
-    table.add_column("Source", no_wrap=True)
-    table.add_column("Replaces", no_wrap=True)
-    table.add_column("Path")
-
-    for item in items:
-        table.add_row(
-            item["name"],
-            item.get("source") or "-",
-            item.get("replaces") or "-",
-            item.get("path") or "-",
-        )
-    return table
 
 
 def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, str]]:

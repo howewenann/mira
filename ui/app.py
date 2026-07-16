@@ -24,6 +24,7 @@ from agent.context_overflow import context_notice_rendered, pop_context_overflow
 from agent.planning.criteria import GoalCriteriaService
 from agent.planning.policy import PLANNING_STAGE_FINALIZE, PLANNING_STAGE_RESEARCH
 from agent.planning.proposals import effective_objective, proposal, proposal_title
+from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
 from config.settings import (
     EXECUTE_TOOL,
     git_protection_enabled,
@@ -59,6 +60,7 @@ from ui.repl import (
     rubric_plan_revision_text,
     run_user_turn,
 )
+from ui.runtime_snapshot import runtime_report
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
@@ -88,6 +90,7 @@ class MiraApp(App[None]):
         resume: bool = False,
         session_id: str | None = None,
         config: dict[str, Any] | None = None,
+        launch_options: LaunchOptions | None = None,
         bootstrap: Bootstrap | None = None,
         ensure_git_repository: GitGuard | None = None,
         prebuilt: dict[str, Any] | None = None,
@@ -98,6 +101,7 @@ class MiraApp(App[None]):
         self.resume = resume
         self.session_id = session_id
         self.config = config
+        self.launch_options = launch_options or LaunchOptions()
         self.bootstrap = bootstrap
         self.ensure_git_repository = ensure_git_repository
         self.prebuilt = prebuilt
@@ -112,6 +116,7 @@ class MiraApp(App[None]):
         self.model_name = ""
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
+        self.runtime_snapshot: RuntimeSnapshot | None = None
         self.checkpointer: Any = None
         self.mode: dict[str, Any] = {"planning": False}
         self.ready = False
@@ -199,6 +204,11 @@ class MiraApp(App[None]):
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
         self.checkpointer = state.get("checkpointer")
+        self.runtime_snapshot = build_runtime_snapshot(
+            self.config or {},
+            self.launch_options,
+            model_name=self.model_name,
+        )
         self.mode = initial_mode(self.agent, self.plan_agent, (self.config or {}).get("settings"))
         self.ready = True
         self.busy = False
@@ -264,6 +274,11 @@ class MiraApp(App[None]):
             return
 
         self._record_prompt_history(text)
+        if text == "/runtime":
+            self._render_runtime_snapshot()
+            self.action_focus_prompt()
+            return
+
         self.query_one(SubagentsPanel).prepare_turn()
         if text in DESTRUCTIVE_HISTORY_COMMANDS:
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
@@ -1184,24 +1199,41 @@ class MiraApp(App[None]):
             return True
 
         await self._reload_runtime()
-        self.system_message("agents reloaded", kind="info")
+        self.system_message("runtime reloaded", kind="info")
         return True
 
-    async def _reload_runtime(self) -> None:
+    async def _reload_runtime(self) -> RuntimeSnapshot:
         """Reload dotenv/config, model metadata, visible chrome, and agents."""
         from agent.llm import get_llm, get_model_name
-        from config.loader import load_config
         from config.metadata import ModelMetadata, infer_model_metadata
+        from config.runtime import load_effective_config
 
-        self.config = load_config(self.workspace, override_dotenv=True)
-        inspect_model = get_llm(self.config, metadata=ModelMetadata())
-        metadata = await infer_model_metadata(self.config, model=inspect_model)
-        self.config["llm_inferred_context_tokens"] = metadata.context_tokens
-        self.config["llm_context_source"] = metadata.context_source
-        self.model_name = get_model_name(self.config)
+        config = load_effective_config(
+            self.workspace,
+            self.launch_options,
+            override_dotenv=True,
+        )
+        inspect_model = get_llm(config, metadata=ModelMetadata())
+        metadata = await infer_model_metadata(config, model=inspect_model)
+        config["llm_inferred_context_tokens"] = metadata.context_tokens
+        config["llm_context_source"] = metadata.context_source
+        model_name = get_model_name(config)
+        agent, plan_agent = self._build_agent_pair(config=config, metadata=metadata)
+        mode_updates = self._agent_mode_updates(agent, plan_agent, config)
+        snapshot = build_runtime_snapshot(
+            config,
+            self.launch_options,
+            model_name=model_name,
+        )
+
+        self.config = config
+        self.model_name = model_name
         self.context_limit_tokens = metadata.context_tokens
         self.context_limit_source = metadata.context_source
-        await self._rebuild_agents(metadata=metadata)
+        self.agent = agent
+        self.plan_agent = plan_agent
+        self.mode.update(mode_updates)
+        self.runtime_snapshot = snapshot
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -1212,6 +1244,18 @@ class MiraApp(App[None]):
             self.store.save(self.session)
         self._refresh_startup_splash()
         self._set_status(state=self.status_state)
+        return snapshot
+
+    def _render_runtime_snapshot(
+        self,
+        snapshot: RuntimeSnapshot | None = None,
+    ) -> None:
+        """Render the current sanitized runtime and connection state."""
+        snapshot = snapshot or self.runtime_snapshot
+        if snapshot is None:
+            self.system_message("runtime state is not available", kind="warning")
+            return
+        self.command_output(runtime_report(snapshot))
 
     def _refresh_startup_splash(self) -> None:
         """Refresh the visible startup metadata block after runtime changes."""
@@ -1967,23 +2011,51 @@ class MiraApp(App[None]):
         if self.config is None or self.checkpointer is None:
             return
 
+        agent, plan_agent = self._build_agent_pair(config=self.config, metadata=metadata)
+        mode_updates = self._agent_mode_updates(agent, plan_agent, self.config)
+        self.agent = agent
+        self.plan_agent = plan_agent
+        self.mode.update(mode_updates)
+
+    def _build_agent_pair(self, *, config: dict[str, Any], metadata: Any | None) -> tuple[Any, Any]:
+        """Build both agents without replacing the active pair."""
         from agent.factory import build_agent, build_plan_agent
 
-        self.agent = build_agent(
-            config=self.config,
+        agent = build_agent(
+            config=config,
             workspace=self.workspace,
             checkpointer=self.checkpointer,
             metadata=metadata,
         )
-        self.plan_agent = build_plan_agent(
-            config=self.config,
+        plan_agent = build_plan_agent(
+            config=config,
             workspace=self.workspace,
             checkpointer=self.checkpointer,
             metadata=metadata,
         )
-        refresh_agent_specs(self.mode, self.agent, self.plan_agent)
-        self.mode["rubric_enabled"] = rubric_enabled(self.config.get("settings"))
-        self.mode["rubric_max_iterations"] = rubric_max_iterations(self.config.get("settings"))
+        return agent, plan_agent
+
+    def _agent_mode_updates(
+        self,
+        agent: Any,
+        plan_agent: Any,
+        config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Prepare mode projections before installing a rebuilt agent pair."""
+        candidate = dict(self.mode)
+        refresh_agent_specs(candidate, agent, plan_agent)
+        candidate["rubric_enabled"] = rubric_enabled(config.get("settings"))
+        candidate["rubric_max_iterations"] = rubric_max_iterations(config.get("settings"))
+        return {
+            key: candidate[key]
+            for key in (
+                "action_tools",
+                "planning_tools",
+                "resources",
+                "rubric_enabled",
+                "rubric_max_iterations",
+            )
+        }
 
     def _refresh_sessions(self) -> None:
         """Reload the session list if the store is available."""

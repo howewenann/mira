@@ -616,8 +616,8 @@ with me before finalizing the design.
 Expected: the planning agent uses `ask_user`; the answer remains structured,
 read-only research completes, the hidden `prepare_goal` interrupt generates
 criteria, and the same planning thread then calls `present_plan`. Before
-`prepare_goal`, `/tools` and diagnostics should not show `present_plan` in the
-model-visible research surface. After the resume, `present_plan` is the only
+`prepare_goal`, `/tools` and diagnostics should not show `present_plan` in
+the model-visible research surface. After the resume, `present_plan` is the only
 model-visible tool and a tool call is required; `prepare_goal`, `ask_user`, and
 research tools cannot be selected. The TUI changes its animated status from
 `drafting Definition of Done...` to `drafting plan...` across the two model

@@ -46,7 +46,10 @@ mira --trace
 ```
 
 `--direct` is for trusted local setups that need direct LLM HTTP calls with
-proxy environment variables ignored and TLS verification disabled.
+proxy environment variables ignored and TLS verification disabled. It applies
+only to the current MIRA process and survives `/reload` within that process.
+Supply it again for a later TUI or one-shot invocation; plain launches default
+to non-direct mode.
 `--trace` opens a separate diagnostics window for TUI runs.
 
 In the TUI, `/clear-errors` deletes saved error reports for the current
@@ -127,7 +130,13 @@ should be run as workspace-relative paths such as `python tmp.py`.
 - Use `mira -f prompt.md` to read a Markdown file as a one-shot prompt.
 - Resume the latest session with `mira -r`.
 - Resume a specific session with `mira -s <session-id>`.
-- Use `/help` in the TUI to see commands.
+- Use `/help` in the TUI to see commands grouped by purpose.
+- Use `/runtime`, `/tools`, `/memories`, `/skills`, and `/subagents` to inspect one
+  part of the active runtime at a time without reloading agents or making a
+  model request. `/runtime` includes the model, sanitized endpoint, connection
+  mode, and launch-scoped flags.
+- Use `/session` for conversation-derived state: session identity, mode, active
+  goal or plan, workspace, and turn count.
 - Use `/new-chat` or the chat history `+ New` action to start a fresh saved
   session without deleting the current one.
 - Use `/compact` in the TUI to summarize and archive older context immediately
@@ -179,7 +188,9 @@ should be run as workspace-relative paths such as `python tmp.py`.
   original prompt, model-call count, bubble, and execution flow.
 - Use `/act` to return to normal action mode.
 - Use `/reload` after changing `.env` or project resources to rebuild the
-  active agents without restarting the TUI.
+  active agents without restarting the TUI. Launch-scoped options such as
+  `--direct` remain active after the reload. A successful reload displays a
+  short confirmation; use the focused inspection commands when you want details.
 
 On startup, MIRA checks whether your workspace is covered by Git. If it is not,
 MIRA asks whether to create a repository before the agent runs. If you choose to
@@ -229,8 +240,11 @@ Use these folders to customize MIRA for a project:
 - `.mira/tools/*.py`: LangChain tools, including module-level `@tool` objects
   and optional `get_tools(project_backend)`.
 
-In the TUI, use `/memories`, `/skills`, `/subagents`, and `/tools` to inspect
-what MIRA loaded and which project resources replaced defaults.
+In the TUI, use `/memories`, `/skills`, and `/subagents` to inspect what MIRA
+loaded and which project resources replaced defaults. `/tools` shows the tools
+available in the current Plan/Act stage. Runtime information is derived from the
+active process and agents; `/session` remains separate because it describes the
+durable conversation.
 
 ## Features
 

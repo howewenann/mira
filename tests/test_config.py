@@ -7,6 +7,7 @@ import os
 import ssl
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, DEFAULT_CONTEXT_TOKENS, load_llm_config
 from config.loader import load_config
+from config.runtime import LaunchOptions, build_runtime_snapshot, load_effective_config
 
 
 class LLMConfigTests(unittest.TestCase):
@@ -123,6 +125,88 @@ class LLMConfigTests(unittest.TestCase):
             config = load_config(workspace, override_dotenv=True)
 
         self.assertEqual(config["llm_model"], "from-dotenv")
+
+    def test_effective_config_applies_independent_immutable_launch_options(self) -> None:
+        """Launch options should overlay a copy of reloadable configuration."""
+        raw_config = {"llm_model": "local-model"}
+        normal_options = LaunchOptions()
+        direct_options = LaunchOptions(llm_direct=True)
+
+        with patch("config.loader.load_config", return_value=raw_config):
+            normal_config = load_effective_config(Path("."), normal_options)
+            direct_config = load_effective_config(Path("."), direct_options)
+
+        self.assertFalse(normal_config["llm_direct"])
+        self.assertTrue(direct_config["llm_direct"])
+        self.assertNotIn("llm_direct", raw_config)
+        self.assertIsNot(normal_config, raw_config)
+        self.assertIsNot(direct_config, raw_config)
+        with self.assertRaises(FrozenInstanceError):
+            direct_options.llm_direct = False  # type: ignore[misc]
+
+    def test_effective_config_does_not_create_launch_option_files(self) -> None:
+        """Building process-local config should not persist launch options."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
+            workspace = Path(directory)
+
+            config = load_effective_config(workspace, LaunchOptions(llm_direct=True))
+
+            self.assertTrue(config["llm_direct"])
+            self.assertFalse((workspace / ".mira").exists())
+
+    def test_runtime_snapshot_sanitizes_endpoint_and_excludes_secrets(self) -> None:
+        """Runtime inspection should expose only allowlisted, sanitized values."""
+        snapshot = build_runtime_snapshot(
+            {
+                "llm_provider": "openai",
+                "llm_base_url": "https://user:password@example.test:8443/v1/models?api_key=secret#token",
+                "llm_api_key": "never-show-this",
+                "llm_direct": True,
+                "unrelated_secret": "also-never-show-this",
+            },
+            LaunchOptions(llm_direct=True),
+            model_name="openai:test-model",
+        )
+
+        self.assertEqual(snapshot.model_name, "openai:test-model")
+        self.assertEqual(snapshot.provider, "openai")
+        self.assertEqual(snapshot.endpoint, "https://example.test:8443/v1/models")
+        self.assertTrue(snapshot.direct_effective)
+        self.assertTrue(snapshot.direct_requested)
+        self.assertEqual(snapshot.warnings, ())
+        self.assertNotIn("secret", str(snapshot))
+        self.assertNotIn("password", str(snapshot))
+
+    def test_runtime_snapshot_reports_direct_mode_mismatch(self) -> None:
+        """Requested direct mode should not be reported active when config disagrees."""
+        snapshot = build_runtime_snapshot(
+            {
+                "llm_provider": "lmstudio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_direct": False,
+            },
+            LaunchOptions(llm_direct=True),
+            model_name="lmstudio:local-model",
+        )
+
+        self.assertFalse(snapshot.direct_effective)
+        self.assertTrue(snapshot.direct_requested)
+        self.assertEqual(
+            snapshot.warnings,
+            ("Direct mode was requested but is not present in the effective configuration.",),
+        )
+
+    def test_runtime_snapshot_omits_malformed_endpoint(self) -> None:
+        """Malformed endpoints should never fall back to raw display text."""
+        snapshot = build_runtime_snapshot(
+            {"llm_base_url": "https://user:secret@[invalid", "llm_direct": False},
+            LaunchOptions(),
+            model_name="unknown:model",
+        )
+
+        self.assertIsNone(snapshot.endpoint)
+        self.assertFalse(snapshot.direct_effective)
+        self.assertFalse(snapshot.direct_requested)
 
     def test_get_llm_passes_normalized_config_to_chat_anyllm(self) -> None:
         """The LangChain model should be created from normalized LLM keys."""
@@ -258,6 +342,16 @@ class CLIConfigTests(unittest.TestCase):
                 run.assert_called_once()
                 self.assertTrue(run.call_args.kwargs["trace"])
 
+    def test_cli_direct_option_passes_to_run(self) -> None:
+        """The public direct option should remain a launch-time CLI argument."""
+        for option in ("--direct", "-d"):
+            with self.subTest(option=option), patch("cli.main.run") as run:
+                result = CliRunner().invoke(cli_app, [option])
+
+                self.assertEqual(result.exit_code, 0)
+                run.assert_called_once()
+                self.assertTrue(run.call_args.kwargs["direct"])
+
     def test_run_prints_config_errors_without_traceback(self) -> None:
         """Config errors should exit cleanly through Typer."""
         with (
@@ -373,7 +467,11 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             renderer: object | None = None,
         ) -> dict[str, object]:
             events.append("bootstrap")
-            self.assertIs(config, config_data)
+            self.assertIsNot(config, config_data)
+            self.assertEqual(
+                config,
+                {**config_data, "llm_direct": False},
+            )
             self.assertIs(renderer, renderer_obj)
             return {
                 "agent": "agent",
@@ -449,7 +547,52 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 resume=False,
                 workspace=Path("."),
                 session=None,
-                direct=True,
+                launch_options=LaunchOptions(llm_direct=True),
+            )
+
+    async def test_run_defaults_one_shot_to_non_direct_config(self) -> None:
+        """A plain one-shot invocation should explicitly disable direct mode."""
+        config = {
+            "tool_output_chars": 123,
+            "session_dir": "unused",
+            "llm_provider": "lmstudio",
+            "llm_model": "local-model",
+        }
+
+        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
+            return True
+
+        async def bootstrap(
+            workspace: Path,
+            session: str | None,
+            resume: bool,
+            config: dict[str, object] | None = None,
+            renderer: object | None = None,
+        ) -> dict[str, object]:
+            self.assertIsNotNone(config)
+            self.assertFalse(config["llm_direct"])
+            return {
+                "agent": "agent",
+                "renderer": renderer,
+                "session": {"id": "thread-1"},
+                "store": type("Store", (), {"save": lambda self, record: None})(),
+            }
+
+        async def run_turn(*args: object, **kwargs: object) -> object:
+            return type("Result", (), {"final_text": "done"})()
+
+        with (
+            patch("config.loader.load_config", return_value=config),
+            patch("ui.renderer.Renderer", return_value=object()),
+            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
+            patch("cli.commands._bootstrap", bootstrap),
+            patch("runtime.runner.run_turn", run_turn),
+        ):
+            await commands._run(
+                prompt="hello",
+                resume=False,
+                workspace=Path("."),
+                session=None,
             )
 
     async def test_one_shot_records_system_error_when_turn_fails(self) -> None:

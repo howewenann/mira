@@ -6,7 +6,10 @@ import asyncio
 import warnings
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from config.runtime import LaunchOptions
 
 
 def run(
@@ -20,9 +23,11 @@ def run(
 ) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
     from config.llm import ConfigError
+    from config.runtime import LaunchOptions
 
     try:
         _suppress_known_warnings()
+        launch_options = LaunchOptions(llm_direct=bool(direct))
         asyncio.run(
             _run(
                 prompt=prompt,
@@ -30,7 +35,7 @@ def run(
                 resume=resume,
                 workspace=workspace,
                 session=session,
-                direct=direct,
+                launch_options=launch_options,
                 trace=trace,
             )
         )
@@ -58,7 +63,7 @@ async def _run(
     resume: bool,
     workspace: Path,
     session: str | None,
-    direct: bool = False,
+    launch_options: LaunchOptions | None = None,
     prompt_file: Path | None = None,
     trace: bool = False,
 ) -> None:
@@ -66,12 +71,12 @@ async def _run(
     import typer
 
     from cli.git_guard import ensure_git_repository
-    from config.loader import load_config
+    from config.runtime import LaunchOptions, load_effective_config
 
     workspace = workspace.expanduser().resolve()
     prompt = _resolve_one_shot_prompt(prompt, prompt_file, workspace)
-    config = load_config(workspace)
-    config["llm_direct"] = bool(direct)
+    launch_options = launch_options or LaunchOptions()
+    config = load_effective_config(workspace, launch_options)
 
     if prompt is None:
         if trace:
@@ -87,6 +92,7 @@ async def _run(
             resume=resume,
             session_id=session,
             config=config,
+            launch_options=launch_options,
             bootstrap=_bootstrap,
             ensure_git_repository=ensure_git_repository,
             tool_output_chars=config["tool_output_chars"],
@@ -249,8 +255,8 @@ async def _bootstrap(
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
     from agent.llm import get_llm, get_model_name
-    from config.loader import load_config
     from config.metadata import ModelMetadata, infer_model_metadata
+    from config.runtime import LaunchOptions, load_effective_config
     from session.checkpoint import make_checkpointer
     from session.context import mark_resume_context_pending
     from session.dashboard import ensure_dashboard
@@ -259,7 +265,7 @@ async def _bootstrap(
 
     workspace = workspace.expanduser().resolve()
     if config is None:
-        config = load_config(workspace)
+        config = load_effective_config(workspace, LaunchOptions())
     if renderer is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     startup_progress(renderer, "loading session...")

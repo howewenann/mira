@@ -95,6 +95,24 @@ log behavior, or trace-window behavior changes.
 
 **Decision:** Provider configuration comes from environment variables and
 workspace `.env`; user-facing workspace settings live in `.mira/settings.yml`.
+Immutable launch options are process-local and overlay freshly loaded values to
+form the effective runtime configuration. `/reload` reloads environment and
+workspace configuration, then reapplies the same launch options. Launch options
+are never recovered from the previous effective config or persisted in settings
+or sessions. `--direct` is currently the only launch option in this layer;
+trace-window state remains separate.
+The active runtime state is derived from effective configuration: model
+metadata, model identity, action/planning agents, normalized resource
+projections, and a sanitized runtime snapshot. Focused read-only commands expose
+one section at a time without loading configuration, constructing a model, or
+checking connectivity: `/runtime`, `/tools`, `/memories`, `/skills`, and
+`/subagents`. Launch-scoped flags are displayed as rows in the Runtime table so
+their process scope remains visible beside the effective connection state.
+`/reload` builds replacement configuration, metadata, both agents, resource
+projections, and the snapshot before replacing active runtime references, then
+displays a short confirmation. Endpoint display is allowlisted and strips URL
+credentials, query strings, and fragments; API keys and arbitrary config values
+never enter the snapshot or inspection output.
 LM Studio remains the default user-facing provider, but MIRA constructs its
 LangChain chat model through AnyLLM's OpenAI-compatible transport so DeepAgents
 tool calls use LM Studio's `/v1` server path instead of the native
@@ -115,12 +133,14 @@ auto-added raw one by name. DeepAgents therefore rejects a dynamic
 static response formats continue to work. Keeping these choices in workspace
 settings makes them inspectable without changing QuickJS or installed packages.
 
-**Where to check:** `config/loader.py`, `config/llm.py`, `agent/llm.py`,
-`config/settings.py`, `agent/subagent_compilation.py`,
+**Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
+`agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
+`ui/runtime_snapshot.py`, `agent/subagent_compilation.py`,
 `ui/widgets/settings_panel.py`.
 
-**Update this when:** A setting moves between `.env` and `.mira/settings.yml`,
-new provider variables are introduced, or `/settings` changes what it controls.
+**Update this when:** A value moves between reloadable and launch-scoped
+configuration, a setting moves between `.env` and `.mira/settings.yml`, new
+provider variables are introduced, or `/settings` changes what it controls.
 
 ## Execute Backend
 
@@ -170,8 +190,8 @@ to inspect.
   at `/.mira/...`.
 - `build_resources()` loads memories, skills, subagents, and tools, then passes
   the final lists to `create_deep_agent(...)`.
-- Metadata keeps `source` and `replaces` fields so `/memories`, `/skills`,
-  `/subagents`, `/tools`, and `/settings` can show what happened.
+- Metadata keeps `source` and `replaces` fields so `/tools`, `/memories`,
+  `/skills`, `/subagents`, and `/settings` can show what happened.
 
 **Overwrite rules:**
 
@@ -391,7 +411,14 @@ stays simpler for scripts and quick prompts.
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
-rebuilding agents without restarting the session. `/new-chat` and the sidebar
+rebuilding agents without restarting the session. Read-only process and agent
+inspection is split across `/runtime`, `/tools`, `/memories`, `/skills`, and
+`/subagents`; each command renders one focused section without rebuilding agents
+or making a model/network request. `/help` keeps every command in one table but
+groups related commands under visually distinct soft-blue section headers.
+`/session` stays separate because it
+summarizes durable conversation state, including active goals and plans.
+`/new-chat` and the sidebar
 `+ New` action create and switch to a fresh saved session without deleting the
 current session. `/compact` is also TUI-only because it needs the active agent,
 thread, checkpoint, and session store; it runs outside a normal model turn and

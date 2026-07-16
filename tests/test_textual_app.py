@@ -23,6 +23,7 @@ from textual.widgets import Button, Input, Static, TextArea
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from config.metadata import ModelMetadata
+from config.runtime import LaunchOptions, build_runtime_snapshot
 from config.settings import (
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
@@ -42,6 +43,7 @@ from runtime.trace_stream import TraceStream
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
+from ui.runtime_snapshot import runtime_report
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import strip_ansi
 from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
@@ -127,7 +129,12 @@ async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.02)
 
 
-def make_app(workspace: Path | None = None, session: dict[str, Any] | None = None, **state_overrides: Any) -> MiraApp:
+def make_app(
+    workspace: Path | None = None,
+    session: dict[str, Any] | None = None,
+    launch_options: LaunchOptions | None = None,
+    **state_overrides: Any,
+) -> MiraApp:
     """Return a bootstrapped app with fake agents and session state."""
     workspace = workspace or Path(".")
     session_record = session or {
@@ -162,6 +169,7 @@ def make_app(workspace: Path | None = None, session: dict[str, Any] | None = Non
     return MiraApp(
         workspace=workspace,
         prebuilt=state,
+        launch_options=launch_options,
         tool_output_chars=80,
     )
 
@@ -181,6 +189,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_destructive_confirm_choices_match_visible_shortcuts(self) -> None:
         """Clear confirmations should return the same shortcuts shown in their labels."""
         self.assertEqual(DESTRUCTIVE_CONFIRM_CHOICES, [("o", "OK (o)"), ("c", "Cancel (c)")])
+
+    def test_direct_constructor_defaults_to_non_direct_launch_options(self) -> None:
+        """Existing MiraApp callers should receive safe default launch options."""
+        app = MiraApp(config={})
+
+        self.assertEqual(app.launch_options, LaunchOptions())
+        self.assertFalse(app.launch_options.llm_direct)
+
+    def test_runtime_report_uses_sanitized_snapshot(self) -> None:
+        """Runtime inspection should expose only the allowlisted fields."""
+        snapshot = build_runtime_snapshot(
+            {
+                "llm_provider": "openai",
+                "llm_base_url": "https://user:secret@example.test/v1?token=hidden",
+                "llm_direct": True,
+            },
+            LaunchOptions(llm_direct=True),
+            model_name="openai:test-model",
+        )
+
+        def render(value: Any) -> str:
+            output = StringIO()
+            Console(file=output, force_terminal=False, width=120).print(value)
+            return output.getvalue()
+
+        output = render(runtime_report(snapshot))
+
+        self.assertIn("Runtime", output)
+        self.assertIn("Connection", output)
+        self.assertIn("Direct", output)
+        self.assertIn("Proxy environment", output)
+        self.assertIn("TLS verification", output)
+        self.assertIn("-d / --direct", output)
+        self.assertIn("enabled", output)
+        self.assertNotIn("Tools", output)
+        self.assertNotIn("Memories", output)
+        self.assertNotIn("secret", output)
+        self.assertNotIn("token", output)
 
     def test_splash_text_uses_blocky_wordmark_and_logo_width(self) -> None:
         """The startup splash should preserve the old blocky logo structure."""
@@ -259,10 +305,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "events": [{"type": "user", "text": "keep me"}],
         }
         store = FakeStore()
-        app = make_app(session=old_session, store=store)
+        launch_options = LaunchOptions(llm_direct=True)
+        app = make_app(
+            session=old_session,
+            store=store,
+            config={"llm_direct": True},
+            launch_options=launch_options,
+        )
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            runtime_snapshot = app.runtime_snapshot
             app.query_one("#new-chat", Button).press()
             await wait_until(lambda: app.session["id"] == "new-thread-1")
 
@@ -274,6 +327,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("started new chat", rendered)
             self.assertNotIn("keep me", rendered)
             self.assertTrue(app.query_one(PromptBox).has_focus)
+            self.assertIs(app.launch_options, launch_options)
+            self.assertTrue(app.config["llm_direct"])
+            self.assertIs(app.runtime_snapshot, runtime_snapshot)
+            self.assertTrue(app.runtime_snapshot.direct_effective)
 
     async def test_new_chat_command_uses_same_session_switch(self) -> None:
         """The slash command should create a blank saved session like the sidebar action."""
@@ -307,6 +364,58 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.session["id"], "thread-1")
             self.assertEqual(store.new_sessions, 0)
             self.assertIn("finish the current turn before starting a new chat", rendered)
+
+    async def test_session_switch_reuses_effective_config_and_launch_options(self) -> None:
+        """Loading another conversation should retain process-local direct mode."""
+        launch_options = LaunchOptions(llm_direct=True)
+        effective_config = {"settings": {}, "llm_direct": True}
+        received_configs: list[dict[str, Any]] = []
+
+        async def bootstrap(
+            workspace: Path,
+            session_id: str | None,
+            resume: bool,
+            config: dict[str, Any] | None,
+            renderer: Any | None,
+        ) -> dict[str, Any]:
+            self.assertEqual(session_id, "thread-2")
+            self.assertTrue(resume)
+            self.assertIsNotNone(config)
+            received_configs.append(config)
+            return {
+                "agent": "new-agent",
+                "plan_agent": "new-plan-agent",
+                "config": config,
+                "store": FakeStore(),
+                "session": {
+                    "id": "thread-2",
+                    "workspace": str(workspace),
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "turns": 0,
+                    "events": [],
+                },
+                "model_name": "test-model",
+                "context_limit_tokens": 8192,
+                "context_limit_source": "test",
+                "checkpointer": "new-checkpointer",
+            }
+
+        app = make_app(
+            config=effective_config,
+            launch_options=launch_options,
+        )
+        app.bootstrap = bootstrap
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await app._load_session("thread-2")
+            await pilot.pause()
+
+        self.assertEqual(received_configs, [effective_config])
+        self.assertIs(app.launch_options, launch_options)
+        self.assertTrue(app.config["llm_direct"])
+        self.assertTrue(app.runtime_snapshot.direct_effective)
+        self.assertTrue(app.runtime_snapshot.direct_requested)
 
     async def test_narrow_window_hides_sidebar_and_keeps_prompt_width(self) -> None:
         """Very narrow terminals should not squeeze the prompt to zero width."""
@@ -1649,9 +1758,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(command_blocks), 1)
             output = renderable_plain(command_blocks[0])
             self.assertIn("Commands", output)
+            for section in ("General", "Inspect", "Workflow", "Configuration", "Chat & history"):
+                self.assertIn(section, output)
             self.assertIn("/help", output)
             self.assertIn("/compact", output)
+            self.assertIn("/runtime", output)
+            self.assertIn("/tools", output)
+            self.assertIn("/memories", output)
+            self.assertIn("/skills", output)
             self.assertIn("/subagents", output)
+            self.assertIn("/session", output)
+            self.assertNotIn("/model", output)
 
     async def test_goal_command_disabled_message_does_not_start_a_turn(self) -> None:
         app = make_app()
@@ -1771,6 +1888,200 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("mode: action", output)
             self.assertIn("turns: 0", output)
 
+    async def test_runtime_command_is_read_only_and_shows_direct_mode(self) -> None:
+        """Runtime inspection should use stored state without touching agents or config."""
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 3,
+            "events": [{"type": "user", "text": "keep me"}],
+        }
+        app = make_app(
+            session=session,
+            config={
+                "llm_provider": "openai",
+                "llm_base_url": "https://user:secret@example.test/v1?token=hidden",
+                "llm_direct": True,
+            },
+            model_name="openai:test-model",
+            launch_options=LaunchOptions(llm_direct=True),
+            agent=type(
+                "Agent",
+                (),
+                {
+                    "mira_tool_specs": [
+                        {
+                            "name": "project_search",
+                            "source": "project",
+                            "replaces": "grep",
+                            "path": "/.mira/tools/project_search.py",
+                            "description": "Search project files.",
+                        }
+                    ],
+                    "mira_resources": {
+                        "memories": [
+                            {
+                                "name": "AGENTS.md",
+                                "source": "project",
+                                "replaces": "default",
+                                "path": "/.mira/memories/AGENTS.md",
+                            }
+                        ],
+                        "skills": [],
+                        "subagents": [],
+                    },
+                },
+            )(),
+            plan_agent=type(
+                "PlanAgent",
+                (),
+                {"mira_tool_specs": [{"name": "read_file", "description": "Read a file."}]},
+            )(),
+        )
+
+        with (
+            patch("config.loader.load_config") as load_config,
+            patch("agent.llm.get_llm") as get_llm,
+            patch("config.metadata.infer_model_metadata", new_callable=AsyncMock) as infer_metadata,
+            patch("agent.factory.build_agent") as build_agent,
+            patch("agent.factory.build_plan_agent") as build_plan_agent,
+            patch("ui.app.run_user_turn", new_callable=AsyncMock) as run_turn,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/runtime"))
+                await pilot.pause()
+
+                command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+                self.assertEqual(len(command_blocks), 1)
+                output = renderable_plain(command_blocks[0])
+                user_blocks = [child for child in app.query_one(ChatLog).children if "user" in child.classes]
+                self.assertEqual(len(user_blocks), 1)
+                self.assertNotIn("/runtime", renderable_plain(user_blocks[0]))
+
+        self.assertIn("Runtime", output)
+        self.assertIn("openai:test-model", output)
+        self.assertIn("Direct", output)
+        self.assertIn("https://example.test/v1", output)
+        self.assertIn("Proxy environment", output)
+        self.assertIn("Ignored", output)
+        self.assertIn("TLS verification", output)
+        self.assertIn("Disabled", output)
+        self.assertIn("-d / --direct", output)
+        self.assertIn("enabled", output)
+        self.assertNotIn("Tools", output)
+        self.assertNotIn("Memories", output)
+        self.assertNotIn("secret", output)
+        self.assertNotIn("token", output)
+        self.assertEqual(app.session["turns"], 3)
+        self.assertEqual(app.session["events"], [{"type": "user", "text": "keep me"}])
+        load_config.assert_not_called()
+        get_llm.assert_not_called()
+        infer_metadata.assert_not_called()
+        build_agent.assert_not_called()
+        build_plan_agent.assert_not_called()
+        run_turn.assert_not_called()
+
+    async def test_runtime_command_shows_standard_mode_and_mismatch_warning(self) -> None:
+        """Inspection should not claim direct transport when effective config is standard."""
+        app = make_app(
+            config={
+                "llm_provider": "lmstudio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_direct": False,
+            },
+            model_name="lmstudio:local-model",
+            launch_options=LaunchOptions(llm_direct=True),
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/runtime"))
+            await pilot.pause()
+            command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+            output = renderable_plain(command_blocks[0])
+
+        self.assertIn("Connection", output)
+        self.assertIn("Standard", output)
+        self.assertIn("-d / --direct", output)
+        self.assertIn("enabled", output)
+        self.assertIn("Direct mode was requested but is not present", output)
+        self.assertNotIn("Proxy environment", output)
+        self.assertNotIn("TLS verification", output)
+
+    async def test_tools_command_uses_current_planning_projection(self) -> None:
+        """The tools command should show only the active Plan/Act tool set."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.mode.update(
+                {
+                    "planning": True,
+                    "planning_tools": [
+                        {"name": "plan_reader", "description": "Inspect during planning."}
+                    ],
+                    "action_tools": [
+                        {"name": "action_writer", "description": "Modify during action."}
+                    ],
+                }
+            )
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/tools"))
+            await pilot.pause()
+            command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+            output = renderable_plain(command_blocks[0])
+
+        self.assertIn("Tools (planning)", output)
+        self.assertIn("plan_reader", output)
+        self.assertNotIn("action_writer", output)
+
+    async def test_resource_commands_render_one_section_per_command(self) -> None:
+        """Resource inspection should stay split across focused command blocks."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            for command in ("/memories", "/skills", "/subagents"):
+                await app.submit_prompt(PromptBox.Submitted(prompt, command))
+                await pilot.pause()
+            command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+
+        self.assertEqual(len(command_blocks), 3)
+        outputs = [renderable_plain(block) for block in command_blocks]
+        for title, output in zip(("Memories", "Skills", "Subagents"), outputs, strict=True):
+            self.assertIn(title, output)
+            self.assertIn("none loaded", output)
+
+    async def test_runtime_command_shows_normal_launch_option_disabled(self) -> None:
+        """A plain launch should report standard transport and a disabled direct flag."""
+        app = make_app(
+            config={
+                "llm_provider": "lmstudio",
+                "llm_base_url": "http://localhost:1234/v1",
+                "llm_direct": False,
+            },
+            model_name="lmstudio:local-model",
+        )
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/runtime"))
+            await pilot.pause()
+            command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+            output = renderable_plain(command_blocks[0])
+
+        self.assertIn("Connection", output)
+        self.assertIn("Standard", output)
+        self.assertIn("-d / --direct", output)
+        self.assertIn("disabled", output)
+        self.assertNotIn("Warning", output)
+
     async def test_reload_command_rebuilds_agents(self) -> None:
         """The reload command should rebuild agents and refresh visible metadata."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
@@ -1784,7 +2095,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            launch_options = LaunchOptions(llm_direct=True)
+            app = make_app(
+                workspace=workspace,
+                config={"settings": load_settings(workspace), "llm_direct": True},
+                launch_options=launch_options,
+            )
             action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
             plan_agent = type("PlanAgent", (), {"mira_tool_specs": [{"name": "plan_tool", "description": "Plan."}]})()
 
@@ -1792,7 +2108,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 return ModelMetadata(10000, "reload-test")
 
             with (
-                patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
+                patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()) as get_llm,
                 patch("config.metadata.infer_model_metadata", infer_metadata),
                 patch("agent.factory.build_agent", return_value=action_agent) as build_agent,
                 patch("agent.factory.build_plan_agent", return_value=plan_agent) as build_plan_agent,
@@ -1804,9 +2120,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
                     await wait_until(lambda: app.agent is action_agent)
                     await pilot.pause(0.3)
+                    reload_info_blocks = [
+                        child for child in app.query_one(ChatLog).children if "info" in child.classes
+                    ]
+                    reload_command_blocks = [
+                        child for child in app.query_one(ChatLog).children if "command" in child.classes
+                    ]
+                    await app.submit_prompt(PromptBox.Submitted(prompt, "/runtime"))
+                    await pilot.pause()
                     rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                     status = renderable_plain(app.query_one(StatusBar))
                     startup_blocks = [child for child in app.query_one(ChatLog).children if "startup" in child.classes]
+                    command_blocks = [
+                        child for child in app.query_one(ChatLog).children if "command" in child.classes
+                    ]
 
             self.assertIs(app.plan_agent, plan_agent)
             self.assertEqual(app.model_name, "lmstudio:visual-model")
@@ -1814,6 +2141,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.context_limit_source, "reload-test")
             self.assertEqual(build_agent.call_count, 1)
             self.assertEqual(build_plan_agent.call_count, 1)
+            self.assertIs(app.launch_options, launch_options)
+            self.assertTrue(app.config["llm_direct"])
+            self.assertTrue(get_llm.call_args.args[0]["llm_direct"])
+            self.assertTrue(build_agent.call_args.kwargs["config"]["llm_direct"])
+            self.assertTrue(build_plan_agent.call_args.kwargs["config"]["llm_direct"])
             self.assertEqual(app.mode["action_tools"], [{"name": "fresh_tool", "description": "Fresh."}])
             self.assertEqual(app.mode["planning_tools"], [{"name": "plan_tool", "description": "Plan."}])
             self.assertEqual(len(startup_blocks), 1)
@@ -1821,7 +2153,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("model     loading", rendered)
             self.assertNotIn("- starting", rendered)
             self.assertIn("lmstudio:visual-model", status)
-            self.assertIn("agents reloaded", rendered)
+            self.assertEqual(len(reload_info_blocks), 1)
+            self.assertIn("runtime reloaded", renderable_plain(reload_info_blocks[0]))
+            self.assertEqual(reload_command_blocks, [])
+            self.assertEqual(len(command_blocks), 1)
+            runtime_output = renderable_plain(command_blocks[0])
+            self.assertIn("Runtime", runtime_output)
 
     async def test_reload_command_reload_dotenv_with_override(self) -> None:
         """The reload command should let edited .env values replace loaded env values."""
@@ -1838,10 +2175,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             os.environ["MIRA_LLM_PROVIDER"] = "lmstudio"
             os.environ["MIRA_LLM_MODEL"] = "already-loaded"
-            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
-
-            async def rebuild(**kwargs: Any) -> None:
-                return None
+            launch_options = LaunchOptions(llm_direct=True)
+            app = make_app(
+                workspace=workspace,
+                config={"settings": load_settings(workspace), "llm_direct": True},
+                launch_options=launch_options,
+            )
 
             async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
                 return ModelMetadata(8192, "reload-test")
@@ -1849,15 +2188,86 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
                 patch("config.metadata.infer_model_metadata", infer_metadata),
+                patch.object(app, "_build_agent_pair", return_value=(app.agent, app.plan_agent)),
             ):
                 async with app.run_test(size=(100, 30)) as pilot:
                     await pilot.pause()
-                    app._rebuild_agents = rebuild
-
                     await app._handle_reload_command()
 
             self.assertEqual(app.config["llm_model"], "from-env-file")
+            self.assertTrue(app.config["llm_direct"])
+            self.assertIs(app.launch_options, launch_options)
             self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")
+
+    async def test_reload_without_direct_mode_remains_non_direct(self) -> None:
+        """Reload should explicitly preserve the normal launch default."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
+            workspace = Path(directory)
+            app = make_app(workspace=workspace)
+
+            async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
+                return ModelMetadata(8192, "reload-test")
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                with (
+                    patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
+                    patch("config.metadata.infer_model_metadata", infer_metadata),
+                    patch.object(app, "_build_agent_pair", return_value=(app.agent, app.plan_agent)),
+                ):
+                    await app._reload_runtime()
+
+            self.assertFalse(app.config["llm_direct"])
+            self.assertFalse(app.launch_options.llm_direct)
+
+    async def test_reload_agent_failure_preserves_previous_runtime(self) -> None:
+        """A partially built replacement pair should never replace the active runtime."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
+            workspace = Path(directory)
+            app = make_app(
+                workspace=workspace,
+                config={
+                    "settings": load_settings(workspace),
+                    "llm_provider": "lmstudio",
+                    "llm_model": "old-model",
+                    "llm_base_url": "http://localhost:1234/v1",
+                    "llm_direct": True,
+                },
+                model_name="lmstudio:old-model",
+                launch_options=LaunchOptions(llm_direct=True),
+            )
+
+            async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
+                return ModelMetadata(16384, "reload-test")
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                old_config = app.config
+                old_agent = app.agent
+                old_plan_agent = app.plan_agent
+                old_model_name = app.model_name
+                old_context_limit = app.context_limit_tokens
+                old_snapshot = app.runtime_snapshot
+                with (
+                    patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
+                    patch("config.metadata.infer_model_metadata", infer_metadata),
+                    patch("agent.factory.build_agent", return_value="candidate-agent") as build_agent,
+                    patch("agent.factory.build_plan_agent", side_effect=RuntimeError("plan build failed")) as build_plan,
+                ):
+                    await app._run_reload_command()
+                    await pilot.pause()
+                    rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+            build_agent.assert_called_once()
+            build_plan.assert_called_once()
+            self.assertIs(app.config, old_config)
+            self.assertIs(app.agent, old_agent)
+            self.assertIs(app.plan_agent, old_plan_agent)
+            self.assertEqual(app.model_name, old_model_name)
+            self.assertEqual(app.context_limit_tokens, old_context_limit)
+            self.assertIs(app.runtime_snapshot, old_snapshot)
+            self.assertIn("reload error: plan build failed", rendered)
+            self.assertNotIn("Runtime reloaded", rendered)
 
     async def test_reload_command_is_refused_while_busy(self) -> None:
         """The reload command should not rebuild agents during an active turn."""

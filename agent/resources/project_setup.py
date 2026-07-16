@@ -48,8 +48,8 @@ MIRA loads project resources from this folder on top of its defaults.
   workspace access. Project tools override defaults when the tool `name` is
   the same.
 
-Use `/memories`, `/skills`, `/subagents`, and `/tools` in the REPL to inspect
-what MIRA loaded.
+Use `/runtime` in the TUI to inspect the active model and connection. Use
+`/tools`, `/memories`, `/skills`, and `/subagents` for their focused sections.
 """
 
 EXAMPLE_MEMORY = """# Example Project Memory

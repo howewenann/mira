@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from langchain_core.exceptions import ContextOverflowError
 from rich.console import Console
+from rich.text import Text
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
@@ -17,9 +18,11 @@ from agent.middleware import ModelToolVisibilityMiddleware, PlanningStageMiddlew
 from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
 from agent.tools.specs import tool_name
 from config.metadata import ModelMetadata
+from config.runtime import RuntimeSnapshot
 from runtime import runner
 from runtime.context_usage import record_deepagents_context_tokens
 from ui import repl
+from ui.runtime_snapshot import resources_table, runtime_report, tools_table
 
 
 class RecordingConsole:
@@ -603,14 +606,18 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("enter safe planning mode", output)
         self.assertIn("/act", output)
         self.assertIn("return to action mode", output)
-        self.assertIn("/tools", output)
         self.assertIn("/settings", output)
-        self.assertIn("/reload", output)
-        self.assertNotIn("/config", output)
-        self.assertIn("list tools", output)
+        self.assertIn("/runtime", output)
+        self.assertIn("/tools", output)
         self.assertIn("/memories", output)
         self.assertIn("/skills", output)
         self.assertIn("/subagents", output)
+        self.assertIn("/session", output)
+        self.assertIn("/reload", output)
+        for section in ("General", "Inspect", "Workflow", "Configuration", "Chat & history"):
+            self.assertIn(section, output)
+        self.assertNotIn("/config", output)
+        self.assertNotIn("/model", output)
 
     def test_help_table_returns_rich_table(self) -> None:
         """The help table should render all commands together."""
@@ -624,41 +631,48 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Command", rendered)
         self.assertIn("Description", rendered)
         self.assertIn("/help", rendered)
-        self.assertIn("/subagents", rendered)
+        self.assertIn("Inspect", rendered)
+        self.assertIn("/runtime", rendered)
+        self.assertIn("/tools", rendered)
+        self.assertIn("/session", rendered)
+        self.assertNotIn("/model", rendered)
+        section_cells = [cell for cell in table.columns[0]._cells if isinstance(cell, Text)]
+        self.assertTrue(section_cells)
+        self.assertTrue(all(str(cell.style) == repl.HELP_SECTION_STYLE for cell in section_cells))
 
-    async def test_tools_command_lists_action_tools(self) -> None:
-        """The tools command should show action-mode tools."""
+    async def test_runtime_command_is_recognized_as_textual_only(self) -> None:
+        """The shared router should advertise TUI-only runtime inspection."""
+        renderer = RecordingRenderer()
+
+        handled = await repl.handle_command("/runtime", renderer, {}, "test-model", {"planning": False})
+
+        self.assertTrue(handled)
+        self.assertEqual(renderer.console.lines, ["/runtime is available in the Textual app"])
+
+    async def test_model_command_is_removed(self) -> None:
+        """The model alias should not duplicate the focused runtime command."""
+        renderer = RecordingRenderer()
+
+        handled = await repl.handle_command("/model", renderer, {}, "model", {"planning": False})
+
+        self.assertTrue(handled)
+        self.assertEqual(renderer.console.lines, ["unknown command: /model"])
+
+    async def test_tools_command_lists_current_mode_tools(self) -> None:
+        """The tools command should render one table for the active mode."""
         renderer = RecordingRenderer()
 
         handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": False})
 
         self.assertTrue(handled)
-        output = "\n".join(renderer.console.lines)
+        self.assertEqual(len(renderer.console.lines), 1)
+        output = renderer.console.lines[0]
         self.assertIn("Tools (action)", output)
-        self.assertIn("ask_user", output)
         self.assertIn("read_file", output)
         self.assertIn("write_file", output)
-        self.assertIn("edit_file", output)
-        self.assertIn("task", output)
-        self.assertIn("Description", output)
 
-    async def test_tools_command_hides_write_tools_in_planning_mode(self) -> None:
-        """The tools command should reflect planning-mode tool restrictions."""
-        renderer = RecordingRenderer()
-
-        handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": True})
-
-        self.assertTrue(handled)
-        output = "\n".join(renderer.console.lines)
-        self.assertIn("Tools (planning)", output)
-        self.assertIn("ask_user", output)
-        self.assertIn("read_file", output)
-        for tool in PLAN_DISABLED_TOOLS:
-            self.assertNotIn(tool, output)
-
-    async def test_resource_commands_show_loaded_resources(self) -> None:
-        """Resource commands should print attached resource metadata."""
-        renderer = RecordingRenderer()
+    async def test_resource_commands_render_one_section_each(self) -> None:
+        """Each resource command should produce one table with an explicit empty state."""
         mode = {
             "resources": {
                 "memories": [
@@ -673,20 +687,54 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 "subagents": [],
             }
         }
+        outputs = {}
+        for command in ("/memories", "/skills", "/subagents"):
+            renderer = RecordingRenderer()
+            self.assertTrue(await repl.handle_command(command, renderer, {}, "model", mode))
+            self.assertEqual(len(renderer.console.lines), 1)
+            outputs[command] = renderer.console.lines[0]
 
-        self.assertTrue(await repl.handle_command("/memories", renderer, {}, "model", mode))
-        self.assertTrue(await repl.handle_command("/skills", renderer, {}, "model", mode))
-        self.assertTrue(await repl.handle_command("/subagents", renderer, {}, "model", mode))
+        self.assertIn("AGENTS.md", outputs["/memories"])
+        self.assertIn("none loaded", outputs["/skills"])
+        self.assertIn("none loaded", outputs["/subagents"])
 
-        output = "\n".join(renderer.console.lines)
-        self.assertIn("Memories", output)
-        self.assertIn("AGENTS.md", output)
-        self.assertIn("project", output)
-        self.assertIn("Replaces", output)
-        self.assertIn("default", output)
-        self.assertIn("Skills", output)
-        self.assertIn("Subagents", output)
-        self.assertEqual(output.count("none loaded"), 2)
+    def test_available_tools_lists_action_tools(self) -> None:
+        """Runtime reporting should receive the action-mode tool projection."""
+        names = {tool["name"] for tool in repl.available_tools({"planning": False}, planning=False)}
+
+        self.assertTrue({"ask_user", "read_file", "write_file", "edit_file", "task"} <= names)
+
+    def test_available_tools_hides_write_tools_in_planning_mode(self) -> None:
+        """Runtime reporting should receive the planning-mode tool projection."""
+        names = {tool["name"] for tool in repl.available_tools({"planning": True}, planning=True)}
+
+        self.assertIn("ask_user", names)
+        self.assertIn("read_file", names)
+        for tool in PLAN_DISABLED_TOOLS:
+            self.assertNotIn(tool, names)
+
+    def test_runtime_report_shows_sanitized_runtime_details(self) -> None:
+        """The runtime report should stay focused on model and connection state."""
+        report = runtime_report(
+            RuntimeSnapshot(
+                model_name="test-model",
+                provider="lmstudio",
+                endpoint="http://localhost:1234/v1",
+                direct_effective=False,
+                direct_requested=False,
+            )
+        )
+        rendered = StringIO()
+        Console(file=rendered, force_terminal=False, width=120).print(report)
+        output = rendered.getvalue()
+
+        self.assertIn("Runtime", output)
+        self.assertIn("test-model", output)
+        self.assertIn("lmstudio", output)
+        self.assertIn("http://localhost:1234/v1", output)
+        self.assertIn("-d / --direct", output)
+        self.assertNotIn("Tools", output)
+        self.assertNotIn("Memories", output)
 
     def test_tool_specs_use_agent_metadata(self) -> None:
         """Tool specs should come from agent metadata when available."""
@@ -718,9 +766,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_tools_table_returns_rich_table(self) -> None:
         """The tools table should expose tool metadata in a Rich table."""
-        table = repl.tools_table(
-            "Tools (action)",
+        table = tools_table(
             [{"name": "long_tool", "description": "This description should wrap when the width is narrow."}],
+            planning=False,
         )
 
         output = StringIO()
@@ -732,8 +780,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_tool_table_shows_source_and_replacement(self) -> None:
         """The tools table should show custom tool source and replacement info."""
-        table = repl.tools_table(
-            "Tools (action)",
+        table = tools_table(
             [
                 {
                     "name": "grep",
@@ -742,6 +789,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                     "replaces": "built-in",
                 }
             ],
+            planning=False,
         )
 
         output = StringIO()
@@ -753,7 +801,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_resources_table_returns_rich_table(self) -> None:
         """The resources table should expose source and replacement columns."""
-        table = repl.resources_table(
+        table = resources_table(
             "Memories",
             [
                 {
@@ -1233,7 +1281,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("context compacted", rendered)
 
     async def test_session_command_shows_current_mode(self) -> None:
-        """The session command should print mode and saved-plan count."""
+        """The session command should print conversation-derived state."""
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 3}
 
@@ -1243,7 +1291,32 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(renderer.console.lines), 1)
         self.assertIn("session: thread-1", renderer.console.lines[0])
         self.assertIn("mode: planning", renderer.console.lines[0])
-        self.assertIn("current plan: no", renderer.console.lines[0])
+        self.assertIn("active goal: no", renderer.console.lines[0])
+        self.assertIn("active plan: no", renderer.console.lines[0])
+
+    def test_session_summary_detects_goals_and_both_plan_shapes(self) -> None:
+        """Goals and plans should follow the active conversation proposal state."""
+        session = {
+            "id": "thread-1",
+            "title": "Runtime cleanup",
+            "workspace": ".",
+            "turns": 3,
+        }
+        cases = (
+            ({"planning": False}, "no", "no"),
+            ({"planning": True, "current_plan": {"title": "Ordinary"}}, "no", "yes"),
+            ({"planning": True, "current_proposal": {"kind": "goal"}}, "yes", "no"),
+            ({"planning": True, "current_proposal": {"kind": "plan"}}, "no", "yes"),
+        )
+
+        for mode, expected_goal, expected_plan in cases:
+            with self.subTest(mode=mode):
+                summary = repl.session_summary_text(session, mode)
+                self.assertIn(f"active goal: {expected_goal}", summary)
+                self.assertIn(f"active plan: {expected_plan}", summary)
+                self.assertIn("title: Runtime cleanup", summary)
+                self.assertIn("workspace: .", summary)
+                self.assertIn("turns: 3", summary)
 
     def test_plan_thread_id_is_separate_from_action_thread(self) -> None:
         """Planning threads should be isolated from action memory."""

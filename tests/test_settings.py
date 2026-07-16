@@ -182,6 +182,8 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("response_schema: true", text)
         self.assertIn("web_search", text)
         self.assertIn("enabled: false", text)
+        self.assertNotIn("llm_direct", text)
+        self.assertNotIn("llm_direct", loaded)
         self.assertFalse(settings.git_protection_enabled(loaded))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))
