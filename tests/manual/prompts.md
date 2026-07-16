@@ -671,6 +671,18 @@ PowerShell where available:
 Record the terminal host separately from the shell, along with its version and
 the active Textual driver.
 
+### Solid scrollbars
+
+1. Make chat history, `/settings`, the prompt panel, and the subagent panel
+   overflow vertically by shrinking the terminal or adding enough content.
+2. Scroll each panel from top to bottom with the mouse wheel and keyboard.
+3. Drag each visible scrollbar thumb and click above and below it.
+4. Inspect both ends of every thumb at several positions.
+
+Expected: Windows scrollbars use solid colored cells with no boxed, replacement,
+or fractional-block glyphs. Wheel and keyboard scrolling, thumb dragging, and
+page-region clicks retain their normal behavior.
+
 ### Enter and Shift+Enter
 
 1. Type `line one`, press left Shift+Enter, and confirm the prompt is not

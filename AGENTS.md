@@ -45,13 +45,23 @@
 
 ## Documentation
 
-- Keep `README.md` focused on user-facing usage, setup, commands, and brief
-  features.
+- Treat `README.md` as a concise user quick-start, not a changelog, behavioral
+  specification, architecture record, or test plan. Keep it focused on
+  installation, essential configuration, common commands, safety, and links to
+  deeper documentation.
+- Do not add implementation details, minor UI behavior, internal lifecycle or
+  precedence rules, exhaustive edge cases, or manual verification matrices to
+  `README.md`. Put design rationale in `ARCHITECTURE_DECISIONS.md` and manual
+  procedures in `tests/manual/`.
+- Prefer replacing or tightening existing README text over appending another
+  paragraph. Keep the file under roughly 200 lines unless essential user setup
+  genuinely requires more.
 - Keep `ARCHITECTURE_DECISIONS.md` focused on design rationale, high-level
   behavior, overwrite/precedence rules, and code pointers.
-- When changing user-visible behavior, CLI flags, settings, project resources,
-  sessions, planning mode, HITL, context handling, or UI behavior, update the
-  relevant sections of both files in the same change.
+- Update `README.md` only when a change affects installation, required
+  configuration, public CLI options, or a common user workflow. Minor visual
+  fixes and internal behavior changes normally require only architecture notes,
+  tests, or manual prompts.
 - When asked why MIRA behaves a certain way, consult
   `ARCHITECTURE_DECISIONS.md` first, then verify against the code.
 

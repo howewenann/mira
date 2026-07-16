@@ -425,6 +425,12 @@ use `CF_UNICODETEXT` directly while keeping Textual's in-process clipboard in
 sync, so copying does not depend on terminal selection mode or OSC 52 support.
 Non-Windows launches retain Textual's default driver and clipboard behavior.
 
+Windows also replaces Textual's fractional scrollbar-edge glyphs with solid
+cells. Textual still owns scrollbar sizing, colors, mouse actions, and scroll
+state; MIRA changes only the renderer's sub-cell glyph table. This avoids tofu
+or mojibake in older console/font combinations without changing non-Windows
+rendering.
+
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before

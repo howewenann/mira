@@ -67,6 +67,7 @@ from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 from ui.windows_clipboard import set_windows_clipboard
 from ui.windows_input import driver_class_for_platform
+from ui.windows_scrollbars import configure_scrollbars_for_platform
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
@@ -99,6 +100,7 @@ class MiraApp(App[None]):
         prebuilt: dict[str, Any] | None = None,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
     ) -> None:
+        configure_scrollbars_for_platform(sys.platform)
         super().__init__(driver_class=driver_class_for_platform(sys.platform))
         self.workspace = workspace.expanduser().resolve() if workspace is not None else Path.cwd()
         self.resume = resume
