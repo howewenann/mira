@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+ToolFailureFingerprint = tuple[str, str, str, str]
+
 
 @dataclass(frozen=True)
 class ToolLoadFailure:
@@ -23,6 +25,28 @@ class ToolLoadFailure:
     traceback_text: str
     missing_module: str
     suggested_requirement: str
+
+
+def tool_failure_fingerprint(
+    failure: ToolLoadFailure,
+    workspace: Path,
+) -> ToolFailureFingerprint:
+    """Return stable fields for an explicit reload's before-and-after comparison."""
+    try:
+        source = (
+            failure.source_path.expanduser()
+            .resolve()
+            .relative_to(workspace.expanduser().resolve())
+            .as_posix()
+        )
+    except (OSError, RuntimeError, ValueError):
+        source = failure.display_path
+    return (
+        source,
+        failure.exception_type,
+        failure.missing_module,
+        failure.message,
+    )
 
 
 def tool_load_failure(path: Path, workspace: Path, error: BaseException) -> ToolLoadFailure:

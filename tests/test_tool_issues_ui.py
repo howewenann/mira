@@ -40,6 +40,35 @@ def failure(
 
 
 class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_tool_failures_show_one_grouped_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for failures, expected in (
+                ([failure(workspace, "one.py", missing="alpha")], "1 project tool file could not be loaded."),
+                (
+                    [
+                        failure(workspace, "one.py", missing="alpha"),
+                        failure(workspace, "two.py", missing="beta"),
+                    ],
+                    "2 project tool files could not be loaded.",
+                ),
+            ):
+                app = make_app(workspace, tool_failures=failures)
+                app.notify = Mock()  # type: ignore[method-assign]
+                async with app.run_test():
+                    self.assertEqual(app.notify.call_count, 1)
+                    message = app.notify.call_args.args[0]
+                    self.assertIn(expected, message)
+                    self.assertIn("Open Issues or run /issues.", message)
+                    self.assertEqual(app.notify.call_args.kwargs["title"], "Custom tools unavailable")
+                    self.assertEqual(app.notify.call_args.kwargs["severity"], "warning")
+
+    async def test_startup_without_failures_does_not_toast(self) -> None:
+        app = make_app(tool_failures=[])
+        app.notify = Mock()  # type: ignore[method-assign]
+        async with app.run_test():
+            app.notify.assert_not_called()
+
     async def test_indicator_modal_grouping_close_and_command_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -132,6 +161,7 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 screen = app.screen
                 self.assertIsInstance(screen, ToolIssuesScreen)
+                app.notify = Mock()  # type: ignore[method-assign]
                 app.reload_after_tool_install = AsyncMock()  # type: ignore[method-assign]
                 screen.installing = True
                 await screen._install_finished(PipInstallResult(["alpha"], 1, "out", "network failed"))
@@ -140,6 +170,7 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(screen.query_one("#tool-issues-install", Button).disabled)
                 self.assertIn("network failed", renderable_plain(screen.query_one("#tool-issues-summary", Static)))
                 self.assertIn("stdout:", renderable_plain(screen.query_one("#tool-issues-summary", Static)))
+                app.notify.assert_not_called()
 
     async def test_success_closes_resolved_screen_and_remaining_failure_refreshes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -152,8 +183,9 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 screen = app.screen
                 self.assertIsInstance(screen, ToolIssuesScreen)
+                app.notify = Mock()  # type: ignore[method-assign]
 
-                async def resolve_all() -> None:
+                async def resolve_all(**_: object) -> None:
                     app.tool_failures = []
 
                 app._reload_runtime = AsyncMock(side_effect=resolve_all)  # type: ignore[method-assign]
@@ -162,13 +194,14 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertNotIsInstance(app.screen, ToolIssuesScreen)
                 self.assertFalse(app.query_one("#tool-issues-button", Button).display)
+                app.notify.assert_not_called()
 
                 app.tool_failures = [first]
                 app._open_tool_issues()
                 await pilot.pause()
                 screen = app.screen
 
-                async def leave_second() -> None:
+                async def leave_second(**_: object) -> None:
                     app.tool_failures = [second]
 
                 app._reload_runtime = AsyncMock(side_effect=leave_second)  # type: ignore[method-assign]
@@ -177,23 +210,53 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(app.screen, screen)
                 self.assertFalse(screen.installing)
                 self.assertEqual(screen.query_one("#tool-issues-packages", Input).value, "beta")
+                app.notify.assert_not_called()
 
-    async def test_toast_is_grouped_and_deduplicated_by_failure_set(self) -> None:
+    async def test_explicit_reload_warnings_cover_unchanged_partial_and_new_failures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             first = failure(workspace, "one.py", missing="alpha")
             second = failure(workspace, "two.py", missing="beta")
-            app = make_app(workspace, tool_failures=[])
+            third = failure(workspace, "three.py", error_type="SyntaxError")
+            app = make_app(workspace, tool_failures=[first, second])
             async with app.run_test():
-                app._notified_tool_failure_sets.clear()
                 app.notify = Mock()  # type: ignore[method-assign]
-                app.tool_failures = [first]
-                app._sync_tool_issues(notify=True)
-                app._sync_tool_issues(notify=True)
-                self.assertEqual(app.notify.call_count, 1)
-                app.tool_failures = [first, second]
-                app._sync_tool_issues(notify=True)
+                both = app._tool_failure_set()
+
+                app._notify_explicit_reload(both)
+                app._notify_explicit_reload(both)
                 self.assertEqual(app.notify.call_count, 2)
+                unchanged = app.notify.call_args.args[0]
+                self.assertIn("2 custom tool files are still unavailable.", unchanged)
+
+                app.notify.reset_mock()
+                app.tool_failures = [second]
+                app._notify_explicit_reload(both)
+                partial = app.notify.call_args.args[0]
+                self.assertIn("1 custom tool file recovered.", partial)
+                self.assertIn("1 is still unavailable.", partial)
+
+                app.notify.reset_mock()
+                app.tool_failures = [first, second, third]
+                app._notify_explicit_reload(both)
+                introduced = app.notify.call_args.args[0]
+                self.assertIn("1 new custom tool failure was detected.", introduced)
+                self.assertIn("3 custom tool files are unavailable.", introduced)
+                self.assertIn("Open Issues or run /issues.", introduced)
+                self.assertEqual(app.notify.call_args.kwargs["title"], "Reload completed")
+                self.assertEqual(app.notify.call_args.kwargs["severity"], "warning")
+
+    async def test_explicit_reload_does_not_toast_after_full_recovery_or_clean_reload(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = make_app(workspace, tool_failures=[failure(workspace, "one.py", missing="alpha")])
+            async with app.run_test():
+                app.notify = Mock()  # type: ignore[method-assign]
+                previous = app._tool_failure_set()
+                app.tool_failures = []
+                app._notify_explicit_reload(previous)
+                app._notify_explicit_reload(frozenset())
+                app.notify.assert_not_called()
 
     def test_requirement_parser_rejects_empty_shell_operators_and_pip_options(self) -> None:
         self.assertEqual(parse_requirements("alpha beta==2"), ["alpha", "beta==2"])

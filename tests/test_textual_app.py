@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from pyfiglet import Figlet
 from rich.cells import cell_len
@@ -2452,6 +2452,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(app.launch_options, launch_options)
             self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")
 
+    async def test_reload_command_uses_shared_reload(self) -> None:
+        """The slash command should present failures after the shared reload completes."""
+        app = make_app()
+        async with app.run_test():
+            app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
+            await app._handle_reload_command()
+
+        app._reload_runtime.assert_awaited_once_with()
+
     async def test_reload_without_direct_mode_remains_non_direct(self) -> None:
         """Reload should explicitly preserve the normal launch default."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
@@ -2495,6 +2504,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
+                app.notify = Mock()  # type: ignore[method-assign]
                 old_config = app.config
                 old_agent = app.agent
                 old_plan_agent = app.plan_agent
@@ -2521,6 +2531,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(app.runtime_snapshot, old_snapshot)
             self.assertIn("reload error: plan build failed", rendered)
             self.assertNotIn("Runtime reloaded", rendered)
+            self.assertFalse(
+                any(call.kwargs.get("title") == "Reload completed" for call in app.notify.call_args_list)
+            )
 
     async def test_reload_command_is_refused_while_busy(self) -> None:
         """The reload command should not rebuild agents during an active turn."""

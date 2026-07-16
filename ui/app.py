@@ -25,6 +25,7 @@ from agent.context_overflow import context_notice_rendered, pop_context_overflow
 from agent.planning.criteria import GoalCriteriaService
 from agent.planning.policy import PLANNING_STAGE_FINALIZE, PLANNING_STAGE_RESEARCH
 from agent.planning.proposals import effective_objective, proposal, proposal_title
+from agent.resources.tool_failures import ToolFailureFingerprint, tool_failure_fingerprint
 from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
 from config.settings import (
     EXECUTE_TOOL,
@@ -84,6 +85,48 @@ GitGuard = Callable[[Path, Any], Any]
 DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
 DESTRUCTIVE_CONFIRM_HINT = "Press O to confirm, C or Esc to cancel."
 DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
+
+
+def tool_reload_message(
+    previous: frozenset[ToolFailureFingerprint],
+    current: frozenset[ToolFailureFingerprint],
+) -> str:
+    """Return the concise unresolved-tool warning for an explicit reload."""
+    recovered = len(previous - current)
+    introduced = len(current - previous)
+    unresolved = len(current)
+    attention = "Open Issues or run /issues."
+
+    if introduced:
+        introduced_text = (
+            "1 new custom tool failure was detected."
+            if introduced == 1
+            else f"{introduced} new custom tool failures were detected."
+        )
+        unresolved_text = (
+            "1 custom tool file is unavailable."
+            if unresolved == 1
+            else f"{unresolved} custom tool files are unavailable."
+        )
+        return f"{introduced_text}\n{unresolved_text}\n\n{attention}"
+
+    if recovered:
+        recovered_text = (
+            "1 custom tool file recovered."
+            if recovered == 1
+            else f"{recovered} custom tool files recovered."
+        )
+        remaining_text = (
+            "1 is still unavailable." if unresolved == 1 else f"{unresolved} are still unavailable."
+        )
+        return f"{recovered_text}\n{remaining_text}\n\n{attention}"
+
+    unavailable_text = (
+        "1 custom tool file is still unavailable."
+        if unresolved == 1
+        else f"{unresolved} custom tool files are still unavailable."
+    )
+    return f"{unavailable_text}\n{attention}"
 
 
 class MiraApp(App[None]):
@@ -146,7 +189,6 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
         self.tool_failures: list[Any] = []
-        self._notified_tool_failure_sets: set[tuple[str, ...]] = set()
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
 
@@ -176,6 +218,7 @@ class MiraApp(App[None]):
         self.query_one(PromptBox).disabled = True
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
+            self._notify_startup_tool_failures()
             return
         self.query_one(ChatLog).startup_loading(workspace=str(self.workspace), state="starting...")
         self.call_after_refresh(self._start_startup_worker)
@@ -207,6 +250,7 @@ class MiraApp(App[None]):
                 self,
             )
             self._install_state(state)
+            self._notify_startup_tool_failures()
         except Exception as exc:
             error_path = self._write_error_report(exc, source="tui.startup")
             self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
@@ -254,7 +298,7 @@ class MiraApp(App[None]):
         chat.restore_session(self.session)
         self._refresh_sessions()
         self._set_status(state="ready")
-        self._sync_tool_issues(notify=True)
+        self._sync_tool_issues()
         self.action_focus_prompt()
 
     def _write_error_report(
@@ -1244,7 +1288,9 @@ class MiraApp(App[None]):
             self.system_message("finish the current turn before reloading agents", kind="warning")
             return True
 
+        previous_failures = self._tool_failure_set()
         await self._reload_runtime()
+        self._notify_explicit_reload(previous_failures)
         self.system_message("runtime reloaded", kind="info")
         return True
 
@@ -1291,7 +1337,7 @@ class MiraApp(App[None]):
             self.store.save(self.session)
         self._refresh_startup_splash()
         self._set_status(state=self.status_state)
-        self._sync_tool_issues(notify=True)
+        self._sync_tool_issues()
         return snapshot
 
     def _render_runtime_snapshot(
@@ -1996,8 +2042,8 @@ class MiraApp(App[None]):
             return
         self.push_screen(ToolIssuesScreen(self.tool_failures))
 
-    def _sync_tool_issues(self, *, notify: bool) -> None:
-        """Refresh the compact entry point, open modal, and grouped toast."""
+    def _sync_tool_issues(self) -> None:
+        """Refresh the persistent Issues entry point and any open modal."""
         if not self.is_mounted:
             return
         self._sync_tool_issues_button()
@@ -2006,16 +2052,34 @@ class MiraApp(App[None]):
                 self.screen.update_failures(self.tool_failures)
             elif not self.screen.installing:
                 self.screen.dismiss()
-        fingerprint = tuple(sorted(str(failure.identifier) for failure in self.tool_failures))
-        if notify and fingerprint and fingerprint not in self._notified_tool_failure_sets:
-            self._notified_tool_failure_sets.add(fingerprint)
-            count = len(self.tool_failures)
-            self.notify(
-                f"{count} project tool file{'s' if count != 1 else ''} could not be loaded.\n"
-                "Open Issues to repair them.",
-                title="Custom tools unavailable",
-                severity="warning",
-            )
+
+    def _tool_failure_set(self) -> frozenset[ToolFailureFingerprint]:
+        """Return the current stable failure fingerprints."""
+        return frozenset(tool_failure_fingerprint(failure, self.workspace) for failure in self.tool_failures)
+
+    def _notify_explicit_reload(self, previous: frozenset[ToolFailureFingerprint]) -> None:
+        """Report a successful explicit reload only while failures remain."""
+        current = self._tool_failure_set()
+        if not current:
+            return
+        message = tool_reload_message(previous, current)
+        self.notify(
+            message,
+            title="Reload completed",
+            severity="warning",
+        )
+
+    def _notify_startup_tool_failures(self) -> None:
+        """Show one grouped startup warning when custom tools are unavailable."""
+        count = len(self._tool_failure_set())
+        if not count:
+            return
+        self.notify(
+            f"{count} project tool file{'s' if count != 1 else ''} could not be loaded.\n"
+            "Open Issues or run /issues.",
+            title="Custom tools unavailable",
+            severity="warning",
+        )
 
     def _sync_tool_issues_button(self) -> None:
         if not self.is_mounted:
@@ -2043,11 +2107,10 @@ class MiraApp(App[None]):
             screen._sync_controls()
             return
         screen.installing = False
-        self._sync_tool_issues(notify=False)
-        if not self.tool_failures:
-            self.notify("All project tool files loaded successfully.", title="Custom tools")
-            return
         screen.update_failures(self.tool_failures)
+        self._sync_tool_issues()
+        if not self.tool_failures:
+            return
 
     @on(ListView.Selected, "#sessions")
     def select_session(self, event: ListView.Selected) -> None:
@@ -2134,7 +2197,7 @@ class MiraApp(App[None]):
         self.plan_agent = plan_agent
         self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
         self.mode.update(mode_updates)
-        self._sync_tool_issues(notify=True)
+        self._sync_tool_issues()
 
     def _build_agent_pair(self, *, config: dict[str, Any], metadata: Any | None) -> tuple[Any, Any]:
         """Build both agents without replacing the active pair."""

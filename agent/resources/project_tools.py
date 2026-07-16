@@ -20,6 +20,7 @@ def project_tools_from_module(
     source_path: Path,
     workspace: Path,
     settings: dict[str, Any] | None,
+    project_backend: Any,
 ) -> list[Any]:
     """Discover module-defined markers and wrap them as explicit StructuredTools."""
     tools: list[Any] = []
@@ -36,11 +37,14 @@ def project_tools_from_module(
         if not description:
             raise ValueError(f"@project_tool {public_name!r} must have a description or docstring")
         schema = create_schema_from_function(public_name, value)
+        path_parameters = workspace_path_parameters(inspect.signature(value))
 
         def _invoke_project_tool(
             _source_path: Path = source_path,
             _function_name: str = value.__name__,
             _public_name: str = public_name,
+            _path_parameters: frozenset[str] = path_parameters,
+            _project_backend: Any = project_backend,
             **arguments: Any,
         ) -> Any:
             return invoke_project_tool(
@@ -50,6 +54,8 @@ def project_tools_from_module(
                 arguments=arguments,
                 workspace=workspace,
                 settings=settings,
+                project_backend=_project_backend,
+                path_parameters=_path_parameters,
             )
 
         tools.append(
@@ -58,6 +64,7 @@ def project_tools_from_module(
                 name=public_name,
                 description=description,
                 args_schema=schema,
+                handle_tool_error=True,
             )
         )
         setattr(tools[-1], "__mira_project_runtime__", True)
@@ -75,6 +82,8 @@ def invoke_project_tool(
     arguments: dict[str, Any],
     workspace: Path,
     settings: dict[str, Any] | None,
+    project_backend: Any,
+    path_parameters: frozenset[str],
 ) -> Any:
     """Run one function through the configured project Python process."""
     from agent.resources import execute_env, project_environment_label, project_python_command
@@ -85,7 +94,7 @@ def invoke_project_tool(
     request = {
         "source_path": str(source_path.resolve()),
         "function_name": function_name,
-        "arguments": arguments,
+        "arguments": resolve_workspace_path_arguments(arguments, path_parameters, project_backend),
         "workspace": str(workspace.resolve()),
         "bridge_path": str(bridge_path),
     }
@@ -142,3 +151,36 @@ def project_tool_error(name: str, environment: str, error_type: str, message: st
     if details:
         lines.extend(("", "Diagnostic details:", details.rstrip()))
     return "\n".join(lines)
+
+
+def workspace_path_parameters(signature: inspect.Signature) -> frozenset[str]:
+    """Return conventional structured arguments that carry workspace paths."""
+    return frozenset(
+        name
+        for name in signature.parameters
+        if name == "path" or name == "paths" or name.endswith("_path") or name.endswith("_paths")
+    )
+
+
+def resolve_workspace_path_arguments(
+    arguments: dict[str, Any],
+    path_parameters: frozenset[str],
+    project_backend: Any,
+) -> dict[str, Any]:
+    """Translate MIRA virtual paths to host paths before crossing the child boundary."""
+    return {
+        name: resolve_workspace_path_value(value, project_backend) if name in path_parameters else value
+        for name, value in arguments.items()
+    }
+
+
+def resolve_workspace_path_value(value: Any, project_backend: Any) -> Any:
+    """Resolve leading-slash virtual paths while preserving other argument values."""
+    if isinstance(value, str):
+        if not value.startswith("/"):
+            return value
+        resolver = getattr(project_backend, "_resolve_path", None)
+        return str(resolver(value)) if callable(resolver) else value
+    if isinstance(value, list):
+        return [resolve_workspace_path_value(item, project_backend) for item in value]
+    return value

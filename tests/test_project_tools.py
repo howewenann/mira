@@ -11,8 +11,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from deepagents.backends import FilesystemBackend
-from langchain_core.tools import ToolException
-
 from agent import factory
 from agent.resources import build_resources, project_python_command
 from agent.resources.project_setup import ensure_project_examples
@@ -253,6 +251,27 @@ class ProjectToolProxyTests(unittest.TestCase):
             self.assertEqual(metadata["environment"], "System")
             self.assertEqual(tool.invoke({"value": "x", "repeat": 2}), "project:xproject:x")
 
+    def test_virtual_workspace_path_is_resolved_before_child_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools = workspace / ".mira" / "tools"
+            tools.mkdir(parents=True)
+            (workspace / "sample.txt").write_text("workspace path worked", encoding="utf-8")
+            (tools / "path_tool.py").write_text(
+                "from mira_tool_api import project_tool\n"
+                "@project_tool\ndef read_project_file(path: str) -> str:\n"
+                '    """Read a workspace file."""\n'
+                "    from pathlib import Path\n"
+                "    return Path(path).read_text(encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            tool = next(
+                tool
+                for tool in build_resources(workspace, create_examples=False).tools
+                if tool.name == "read_project_file"
+            )
+            self.assertEqual(tool.invoke({"path": "/sample.txt"}), "workspace path worked")
+
     def test_marked_original_in_tools_export_does_not_create_second_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -289,11 +308,10 @@ class ProjectToolProxyTests(unittest.TestCase):
             resources = build_resources(workspace, create_examples=False)
             by_name = {tool.name: tool for tool in resources.tools}
             self.assertEqual(by_name["make_set"].invoke({}), "{1, 2}")
-            with self.assertRaises(ToolException) as caught:
-                by_name["explode"].invoke({})
-            self.assertIn("explode failed in the project environment", str(caught.exception))
-            self.assertIn("Runtime: Project", str(caught.exception))
-            self.assertIn("RuntimeError: child boom", str(caught.exception))
+            error = by_name["explode"].invoke({})
+            self.assertIn("explode failed in the project environment", error)
+            self.assertIn("Runtime: Project", error)
+            self.assertIn("RuntimeError: child boom", error)
 
     def test_async_project_function_is_awaited_in_child(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -115,7 +115,13 @@ def tools_from_file(
     module = import_python_file(path, "mira_resource_tools")
     tools = module_tools(module)
     if discover_project_tools:
-        project_tools = project_tools_from_module(module, path, workspace or path.parent, settings)
+        project_tools = project_tools_from_module(
+            module,
+            path,
+            workspace or path.parent,
+            settings,
+            project_backend,
+        )
         tools.extend(project_tools)
     declared = getattr(module, "TOOLS", [])
     if declared:

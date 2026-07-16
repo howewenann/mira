@@ -724,6 +724,32 @@ Run every scenario from a disposable Git workspace with the current checkout:
 conda run --no-capture-output -n ai_agents python -m cli.main --workspace <workspace>
 ```
 
+### Toast behavior
+
+Run these checks alongside the scenarios below:
+
+1. Start with one missing project-tool dependency. Confirm startup produces one
+   `Custom tools unavailable` warning containing `Open Issues or run /issues.`,
+   the toast is not clickable, and both `Issues 1` and `/issues` open the repair
+   screen. Several broken files must still produce only one grouped toast.
+2. Leave one failure unresolved and run `/reload` twice. Confirm each explicit
+   reload produces `Reload completed` and `1 custom tool file is still
+   unavailable.` without adding the warning to chat history.
+3. Fix the only failure outside Issues, then wait and continue using MIRA.
+   Confirm the tool does not appear automatically and `Issues 1` remains. Run
+   `/reload`; confirm there is no recovery toast, `Issues 1` disappears,
+   `/tools` shows the recovered tool, and the rebuilt agent can call it.
+4. Start with two failures, repair one externally, and run `/reload`. Confirm one
+   warning reports one recovered file and one still unavailable, while the
+   indicator changes from `Issues 2` to `Issues 1`.
+5. Repair all failures with Install All and Reload. Confirm progress remains in
+   the modal, the modal closes, the indicator disappears, and no toast appears.
+6. Leave a syntax error after Install All and Reload. Confirm the modal stays
+   open with refreshed failures and package input, and no toast appears.
+7. Add a new broken tool before `/reload`. Confirm one warning reports the new
+   failure and current unresolved count, while paths and tracebacks remain only
+   in Issues.
+
 ### 1. Missing MIRA dependency does not block startup
 
 Create `local_packages/mira_manual_dep/pyproject.toml` for a setuptools project

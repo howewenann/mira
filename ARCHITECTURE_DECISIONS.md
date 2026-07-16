@@ -217,7 +217,10 @@ to inspect.
   that finish loading enter merge, settings, approval, schema, or agent paths;
   a failed file never creates a disabled placeholder. `/reload` retries all
   files, and one-shot mode prints one grouped warning while continuing with the
-  successful subset.
+  successful subset. The TUI shows one grouped startup warning and keeps
+  unresolved failures behind its persistent Issues entry point. Explicit
+  `/reload` repeats a warning while failures remain. Recovery and
+  Issues-driven installation/reload do not toast.
 - Standard LangChain `@tool` runs in MIRA's interpreter. The dependency-free
   `mira_tool_api.project_tool` decorator is an explicit alternative: it leaves
   the original callable unchanged and adds versioned metadata. The loader
@@ -232,7 +235,10 @@ to inspect.
   importing the source. This exposes neither MIRA's site-packages nor a second
   environment setting. JSON-compatible results are preserved; other values
   fall back to `repr`, and child exceptions become normal project-runtime tool
-  errors.
+  errors. Before crossing the child boundary, conventional structured path
+  arguments (`path`, `*_path`, `paths`, and `*_paths`) reuse the project
+  backend's virtual-path resolver so `/file` refers to the workspace rather
+  than the host filesystem root.
 - A normal `@tool` that delays a missing import until its function body loads
   successfully and remains outside startup repair; that invocation follows the
   ordinary tool-error path.
