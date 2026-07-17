@@ -1336,13 +1336,14 @@ class ProposalBubble(Vertical):
     """Goal or rubric-enabled plan with separately rendered criteria."""
 
     def __init__(self, value: dict[str, Any], *, active: bool, status: str = "pending") -> None:
-        kind = "plan-review" if value.get("kind") == "plan" else "goal"
+        complete = isinstance(value.get("plan"), dict)
+        kind = "plan-review" if complete else "goal"
         super().__init__(classes=f"message proposal {kind}")
         self.value = value
         self.status = status
         self.active = active
         self._last_action_id = f"proposal-implement-{self.proposal_id}"
-        title = "plan + goal" if value.get("kind") == "plan" else "goal"
+        title = "plan + goal" if complete else "legacy goal"
         self.border_title = title if status == "pending" else f"{title} - {status}"
 
     @property
@@ -1387,7 +1388,7 @@ class ProposalBubble(Vertical):
     def resolve(self, status: str) -> None:
         self.status = status
         self.active = False
-        base = "plan + goal" if self.value.get("kind") == "plan" else "goal"
+        base = "plan + goal" if isinstance(self.value.get("plan"), dict) else "legacy goal"
         self.border_title = f"{base} - {status}"
         for button in self.query(Button):
             button.disabled = True
@@ -1398,6 +1399,7 @@ class ProposalBubble(Vertical):
         text = Text()
         plan = self.value.get("plan")
         if isinstance(plan, dict):
+            text.append("PLAN\n", style="bold cyan")
             text.append(str(plan.get("title") or "Implementation Plan"), style="bold")
             text.append("\n\n")
             for heading, key in (

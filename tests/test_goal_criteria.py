@@ -21,6 +21,20 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         messages = model.ainvoke.await_args.args[0]
         self.assertIn("Do not create an execution plan", messages[0].content)
         self.assertIn("<objective>\nCompare two options\n</objective>", messages[1].content)
+        self.assertNotIn("<research_context>", messages[1].content)
+
+    async def test_generation_receives_only_bounded_research_handoff(self) -> None:
+        model = type("Model", (), {})()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content="- Existing storage is reused"))
+        with patch("agent.planning.criteria.get_llm", return_value=model):
+            await GoalCriteriaService({}).generate(
+                "Finish persistence",
+                "Sessions are JSON-backed and normalized on save.",
+            )
+
+        messages = model.ainvoke.await_args.args[0]
+        self.assertIn("<research_context>\nSessions are JSON-backed", messages[1].content)
+        self.assertIn("objective is authoritative", messages[0].content.lower())
 
     async def test_revision_has_no_plan_input_and_handles_plan_only_feedback(self) -> None:
         model = type("Model", (), {})()
@@ -31,6 +45,7 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
                 "Compare two options",
                 previous,
                 "Make the plan shorter",
+                "The current proposal already uses the session store.",
             )
 
         self.assertEqual(result, previous)
@@ -38,6 +53,7 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("feedback may mention \"the plan\"", messages[0].content)
         self.assertIn("<previous_criteria>", messages[1].content)
         self.assertNotIn("previous_plan", messages[1].content)
+        self.assertIn("<research_context>", messages[1].content)
 
     async def test_blank_model_response_is_rejected(self) -> None:
         model = type("Model", (), {})()

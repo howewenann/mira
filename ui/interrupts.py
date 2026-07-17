@@ -56,6 +56,14 @@ def plan_request(interrupt: Any) -> dict[str, Any]:
     return normalize_plan(value if isinstance(value, dict) else {})
 
 
+def research_summary_request(interrupt: Any, *, limit: int = 4000) -> str:
+    """Extract the bounded research handoff from prepare_goal."""
+    value = getattr(interrupt, "value", interrupt)
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("research_summary") or "").strip()[:limit]
+
+
 def normalize_plan(value: dict[str, Any]) -> dict[str, Any]:
     """Return a compact structured plan from an interrupt payload."""
     title = compact_text(value.get("title")) or "Implementation Plan"

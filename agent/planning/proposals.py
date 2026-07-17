@@ -1,8 +1,10 @@
-"""Small helpers for explicit goal and plan proposal state."""
+"""Small helpers for canonical goal-and-plan proposal state."""
 
 from __future__ import annotations
 
 from typing import Any
+
+PROPOSAL_ORIGINS = {"plan_mode", "goal_command"}
 
 
 def effective_objective(original: str, decisions: list[dict[str, str]] | None = None) -> str:
@@ -22,23 +24,27 @@ def effective_objective(original: str, decisions: list[dict[str, str]] | None = 
 def proposal(
     *,
     proposal_id: str,
-    kind: str,
+    origin: str,
     original_objective: str,
     decisions: list[dict[str, str]] | None,
     criteria: str,
-    plan: dict[str, Any] | None,
+    plan: dict[str, Any],
     rubric_iterations: int,
 ) -> dict[str, Any]:
-    """Return separately recoverable proposal fields for review and persistence."""
+    """Return the complete proposal shape used by both entry paths."""
+    if origin not in PROPOSAL_ORIGINS:
+        raise ValueError(f"unsupported proposal origin: {origin}")
+    if not isinstance(plan, dict):
+        raise TypeError("new proposals require a structured plan")
     resolved = [dict(item) for item in decisions or []]
     return {
         "id": proposal_id,
-        "kind": "plan" if kind == "plan" else "goal",
         "original_objective": str(original_objective or "").strip(),
         "objective": effective_objective(original_objective, resolved),
         "resolved_decisions": resolved,
         "criteria": str(criteria or "").strip(),
-        "plan": dict(plan) if isinstance(plan, dict) else None,
+        "plan": dict(plan),
+        "origin": origin,
         "rubric_iterations": int(rubric_iterations),
     }
 

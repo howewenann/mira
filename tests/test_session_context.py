@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
+from session.goals import activate_goal, clear_active_goal, current_active_goal, update_active_goal_after_turn
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from session.store import SessionStore
@@ -227,13 +228,130 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at",
                 "turns",
                 "dashboard",
+                "active_goal",
                 "events",
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
+        self.assertIsNone(record["active_goal"])
         self.assertNotIn("llm_direct", record)
+
+    def test_active_goal_survives_save_load_and_is_not_inferred_from_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            record = store.new(session_id="thread-1", workspace=Path("workspace"))
+            record["events"] = [
+                {
+                    "id": 1,
+                    "type": "proposal",
+                    "proposal": {
+                        "id": "proposal-1",
+                        "objective": "Build search.",
+                        "criteria": "- Search works.",
+                        "plan": {"title": "Search"},
+                    },
+                    "status": "approved for implementation",
+                }
+            ]
+            store.save(record)
+            self.assertIsNone(store.read(store.path("thread-1"))["active_goal"])
+
+            activate_goal(
+                record,
+                {
+                    "id": "proposal-1",
+                    "original_objective": "Build search.",
+                    "objective": "Build search.",
+                    "resolved_decisions": [],
+                    "criteria": "- Search works.",
+                    "plan": {"title": "Search", "summary": ["Add search."]},
+                    "origin": "goal_command",
+                    "rubric_iterations": 3,
+                },
+            )
+            store.save(record)
+            restored = store.read(store.path("thread-1"))
+
+        self.assertEqual(restored["active_goal"]["objective"], "Build search.")
+        self.assertEqual(restored["active_goal"]["criteria"], "- Search works.")
+        self.assertEqual(restored["active_goal"]["plan"]["title"], "Search")
+        self.assertEqual(restored["active_goal"]["status"], "active")
+
+    def test_active_goal_status_transitions_preserve_history(self) -> None:
+        record = {
+            "events": [
+                {"type": "proposal", "proposal": {"id": "proposal-1"}, "status": "approved for implementation"}
+            ]
+        }
+        proposal = {
+            "id": "proposal-1",
+            "objective": "Write report.",
+            "criteria": "- Report exists.",
+            "plan": {"title": "Report"},
+            "origin": "plan_mode",
+            "rubric_iterations": 2,
+        }
+        activate_goal(record, proposal)
+        update_active_goal_after_turn(record, "max_iterations_reached")
+        self.assertEqual(current_active_goal(record)["last_rubric_status"], "max_iterations_reached")
+        update_active_goal_after_turn(record, "satisfied")
+        self.assertIsNone(current_active_goal(record))
+        self.assertEqual(record["active_goal"]["status"], "complete")
+        self.assertEqual(record["events"][0]["status"], "complete")
+
+        activate_goal(record, {**proposal, "id": "proposal-2"})
+        cleared = clear_active_goal(record)
+        self.assertEqual(cleared["status"], "cleared")
+        self.assertIsNone(current_active_goal(record))
+
+    def test_new_active_goal_explicitly_supersedes_previous_proposal(self) -> None:
+        record = {
+            "events": [
+                {"type": "proposal", "proposal": {"id": "proposal-1"}, "status": "approved for implementation"},
+                {"type": "proposal", "proposal": {"id": "proposal-2"}, "status": "approved for implementation"},
+            ]
+        }
+        base = {
+            "objective": "Do work.",
+            "criteria": "- Work is done.",
+            "plan": {"title": "Work"},
+            "origin": "goal_command",
+            "rubric_iterations": 3,
+        }
+        activate_goal(record, {**base, "id": "proposal-1"})
+        activate_goal(record, {**base, "id": "proposal-2"})
+
+        self.assertEqual(record["events"][0]["status"], "superseded")
+        self.assertEqual(record["active_goal"]["proposal_id"], "proposal-2")
+
+    def test_action_resume_context_can_exclude_duplicate_active_proposal(self) -> None:
+        proposal = {
+            "id": "proposal-1",
+            "objective": "Build search.",
+            "criteria": "- Search works.",
+            "plan": {"title": "Search"},
+            "origin": "goal_command",
+            "rubric_iterations": 3,
+        }
+        record = {
+            "active_goal": {
+                **proposal,
+                "proposal_id": "proposal-1",
+                "status": "active",
+                "last_rubric_status": "max_iterations_reached",
+            },
+            "events": [
+                {"id": 1, "type": "proposal", "proposal": proposal, "status": "approved for implementation"}
+            ],
+        }
+
+        planning_context = context.build_resume_context(record)
+        action_context = context.build_resume_context(record, exclude_active_goal=True)
+
+        self.assertIn("Recent goal-driven proposals", planning_context)
+        self.assertNotIn("Recent goal-driven proposals", action_context)
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))

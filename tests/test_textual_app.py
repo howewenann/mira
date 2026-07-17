@@ -915,12 +915,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         proposal = {
             "id": "proposal-1",
-            "kind": "goal",
+            "origin": "goal_command",
             "original_objective": "Add ranked search.",
             "objective": "Add ranked search.",
             "resolved_decisions": [],
             "criteria": "- Results are ranked.\n- Focused tests pass.",
-            "plan": None,
+            "plan": {
+                "title": "Ranked search",
+                "summary": ["Add ranked search."],
+                "key_changes": ["Rank results."],
+                "test_plan": ["Run focused tests."],
+                "assumptions": ["No additional assumptions."],
+            },
             "rubric_iterations": 3,
         }
 
@@ -933,6 +939,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             proposal_blocks = list(chat.query(".proposal"))
             self.assertEqual(len(proposal_blocks), 1)
             proposal_text = renderable_plain(proposal_blocks[0].query_one(".proposal-body", Static))
+            self.assertIn("PLAN", proposal_text)
             self.assertIn("GOAL", proposal_text)
             self.assertIn("Add ranked search.", proposal_text)
             self.assertIn("DEFINITION OF DONE", proposal_text)
@@ -975,16 +982,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "planning": True,
                         "rubric_enabled": True,
-                        "active_objective": "Add ranked search.",
-                        "resolved_decisions": [{"question": "Backend?", "answer": "SQLite"}],
+                        "proposal_run": {
+                            "origin": "plan_mode",
+                            "original_objective": "Add ranked search.",
+                            "resolved_decisions": [{"question": "Backend?", "answer": "SQLite"}],
+                            "stage": "research",
+                            "criteria": "",
+                        },
                         "planning_stage": "research",
                     }
                 )
-                resume = await app.prepare_goal({"type": "prepare_goal"})
+                resume = await app.prepare_goal({"type": "prepare_goal", "research_summary": "Existing index is SQLite."})
 
         self.assertEqual(app.mode["planning_stage"], "finalize")
-        self.assertEqual(app.mode["pending_criteria"], "- Ranked search works.")
+        self.assertEqual(app.mode["proposal_run"]["criteria"], "- Ranked search works.")
         self.assertIn("Resolved planning decisions", service.generate.await_args.args[0])
+        self.assertEqual(service.generate.await_args.args[1], "Existing index is SQLite.")
         self.assertIn("<definition_of_done>\n- Ranked search works.", resume)
 
     async def test_prepare_goal_shows_definition_and_plan_spinners(self) -> None:
@@ -993,7 +1006,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         service = type("CriteriaService", (), {})()
 
-        async def generate(_objective: str) -> str:
+        async def generate(_objective: str, _research_context: str = "") -> str:
             started.set()
             await release.wait()
             return "- Ranked search works."
@@ -1007,8 +1020,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "planning": True,
                         "rubric_enabled": True,
-                        "active_objective": "Add ranked search.",
-                        "resolved_decisions": [],
+                        "proposal_run": {
+                            "origin": "plan_mode",
+                            "original_objective": "Add ranked search.",
+                            "resolved_decisions": [],
+                            "stage": "research",
+                            "criteria": "",
+                        },
                         "planning_stage": "research",
                     }
                 )
@@ -1026,6 +1044,133 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("drafting plan...", renderable_plain(app.query_one(ChatLog).children[-1]))
                 app.finish_turn()
                 app.busy = False
+
+    async def test_goal_command_uses_transient_proposal_run_without_switching_mode(self) -> None:
+        app = make_app()
+        captured: dict[str, Any] = {}
+
+        async def run_proposal(**kwargs: Any) -> None:
+            captured.update(dict(kwargs["mode"]["proposal_run"]))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.mode["rubric_enabled"] = True
+            with patch("ui.app.run_user_turn", side_effect=run_proposal) as run:
+                await app._run_goal_command("Write a professional announcement.")
+
+        self.assertFalse(app.mode["planning"])
+        self.assertIsNone(app.mode["proposal_run"])
+        self.assertEqual(captured["origin"], "goal_command")
+        self.assertTrue(captured["explicit"])
+        self.assertEqual(run.await_args.kwargs["plan_agent"], app.plan_agent)
+        self.assertEqual(run.await_args.kwargs["display_text"], "/goal Write a professional announcement.")
+
+    async def test_present_plan_builds_same_complete_proposal_for_goal_origin(self) -> None:
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Announcement",
+            "summary": ["Rewrite the announcement."],
+            "key_changes": ["Use a professional tone."],
+            "test_plan": ["Review the final copy."],
+            "assumptions": ["Keep the original facts."],
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.mode.update(
+                {
+                    "rubric_enabled": True,
+                    "proposal_run": {
+                        "origin": "goal_command",
+                        "original_objective": "Rewrite this announcement.",
+                        "resolved_decisions": [],
+                        "criteria": "- The announcement is professional.",
+                        "stage": "finalize",
+                    },
+                }
+            )
+            await app.present_plan(interrupt)
+            await pilot.pause()
+
+        value = app.mode["current_proposal"]
+        self.assertEqual(value["origin"], "goal_command")
+        self.assertIsInstance(value["plan"], dict)
+        self.assertNotIn("kind", value)
+        self.assertEqual(value["criteria"], "- The announcement is professional.")
+
+    async def test_approved_proposal_activates_and_clear_preserves_event(self) -> None:
+        app = make_app()
+        value = {
+            "id": "proposal-1",
+            "origin": "goal_command",
+            "original_objective": "Write a report.",
+            "objective": "Write a report.",
+            "resolved_decisions": [],
+            "criteria": "- The report exists.",
+            "plan": {"title": "Report", "summary": ["Write it."]},
+            "rubric_iterations": 3,
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._present_proposal(value)
+            await pilot.pause()
+            app._approve_current_proposal(value)
+            self.assertEqual(app.session["active_goal"]["status"], "active")
+            app._clear_active_goal()
+
+        self.assertEqual(app.session["active_goal"]["status"], "cleared")
+        proposal_event = next(event for event in app.session["events"] if event.get("type") == "proposal")
+        self.assertEqual(proposal_event["status"], "cleared")
+
+    async def test_proposal_discard_navigation_follows_origin(self) -> None:
+        app = make_app()
+
+        def value(proposal_id: str, origin: str) -> dict[str, Any]:
+            return {
+                "id": proposal_id,
+                "origin": origin,
+                "original_objective": "Do work.",
+                "objective": "Do work.",
+                "resolved_decisions": [],
+                "criteria": "- Work is done.",
+                "plan": {"title": "Work", "summary": ["Do it."]},
+                "rubric_iterations": 3,
+            }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            goal_value = value("proposal-1", "goal_command")
+            app._present_proposal(goal_value)
+            await pilot.pause()
+            await app._handle_proposal_action("discard", "proposal-1")
+            self.assertFalse(app.mode["planning"])
+
+            plan_value = value("proposal-2", "plan_mode")
+            app._present_proposal(plan_value)
+            await pilot.pause()
+            await app._handle_proposal_action("discard", "proposal-2")
+            self.assertTrue(app.mode["planning"])
+
+    async def test_legacy_goal_only_proposal_replays_without_actions(self) -> None:
+        app = make_app()
+        legacy = {
+            "id": "legacy-1",
+            "kind": "goal",
+            "original_objective": "Legacy work.",
+            "objective": "Legacy work.",
+            "criteria": "- Legacy work is done.",
+            "plan": None,
+            "rubric_iterations": 3,
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.present_proposal(legacy, active=False, status="approved for implementation")
+            await pilot.pause()
+
+            bubble = list(chat.query(".proposal"))[-1]
+            self.assertIn("Original objective", renderable_plain(bubble.query_one(".proposal-body", Static)))
+            self.assertEqual(len(bubble.query(".proposal-action")), 0)
 
     async def test_cancel_turn_detaches_reasoning_and_assistant_blocks(self) -> None:
         """New streamed output after cancellation should start fresh main bubbles."""
@@ -3217,12 +3362,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._present_proposal(
                     {
                         "id": "proposal-1",
-                        "kind": "goal",
+                        "origin": "goal_command",
                         "original_objective": "Add search.",
                         "objective": "Add search.",
                         "resolved_decisions": [],
                         "criteria": "- Search works.",
-                        "plan": None,
+                        "plan": {"title": "Search", "summary": ["Add search."]},
                         "rubric_iterations": 3,
                     }
                 )

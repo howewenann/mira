@@ -22,6 +22,7 @@ from config.runtime import RuntimeSnapshot
 from runtime import runner
 from runtime.context_usage import record_deepagents_context_tokens
 from ui import repl
+from ui.interrupts import research_summary_request
 from ui.runtime_snapshot import resources_table, runtime_report, tools_table
 
 
@@ -993,11 +994,16 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 mode=enabled,
                 text="ordinary enabled turn",
             )
-            enabled["approved_proposal"] = {
-                "kind": "goal",
+            session["active_goal"] = {
+                "proposal_id": "proposal-1",
+                "id": "proposal-1",
                 "objective": "Build it.",
                 "criteria": "- It works.",
-                "plan": None,
+                "plan": {"title": "Build", "summary": ["Build it."]},
+                "origin": "goal_command",
+                "rubric_iterations": 4,
+                "status": "active",
+                "last_rubric_status": "",
             }
             await repl.run_user_turn(
                 agent="action-agent",
@@ -1303,14 +1309,26 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             "turns": 3,
         }
         cases = (
-            ({"planning": False}, "no", "no"),
-            ({"planning": True, "current_plan": {"title": "Ordinary"}}, "no", "yes"),
-            ({"planning": True, "current_proposal": {"kind": "goal"}}, "yes", "no"),
-            ({"planning": True, "current_proposal": {"kind": "plan"}}, "no", "yes"),
+            ({"planning": False}, None, "no", "no"),
+            ({"planning": True, "current_plan": {"title": "Ordinary"}}, None, "no", "yes"),
+            ({"planning": True, "current_proposal": {"plan": {"title": "Proposal"}}}, None, "no", "yes"),
+            (
+                {"planning": False},
+                {
+                    "proposal_id": "proposal-1",
+                    "objective": "Build it.",
+                    "criteria": "- Done.",
+                    "plan": {"title": "Build"},
+                    "status": "active",
+                },
+                "yes",
+                "yes",
+            ),
         )
 
-        for mode, expected_goal, expected_plan in cases:
+        for mode, active_goal, expected_goal, expected_plan in cases:
             with self.subTest(mode=mode):
+                session["active_goal"] = active_goal
                 summary = repl.session_summary_text(session, mode)
                 self.assertIn(f"active goal: {expected_goal}", summary)
                 self.assertIn(f"active plan: {expected_plan}", summary)
@@ -1452,9 +1470,120 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("<objective>\nBuild search.\n</objective>", text)
         self.assertIn("<previous_plan>\nTitle: Search", text)
-        self.assertIn("<definition_of_done>\n- Ranked results are returned.", text)
+        self.assertIn("<previous_definition_of_done>\n- Ranked results are returned.", text)
         self.assertIn("<user_feedback>\nMake the plan shorter.\n</user_feedback>", text)
-        self.assertIn("If no plan change is required, return the previous plan unchanged.", text)
+        self.assertIn("then call prepare_goal", text)
+
+    def test_prepare_goal_research_handoff_is_bounded(self) -> None:
+        summary = research_summary_request(
+            {"type": "prepare_goal", "research_summary": "x" * 5000}
+        )
+
+        self.assertEqual(len(summary), 4000)
+
+    async def test_explicit_goal_proposal_uses_plan_agent_without_persistent_plan_mode(self) -> None:
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0}
+        mode = repl.initial_mode(
+            "action-agent",
+            "plan-agent",
+            {"system": {"rubric": {"enabled": True, "max_iterations": 3}}},
+        )
+        mode["proposal_run"] = {
+            "origin": "goal_command",
+            "thread_id": "thread-1:plan:1",
+            "stage": "research",
+            "explicit": True,
+        }
+        captured: dict[str, Any] = {}
+
+        async def fake_run_turn(**kwargs: Any) -> runner.TurnResult:
+            captured.update(kwargs)
+            return runner.TurnResult()
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="Write an announcement.",
+            )
+
+        self.assertFalse(mode["planning"])
+        self.assertEqual(captured["agent"], "plan-agent")
+        self.assertIn("Do not classify it as SAFE_CONVERSATION", captured["text"])
+        self.assertIn("call prepare_goal immediately", captured["text"])
+
+    async def test_active_goal_continues_after_exhaustion_and_completes_when_satisfied(self) -> None:
+        renderer = RecordingRenderer()
+        session = {
+            "id": "thread-1",
+            "workspace": ".",
+            "turns": 0,
+            "active_goal": {
+                "proposal_id": "proposal-1",
+                "objective": "Build search.",
+                "criteria": "- Search works.",
+                "plan": {"title": "Search", "summary": ["Add search."]},
+                "origin": "goal_command",
+                "rubric_iterations": 2,
+                "status": "active",
+                "last_rubric_status": "",
+            },
+            "events": [],
+        }
+        mode = repl.initial_mode(
+            "action-agent",
+            "plan-agent",
+            {"system": {"rubric": {"enabled": True, "max_iterations": 2}}},
+        )
+        statuses = iter(("max_iterations_reached", "satisfied", ""))
+        calls: list[dict[str, Any]] = []
+
+        async def fake_run_turn(**kwargs: Any) -> runner.TurnResult:
+            calls.append(kwargs)
+            return runner.TurnResult(rubric_status=next(statuses))
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="Continue where we left off.",
+            )
+            self.assertEqual(session["active_goal"]["status"], "active")
+            self.assertEqual(session["active_goal"]["last_rubric_status"], "max_iterations_reached")
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="Continue.",
+            )
+            self.assertEqual(session["active_goal"]["status"], "complete")
+            await repl.run_user_turn(
+                agent="action-agent",
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="Unrelated question.",
+            )
+
+        self.assertEqual(calls[0]["rubric"], "- Search works.")
+        self.assertEqual(calls[1]["rubric"], "- Search works.")
+        self.assertIn("<approved_plan>", calls[1]["text"])
+        self.assertIsNone(calls[2]["rubric"])
+        self.assertEqual(calls[2]["agent"], "action-agent")
 
     async def test_plans_command_is_removed(self) -> None:
         """The old saved-plan command should no longer be handled specially."""

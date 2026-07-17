@@ -91,7 +91,8 @@ it only with a trusted local endpoint.
 | Start a new saved chat | `/new-chat` |
 | Enter planning mode | `/plan` |
 | Return to action mode | `/act` |
-| Create a graded goal | `/goal <prompt>` |
+| Review a graded Plan + Goal proposal | `/goal <prompt>` |
+| Show or clear the active goal | `/goal show`, `/goal clear` |
 | Compact older context | `/compact` |
 | Reload configuration and resources | `/reload` |
 | Repair unavailable custom tools | `/issues` |
@@ -100,8 +101,11 @@ Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 `/skills`, and `/subagents`. Destructive cleanup commands require confirmation
 and are listed in `/help`.
 
-Planning mode is read-only. Review the generated plan, then choose Implement,
-Revise, or Discard. Rubric grading and `/goal` are opt-in through `/settings`.
+Planning mode is read-only. With rubric grading enabled, `/plan` implementation
+requests and one-shot `/goal` requests share the same Plan + Definition of Done
+review. Approved goals remain active across turns and session resumes until
+satisfied, cleared, or superseded. Rubric grading and proposal creation through
+`/goal` are opt-in through `/settings`.
 
 ## Project Resources
 

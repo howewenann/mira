@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from session.dashboard import normalize_dashboard
+from session.goals import normalize_active_goal
 from runtime.tool_events import CONTROL_TOOLS
 
 UNTITLED_SESSION = "Untitled session"
@@ -28,6 +29,7 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
         "turns": int(record.get("turns") or 0),
         "dashboard": normalize_dashboard(record.get("dashboard")),
+        "active_goal": normalize_active_goal(record.get("active_goal")),
         "events": normalize_events(record.get("events")),
     }
 
@@ -213,13 +215,17 @@ def normalize_proposals(value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, dict):
             continue
         plan = value.get("plan") if isinstance(value.get("plan"), dict) else None
+        raw_decisions = value.get("resolved_decisions")
+        decisions = raw_decisions if isinstance(raw_decisions, list) else []
         proposals.append(
             {
                 "id": compact_line(value.get("id") or f"proposal-{item['id']}"),
-                "kind": "plan" if value.get("kind") == "plan" else "goal",
+                "kind": "plan" if value.get("kind") == "plan" or plan is not None else "goal",
+                "origin": compact_line(value.get("origin")),
                 "status": compact_line(item.get("status") or "pending"),
                 "original_objective": compact_text(value.get("original_objective")),
                 "objective": compact_text(value.get("objective")),
+                "resolved_decisions": [dict(decision) for decision in decisions if isinstance(decision, dict)],
                 "criteria": compact_text(value.get("criteria")),
                 "plan": plan,
                 "rubric_iterations": bounded_positive_int(value.get("rubric_iterations"), default=3, maximum=20),
@@ -334,10 +340,14 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
     return False
 
 
-def build_resume_context(record: dict[str, Any]) -> str:
+def build_resume_context(record: dict[str, Any], *, exclude_active_goal: bool = False) -> str:
     compactions = normalize_compactions(record.get("events"))
     plans = normalize_plans(record.get("events"))[-RESUME_PLAN_LIMIT:]
-    proposals = normalize_proposals(record.get("events"))[-RESUME_PROPOSAL_LIMIT:]
+    proposals = normalize_proposals(record.get("events"))
+    active_goal = normalize_active_goal(record.get("active_goal"))
+    if exclude_active_goal and active_goal and active_goal.get("status") == "active":
+        proposals = [value for value in proposals if value["id"] != active_goal["proposal_id"]]
+    proposals = proposals[-RESUME_PROPOSAL_LIMIT:]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
     if not compactions and not plans and not proposals and not messages:
         return ""
@@ -366,11 +376,16 @@ def build_resume_context(record: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def with_resume_context(session: dict[str, Any], text: str) -> str:
+def with_resume_context(
+    session: dict[str, Any],
+    text: str,
+    *,
+    exclude_active_goal: bool = False,
+) -> str:
     if not session.pop("resume_context_pending", False):
         return text
 
-    context = build_resume_context(session)
+    context = build_resume_context(session, exclude_active_goal=exclude_active_goal)
     if not context:
         return text
     return f"{context}\n\nCurrent user request:\n{text}"
@@ -434,7 +449,8 @@ def plan_context_text(plan: dict[str, Any]) -> str:
 
 def proposal_context_text(value: dict[str, Any]) -> str:
     """Return separately labelled objective, criteria, and optional plan context."""
-    lines = [f"{value['id']} ({value['status']}, {value['kind']})"]
+    label = value.get("origin") or value.get("kind") or "legacy"
+    lines = [f"{value['id']} ({value['status']}, {label})"]
     lines.extend(["Objective:", value["objective"], "Definition of Done:", value["criteria"]])
     plan = value.get("plan")
     if isinstance(plan, dict):

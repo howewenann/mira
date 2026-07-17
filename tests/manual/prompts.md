@@ -711,7 +711,7 @@ mock models for deterministic criteria revision and iteration-cap behavior, and
 also run scenario 2 once with a real locally configured MIRA model where
 practical.
 
-### 1. Disabled compatibility
+### Disabled compatibility precheck
 
 Leave Rubric Middleware disabled in `/settings`, then enter:
 
@@ -724,22 +724,57 @@ proposal event is created. Enter `/plan` and plan the same task. The legacy plan
 bubble and single planning flow remain unchanged, with no Definition of Done or
 visible `prepare_goal` control.
 
-### 2. Goal proposal and implementation
+### 1. Ordinary action prompt
+
+In action mode, enter:
+
+```text
+Explain the difference between a goal and a plan.
+```
+
+Expected: a direct action-agent response with no proposal, planning research,
+criteria generation, or rubric grading.
+
+### 2. Simple goal with no research
 
 Enable Rubric Middleware, leave maximum iterations at 3, then enter:
 
 ```text
-/goal create palindrome.py with a typed is_palindrome function and focused tests
+/goal Write a short professional event announcement.
 ```
 
-Expected: a goal bubble separately shows the original objective, Markdown
-Definition of Done, and `Rubric iterations: 3`. Choose Implement. The normal
-action agent receives the effective objective plus rubric criteria, rubric
-activity updates one TUI block in place, passes are numbered from 1, and no
-`rubric_grader` tool appears. While criteria are being generated, an animated
-`drafting Definition of Done...` block remains visible.
+Expected: the planning agent may call `prepare_goal` immediately with an empty
+research summary. No file or web research is required. One combined Plan +
+Definition of Done bubble appears, the status remains action mode, and Implement
+runs through the action agent.
 
-### 3. Goal criteria-only revision
+### 3. Contextual goal
+
+```text
+/goal Finish the current session-resume implementation.
+```
+
+Expected: targeted read-only inspection precedes `prepare_goal`; the bounded
+research summary contains only material facts, and no write occurs before
+Implement.
+
+### 4. Persistent plan mode
+
+Enter `/plan`, submit a substantial implementation request, and verify the same
+combined proposal UI appears while planning mode remains persistent until
+Implement or `/act`.
+
+### 5. Plan-mode safe conversation
+
+Start a fresh planning turn and enter:
+
+```text
+Why is the current implementation structured this way?
+```
+
+Expected: a normal read-only response with no proposal or criteria generation.
+
+### 6. Revision without research
 
 Create another `/goal`, choose Revise, and enter:
 
@@ -747,60 +782,40 @@ Create another `/goal`, choose Revise, and enter:
 Make the plan shorter.
 ```
 
-Expected with the deterministic mock: criteria are returned exactly unchanged,
-the previous plan is absent from the criteria-revision request, and the real
-feedback is recorded as a user event. Revise again with `Require Unicode
-examples in the tests.` Only the Definition of Done changes. Discard the
-proposal and verify prompt focus is restored.
+Expected: `prepare_goal` may be called immediately, criteria remain exactly
+unchanged where appropriate, the previous plan is absent from the criteria
+model request, and the complete plan is revised.
 
-### 4. Rubric-enabled planning order
-
-Enter `/plan`, then:
+### 7. Revision requiring research
 
 ```text
-Plan a searchable notes index. SQLite and JSON are both acceptable, but choose
-with me before finalizing the design.
+Use the same storage pattern as the existing session implementation.
 ```
 
-Expected: the planning agent uses `ask_user`; the answer remains structured,
-read-only research completes, the hidden `prepare_goal` interrupt generates
-criteria, and the same planning thread then calls `present_plan`. Before
-`prepare_goal`, `/tools` and diagnostics should not show `present_plan` in
-the model-visible research surface. After the resume, `present_plan` is the only
-model-visible tool and a tool call is required; `prepare_goal`, `ask_user`, and
-research tools cannot be selected. The TUI changes its animated status from
-`drafting Definition of Done...` to `drafting plan...` across the two model
-calls. The bubble shows normal plan sections followed by the
-Definition of Done. Session JSON keeps original objective, resolved decision,
-effective objective, criteria, and plan as separate proposal fields.
+Expected: targeted inspection resolves the storage facts, criteria change only
+if completion conditions changed, and the final plan follows the discovered
+session pattern.
 
-### 5. Plan revision and approval
+### 8. Rubric exhaustion and continuation
 
-Choose Revise on the rubric-enabled plan and enter:
+Use a deterministic weak model or mocked grader that reaches the configured
+iteration cap. After `max_iterations_reached`, enter:
 
 ```text
-Keep the same outcomes, but make the plan shorter.
+Continue where we left off.
 ```
 
-Expected: criteria revision completes first and may return criteria unchanged;
-plan revision then receives identical feedback, original objective, previous
-plan, and revised criteria, and returns a complete plan. Choose Implement. The
-action context contains the approved plan while invocation state contains the
-separate criteria.
+Expected: `/goal show` reports the same objective, plan, and criteria; no
+planning or criteria model call occurs; a fresh native rubric grading run starts
+with the exact stored criteria.
 
-### 6. Cap reconciliation, ordinary clearing, and replay
+### 9. Session restart and controls
 
-Set maximum iterations to 1. With a deterministic mock grader, implement a goal
-whose final event says `needs_revision` while checkpoint state says
-`max_iterations_reached`.
-
-Expected: TUI, one-shot/trace output, `TurnResult`, and the durable rubric event
-finish as `max_iterations_reached`, showing failed criteria and gaps. Reopen the
-session: completed proposal and rubric blocks replay, start activity does not,
-and no synthetic grader feedback appears as user chat. Submit an ordinary
-action prompt while rubric remains enabled; MIRA sends explicit `rubric=None`
-and performs no grading. Changing either rubric setting while a proposal is
-pending resolves it as `settings changed` and rebuilds both agents.
+After an incomplete active goal, close MIRA, resume the same session, and enter
+`Continue`. Expected: the exact active goal is restored from session state and
+execution continues without proposal reconstruction. Verify `/goal clear`
+stops rubric attachment but leaves historical proposal/rubric blocks, while a
+newly implemented proposal explicitly supersedes an older active goal.
 
 ## Windows TUI Keyboard And Copy Matrix
 

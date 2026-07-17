@@ -373,16 +373,19 @@ sends its Markdown criteria. The middleware's injected revision messages stay
 inside DeepAgents state and are not projected as user-authored session events.
 
 **Proposal lifecycle:** `/goal <prompt>` is TUI-only because it requires an
-interactive review bubble. A separate `GoalCriteriaService` creates or revises
-Markdown criteria with a fresh instance of MIRA's configured model outside the
-action graph. Goal proposals and rubric-enabled plan proposals store their id,
-kind, original objective, structured resolved decisions, deterministically
-derived effective objective, criteria, optional structured plan, iteration
-cap, and status as explicit proposal events.
+interactive review bubble. It temporarily routes through the same read-only
+planning agent used by rubric-enabled `/plan` without setting persistent
+planning mode. Both origins produce one complete proposal containing the id,
+origin, original and effective objectives, structured resolved decisions,
+criteria, structured plan, and iteration cap. The origin controls navigation;
+rendering, revision, persistence, and implementation are shared.
 
 Rubric-enabled planning adds one hidden control interrupt, `prepare_goal`. The
-planning agent calls it only after read-only research and material `ask_user`
-decisions are complete. A focused `PlanningStageMiddleware` owns a checkpointed
+planning agent calls it as soon as available context is sufficient, after any
+necessary read-only research and material `ask_user` decisions. Research is
+optional and the tool carries only a bounded summary of material evidence; the
+full tool transcript never crosses into criteria generation. A focused
+`PlanningStageMiddleware` owns a checkpointed
 `research | finalize` state using LangChain's middleware state schema. It keeps
 the compiled tool registry stable while filtering each model request: research
 hides `present_plan`; after the interrupt, the runner resumes with a native
@@ -391,14 +394,25 @@ exposes only `present_plan` and sets the provider-portable `required` tool
 choice. Requiring a call is deterministic with one exposed tool and avoids the
 named-tool object rejected by some OpenAI-compatible providers. The wrapped
 research request repeats a stage-specific `ask_user`/`prepare_goal` terminal
-contract instead of the legacy `present_plan` reminder. MIRA then
-generates criteria and resumes the same planning thread to produce the plan
-alone. Revision first sends feedback to criteria revision, then starts a new
-planning thread directly in finalization with the same feedback, revised
-criteria, original objective, and previous plan. This avoids graph rebuilding,
-message parsing, duplicate plan tools, and prompt-only ordering. Disabled
+contract instead of the legacy `present_plan` reminder. `GoalCriteriaService`
+treats the objective as authoritative and receives only the effective
+objective, optional research context, and—during revision—the previous
+criteria and feedback, never the previous plan. MIRA then resumes the same
+planning thread to produce the plan alone. Revisions use the same discovery,
+criteria, and finalization sequence with the previous plan supplied only to
+plan finalization. Disabled
 planning does not install the stage middleware and keeps the legacy prompt,
 tools, plan event, rendering, and action handoff unchanged.
+
+**Durable active goals:** Implementing either proposal origin stores the exact
+approved objective, criteria, and plan as the session's authoritative
+`active_goal`. Each action turn receives that context and rubric until grading
+returns `satisfied`, the user runs `/goal clear`, or another approved proposal
+supersedes it. `max_iterations_reached` leaves the goal active; supplying the
+same rubric on the next action turn uses RubricMiddleware's native fresh-run
+reset. Session resume reads only the explicit active-goal field and never
+infers one from recent proposal history. `/goal show` and `/goal clear` are
+model-free controls; historical proposal and rubric events remain replayable.
 
 Criteria generation and plan finalization can each involve a silent model call.
 The TUI reuses its transient animated waiting block with phase-specific labels
