@@ -16,7 +16,7 @@ from agent.context_overflow import context_overflow_error, set_context_overflow_
 from agent import factory
 from agent.middleware import ModelToolVisibilityMiddleware, PlanningStageMiddleware
 from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
-from agent.tools.specs import tool_name
+from agent.tools.specs import mira_environment_label, tool_name
 from config.metadata import ModelMetadata
 from config.runtime import RuntimeSnapshot
 from runtime import runner
@@ -389,6 +389,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
             patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
+            patch("agent.tools.specs.mira_environment_label", return_value="ai_agents"),
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
 
@@ -403,6 +404,12 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         grep = next(tool for tool in agent.mira_tool_specs if tool["name"] == "grep")
         self.assertEqual(grep["source"], "default")
         self.assertEqual(grep["replaces"], "built-in")
+        self.assertEqual(grep["runtime"], "MIRA")
+        self.assertEqual(grep["environment"], "ai_agents")
+        read_file = next(tool for tool in agent.mira_tool_specs if tool["name"] == "read_file")
+        self.assertEqual(read_file["source"], "built-in")
+        self.assertEqual(read_file["runtime"], "MIRA")
+        self.assertEqual(read_file["environment"], "ai_agents")
 
     def test_plan_agent_metadata_hides_write_tools(self) -> None:
         """Plan agents should hide mutating and delegation tool metadata."""
@@ -745,25 +752,93 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             {"mira_tool_specs": [{"name": "custom_tool", "description": "custom description"}]},
         )()
 
-        self.assertEqual(repl.tool_specs(agent), [{"name": "custom_tool", "description": "custom description"}])
+        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
+            specs = repl.tool_specs(agent)
+
+        self.assertEqual(
+            specs,
+            [
+                {
+                    "name": "custom_tool",
+                    "description": "custom description",
+                    "source": "built-in",
+                    "runtime": "MIRA",
+                    "environment": "ai_agents",
+                }
+            ],
+        )
 
     def test_tool_specs_use_docstrings_for_callables(self) -> None:
         """Callable tool descriptions should fall back to docstrings."""
         agent = type("Agent", (), {"tools": [sample_tool]})()
 
+        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
+            specs = repl.tool_specs(agent)
+
         self.assertEqual(
-            repl.tool_specs(agent),
-            [{"name": "sample_tool", "description": "Run a sample operation for tests."}],
+            specs,
+            [
+                {
+                    "name": "sample_tool",
+                    "description": "Run a sample operation for tests.",
+                    "source": "built-in",
+                    "runtime": "MIRA",
+                    "environment": "ai_agents",
+                }
+            ],
         )
 
     def test_tool_descriptions_use_first_sentence(self) -> None:
         """Tool display descriptions should be shortened for the table."""
         tools = [{"name": "read_file", "description": "Reads a file from the filesystem.\n\nUse this after listing files."}]
 
-        self.assertEqual(
-            repl.normalize_tool_specs(tools),
-            [{"name": "read_file", "description": "Reads a file from the filesystem."}],
-        )
+        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
+            self.assertEqual(
+                repl.normalize_tool_specs(tools),
+                [
+                    {
+                        "name": "read_file",
+                        "description": "Reads a file from the filesystem.",
+                        "source": "built-in",
+                        "runtime": "MIRA",
+                        "environment": "ai_agents",
+                    }
+                ],
+            )
+
+    def test_tool_normalization_preserves_project_runtime_metadata(self) -> None:
+        """Project runtime metadata should survive the final UI projection."""
+        tools = [
+            {
+                "name": "inspect_csv_with_polars",
+                "description": "Inspect a CSV using Polars.",
+                "source": "project",
+                "replaces": "",
+                "path": "/.mira/tools/polars.py",
+                "runtime": "Project",
+                "environment": "mini-agent",
+            }
+        ]
+
+        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
+            normalized = repl.normalize_tool_specs(tools)
+
+        self.assertEqual(normalized[0]["source"], "project")
+        self.assertEqual(normalized[0]["runtime"], "Project")
+        self.assertEqual(normalized[0]["environment"], "mini-agent")
+
+    def test_mira_environment_label_prefers_conda_then_venv_then_system(self) -> None:
+        """MIRA runtime labels should describe the active Python environment."""
+        with patch.dict("agent.tools.specs.os.environ", {"CONDA_DEFAULT_ENV": "ai_agents"}, clear=True):
+            self.assertEqual(mira_environment_label(), "ai_agents")
+        with patch.dict("agent.tools.specs.os.environ", {"VIRTUAL_ENV": r"C:\work\.venv"}, clear=True):
+            self.assertEqual(mira_environment_label(), ".venv")
+        with (
+            patch.dict("agent.tools.specs.os.environ", {}, clear=True),
+            patch("agent.tools.specs.sys.prefix", r"C:\Python"),
+            patch("agent.tools.specs.sys.base_prefix", r"C:\Python"),
+        ):
+            self.assertEqual(mira_environment_label(), "System")
 
     def test_tools_table_returns_rich_table(self) -> None:
         """The tools table should expose tool metadata in a Rich table."""
@@ -778,6 +853,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tools (action)", rendered)
         self.assertIn("long_tool", rendered)
         self.assertIn("Description", rendered)
+        self.assertNotIn("│ -", rendered)
 
     def test_tool_table_shows_source_and_replacement(self) -> None:
         """The tools table should show custom tool source and replacement info."""
@@ -799,6 +875,30 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("grep", rendered)
         self.assertIn("default", rendered)
         self.assertIn("built-in", rendered)
+
+    def test_tool_table_shows_project_runtime_and_environment(self) -> None:
+        """The table should distinguish the project execution boundary and environment."""
+        table = tools_table(
+            [
+                {
+                    "name": "inspect_csv_with_polars",
+                    "description": "Inspect CSV data.",
+                    "source": "project",
+                    "path": "/.mira/tools/polars.py",
+                    "runtime": "Project",
+                    "environment": "mini-agent",
+                }
+            ],
+            planning=False,
+        )
+
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=120).print(table)
+        rendered = output.getvalue()
+        self.assertIn("project", rendered)
+        self.assertIn("Project", rendered)
+        self.assertIn("mini-agent", rendered)
+        self.assertNotIn(" - ", rendered)
 
     def test_resources_table_returns_rich_table(self) -> None:
         """The resources table should expose source and replacement columns."""

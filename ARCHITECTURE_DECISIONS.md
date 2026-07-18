@@ -191,7 +191,9 @@ to inspect.
 - `build_resources()` loads memories, skills, subagents, and tools, then passes
   the final lists to `create_deep_agent(...)`.
 - Metadata keeps `source` and `replaces` fields so `/tools`, `/memories`,
-  `/skills`, `/subagents`, and `/settings` can show what happened.
+  `/skills`, `/subagents`, and `/settings` can show what happened. Tool
+  projections also retain their MIRA-or-Project runtime boundary and the
+  concrete Python environment used for execution.
 
 **Overwrite rules:**
 

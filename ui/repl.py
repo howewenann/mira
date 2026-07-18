@@ -27,6 +27,7 @@ from agent.planning.policy import (
     RUBRIC_PLAN_RESEARCH_REMINDER,
     plan_disabled_tools_text,
 )
+from agent.tools.specs import mira_environment_label
 from runtime.context_usage import context_usage_scope
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
@@ -612,16 +613,22 @@ def normalize_resource_items(items: Any) -> list[dict[str, str]]:
 def normalize_tool_specs(tools: list[Any] | tuple[Any, ...]) -> list[dict[str, str]]:
     """Normalize tool objects, callables, and dicts for display."""
     specs: list[dict[str, str]] = []
+    environment = mira_environment_label()
     for tool in tools:
         name = tool_name(tool)
         if not name:
             continue
-        spec = {"name": name, "description": first_sentence(tool_description(tool))}
+        spec = {
+            "name": name,
+            "description": first_sentence(tool_description(tool)),
+            "source": "built-in",
+            "runtime": "MIRA",
+            "environment": environment,
+        }
         if isinstance(tool, dict):
-            for key in ("source", "replaces", "path"):
-                value = tool.get(key)
-                if value:
-                    spec[key] = str(value)
+            for key in ("source", "replaces", "path", "runtime", "environment"):
+                if key in tool:
+                    spec[key] = str(tool.get(key) or "")
         specs.append(spec)
     return specs
 

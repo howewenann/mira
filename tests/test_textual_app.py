@@ -24,6 +24,7 @@ from textual.widgets import Button, Input, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
+from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
 from config.runtime import LaunchOptions, build_runtime_snapshot
 from config.settings import (
@@ -2544,8 +2545,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(get_llm.call_args.args[0]["llm_direct"])
             self.assertTrue(build_agent.call_args.kwargs["config"]["llm_direct"])
             self.assertTrue(build_plan_agent.call_args.kwargs["config"]["llm_direct"])
-            self.assertEqual(app.mode["action_tools"], [{"name": "fresh_tool", "description": "Fresh."}])
-            self.assertEqual(app.mode["planning_tools"], [{"name": "plan_tool", "description": "Plan."}])
+            environment = mira_environment_label()
+            self.assertEqual(
+                app.mode["action_tools"],
+                [
+                    {
+                        "name": "fresh_tool",
+                        "description": "Fresh.",
+                        "source": "built-in",
+                        "runtime": "MIRA",
+                        "environment": environment,
+                    }
+                ],
+            )
+            self.assertEqual(
+                app.mode["planning_tools"],
+                [
+                    {
+                        "name": "plan_tool",
+                        "description": "Plan.",
+                        "source": "built-in",
+                        "runtime": "MIRA",
+                        "environment": environment,
+                    }
+                ],
+            )
             self.assertEqual(len(startup_blocks), 1)
             self.assertIn("model     lmstudio:visual-model", rendered)
             self.assertNotIn("model     loading", rendered)
