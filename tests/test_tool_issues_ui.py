@@ -40,6 +40,102 @@ def failure(
 
 
 class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keyboard_focus_labels_and_arrow_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = make_app(workspace, tool_failures=[failure(workspace, "one.py", missing="alpha")])
+            async with app.run_test() as pilot:
+                app._open_tool_issues()
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, ToolIssuesScreen)
+                packages = screen.query_one("#tool-issues-packages", Input)
+                install = screen.query_one("#tool-issues-install", Button)
+                close = screen.query_one("#tool-issues-close", Button)
+                await wait_until(lambda: packages.has_focus)
+                self.assertEqual(str(install.label), "Install All and Reload (i)")
+                self.assertEqual(str(close.label), "Close (c)")
+
+                await pilot.press("tab")
+                self.assertTrue(install.has_focus)
+                await pilot.press("shift+tab")
+                self.assertTrue(packages.has_focus)
+                await pilot.press("down")
+                self.assertTrue(install.has_focus)
+                await pilot.press("right")
+                self.assertTrue(close.has_focus)
+                await pilot.press("right")
+                self.assertTrue(install.has_focus)
+                await pilot.press("up")
+                self.assertTrue(packages.has_focus)
+                await pilot.press("up")
+                self.assertTrue(close.has_focus)
+
+    async def test_syntax_only_issues_focus_close_and_skip_disabled_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = make_app(workspace, tool_failures=[failure(workspace, "syntax.py", error_type="SyntaxError")])
+            async with app.run_test() as pilot:
+                app._open_tool_issues()
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, ToolIssuesScreen)
+                install = screen.query_one("#tool-issues-install", Button)
+                close = screen.query_one("#tool-issues-close", Button)
+                await wait_until(lambda: close.has_focus)
+                self.assertTrue(install.disabled)
+                screen.install_requirements = Mock()  # type: ignore[method-assign]
+
+                await pilot.press("up", "down", "left", "right", "i")
+                self.assertTrue(close.has_focus)
+                screen.install_requirements.assert_not_called()
+
+    async def test_contextual_shortcuts_preserve_input_and_start_one_install(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = make_app(workspace, tool_failures=[failure(workspace, "one.py", missing="alpha")])
+            async with app.run_test() as pilot:
+                app._open_tool_issues()
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, ToolIssuesScreen)
+                packages = screen.query_one("#tool-issues-packages", Input)
+                close = screen.query_one("#tool-issues-close", Button)
+                screen.install_requirements = Mock()  # type: ignore[method-assign]
+                await wait_until(lambda: packages.has_focus)
+
+                packages.value = "a"
+                packages.cursor_position = 1
+                await pilot.press("left", "i", "c")
+                self.assertEqual(packages.value, "ica")
+                close.focus()
+                await pilot.press("i", "i")
+                screen.install_requirements.assert_called_once_with(["ica"])
+                self.assertTrue(screen.installing)
+                self.assertIs(app.screen, screen)
+
+    async def test_enter_submits_packages_and_c_closes_while_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = make_app(workspace, tool_failures=[failure(workspace, "one.py", missing="alpha")])
+            async with app.run_test() as pilot:
+                app._open_tool_issues()
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, ToolIssuesScreen)
+                packages = screen.query_one("#tool-issues-packages", Input)
+                screen.install_requirements = Mock()  # type: ignore[method-assign]
+                await wait_until(lambda: packages.has_focus)
+                await pilot.press("enter")
+                screen.install_requirements.assert_called_once_with(["alpha"])
+
+                screen.installing = False
+                screen._sync_controls()
+                screen.query_one("#tool-issues-close", Button).focus()
+                await pilot.press("c")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, ToolIssuesScreen)
+
     async def test_startup_tool_failures_show_one_grouped_warning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

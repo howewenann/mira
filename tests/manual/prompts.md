@@ -1037,7 +1037,18 @@ Shrink the terminal while a mixed Issues screen is open.
 Expected: the body scrolls, both action buttons stay together at the bottom,
 Escape closes only while idle, and `/issues` remains a reliable fallback.
 
-### 11. One-shot mode
+### 11. Issues keyboard navigation
+
+Open Issues with at least one repairable missing dependency. Confirm the
+package input receives initial focus; Tab and Shift+Tab traverse enabled
+controls; Up and Down wrap through the input and actions; and Left and Right
+switch between Install and Close without moving focus out of the package input
+while editing. Type `i` and `c` in the input, then focus an action and confirm
+`i` starts installation and `c` closes. Confirm Enter submits the input, the
+button labels show `(i)` and `(c)`, disabled controls are skipped, and no
+shortcut closes or restarts the modal while installation is active.
+
+### 12. One-shot mode
 
 Add one successful tool file, one missing-dependency file, and one syntax-error
 file, then run:

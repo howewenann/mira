@@ -12,6 +12,7 @@ from textual import on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, LoadingIndicator, Static
 
@@ -51,12 +52,13 @@ class ToolIssuesScreen(ModalScreen[None]):
             yield Input(" ".join(missing_requirements(self.failures)), id="tool-issues-packages")
             yield LoadingIndicator(id="tool-issues-loading")
             with Horizontal(id="tool-issues-actions"):
-                yield Button("Install All and Reload", id="tool-issues-install", variant="primary")
-                yield Button("Close", id="tool-issues-close")
+                yield Button("Install All and Reload (i)", id="tool-issues-install", variant="primary")
+                yield Button("Close (c)", id="tool-issues-close")
 
     def on_mount(self) -> None:
         self.query_one("#tool-issues-loading", LoadingIndicator).display = False
         self._sync_controls()
+        self.call_after_refresh(self._focus_initial_control)
 
     def update_failures(self, failures: list[ToolLoadFailure]) -> None:
         self.failures = list(failures)
@@ -65,6 +67,7 @@ class ToolIssuesScreen(ModalScreen[None]):
             self.query_one("#tool-issues-summary", Static).update(self.summary_text())
             self.query_one("#tool-issues-packages", Input).value = " ".join(missing_requirements(self.failures))
             self._sync_controls()
+            self.call_after_refresh(self._focus_initial_control)
 
     def summary_text(self) -> str:
         repairable = [failure for failure in self.failures if failure.missing_module]
@@ -97,7 +100,18 @@ class ToolIssuesScreen(ModalScreen[None]):
     @on(Button.Pressed, "#tool-issues-install")
     def install_pressed(self, event: Button.Pressed) -> None:
         event.stop()
-        if self.installing:
+        self._start_install()
+
+    @on(Input.Submitted, "#tool-issues-packages")
+    def packages_submitted(self, event: Input.Submitted) -> None:
+        """Start installation when Enter is pressed in the package input."""
+        event.stop()
+        self._start_install()
+
+    def _start_install(self) -> None:
+        """Validate the editable requirements and start the shared install worker."""
+        install = self.query_one("#tool-issues-install", Button)
+        if self.installing or install.disabled:
             return
         try:
             requirements = parse_requirements(self.query_one("#tool-issues-packages", Input).value)
@@ -110,6 +124,29 @@ class ToolIssuesScreen(ModalScreen[None]):
         self.query_one("#tool-issues-summary", Static).update(self.summary_text())
         self._sync_controls()
         self.install_requirements(requirements)
+
+    def on_key(self, event: Key) -> None:
+        """Handle contextual shortcuts and arrow-key focus movement."""
+        if self.installing:
+            return
+
+        package_input = self.query_one("#tool-issues-packages", Input)
+        key = event.key.lower()
+        if key in {"i", "c"} and package_input.has_focus:
+            return
+        if key == "i":
+            event.stop()
+            self._start_install()
+            return
+        if key == "c":
+            event.stop()
+            self.action_close()
+            return
+        if key in {"left", "right"} and package_input.has_focus:
+            return
+        if key in {"up", "down", "left", "right"}:
+            event.stop()
+            self._move_issue_focus(key)
 
     @work(thread=True, exclusive=True, exit_on_error=False, group="tool-issues-install")
     def install_requirements(self, requirements: list[str]) -> None:
@@ -148,6 +185,7 @@ class ToolIssuesScreen(ModalScreen[None]):
         self.install_details = f"Pip installation failed:\n{details}"
         self.query_one("#tool-issues-summary", Static).update(self.summary_text())
         self._sync_controls()
+        self.call_after_refresh(self._focus_initial_control)
 
     def _sync_controls(self) -> None:
         repairable = bool(missing_requirements(self.failures))
@@ -155,6 +193,44 @@ class ToolIssuesScreen(ModalScreen[None]):
         self.query_one("#tool-issues-install", Button).disabled = self.installing or not repairable
         self.query_one("#tool-issues-close", Button).disabled = self.installing
         self.query_one("#tool-issues-loading", LoadingIndicator).display = self.installing
+
+    def _enabled_controls(self) -> list[Input | Button]:
+        """Return keyboard-focusable modal controls in document order."""
+        controls: list[Input | Button] = [
+            self.query_one("#tool-issues-packages", Input),
+            self.query_one("#tool-issues-install", Button),
+            self.query_one("#tool-issues-close", Button),
+        ]
+        return [control for control in controls if not control.disabled and control.display]
+
+    def _focus_initial_control(self) -> None:
+        """Focus editable requirements when available, otherwise the first enabled action."""
+        controls = self._enabled_controls()
+        if controls:
+            controls[0].focus()
+
+    def _move_issue_focus(self, key: str) -> None:
+        """Move focus through enabled controls with arrow-key wrapping."""
+        controls = self._enabled_controls()
+        if not controls:
+            return
+        focused_index = next((index for index, control in enumerate(controls) if control.has_focus), None)
+
+        if key in {"left", "right"}:
+            buttons = [control for control in controls if isinstance(control, Button)]
+            if not buttons:
+                return
+            focused_button = next((button for button in buttons if button.has_focus), None)
+            if focused_button is None:
+                buttons[0].focus()
+                return
+            offset = -1 if key == "left" else 1
+            buttons[(buttons.index(focused_button) + offset) % len(buttons)].focus()
+            return
+
+        offset = -1 if key == "up" else 1
+        target = (focused_index + offset) % len(controls) if focused_index is not None else 0
+        controls[target].focus()
 
     def action_close(self) -> None:
         if not self.installing:
