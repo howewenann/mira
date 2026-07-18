@@ -225,9 +225,19 @@ def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None
 
     keys: list[str] = []
     for key in candidates:
-        if key and key not in keys:
+        if _valid_summarization_profile_key(key) and key not in keys:
             keys.append(key)
     return keys
+
+
+def _valid_summarization_profile_key(key: str) -> bool:
+    """Return whether a generated key fits DeepAgents' registry shape."""
+    if not key or key != key.strip() or key.count(":") > 1:
+        return False
+    if ":" not in key:
+        return True
+    provider, model = key.split(":", 1)
+    return bool(provider and model and provider == provider.strip() and model == model.strip())
 
 
 def _action_permissions() -> list[FilesystemPermission]:

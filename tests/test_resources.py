@@ -640,6 +640,23 @@ def get_tools(project_backend):
         keys = [call.args[0] for call in register.call_args_list]
         self.assertEqual(keys, ["openai:gpt-test", "openai", "anyllm:google/gemma", "anyllm"])
 
+    def test_factory_skips_invalid_ollama_summarization_profile_key(self) -> None:
+        """Ollama model tags should not create a double-colon registry key."""
+        model = type("Model", (), {})()
+        with (
+            patch("agent.factory.register_harness_profile") as register,
+            patch("deepagents._models.get_model_provider", return_value="ollama"),
+            patch("deepagents._models.get_model_identifier", return_value="qwen3.6:27b"),
+            patch.object(factory, "_REGISTERED_SUMMARIZATION_PROFILE_KEYS", set()),
+        ):
+            factory._register_summarization_exclusion(
+                {"llm_provider": "ollama", "llm_model": "qwen3.6:27b"},
+                model,
+            )
+
+        keys = [call.args[0] for call in register.call_args_list]
+        self.assertEqual(keys, ["ollama", "qwen3.6:27b"])
+
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""
         names = [tool["name"] for tool in repl.DEFAULT_TOOL_SPECS]
