@@ -421,6 +421,12 @@ class RecordingRenderer:
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         self.events.append(("tool_result", name, result, call_id))
 
+    def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        self.events.append(("tool_error", name, error, call_id))
+
+    def recovered_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        self.events.append(("tool_error", name, error, call_id))
+
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self.events.append(("delegation_started", calls))
 
@@ -1652,6 +1658,35 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_text, "The envs are ai_agents and base.")
         self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
 
+    async def test_run_turn_recovers_failed_final_output_tool_message(self) -> None:
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            ToolMessage(
+                                content="file not found",
+                                name="read_file",
+                                tool_call_id="call-read",
+                                status="error",
+                            ),
+                            OutputMessage("I will try another path."),
+                        ]
+                    },
+                    interrupts=[],
+                )
+            ]
+        )
+        agent.streams[0].tool_calls = AsyncItems(
+            [IncompleteToolCall("read_file", {"path": "missing.txt"}, "", "call-read")]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "read", renderer, "thread-1")
+
+        self.assertEqual(result.tool_results, ["file not found"])
+        self.assertIn(("tool_error", "read_file", "file not found", "call-read"), renderer.events)
+
     async def test_run_turn_deduplicates_tool_stream_and_final_output_results(self) -> None:
         """Final output ToolMessages should not duplicate already streamed tool results."""
         agent = FakeAgent(
@@ -1779,7 +1814,53 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         call.release.set()
         await consuming
 
-        self.assertIn(("tool_result", "execute", "boom", "call-error"), renderer.events)
+        self.assertIn(("tool_error", "execute", "boom", "call-error"), renderer.events)
+
+    async def test_live_tool_error_drains_before_surrounding_stream_failure(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        call = LiveToolCall("execute", {"command": "bad"}, "", "call-error", error="boom")
+
+        async def failing_calls() -> Any:
+            yield call
+            await call.started.wait()
+            call.release.set()
+            raise RuntimeError("graph failed")
+
+        with self.assertRaisesRegex(RuntimeError, "graph failed"):
+            await consume_tool_calls(failing_calls(), renderer, result)
+
+        self.assertIn(("tool_error", "execute", "boom", "call-error"), renderer.events)
+        self.assertEqual(result.tool_results, ["boom"])
+        self.assertTrue(call.completed)
+        self.assertFalse(call.cancelled)
+
+    async def test_empty_live_tool_error_uses_visible_fallback(self) -> None:
+        renderer = RecordingRenderer()
+        call = DocumentedToolCall("execute", {"command": "bad"}, error="", call_id="call-error")
+
+        await consume_tool_calls(AsyncItems([call]), renderer)
+
+        self.assertIn(("tool_error", "execute", "tool failed", "call-error"), renderer.events)
+
+    async def test_failed_retries_remain_separate_from_successful_retry(self) -> None:
+        renderer = RecordingRenderer()
+        calls = [
+            DocumentedToolCall("read_file", {"path": "missing.txt"}, error="first", call_id="call-1"),
+            DocumentedToolCall("read_file", {"path": "missing.txt"}, error="second", call_id="call-2"),
+            DocumentedToolCall("read_file", {"path": "missing.txt"}, output="contents", call_id="call-3"),
+        ]
+
+        await consume_tool_calls(AsyncItems(calls), renderer)
+
+        self.assertEqual(
+            [event for event in renderer.events if event[0] in {"tool_error", "tool_result"}],
+            [
+                ("tool_error", "read_file", "first", "call-1"),
+                ("tool_error", "read_file", "second", "call-2"),
+                ("tool_result", "read_file", "contents", "call-3"),
+            ],
+        )
 
     async def test_watcher_failure_is_collected_without_stopping_other_results(self) -> None:
         renderer = RecordingRenderer()
@@ -1877,7 +1958,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             renderer.events,
             [
                 ("tool_call", "eval", {"code": "bad()"}, "call-error"),
-                ("tool_result", "eval", "boom", "call-error"),
+                ("tool_error", "eval", "boom", "call-error"),
             ],
         )
 

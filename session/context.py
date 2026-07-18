@@ -94,6 +94,8 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             if event["name"] in CONTROL_TOOLS:
                 continue
             event["output"] = output
+            if compact_line(item.get("status")) == "error":
+                event["status"] = "error"
             call_id = compact_line(item.get("call_id"))
             if call_id:
                 event["call_id"] = call_id

@@ -510,6 +510,7 @@ def interrupt_value(interrupt: Any) -> Any:
 def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -> None:
     """Render tool results that only appear in the final graph output."""
     recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
+    recovered_tool_error = getattr(renderer, "recovered_tool_error", None)
     for item in output_tool_results(output):
         if item["name"] in CONTROL_TOOLS:
             continue
@@ -517,7 +518,9 @@ def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -
         call_id = item["call_id"]
         if not result.record_tool_result(text, call_id, item["name"]):
             continue
-        if callable(recovered_tool_result):
+        if item.get("status") == "error" and callable(recovered_tool_error):
+            recovered_tool_error(item["name"], text, call_id=call_id)
+        elif callable(recovered_tool_result):
             recovered_tool_result(item["name"], text, call_id=call_id)
         else:
             renderer.tool_result(item["name"], text, call_id=call_id)

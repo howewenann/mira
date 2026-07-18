@@ -79,9 +79,17 @@ class TraceStream:
         """Trace a live completion without interrupting streamed model text."""
         self._emit("completed_tool_result", name, result)
 
+    def completed_tool_error(self, name: str, error: Any) -> None:
+        """Trace a live failed tool completion."""
+        self._emit("completed_tool_error", name, error)
+
     def recovered_tool_result(self, name: str, result: Any) -> None:
         """Trace a late-discovered tool result using normal terminal ordering."""
         self.tool_result(name, result)
+
+    def recovered_tool_error(self, name: str, error: Any) -> None:
+        """Trace a late-discovered failed tool result."""
+        self._emit("tool_error", name, error)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Trace task delegation."""

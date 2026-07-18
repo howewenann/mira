@@ -119,6 +119,7 @@ def output_tool_results(output: Any) -> list[dict[str, str]]:
                 "name": str(field(message, "name") or "tool"),
                 "output": output_text,
                 "call_id": str(field(message, "tool_call_id") or field(message, "id") or ""),
+                "status": str(field(message, "status") or "success"),
             }
         )
     return results

@@ -62,6 +62,14 @@ class Renderer:
         """Print a completed tool result at the next safe terminal boundary."""
         self.transcript.completed_tool_result(name, result)
 
+    def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        """Print a failed tool result at the next safe terminal boundary."""
+        self.transcript.completed_tool_error(name, error)
+
+    def recovered_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        """Print a late-discovered failed tool result."""
+        self.transcript.tool_error(name, error)
+
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Print a compact task delegation summary."""
         self.transcript.delegation_started(calls)

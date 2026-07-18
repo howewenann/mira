@@ -87,6 +87,20 @@ class TerminalTranscriptTests(unittest.TestCase):
             "\nthinking:\nStill thinking\nread_file output: contents\n",
         )
 
+    def test_completed_tool_error_waits_until_assistant_stream_finishes(self) -> None:
+        transcript, chunks = self.make_transcript()
+
+        transcript.text_delta("Trying a tool")
+        transcript.completed_tool_error("read_file", "file not found")
+        transcript.text_delta(" and recovering.")
+
+        self.assertEqual("".join(chunks), "\nmira:\nTrying a tool and recovering.")
+        transcript.finish_main()
+        self.assertEqual(
+            "".join(chunks),
+            "\nmira:\nTrying a tool and recovering.\nread_file error: file not found\n",
+        )
+
     def test_delegation_and_subagents_match_terminal_spacing(self) -> None:
         transcript, chunks = self.make_transcript(output_chars=32)
 

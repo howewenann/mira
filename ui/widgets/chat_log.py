@@ -141,12 +141,8 @@ class ChatLog(VerticalScroll):
                     created_at=created_at,
                 )
             elif event_type == "tool_result":
-                self.tool_result(
-                    event["name"],
-                    event["output"],
-                    call_id=str(event.get("call_id") or ""),
-                    created_at=created_at,
-                )
+                callback = self.tool_error if event.get("status") == "error" else self.tool_result
+                callback(event["name"], event["output"], call_id=str(event.get("call_id") or ""), created_at=created_at)
             elif event_type == "delegation":
                 self.delegation_started(event["calls"], created_at=created_at)
             elif event_type == "subagent":
@@ -325,7 +321,14 @@ class ChatLog(VerticalScroll):
         block = self._tool_blocks.get(key)
         if block is None:
             widget = self._add_block(f"tool - {name}", Text(""), "message tool-call", created_at=created_at)
-            block = {"name": name, "args": args, "result": "", "widget": widget, "draft": False}
+            block = {
+                "name": name,
+                "args": args,
+                "result": "",
+                "widget": widget,
+                "draft": False,
+                "is_error": False,
+            }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
         else:
@@ -333,9 +336,10 @@ class ChatLog(VerticalScroll):
             block["args"] = args
             block["draft"] = False
 
-        pending = self._take_pending_tool_result(name, call_id)
+        pending, pending_is_error = self._take_pending_tool_result(name, call_id)
         if pending:
             block["result"] = pending
+            block["is_error"] = pending_is_error
         self._update_tool_block(key)
 
     def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
@@ -347,7 +351,14 @@ class ChatLog(VerticalScroll):
         block = self._tool_blocks.get(key)
         if block is None:
             widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
-            block = {"name": name, "args": args, "result": "", "widget": widget, "draft": True}
+            block = {
+                "name": name,
+                "args": args,
+                "result": "",
+                "widget": widget,
+                "draft": True,
+                "is_error": False,
+            }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
         else:
@@ -369,6 +380,25 @@ class ChatLog(VerticalScroll):
             return
         block = self._tool_blocks[key]
         block["result"] = result
+        block["is_error"] = False
+        block["draft"] = False
+        self._update_tool_block(key)
+
+    def tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Attach a failed result to its coordinator-level tool call."""
+        if not error:
+            return
+        self.hide_waiting()
+        self.hide_model_activity()
+        self.finish_main()
+        key = self._resolve_tool_key(name, call_id)
+        if key is None:
+            self._queue_pending_tool_result(name, error, call_id, created_at=created_at, is_error=True)
+            return
+        block = self._tool_blocks[key]
+        block["result"] = error
+        block["is_error"] = True
+        block["draft"] = False
         self._update_tool_block(key)
 
     def completed_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
@@ -381,6 +411,29 @@ class ChatLog(VerticalScroll):
             return
         block = self._tool_blocks[key]
         block["result"] = result
+        block["is_error"] = False
+        block["draft"] = False
+        self._update_tool_block(key, scroll=False)
+
+    def completed_tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+    ) -> None:
+        """Update an existing tool block with a failure without disturbing model output."""
+        if not error:
+            return
+        key = self._resolve_tool_key(name, call_id)
+        if key is None:
+            self._queue_pending_tool_result(name, error, call_id, created_at=created_at, is_error=True)
+            return
+        block = self._tool_blocks[key]
+        block["result"] = error
+        block["is_error"] = True
+        block["draft"] = False
         self._update_tool_block(key, scroll=False)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
@@ -1086,7 +1139,13 @@ class ChatLog(VerticalScroll):
 
     def _tool_update_key(self, name: str, call_id: str = "") -> str:
         if call_id:
-            return f"id:{call_id}"
+            key = f"id:{call_id}"
+            if key in self._tool_blocks:
+                return key
+            draft_key = self._oldest_draft_tool_key(name)
+            if draft_key is not None:
+                self._rekey_tool_block(name, draft_key, key)
+            return key
         draft_key = self._oldest_draft_tool_key(name)
         return draft_key or self._tool_key(name, call_id)
 
@@ -1106,7 +1165,12 @@ class ChatLog(VerticalScroll):
             if key in self._tool_blocks:
                 self._remove_tool_queue_key(name, key)
                 return key
-            return None
+            draft_key = self._oldest_draft_tool_key(name)
+            if draft_key is None:
+                return None
+            self._rekey_tool_block(name, draft_key, key)
+            self._remove_tool_queue_key(name, key)
+            return key
 
         queue = self._tool_name_queues.get(name)
         if not queue:
@@ -1118,22 +1182,38 @@ class ChatLog(VerticalScroll):
                 return key
         return None
 
-    def _queue_pending_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
-        value = json.dumps({"result": result, "created_at": created_at})
+    def _rekey_tool_block(self, name: str, old_key: str, new_key: str) -> None:
+        """Promote one provisional draft to its stable call identifier."""
+        block = self._tool_blocks.pop(old_key)
+        self._tool_blocks[new_key] = block
+        queue = self._tool_name_queues.get(name)
+        if queue:
+            self._tool_name_queues[name] = deque(new_key if item == old_key else item for item in queue)
+
+    def _queue_pending_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        is_error: bool = False,
+    ) -> None:
+        value = json.dumps({"result": result, "created_at": created_at, "is_error": is_error})
         if call_id:
             self._pending_tool_results_by_id[call_id] = value
             return
         self._pending_tool_results_by_name[name].append(value)
 
-    def _take_pending_tool_result(self, name: str, call_id: str = "") -> str:
+    def _take_pending_tool_result(self, name: str, call_id: str = "") -> tuple[str, bool]:
         if call_id:
             result = self._pending_tool_results_by_id.pop(call_id, "")
             if result:
-                return pending_result_text(result)
+                return pending_result(result)
         queue = self._pending_tool_results_by_name.get(name)
         if not queue:
-            return ""
-        return pending_result_text(queue.popleft())
+            return "", False
+        return pending_result(queue.popleft())
 
     def _remove_tool_queue_key(self, name: str, key: str) -> None:
         queue = self._tool_name_queues.get(name)
@@ -1150,8 +1230,12 @@ class ChatLog(VerticalScroll):
         if block.get("result"):
             text.append("\n")
             text.append("-" * 12, style="dim")
-            text.append("\noutput:\n", style="bold cyan")
-            text.append(self.truncate_multiline(block["result"]), style="dim")
+            if block.get("is_error"):
+                text.append("\nerror:\n", style="bold red")
+                text.append(self.truncate_multiline(block["result"]), style="red")
+            else:
+                text.append("\noutput:\n", style="bold cyan")
+                text.append(self.truncate_multiline(block["result"]), style="dim")
         block["widget"].update(text)
         if scroll:
             self._scroll_to_end()
@@ -1169,14 +1253,14 @@ def timestamp_text(value: Any) -> str:
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def pending_result_text(value: str) -> str:
+def pending_result(value: str) -> tuple[str, bool]:
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
-        return value
+        return value, False
     if isinstance(payload, dict):
-        return str(payload.get("result") or "")
-    return value
+        return str(payload.get("result") or ""), bool(payload.get("is_error"))
+    return value, False
 
 
 class PlanActionButton(Button):

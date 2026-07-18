@@ -3913,6 +3913,50 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("draft:", final)
             self.assertIn("README.md", final)
 
+    async def test_provisional_draft_promotes_to_stable_failed_call(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+
+            app.tool_call_delta("read_file", {"path": "miss"}, call_id="index:0")
+            await pilot.pause()
+            draft = [block for block in chat.children if "tool-call" in block.classes][-1]
+
+            app.tool_call("read_file", {"path": "missing.txt"}, call_id="call-read")
+            app.completed_tool_error("read_file", "file not found", call_id="call-read")
+            await pilot.pause()
+
+            tools = [block for block in chat.children if "tool-call" in block.classes]
+            self.assertEqual(tools, [draft])
+            rendered = renderable_plain(draft)
+            self.assertIn("call:", rendered)
+            self.assertNotIn("draft:", rendered)
+            self.assertIn("error:", rendered)
+            self.assertIn("file not found", rendered)
+            self.assertNotIn("output:", rendered)
+
+    async def test_failed_retries_and_success_each_keep_one_tool_block(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call("read_file", {"path": "missing.txt"}, call_id="call-1")
+            app.completed_tool_error("read_file", "first failure", call_id="call-1")
+            app.tool_call("read_file", {"path": "missing.txt"}, call_id="call-2")
+            app.completed_tool_error("read_file", "second failure", call_id="call-2")
+            app.tool_call("read_file", {"path": "missing.txt"}, call_id="call-3")
+            app.completed_tool_result("read_file", "contents", call_id="call-3")
+            await pilot.pause()
+
+            tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 3)
+            rendered = [renderable_plain(block) for block in tools]
+            self.assertIn("error:\nfirst failure", rendered[0])
+            self.assertIn("error:\nsecond failure", rendered[1])
+            self.assertIn("output:\ncontents", rendered[2])
+
     async def test_cancel_turn_discards_tool_call_drafts(self) -> None:
         """Tool-call drafts from a cancelled turn should not be reused."""
         app = make_app()
@@ -4208,6 +4252,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tool = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes][-1]
             self.assertIn("<result>5</result>", renderable_plain(tool))
 
+    async def test_completed_tool_error_waits_for_provisional_call_and_stable_id(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.completed_tool_error("read_file", "file not found", call_id="call-read")
+            app.tool_call_delta("read_file", {"path": "miss"}, call_id="index:0")
+            app.tool_call("read_file", {"path": "missing.txt"}, call_id="call-read")
+            await pilot.pause()
+
+            tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 1)
+            rendered = renderable_plain(tools[0])
+            self.assertIn("call:", rendered)
+            self.assertIn("error:\nfile not found", rendered)
+
     async def test_replayed_tool_result_attaches_to_original_call_block(self) -> None:
         """Saved call/result events should replay as one grouped tool block."""
         app = make_app()
@@ -4239,6 +4299,39 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
             self.assertEqual(len(tools), 1)
             self.assertIn("contents", renderable_plain(tools[0]))
+
+    async def test_replayed_failed_tool_result_keeps_error_label(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(ChatLog).restore_session(
+                {
+                    "events": [
+                        {
+                            "type": "tool_call",
+                            "mode": "action",
+                            "name": "read_file",
+                            "args": {"path": "missing.txt"},
+                            "call_id": "call-read",
+                        },
+                        {
+                            "type": "tool_result",
+                            "mode": "action",
+                            "name": "read_file",
+                            "output": "file not found",
+                            "status": "error",
+                            "call_id": "call-read",
+                        },
+                    ]
+                }
+            )
+            await pilot.pause()
+
+            tool = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes][-1]
+            rendered = renderable_plain(tool)
+            self.assertIn("error:\nfile not found", rendered)
+            self.assertNotIn("output:", rendered)
 
     async def test_tool_results_without_ids_attach_by_name_order(self) -> None:
         """Tool results without ids should attach to the oldest unresolved matching call."""

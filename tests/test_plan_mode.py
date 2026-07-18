@@ -1179,7 +1179,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             **kwargs: Any,
         ) -> runner.TurnResult:
             renderer.text_delta("working")
-            renderer.tool_call("read_file", {"path": "README.md"})
+            renderer.tool_call("read_file", {"path": "missing.txt"}, call_id="call-read")
+            renderer.completed_tool_error("read_file", "file not found", call_id="call-read")
             raise RuntimeError("model stopped")
 
         with patch("ui.repl.run_turn", fake_run_turn):
@@ -1197,11 +1198,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["turns"], 0)
         self.assertGreaterEqual(len(store.saves), 4)
         event_types = [event["type"] for event in store.saves[-1]["events"]]
-        self.assertEqual(event_types, ["user", "assistant", "tool_call", "system_error"])
+        self.assertEqual(event_types, ["user", "assistant", "tool_call", "tool_result", "system_error"])
         self.assertEqual(store.saves[0]["events"][0]["text"], "inspect the repo")
         self.assertEqual(store.saves[-1]["events"][1]["text"], "working")
         self.assertEqual(store.saves[-1]["events"][2]["name"], "read_file")
-        self.assertIn("model stopped", store.saves[-1]["events"][3]["text"])
+        self.assertEqual(store.saves[-1]["events"][3]["status"], "error")
+        self.assertIn("file not found", store.saves[-1]["events"][3]["output"])
+        self.assertIn("model stopped", store.saves[-1]["events"][4]["text"])
 
     async def test_run_user_turn_records_context_overflow_as_info(self) -> None:
         """Escaped context overflow should persist as info instead of system_error."""

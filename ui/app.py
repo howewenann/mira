@@ -1686,12 +1686,25 @@ class MiraApp(App[None]):
         self.trace.completed_tool_result(name, result)
         self.query_one(ChatLog).completed_tool_result(name, result, call_id=call_id, created_at=created_at)
 
+    def completed_tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Update a failed ordinary tool without closing active model output."""
+        self.trace.completed_tool_error(name, error)
+        self.query_one(ChatLog).completed_tool_error(name, error, call_id=call_id, created_at=created_at)
+
     def recovered_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Render a late-discovered tool result in session transcript order."""
         self.trace.recovered_tool_result(name, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
         self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
+        self._rearm_waiting_if_busy()
+
+    def recovered_tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+        """Render a late-discovered failed tool result in session transcript order."""
+        self.trace.recovered_tool_error(name, error)
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(ChatLog).tool_error(name, error, call_id=call_id, created_at=created_at)
         self._rearm_waiting_if_busy()
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:

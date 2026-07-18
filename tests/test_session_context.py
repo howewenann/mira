@@ -858,6 +858,26 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             [("tool_result", "read_file", "contents", "call-read")],
         )
 
+    def test_completed_tool_error_persists_before_turn_failure(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.tool_call("read_file", {"path": "missing.txt"}, call_id="call-read")
+        recording.text_delta("Trying the file")
+        recording.completed_tool_error("read_file", "file not found", call_id="call-read")
+        recorder.system_error("turn error: graph failed")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["tool_call", "tool_result", "assistant", "system_error"],
+        )
+        self.assertEqual(events[1]["status"], "error")
+        self.assertEqual(events[1]["call_id"], "call-read")
+        self.assertIn(("tool_error", "read_file", "file not found", "call-read"), renderer.events)
+
     def test_completed_idless_results_group_by_original_call_order(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

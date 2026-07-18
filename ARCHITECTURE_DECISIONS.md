@@ -458,6 +458,12 @@ stays simpler for scripts and quick prompts.
 Completed ordinary tool results update their original tool blocks before the
 overall turn ends when the provider exposes a live terminal tool event. Final
 graph-state recovery remains the fallback for providers that do not.
+Native tool failures use the same path with explicit error status: terminal
+watchers get a bounded chance to publish an already-observed error before an
+overall stream failure propagates, and saved sessions replay the result with an
+inline error label. Provider drafts without their final call id are promoted
+FIFO by tool name when the stable id arrives, while distinct stable ids remain
+separate retry attempts.
 
 On Windows, MIRA pins Textual 8.2.7 and selects a narrow Windows driver adapter.
 Textual's Win32 event monitor normally reduces each `KEY_EVENT_RECORD` to its

@@ -278,6 +278,24 @@ Expected:
 - Session JSON contains one `tool_result` event per `call_id`; the final-state
   recovery path did not persist a duplicate.
 
+### Native failure and retry regression
+
+When reproducing a provider or ordinary tool that emits a native `tool-error`,
+request two failed attempts followed by one successful retry.
+
+Expected:
+
+- Each real attempt has exactly one tool bubble; provisional argument chunks
+  do not leave an additional `draft` bubble when the stable call id arrives.
+- Both failures remain visible in their own bubbles under a red `error:` label,
+  and the successful retry uses the normal `output:` label.
+- A handled failure does not add a turn-level error. If the graph also aborts,
+  the inline tool error appears before the existing turn-level error report.
+- After resuming the session, failed `tool_result` events retain
+  `status: "error"` and replay with the same error labels.
+- In one-shot mode, failed completions print as `<tool> error: ...` at a safe
+  terminal boundary without splitting streamed assistant text.
+
 ### Plan and goal isolation
 
 Run these checks in the same build, but treat them as regressions only: ordinary

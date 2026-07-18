@@ -45,8 +45,11 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
                     name=f"mira-tool-result-{call_id or name}",
                 )
             )
-    except BaseException:
+    except asyncio.CancelledError:
         await cancel_watchers(watchers)
+        raise
+    except BaseException:
+        await finish_watchers(watchers)
         raise
     else:
         await finish_watchers(watchers)
@@ -67,18 +70,23 @@ async def watch_tool_result(
     result: Any | None,
 ) -> None:
     """Follow one ordinary call to completion and deliver its final result."""
-    output = await tool_call_output(call)
-    if isinstance(output, Command) or not output:
+    output, is_error = await tool_call_completion(call)
+    if isinstance(output, Command):
         return
 
-    text = tool_output_text(output)
+    text = tool_output_text(output) or ("tool failed" if is_error else "")
+    if not text:
+        return
     recorded = True
     if result is not None:
         recorded = result.record_tool_result(text, call_id, name)
     if not recorded:
         return
 
-    callback = getattr(renderer, "completed_tool_result", None)
+    method = "completed_tool_error" if is_error else "completed_tool_result"
+    callback = getattr(renderer, method, None)
+    if not callable(callback) and is_error:
+        callback = getattr(renderer, "completed_tool_result", None)
     if callable(callback):
         callback(name, text, call_id=call_id)
     else:
@@ -104,8 +112,8 @@ async def cancel_watchers(watchers: set[asyncio.Task[None]]) -> None:
     await asyncio.gather(*watchers, return_exceptions=True)
 
 
-async def tool_call_output(call: Any) -> Any:
-    """Return a tool call's final output, collecting streamed deltas if needed."""
+async def tool_call_completion(call: Any) -> tuple[Any, bool]:
+    """Return a tool call's final payload and whether it represents an error."""
     deltas: list[str] = []
 
     output_deltas = field(call, "output_deltas")
@@ -122,20 +130,20 @@ async def tool_call_output(call: Any) -> Any:
 
     if isinstance(call, dict):
         if call.get("error") is not None:
-            return call["error"]
+            return await maybe_await(call["error"]), True
         if call.get("output") is not None:
-            return await maybe_await(call["output"])
-        return "".join(deltas)
+            return await maybe_await(call["output"]), False
+        return "".join(deltas), False
 
     error = field(call, "error")
     if error is not None:
-        return await maybe_await(error)
+        return await maybe_await(error), True
 
     output = field(call, "output")
     if output is not None:
-        return await maybe_await(output)
+        return await maybe_await(output), False
 
-    return "".join(deltas)
+    return "".join(deltas), False
 
 
 async def async_items(value: Any) -> Any:

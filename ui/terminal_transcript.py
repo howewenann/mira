@@ -26,7 +26,7 @@ class TerminalTranscript:
         self.tool_output_chars = int(tool_output_chars)
         self._section = ""
         self._reasoning_text = ""
-        self._pending_tool_results: list[tuple[str, Any]] = []
+        self._pending_tool_results: list[tuple[str, Any, bool]] = []
         self._subagent_labels: dict[int, str] = {}
         self._slug_fallback = slug_fallback
 
@@ -55,14 +55,28 @@ class TerminalTranscript:
         if result:
             self.line(f"{name} output: {self.truncate(result)}")
 
+    def tool_error(self, name: str, error: Any) -> None:
+        """Write a compact failed tool line."""
+        if error:
+            self.line(f"{name} error: {self.truncate(error)}")
+
     def completed_tool_result(self, name: str, result: Any) -> None:
         """Write a completion now, or defer it past active streamed model text."""
         if not result:
             return
         if self._section == "mira" or self._reasoning_text:
-            self._pending_tool_results.append((name, result))
+            self._pending_tool_results.append((name, result, False))
             return
         self.tool_result(name, result)
+
+    def completed_tool_error(self, name: str, error: Any) -> None:
+        """Write a failure now, or defer it past active streamed model text."""
+        if not error:
+            return
+        if self._section == "mira" or self._reasoning_text:
+            self._pending_tool_results.append((name, error, True))
+            return
+        self.tool_error(name, error)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         """Write a compact task delegation block."""
@@ -144,8 +158,9 @@ class TerminalTranscript:
         self._section = ""
         pending = self._pending_tool_results
         self._pending_tool_results = []
-        for name, result in pending:
-            self.write(f"{name} output: {self.truncate(result)}\n")
+        for name, result, is_error in pending:
+            label = "error" if is_error else "output"
+            self.write(f"{name} {label}: {self.truncate(result)}\n")
 
     def stream(self, title: str, text: str) -> None:
         """Write streamed text under a simple section heading."""

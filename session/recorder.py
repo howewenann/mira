@@ -96,11 +96,20 @@ class SessionRecorder:
         self.save()
         return stored
 
-    def completed_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
+    def completed_tool_result(
+        self,
+        name: str,
+        output: Any,
+        call_id: str = "",
+        *,
+        status: str = "success",
+    ) -> dict[str, Any]:
         """Persist a live completion beside its call without closing model output."""
         if name in CONTROL_TOOLS:
             return {}
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
+        if status == "error":
+            event["status"] = "error"
         if call_id:
             event["call_id"] = call_id
         stored = append_event(self.record, event)
@@ -108,11 +117,24 @@ class SessionRecorder:
         self.save()
         return stored
 
-    def recovered_tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
+    def completed_tool_error(self, name: str, error: Any, call_id: str = "") -> dict[str, Any]:
+        """Persist a live failed completion beside its original call."""
+        return self.completed_tool_result(name, error, call_id, status="error")
+
+    def recovered_tool_result(
+        self,
+        name: str,
+        output: Any,
+        call_id: str = "",
+        *,
+        status: str = "success",
+    ) -> dict[str, Any]:
         """Persist a late-discovered tool result before the last assistant reply."""
         if name in CONTROL_TOOLS:
             return {}
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
+        if status == "error":
+            event["status"] = "error"
         if call_id:
             event["call_id"] = call_id
         stored = append_event(self.record, event)
@@ -240,6 +262,10 @@ class SessionRecorder:
         self._rubric_event_ids[key] = int(stored["id"])
         self.save()
         return stored
+
+    def recovered_tool_error(self, name: str, error: Any, call_id: str = "") -> dict[str, Any]:
+        """Persist a recovered failed result before the last assistant reply."""
+        return self.recovered_tool_result(name, error, call_id, status="error")
 
     def rubric_evaluation_status(self, run_id: str, pass_number: int, status: str) -> None:
         """Update the persisted evaluation after checkpoint reconciliation."""
@@ -422,6 +448,17 @@ class RecordingRenderer:
         else:
             call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
 
+    def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        """Record and update a failed tool without ending active model output."""
+        if name in CONTROL_TOOLS:
+            return
+        event = self.recorder.completed_tool_error(name, error, call_id=call_id)
+        callback = getattr(self.renderer, "completed_tool_error", None)
+        if callable(callback):
+            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
+        else:
+            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event))
+
     def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render and record a late-discovered tool result."""
         if name in CONTROL_TOOLS:
@@ -432,6 +469,17 @@ class RecordingRenderer:
             call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
         else:
             call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+
+    def recovered_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        """Render and record a late-discovered failed tool result."""
+        if name in CONTROL_TOOLS:
+            return
+        callback = getattr(self.renderer, "recovered_tool_error", None)
+        event = self.recorder.recovered_tool_error(name, error, call_id=call_id)
+        if callable(callback):
+            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
+        else:
+            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event))
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         event = self.recorder.delegation_started(calls)

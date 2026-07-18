@@ -106,6 +106,16 @@ class TraceStreamTests(unittest.TestCase):
 
         self.assertEqual(handler.messages, ["\nmira:\nfinal answer\nwrite_todos output: updated"])
 
+    def test_completed_tool_error_uses_error_label_at_safe_boundary(self) -> None:
+        trace, handler = self.make_stream()
+
+        trace.assistant_delta("trying")
+        trace.completed_tool_error("read_file", "file not found")
+        trace.assistant_delta(" again")
+        trace.flush_all()
+
+        self.assertEqual("".join(handler.messages), "\nmira:\ntrying again\nread_file error: file not found")
+
     def test_normal_tool_result_flushes_pending_assistant_first(self) -> None:
         trace, handler = self.make_stream()
 
