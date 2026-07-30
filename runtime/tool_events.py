@@ -10,7 +10,7 @@ from langgraph.types import Command
 from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
-CONTROL_TOOLS = {"present_plan", "prepare_goal"}
+CONTROL_TOOLS = {"ask_user", "prepare_goal", "present_plan"}
 WATCHER_SHUTDOWN_SECONDS = 0.1
 
 
@@ -31,12 +31,11 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
                     renderer.delegation_started([normalized])
                 continue
 
-            if name in CONTROL_TOOLS:
-                continue
-
             if is_new_call:
                 renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
 
+            if name in CONTROL_TOOLS:
+                continue
             if not supports_completion_watch(call):
                 continue
             watchers.add(

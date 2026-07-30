@@ -13,8 +13,9 @@ from runtime.renderer_calls import call_renderer
 class ToolCallDrafts:
     """Accumulate streamed tool-call argument chunks for live draft rendering."""
 
-    def __init__(self, renderer: Any) -> None:
+    def __init__(self, renderer: Any, result: Any | None = None) -> None:
         self.renderer = renderer
+        self.result = result
         self._calls: dict[str, dict[str, Any]] = {}
 
     def push(self, chunk: Any) -> None:
@@ -38,6 +39,10 @@ class ToolCallDrafts:
         if not name:
             call_renderer(self.renderer, "model_activity")
             return
+
+        record_draft = getattr(self.result, "record_tool_call_draft", None)
+        if callable(record_draft):
+            record_draft(name, str(call.get("id") or ""))
 
         draft_call = self.draft_call(call)
         if name == "task":

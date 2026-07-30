@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any
 
 from runtime.usage import field
@@ -123,6 +124,59 @@ def output_tool_results(output: Any) -> list[dict[str, str]]:
             }
         )
     return results
+
+
+def output_tool_lifecycle(output: Any) -> list[dict[str, Any]]:
+    """Return executed call/result entries in final graph-message order."""
+    if not isinstance(output, dict):
+        return []
+
+    results = output_tool_results(output)
+    result_ids = {item["call_id"] for item in results if item["call_id"]}
+    idless_results = Counter(
+        item["name"]
+        for item in results
+        if not item["call_id"]
+    )
+    lifecycle: list[dict[str, Any]] = []
+    for message in output.get("messages") or []:
+        for call in field(message, "tool_calls") or []:
+            normalized = normalized_output_tool_call(call)
+            call_id = str(
+                field(normalized, "id")
+                or field(normalized, "call_id")
+                or field(normalized, "tool_call_id")
+                or ""
+            )
+            name = str(field(normalized, "name") or field(normalized, "tool_name") or "tool")
+            if call_id:
+                if call_id not in result_ids:
+                    continue
+            elif idless_results[name] > 0:
+                idless_results[name] -= 1
+            else:
+                continue
+            lifecycle.append({"type": "tool_call", "call": normalized})
+
+        if not is_tool_message(message):
+            continue
+        output_text = message_text(message)
+        if not output_text:
+            continue
+        lifecycle.append(
+            {
+                "type": "tool_result",
+                "name": str(field(message, "name") or "tool"),
+                "output": output_text,
+                "call_id": str(
+                    field(message, "tool_call_id")
+                    or field(message, "id")
+                    or ""
+                ),
+                "status": str(field(message, "status") or "success"),
+            }
+        )
+    return lifecycle
 
 
 def is_tool_message(message: Any) -> bool:

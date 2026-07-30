@@ -42,7 +42,10 @@ from config.settings import (
 )
 from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
+from runtime.tool_events import CONTROL_TOOLS
 from runtime.trace_stream import TraceStream
+from session.recorder import RecordingRenderer as SessionRecordingRenderer
+from session.recorder import SessionRecorder
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -213,6 +216,50 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(app.launch_options, LaunchOptions())
         self.assertFalse(app.launch_options.llm_direct)
+
+    async def test_control_tool_calls_promote_and_complete_in_place(self) -> None:
+        app = make_app()
+        completions = {
+            "ask_user": "Use A",
+            "prepare_goal": "Criteria are ready. Continue to present_plan.",
+            "present_plan": "Plan presented for user review.",
+        }
+
+        async with app.run_test() as pilot:
+            renderer = SessionRecordingRenderer(
+                app,
+                SessionRecorder(app.session, app.store, "planning"),
+            )
+            for name in CONTROL_TOOLS:
+                call_id = f"call-{name}"
+                renderer.tool_call_delta(
+                    name,
+                    {"value": "partial"},
+                    call_id=call_id,
+                )
+                renderer.tool_call(
+                    name,
+                    {"value": "complete"},
+                    call_id=call_id,
+                )
+                renderer.completed_tool_result(
+                    name,
+                    completions[name],
+                    call_id=call_id,
+                )
+            await pilot.pause()
+
+            bubbles = list(app.query(".tool-call"))
+            self.assertEqual(len(bubbles), len(CONTROL_TOOLS))
+            for bubble in bubbles:
+                rendered = renderable_plain(bubble)
+                self.assertIn("call:", rendered)
+                self.assertIn("output:", rendered)
+                self.assertNotIn("draft:", rendered)
+            self.assertEqual(
+                [event["type"] for event in app.session["events"]],
+                ["tool_call", "tool_result"] * len(CONTROL_TOOLS),
+            )
 
     async def test_prompt_box_enter_submits_exactly_once(self) -> None:
         app = PromptBoxTestApp()
@@ -4323,6 +4370,48 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
             self.assertEqual(len(tools), 1)
             self.assertIn("contents", renderable_plain(tools[0]))
+
+    async def test_replayed_ask_user_keeps_question_choices_answer_and_result(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.query_one(ChatLog).restore_session(
+                {
+                    "events": [
+                        {
+                            "type": "tool_call",
+                            "mode": "action",
+                            "name": "ask_user",
+                            "args": {
+                                "question": "Which path?",
+                                "options": ["Use A", "Use B"],
+                            },
+                            "call_id": "call-ask",
+                        },
+                        {
+                            "type": "tool_result",
+                            "mode": "action",
+                            "name": "ask_user",
+                            "output": "Use B",
+                            "call_id": "call-ask",
+                        },
+                    ]
+                }
+            )
+            await pilot.pause()
+
+            tools = [
+                block
+                for block in app.query_one(ChatLog).children
+                if "tool-call" in block.classes
+            ]
+            self.assertEqual(len(tools), 1)
+            rendered = renderable_plain(tools[0])
+            self.assertIn("Which path?", rendered)
+            self.assertIn("Use A", rendered)
+            self.assertIn("Use B", rendered)
+            self.assertIn("output:", rendered)
 
     async def test_replayed_failed_tool_result_keeps_error_label(self) -> None:
         app = make_app()

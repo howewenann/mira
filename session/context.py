@@ -8,7 +8,6 @@ from typing import Any
 
 from session.dashboard import normalize_dashboard
 from session.goals import normalize_active_goal
-from runtime.tool_events import CONTROL_TOOLS
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -80,8 +79,6 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["max_iterations"] = bounded_positive_int(item.get("max_iterations"), default=1, maximum=20)
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
-            if event["name"] in CONTROL_TOOLS:
-                continue
             event["args"] = item.get("args", {})
             call_id = compact_line(item.get("call_id"))
             if call_id:
@@ -91,8 +88,6 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             if not output:
                 continue
             event["name"] = compact_line(item.get("name") or "tool")
-            if event["name"] in CONTROL_TOOLS:
-                continue
             event["output"] = output
             if compact_line(item.get("status")) == "error":
                 event["status"] = "error"

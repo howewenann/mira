@@ -61,8 +61,22 @@ Run one prompt and exit:
 
 ```powershell
 mira --prompt "summarize this project"
-mira --file prompt.md
+mira --file task.txt
+mira --prompt "add focused tests" --rubric "The requested tests pass."
+mira --file task.txt --rubric-file criteria.txt
 ```
+
+`--prompt/-p` and `--file/-f` are mutually exclusive task inputs.
+`--rubric` and `--rubric-file` are mutually exclusive, invocation-only rubric
+inputs and require a task input. File inputs accept any readable, non-empty
+UTF-8 text file regardless of extension; literal and file inputs cannot be
+empty or whitespace-only. Invocation rubrics use the configured rubric
+iteration cap without changing the saved workspace rubric setting.
+
+One-shot exit codes are `0` for success (and rubric satisfaction when supplied),
+`1` for runtime/provider/execution failure, `2` for invalid arguments or input
+files, and `3` when the supplied rubric remains unsatisfied at the iteration
+limit.
 
 Useful startup options:
 

@@ -23,7 +23,18 @@ def main(
         None,
         "--file",
         "-f",
-        help="Read one Markdown prompt file and exit.",
+        help="Read one UTF-8 text task file and exit.",
+        show_default=False,
+    ),
+    rubric: str | None = typer.Option(
+        None,
+        "--rubric",
+        help="Use exact rubric text for this one-shot invocation.",
+    ),
+    rubric_file: Path | None = typer.Option(
+        None,
+        "--rubric-file",
+        help="Read exact rubric text from a UTF-8 file for this one-shot invocation.",
         show_default=False,
     ),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume the most recent session."),
@@ -47,6 +58,8 @@ def main(
         run(
             prompt=prompt,
             prompt_file=prompt_file,
+            rubric=rubric,
+            rubric_file=rubric_file,
             resume=resume,
             workspace=workspace,
             session=session,

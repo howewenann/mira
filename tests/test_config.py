@@ -756,14 +756,13 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(raised.exception.exit_code, 2)
 
-    async def test_file_flag_rejects_missing_directory_and_non_markdown_paths(self) -> None:
+    async def test_file_flag_rejects_missing_and_directory_paths(self) -> None:
         """The file prompt input should fail before model startup for invalid paths."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            (workspace / "notes.txt").write_text("not markdown\n", encoding="utf-8")
             (workspace / "folder.md").mkdir()
 
-            cases = [Path("missing.md"), Path("folder.md"), Path("notes.txt")]
+            cases = [Path("missing.md"), Path("folder.md")]
             for prompt_file in cases:
                 with self.subTest(prompt_file=prompt_file):
                     with self.assertRaises(typer.Exit) as raised:

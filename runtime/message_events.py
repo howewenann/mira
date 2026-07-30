@@ -15,6 +15,7 @@ from runtime.output_events import (
 from runtime.protocol_events import event_delta, is_raw_message_stream, is_tool_call_delta
 from runtime.renderer_calls import call_renderer
 from runtime.tool_call_args import ToolCallDrafts, normalized_call, tool_call_name
+from runtime.tool_events import CONTROL_TOOLS
 from runtime.usage import has_usage, usage_from_message
 
 
@@ -39,7 +40,7 @@ async def consume_messages(
         if is_compaction:
             await _consume_compaction_message(message, renderer)
             call_renderer(renderer, "model_stream_finished")
-            call_list = await _finalized_tool_calls(message, renderer)
+            call_list = await _finalized_tool_calls(message, renderer, result)
             if call_list:
                 render_tool_calls(call_list, renderer, result, render_normal_tools=render_normal_tools)
             if result is not None:
@@ -49,11 +50,11 @@ async def consume_messages(
             continue
 
         if is_raw_message_stream(message):
-            await _consume_ordered_message_stream(message, renderer)
+            await _consume_ordered_message_stream(message, renderer, result)
             call_renderer(renderer, "model_stream_finished")
-            call_list = await _finalized_tool_calls(message, renderer)
+            call_list = await _finalized_tool_calls(message, renderer, result)
         else:
-            call_task = asyncio.create_task(_finalized_tool_calls(message, renderer))
+            call_task = asyncio.create_task(_finalized_tool_calls(message, renderer, result))
             await _consume_reasoning(message, renderer)
             await _consume_text(message, renderer)
             call_renderer(renderer, "model_stream_finished")
@@ -77,9 +78,13 @@ async def _consume_reasoning(message: Any, renderer: Any) -> None:
         renderer.reasoning_delta(str(delta))
 
 
-async def _consume_ordered_message_stream(message: Any, renderer: Any) -> None:
+async def _consume_ordered_message_stream(
+    message: Any,
+    renderer: Any,
+    result: Any | None = None,
+) -> None:
     """Render raw ChatModelStream events in provider order."""
-    tool_drafts = ToolCallDrafts(renderer)
+    tool_drafts = ToolCallDrafts(renderer, result)
     visible_text = ""
 
     async for event in message:
@@ -167,13 +172,17 @@ async def _text_deltas(value: Any) -> AsyncIterator[str]:
         yield str(text)
 
 
-async def _finalized_tool_calls(message: Any, renderer: Any) -> list[Any]:
+async def _finalized_tool_calls(
+    message: Any,
+    renderer: Any,
+    result: Any | None = None,
+) -> list[Any]:
     """Return the finalized tool-call list for a streamed message."""
     calls = getattr(message, "tool_calls", None)
     if calls is None:
         return []
 
-    tool_drafts = ToolCallDrafts(renderer)
+    tool_drafts = ToolCallDrafts(renderer, result)
     if hasattr(calls, "__aiter__"):
         async for chunk in calls:
             tool_drafts.push(chunk)
@@ -207,7 +216,7 @@ def render_tool_calls(
                 result.record_tool_call(name, call_id)
             continue
 
-        if not render_normal_tools:
+        if not render_normal_tools and name not in CONTROL_TOOLS:
             continue
 
         if result is not None and not result.record_tool_call(name, call_id):

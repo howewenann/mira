@@ -19,6 +19,8 @@ def run(
     session: str | None,
     direct: bool = False,
     prompt_file: Path | None = None,
+    rubric: str | None = None,
+    rubric_file: Path | None = None,
     trace: bool = False,
 ) -> None:
     """Bridge Typer's synchronous command callback into the async app."""
@@ -32,6 +34,8 @@ def run(
             _run(
                 prompt=prompt,
                 prompt_file=prompt_file,
+                rubric=rubric,
+                rubric_file=rubric_file,
                 resume=resume,
                 workspace=workspace,
                 session=session,
@@ -65,6 +69,8 @@ async def _run(
     session: str | None,
     launch_options: LaunchOptions | None = None,
     prompt_file: Path | None = None,
+    rubric: str | None = None,
+    rubric_file: Path | None = None,
     trace: bool = False,
 ) -> None:
     """Create the app objects, then run either one-shot or TUI mode."""
@@ -74,9 +80,20 @@ async def _run(
     from config.runtime import LaunchOptions, load_effective_config
 
     workspace = workspace.expanduser().resolve()
-    prompt = _resolve_one_shot_prompt(prompt, prompt_file, workspace)
+    prompt, invocation_rubric = _resolve_one_shot_inputs(
+        prompt,
+        prompt_file,
+        rubric,
+        rubric_file,
+        workspace,
+    )
     launch_options = launch_options or LaunchOptions()
     config = load_effective_config(workspace, launch_options)
+    if invocation_rubric is not None:
+        from config.settings import set_rubric_enabled
+
+        config = dict(config)
+        config["settings"] = set_rubric_enabled(config.get("settings") or {}, True)
 
     if prompt is None:
         if trace:
@@ -116,46 +133,85 @@ async def _run(
     warning = one_shot_warning(app.get("tool_failures") or [])
     if warning:
         renderer.system_message(warning, kind="warning")
-    await _run_one_shot(app, prompt)
+    result = await _run_one_shot(app, prompt, rubric=invocation_rubric)
+    if invocation_rubric is not None and result.rubric_status != "satisfied":
+        raise typer.Exit(code=3)
 
 
-def _resolve_one_shot_prompt(prompt: str | None, prompt_file: Path | None, workspace: Path) -> str | None:
-    """Return literal prompt text or UTF-8 Markdown file contents."""
+def _resolve_one_shot_inputs(
+    prompt: str | None,
+    prompt_file: Path | None,
+    rubric: str | None,
+    rubric_file: Path | None,
+    workspace: Path,
+) -> tuple[str | None, str | None]:
+    """Validate and return exact one-shot task and optional rubric text."""
     import typer
 
     if prompt is not None and prompt_file is not None:
         typer.echo("Use either --prompt/-p or --file/-f, not both.", err=True)
         raise typer.Exit(code=2)
-    if prompt_file is None:
-        return prompt
+    if rubric is not None and rubric_file is not None:
+        typer.echo("Use either --rubric or --rubric-file, not both.", err=True)
+        raise typer.Exit(code=2)
+    if (rubric is not None or rubric_file is not None) and prompt is None and prompt_file is None:
+        typer.echo("--rubric and --rubric-file require --prompt/-p or --file/-f.", err=True)
+        raise typer.Exit(code=2)
+    if prompt is not None and not prompt.strip():
+        typer.echo("--prompt/-p cannot be empty or whitespace-only.", err=True)
+        raise typer.Exit(code=2)
+    if rubric is not None and not rubric.strip():
+        typer.echo("--rubric cannot be empty or whitespace-only.", err=True)
+        raise typer.Exit(code=2)
 
-    path = prompt_file.expanduser()
+    task = _read_text_input(prompt_file, workspace, "--file/-f") if prompt_file is not None else prompt
+    criteria = (
+        _read_text_input(rubric_file, workspace, "--rubric-file")
+        if rubric_file is not None
+        else rubric
+    )
+    return task, criteria
+
+
+def _read_text_input(path_value: Path, workspace: Path, argument: str) -> str:
+    """Read one non-empty UTF-8 text file without restricting its extension."""
+    import typer
+
+    path = path_value.expanduser()
     if not path.is_absolute():
         path = workspace / path
     path = path.resolve()
 
-    if path.suffix.lower() not in {".md", ".markdown"}:
-        typer.echo("--file/-f only accepts Markdown files (.md or .markdown).", err=True)
-        raise typer.Exit(code=2)
     if not path.exists():
-        typer.echo(f"Prompt file does not exist: {path}", err=True)
+        typer.echo(f"{argument} file does not exist: {path}", err=True)
         raise typer.Exit(code=2)
     if not path.is_file():
-        typer.echo(f"Prompt file is not a file: {path}", err=True)
+        typer.echo(f"{argument} path is not a file: {path}", err=True)
         raise typer.Exit(code=2)
 
     try:
-        return path.read_text(encoding="utf-8")
-    except OSError as error:
-        typer.echo(f"Could not read prompt file {path}: {error}", err=True)
-        raise typer.Exit(code=2) from error
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
-        typer.echo(f"Prompt file must be UTF-8: {path}", err=True)
+        typer.echo(f"{argument} file must be valid UTF-8: {path}", err=True)
         raise typer.Exit(code=2) from error
+    except OSError as error:
+        typer.echo(f"Could not read {argument} file {path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+    if not text.strip():
+        typer.echo(f"{argument} file cannot be empty or whitespace-only: {path}", err=True)
+        raise typer.Exit(code=2)
+    return text
 
 
-async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
+async def _run_one_shot(
+    app: dict[str, Any],
+    prompt: str,
+    *,
+    rubric: str | None = None,
+) -> Any:
     """Run one prompt and persist the visible transcript."""
+    import typer
+
     from runtime.runner import run_turn
     from runtime.context_usage import context_usage_scope
     from runtime.error_report import write_error_report
@@ -174,7 +230,13 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
     request_text = with_resume_context(app["session"], prompt)
     settings = (app.get("config") or {}).get("settings")
     rubric_kwargs = {}
-    if rubric_enabled(settings):
+    if rubric is not None:
+        rubric_kwargs = {
+            "rubric": rubric,
+            "rubric_max_iterations": rubric_max_iterations(settings),
+            "include_rubric_state": True,
+        }
+    elif rubric_enabled(settings):
         rubric_kwargs = {
             "rubric": None,
             "rubric_max_iterations": rubric_max_iterations(settings),
@@ -217,7 +279,7 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
                 recorder.info(notice)
             mark_context_notice_rendered(exc)
         app["store"].save(app["session"])
-        return
+        raise typer.Exit(code=1) from exc
     except Exception as exc:
         report_workspace = Path(app.get("workspace") or app["session"].get("workspace") or ".")
         error_path = write_error_report(
@@ -235,6 +297,11 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         recorder.system_error(f"turn error: {exc}; error report: {error_path}")
         raise
     recorder.ensure_assistant(getattr(result, "final_text", ""))
+    if rubric is not None:
+        renderer.system_message(
+            _rubric_outcome_text(str(getattr(result, "rubric_status", "") or "")),
+            kind="info",
+        )
     app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
     update_title(app["session"])
     with suppress(Exception):
@@ -248,6 +315,17 @@ async def _run_one_shot(app: dict[str, Any], prompt: str) -> None:
         context_limit_source=app.get("context_limit_source", "unknown"),
     )
     app["store"].save(app["session"])
+    return result
+
+
+def _rubric_outcome_text(status: str) -> str:
+    """Return the final one-shot rubric outcome summary."""
+    if status == "satisfied":
+        return "Rubric outcome: satisfied."
+    if status == "max_iterations_reached":
+        return "Rubric outcome: unsatisfied after the configured iteration limit."
+    label = status.replace("_", " ").strip() or "unavailable"
+    return f"Rubric outcome: {label}."
 
 
 async def _bootstrap(

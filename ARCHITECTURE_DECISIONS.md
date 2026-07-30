@@ -450,16 +450,29 @@ terminal-status handling, or the goal/plan review lifecycle changes.
 
 **Decision:** The Textual TUI is the primary interactive experience. One-shot
 terminal output uses a separate renderer. One-shot mode accepts literal prompt
-text through `--prompt/-p` or explicit Markdown prompt files through
-`--file/-f`.
+text through `--prompt/-p` or any readable, non-empty UTF-8 text file through
+`--file/-f`. Optional invocation-only rubric text comes from `--rubric` or
+`--rubric-file`; it enables the existing rubric middleware in memory for that
+one-shot run, uses the saved iteration cap, and does not persist a settings
+change or proposal state.
 
 **Why:** The TUI can preserve chat order, tool calls, tool results, subagent
 progress, settings, and session history in one place. The one-shot renderer
 stays simpler for scripts and quick prompts.
 
-Completed ordinary tool results update their original tool blocks before the
-overall turn ends when the provider exposes a live terminal tool event. Final
-graph-state recovery remains the fallback for providers that do not.
+All tools share one underlying lifecycle for call identity, visible start,
+completion or error, persistence, and replay. This includes the v1.9 control
+tools `ask_user`, `prepare_goal`, and `present_plan`: their existing dedicated
+question, criteria, and Plan surfaces remain, but no longer suppress the
+ordinary call/result block. The stable call id associates each surface outcome
+with its original call, so the completed result updates that block in place and
+two calls with identical output remain distinct.
+
+Completed tool results update their original tool blocks before the overall turn
+ends when the provider exposes a live terminal event. Final graph-state recovery
+remains the fallback for providers that do not and uses the same identity-based
+deduplication, recorder, and renderer path rather than a control-specific event
+bus. Reopened sessions replay call and result events in their saved order.
 Native tool failures use the same path with explicit error status: terminal
 watchers get a bounded chance to publish an already-observed error before an
 overall stream failure propagates, and saved sessions replay the result with an

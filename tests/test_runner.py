@@ -23,7 +23,7 @@ from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
-from runtime.tool_events import consume_tool_calls
+from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from agent.default_resources.tools.ask_user import normalize_options
@@ -418,7 +418,13 @@ class RecordingRenderer:
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.events.append(("tool_call", name, args, call_id))
 
+    def recovered_tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+        self.events.append(("tool_call", name, args, call_id))
+
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+        self.events.append(("tool_result", name, result, call_id))
+
+    def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         self.events.append(("tool_result", name, result, call_id))
 
     def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
@@ -607,19 +613,46 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "question": "Which path should MIRA take?",
             "options": ["Use A", "Use B", ASK_USER_OPEN_OPTION],
         }
+        call = {
+            "name": "ask_user",
+            "id": "call-ask",
+            "args": {
+                "question": interrupt["question"],
+                "options": interrupt["options"],
+            },
+            "completed": False,
+        }
         agent = FakeAgent(
             [
-                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[call],
+                    interrupts=[interrupt],
+                ),
                 FakeStream(output={"messages": []}),
             ]
         )
         renderer = RunTurnRenderer(ask_user_answer="Use B")
 
-        await runner.run_turn(agent, "choose", renderer, "thread-1")
+        result = await runner.run_turn(agent, "choose", renderer, "thread-1")
 
         self.assertEqual(renderer.ask_user_prompts, [interrupt])
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(agent.payloads[1].resume, "Use B")
+        self.assertEqual(result.tool_calls, ["ask_user"])
+        self.assertEqual(result.tool_results, ["Use B"])
+        self.assertEqual(
+            [
+                event
+                for event in renderer.events
+                if event[0] in {"tool_call", "ask_user", "tool_result"}
+            ],
+            [
+                ("tool_call", "ask_user", call["args"], "call-ask"),
+                ("ask_user", interrupt),
+                ("tool_result", "ask_user", "Use B", "call-ask"),
+            ],
+        )
 
     async def test_run_turn_presents_plan_interrupt_as_terminal_turn(self) -> None:
         interrupt = {
@@ -630,9 +663,19 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "test_plan": ["Run focused checks."],
             "assumptions": ["Execute is available."],
         }
+        call = {
+            "name": "present_plan",
+            "id": "call-plan",
+            "args": {key: value for key, value in interrupt.items() if key != "type"},
+            "completed": False,
+        }
         agent = FakeAgent(
             [
-                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[call],
+                    interrupts=[interrupt],
+                ),
             ]
         )
         renderer = RunTurnRenderer()
@@ -644,8 +687,26 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.approvals, [])
         self.assertEqual(len(agent.payloads), 1)
         self.assertEqual(result.final_text, "")
+        self.assertEqual(result.tool_results, ["Plan presented for user review."])
+        self.assertEqual(
+            [
+                event
+                for event in renderer.events
+                if event[0] in {"tool_call", "present_plan", "tool_result"}
+            ],
+            [
+                ("tool_call", "present_plan", call["args"], "call-plan"),
+                ("present_plan", interrupt),
+                (
+                    "tool_result",
+                    "present_plan",
+                    "Plan presented for user review.",
+                    "call-plan",
+                ),
+            ],
+        )
 
-    async def test_present_plan_tool_stream_is_not_rendered(self) -> None:
+    async def test_control_tool_stream_renders_call_but_not_raw_command_result(self) -> None:
         call = {
             "name": "present_plan",
             "id": "call-plan",
@@ -658,8 +719,37 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         await runner.run_turn(agent, "plan", renderer, "thread-1")
 
-        self.assertNotIn(("tool_call", "present_plan", {"title": "Plan"}, "call-plan"), renderer.events)
+        self.assertIn(("tool_call", "present_plan", {"title": "Plan"}, "call-plan"), renderer.events)
         self.assertNotIn(("tool_result", "present_plan", "interrupt", "call-plan"), renderer.events)
+
+    async def test_message_fallback_renders_every_v1_control_call(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        calls = [
+            {
+                "name": name,
+                "id": f"call-{name}",
+                "args": {"value": name},
+            }
+            for name in CONTROL_TOOLS
+        ]
+
+        await consume_messages(
+            AsyncItems([Message(calls)]),
+            renderer,
+            result,
+            render_normal_tools=False,
+        )
+
+        self.assertEqual(
+            {
+                (event[1], event[3])
+                for event in renderer.events
+                if event[0] == "tool_call"
+            },
+            {(name, f"call-{name}") for name in CONTROL_TOOLS},
+        )
+        self.assertEqual(set(result.tool_calls), CONTROL_TOOLS)
 
     async def test_run_turn_exits_when_stream_has_no_interrupts(self) -> None:
         agent = FakeAgent([FakeStream(output={"messages": []})])
@@ -918,10 +1008,23 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.rubric_evaluations, [])
 
     async def test_run_turn_resumes_prepare_goal_control_interrupt(self) -> None:
-        interrupt = {"type": "prepare_goal"}
+        interrupt = {
+            "type": "prepare_goal",
+            "research_summary": "Existing index is SQLite.",
+        }
+        call = {
+            "name": "prepare_goal",
+            "id": "call-prepare",
+            "args": {"research_summary": interrupt["research_summary"]},
+            "completed": False,
+        }
         agent = FakeAgent(
             [
-                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[call],
+                    interrupts=[interrupt],
+                ),
                 FakeStream(output={"messages": []}),
             ]
         )
@@ -939,6 +1042,110 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent.payloads), 2)
         self.assertEqual(agent.payloads[0]["planning_stage"], "research")
         self.assertEqual(agent.payloads[1].update, {"planning_stage": "finalize"})
+        self.assertEqual(
+            [
+                event
+                for event in renderer.events
+                if event[0] in {"tool_call", "prepare_goal", "tool_result"}
+            ],
+            [
+                ("tool_call", "prepare_goal", call["args"], "call-prepare"),
+                ("prepare_goal", interrupt),
+                (
+                    "tool_result",
+                    "prepare_goal",
+                    "Criteria are ready. Continue to present_plan.",
+                    "call-prepare",
+                ),
+            ],
+        )
+
+    async def test_control_surface_error_updates_original_call(self) -> None:
+        interrupt = {
+            "type": "ask_user",
+            "question": "Which path?",
+            "options": ["Use A", ASK_USER_OPEN_OPTION],
+        }
+        call = {
+            "name": "ask_user",
+            "id": "call-ask",
+            "args": {
+                "question": interrupt["question"],
+                "options": interrupt["options"],
+            },
+            "completed": False,
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[call],
+                    interrupts=[interrupt],
+                )
+            ]
+        )
+
+        class FailingRenderer(RunTurnRenderer):
+            async def ask_user(self, interrupt: Any) -> str:
+                self.events.append(("ask_user", interrupt))
+                raise RuntimeError("prompt failed")
+
+        renderer = FailingRenderer()
+        with self.assertRaisesRegex(RuntimeError, "prompt failed"):
+            await runner.run_turn(agent, "choose", renderer, "thread-1")
+
+        self.assertIn(("tool_error", "ask_user", "prompt failed", "call-ask"), renderer.events)
+
+    async def test_control_interrupt_recovers_call_id_from_final_graph_state(self) -> None:
+        interrupt = {
+            "type": "ask_user",
+            "question": "Which path?",
+            "options": ["Use A", ASK_USER_OPEN_OPTION],
+        }
+        pending = AIMessage(
+            content=[],
+            tool_calls=[
+                {
+                    "name": "ask_user",
+                    "args": {
+                        "question": interrupt["question"],
+                        "options": interrupt["options"],
+                    },
+                    "id": "call-final-state",
+                }
+            ],
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={"messages": [pending], "__interrupt__": [interrupt]},
+                    interrupts=[],
+                ),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(ask_user_answer="Use A")
+
+        result = await runner.run_turn(agent, "choose", renderer, "thread-1")
+
+        self.assertIn(
+            (
+                "tool_call",
+                "ask_user",
+                {
+                    "question": interrupt["question"],
+                    "options": interrupt["options"],
+                },
+                "call-final-state",
+            ),
+            renderer.events,
+        )
+        self.assertIn(
+            ("tool_result", "ask_user", "Use A", "call-final-state"),
+            renderer.events,
+        )
+        self.assertEqual(result.tool_calls, ["ask_user"])
+        self.assertEqual(result.tool_results, ["Use A"])
 
     async def test_run_turn_keeps_tool_namespace_subagent_with_task_request_ordinary(self) -> None:
         stream = FakeStream(output={"messages": []})
@@ -1658,6 +1865,54 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.final_text, "The envs are ai_agents and base.")
         self.assertIn(("tool_result", "execute", "env list", "call-execute"), renderer.events)
 
+    async def test_run_turn_recovers_call_and_result_from_final_graph_state(self) -> None:
+        call = {
+            "name": "read_file",
+            "args": {"file_path": "README.md"},
+            "id": "call-read",
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={
+                        "messages": [
+                            AIMessage(content=[], tool_calls=[call]),
+                            ToolMessage(
+                                content="contents",
+                                name="read_file",
+                                tool_call_id="call-read",
+                            ),
+                            OutputMessage("Done."),
+                        ]
+                    },
+                    interrupts=[],
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "read", renderer, "thread-1")
+
+        lifecycle = [
+            event
+            for event in renderer.events
+            if event[0] in {"tool_call", "tool_result"}
+        ]
+        self.assertEqual(
+            lifecycle,
+            [
+                (
+                    "tool_call",
+                    "read_file",
+                    {"file_path": "README.md"},
+                    "call-read",
+                ),
+                ("tool_result", "read_file", "contents", "call-read"),
+            ],
+        )
+        self.assertEqual(result.tool_calls, ["read_file"])
+        self.assertEqual(result.tool_results, ["contents"])
+
     async def test_run_turn_recovers_failed_final_output_tool_message(self) -> None:
         agent = FakeAgent(
             [
@@ -1694,6 +1949,16 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 FakeStream(
                     output={
                         "messages": [
+                            AIMessage(
+                                content=[],
+                                tool_calls=[
+                                    {
+                                        "name": "execute",
+                                        "args": {"command": "conda env list"},
+                                        "id": "call-execute",
+                                    }
+                                ],
+                            ),
                             ToolMessage(content="env list", name="execute", tool_call_id="call-execute"),
                             OutputMessage("Done."),
                         ]
@@ -1710,8 +1975,28 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         result = await runner.run_turn(agent, "execute", renderer, "thread-1")
 
         self.assertEqual(result.tool_results, ["env list"])
+        call_events = [event for event in renderer.events if event[:2] == ("tool_call", "execute")]
+        self.assertEqual(
+            call_events,
+            [
+                (
+                    "tool_call",
+                    "execute",
+                    {"command": "conda env list"},
+                    "call-execute",
+                )
+            ],
+        )
         result_events = [event for event in renderer.events if event[:2] == ("tool_result", "execute")]
         self.assertEqual(result_events, [("tool_result", "execute", "env list", "call-execute")])
+
+    def test_equal_outputs_from_distinct_call_ids_remain_separate(self) -> None:
+        result = runner.TurnResult()
+
+        self.assertTrue(result.record_tool_result("same output", "call-one", "read_file"))
+        self.assertTrue(result.record_tool_result("same output", "call-two", "read_file"))
+        self.assertFalse(result.record_tool_result("same output", "call-two", "read_file"))
+        self.assertEqual(result.tool_results, ["same output", "same output"])
 
     async def test_tool_call_stream_accepts_documented_fields(self) -> None:
         renderer = RecordingRenderer()

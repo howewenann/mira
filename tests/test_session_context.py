@@ -21,6 +21,7 @@ from session.store import SessionStore
 from runtime import runner
 from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata
+from runtime.tool_events import CONTROL_TOOLS
 from tests.test_runner import (
     AsyncItems,
     COMPACTION_SUMMARY,
@@ -838,6 +839,32 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
+    def test_recovered_call_and_result_persist_before_final_assistant(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.text_delta("Done.")
+        recording.finish_main()
+        recording.recovered_tool_call(
+            "read_file",
+            {"file_path": "README.md"},
+            call_id="call-read",
+        )
+        recording.recovered_tool_result(
+            "read_file",
+            "contents",
+            call_id="call-read",
+        )
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["tool_call", "tool_result", "assistant"],
+        )
+        self.assertEqual(events[0]["call_id"], events[1]["call_id"])
+
     def test_completed_tool_result_preserves_active_assistant_and_call_grouping(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
@@ -898,19 +925,42 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    def test_present_plan_tool_events_are_not_persisted_or_rendered(self) -> None:
+    def test_control_tool_calls_and_results_are_persisted_and_rendered(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
         recording = SessionRecordingRenderer(renderer, recorder)
+        completions = {
+            "ask_user": "Use A",
+            "prepare_goal": "Criteria are ready. Continue to present_plan.",
+            "present_plan": "Plan presented for user review.",
+        }
 
-        recording.tool_call("present_plan", {"title": "Plan"}, call_id="call-plan")
-        recording.tool_result("present_plan", "interrupt", call_id="call-plan")
-        recording.completed_tool_result("present_plan", "interrupt", call_id="call-plan")
-        recording.recovered_tool_result("present_plan", "interrupt", call_id="call-plan")
+        for name in CONTROL_TOOLS:
+            call_id = f"call-{name}"
+            recording.tool_call(name, {"value": name}, call_id=call_id)
+            recording.completed_tool_result(
+                name,
+                completions[name],
+                call_id=call_id,
+            )
 
-        self.assertEqual(renderer.events, [])
-        self.assertEqual(context.normalize_events(record["events"]), [])
+        events = context.normalize_events(record["events"])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["tool_call", "tool_result"] * len(CONTROL_TOOLS),
+        )
+        for call, result in zip(events[::2], events[1::2], strict=True):
+            self.assertEqual(call["name"], result["name"])
+            self.assertEqual(call["call_id"], result["call_id"])
+        self.assertEqual(
+            {event[1] for event in renderer.events if event[0] == "tool_call"},
+            CONTROL_TOOLS,
+        )
+        self.assertEqual(
+            {event[1] for event in renderer.events if event[0] == "tool_result"},
+            CONTROL_TOOLS,
+        )
 
     def test_rubric_results_are_persisted_as_events_and_reconciled(self) -> None:
         record = {"events": []}
@@ -984,11 +1034,28 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.normalize_proposals(events)[0]["rubric_iterations"], 3)
         self.assertEqual(context.normalize_events(events)[1]["max_iterations"], 1)
 
-    def test_normalize_events_hides_legacy_present_plan_tool_events(self) -> None:
+    def test_normalize_events_replays_control_events_in_original_order(self) -> None:
         record = {
             "events": [
-                {"id": 1, "type": "tool_call", "mode": "planning", "name": "present_plan", "args": {}},
-                {"id": 2, "type": "tool_result", "mode": "planning", "name": "present_plan", "output": "interrupt"},
+                {
+                    "id": 1,
+                    "type": "tool_call",
+                    "mode": "planning",
+                    "name": "ask_user",
+                    "call_id": "call-ask",
+                    "args": {
+                        "question": "Which path?",
+                        "options": ["Use A", "Use B"],
+                    },
+                },
+                {
+                    "id": 2,
+                    "type": "tool_result",
+                    "mode": "planning",
+                    "name": "ask_user",
+                    "call_id": "call-ask",
+                    "output": "Use B",
+                },
                 {
                     "id": 3,
                     "type": "plan",
@@ -1008,7 +1075,15 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         events = context.normalize_events(record["events"])
 
-        self.assertEqual([event["type"] for event in events], ["plan"])
+        self.assertEqual(
+            [event["type"] for event in events],
+            ["tool_call", "tool_result", "plan"],
+        )
+        self.assertEqual(events[0]["args"]["question"], "Which path?")
+        self.assertEqual(events[0]["args"]["options"], ["Use A", "Use B"])
+        self.assertEqual(events[0]["call_id"], "call-ask")
+        self.assertEqual(events[1]["output"], "Use B")
+        self.assertEqual(events[1]["call_id"], "call-ask")
 
     def test_recorder_preserves_subagent_request_on_terminal_events(self) -> None:
         record = {"events": []}

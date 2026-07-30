@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
@@ -22,11 +22,11 @@ from runtime.output_events import (
     final_text,
     output_has_tool_call_repr,
     output_tool_calls,
-    output_tool_results,
+    output_tool_lifecycle,
 )
 from runtime.rubric_events import RubricEventRenderer
 from runtime.subagent_events import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
-from runtime.tool_call_args import tool_call_args
+from runtime.tool_call_args import normalized_call, tool_call_args
 from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
 from runtime.usage import (
     empty_usage,
@@ -56,6 +56,8 @@ class TurnResult:
     rubric_status: str = ""
     rubric_evaluations: list[dict[str, Any]] = field(default_factory=list)
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
+    _tool_call_drafts: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    _tool_call_ids: list[str] = field(default_factory=list, repr=False)
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _seen_tool_result_ids: set[str] = field(default_factory=set, repr=False)
     _seen_tool_result_values: set[tuple[str, str]] = field(default_factory=set, repr=False)
@@ -118,17 +120,36 @@ class TurnResult:
                 return False
             self._seen_tool_call_ids.add(call_id)
         self.tool_calls.append(name)
+        self._tool_call_ids.append(call_id)
         return True
+
+    def record_tool_call_draft(self, name: str, call_id: str) -> None:
+        """Remember a provider draft so fallback promotion keeps its identifier."""
+        self._tool_call_drafts.append((name, call_id))
+
+    def tool_call_since(self, name: str, start: int) -> tuple[bool, str]:
+        """Return whether this loop recorded a named call and its identifier."""
+        for index in range(len(self.tool_calls) - 1, start - 1, -1):
+            if self.tool_calls[index] == name:
+                return True, self._tool_call_ids[index]
+        return False, ""
+
+    def tool_call_draft_since(self, name: str, start: int) -> str:
+        """Return the newest identifier for a named draft in the current loop."""
+        for draft_name, call_id in reversed(self._tool_call_drafts[start:]):
+            if draft_name == name:
+                return call_id
+        return ""
 
     def record_tool_result(self, text: str, call_id: str = "", name: str = "") -> bool:
         """Record one tool result while avoiding duplicate id-based reports."""
         value_key = (name, text)
-        if value_key in self._seen_tool_result_values:
-            return False
         if call_id:
             if call_id in self._seen_tool_result_ids:
                 return False
             self._seen_tool_result_ids.add(call_id)
+        elif value_key in self._seen_tool_result_values:
+            return False
         self._seen_tool_result_values.add(value_key)
         self.tool_results.append(text)
         return True
@@ -389,6 +410,7 @@ async def run_turn(
         rubric_renderer = RubricEventRenderer(event_renderer, rubric_max_iterations)
         output: dict[str, Any] = {}
         tool_call_start = len(result.tool_calls)
+        tool_draft_start = len(result._tool_call_drafts)
         waiting_started = getattr(renderer, "waiting_started", None)
         if callable(waiting_started):
             waiting_started()
@@ -420,11 +442,7 @@ async def run_turn(
         interrupts = await collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
-            pending_calls = [
-                call
-                for call in output_tool_calls(output.get("value"))
-                if str(call.get("name") or "tool") not in CONTROL_TOOLS
-            ]
+            pending_calls = output_tool_calls(output.get("value"))
             leaked_tool_repr = output_has_tool_call_repr(output.get("value"))
             stream_tool_calls_observed = len(result.tool_calls) > tool_call_start
 
@@ -456,20 +474,74 @@ async def run_turn(
                 rubric_renderer.finalize(result.rubric_status)
             return result
 
+        render_interrupt_tool_calls(
+            interrupts,
+            output.get("value"),
+            event_renderer,
+            result,
+            tool_call_start,
+        )
         prepare_goal_interrupt = first_typed_interrupt(interrupts, "prepare_goal")
         plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
         if prepare_goal_interrupt is not None:
+            call_id = ensure_control_tool_call(
+                "prepare_goal",
+                prepare_goal_interrupt,
+                output.get("value"),
+                event_renderer,
+                result,
+                tool_call_start,
+                tool_draft_start,
+            )
+            finalization = await resolve_control_surface(
+                "prepare_goal",
+                renderer.prepare_goal(prepare_goal_interrupt),
+                event_renderer,
+                result,
+                call_id,
+            )
             payload = Command(
-                resume=await renderer.prepare_goal(prepare_goal_interrupt),
+                resume=finalization,
                 update={"planning_stage": PLANNING_STAGE_FINALIZE},
             )
         elif plan_interrupt is not None:
-            await renderer.present_plan(plan_interrupt)
+            call_id = ensure_control_tool_call(
+                "present_plan",
+                plan_interrupt,
+                output.get("value"),
+                event_renderer,
+                result,
+                tool_call_start,
+                tool_draft_start,
+            )
+            await resolve_control_surface(
+                "present_plan",
+                renderer.present_plan(plan_interrupt),
+                event_renderer,
+                result,
+                call_id,
+            )
             result.final_text = ""
             return result
         elif ask_user_interrupt is not None:
-            payload = Command(resume=await renderer.ask_user(ask_user_interrupt))
+            call_id = ensure_control_tool_call(
+                "ask_user",
+                ask_user_interrupt,
+                output.get("value"),
+                event_renderer,
+                result,
+                tool_call_start,
+                tool_draft_start,
+            )
+            answer = await resolve_control_surface(
+                "ask_user",
+                renderer.ask_user(ask_user_interrupt),
+                event_renderer,
+                result,
+                call_id,
+            )
+            payload = Command(resume=answer)
         else:
             decisions = await renderer.ask_approvals(interrupts)
             payload = Command(resume={"decisions": decisions})
@@ -507,11 +579,162 @@ def interrupt_value(interrupt: Any) -> Any:
     return getattr(interrupt, "value", interrupt)
 
 
+def render_interrupt_tool_calls(
+    interrupts: list[Any],
+    output: Any,
+    renderer: Any,
+    result: TurnResult,
+    tool_call_start: int,
+) -> None:
+    """Recover interrupting calls before opening their dedicated surfaces."""
+    for raw_call in output_tool_calls(output):
+        call = normalized_call(raw_call)
+        name = str(call["name"])
+        call_id = str(call.get("id") or "")
+        if result.record_tool_call(name, call_id):
+            renderer.tool_call(name, call.get("args", {}), call_id=call_id)
+
+    observed = Counter(result.tool_calls[tool_call_start:])
+    for interrupt in interrupts:
+        value = interrupt_value(interrupt)
+        if not isinstance(value, dict):
+            continue
+        actions = value.get("action_requests")
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            name = str(action.get("name") or "tool")
+            if observed[name] > 0:
+                observed[name] -= 1
+                continue
+            call_id = str(
+                action.get("id")
+                or action.get("call_id")
+                or action.get("tool_call_id")
+                or ""
+            )
+            if not result.record_tool_call(name, call_id):
+                continue
+            renderer.tool_call(
+                name,
+                action.get("args", {}),
+                call_id=call_id,
+            )
+
+
+def ensure_control_tool_call(
+    name: str,
+    interrupt: Any,
+    output: Any,
+    renderer: Any,
+    result: TurnResult,
+    tool_call_start: int,
+    tool_draft_start: int,
+) -> str:
+    """Promote or reconstruct the current control call before its surface."""
+    observed, call_id = result.tool_call_since(name, tool_call_start)
+    if observed:
+        return call_id
+
+    fallback_call = next(
+        (
+            normalized
+            for normalized in (
+                normalized_call(call)
+                for call in reversed(output_tool_calls(output))
+            )
+            if str(normalized.get("name") or "tool") == name
+        ),
+        None,
+    )
+    value = interrupt_value(interrupt)
+    args = (
+        fallback_call.get("args", {})
+        if isinstance(fallback_call, dict)
+        else {
+            key: item
+            for key, item in value.items()
+            if key != "type"
+        }
+        if isinstance(value, dict)
+        else {}
+    )
+    call_id = (
+        str(
+            fallback_call.get("id")
+            or fallback_call.get("call_id")
+            or fallback_call.get("tool_call_id")
+            or ""
+        )
+        if isinstance(fallback_call, dict)
+        else result.tool_call_draft_since(name, tool_draft_start)
+    )
+    result.record_tool_call(name, call_id)
+    renderer.tool_call(name, args, call_id=call_id)
+    return call_id
+
+
+async def resolve_control_surface(
+    name: str,
+    operation: Any,
+    renderer: Any,
+    result: TurnResult,
+    call_id: str,
+) -> Any:
+    """Resolve one dedicated surface and complete its existing tool block."""
+    try:
+        value = await operation
+    except Exception as exc:
+        complete_control_tool(
+            name,
+            str(exc) or type(exc).__name__,
+            renderer,
+            result,
+            call_id,
+            is_error=True,
+        )
+        raise
+
+    complete_control_tool(name, str(value), renderer, result, call_id)
+    return value
+
+
+def complete_control_tool(
+    name: str,
+    text: str,
+    renderer: Any,
+    result: TurnResult,
+    call_id: str,
+    *,
+    is_error: bool = False,
+) -> None:
+    """Attach one dedicated-surface outcome to its original control call."""
+    if not result.record_tool_result(text, call_id, name):
+        return
+    if is_error:
+        renderer.completed_tool_error(name, text, call_id=call_id)
+    else:
+        renderer.completed_tool_result(name, text, call_id=call_id)
+
+
 def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -> None:
-    """Render tool results that only appear in the final graph output."""
+    """Recover executed calls/results that only appear in final graph state."""
+    recovered_tool_call = getattr(renderer, "recovered_tool_call", None)
     recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
     recovered_tool_error = getattr(renderer, "recovered_tool_error", None)
-    for item in output_tool_results(output):
+    for item in output_tool_lifecycle(output):
+        if item["type"] == "tool_call":
+            call = normalized_call(item["call"])
+            name = str(call["name"])
+            call_id = str(call.get("id") or "")
+            if name in CONTROL_TOOLS or not result.record_tool_call(name, call_id):
+                continue
+            callback = recovered_tool_call if callable(recovered_tool_call) else renderer.tool_call
+            callback(name, call.get("args", {}), call_id=call_id)
+            continue
+
         if item["name"] in CONTROL_TOOLS:
             continue
         text = item["output"]
