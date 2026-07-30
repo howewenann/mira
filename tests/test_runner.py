@@ -956,8 +956,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     "type": "rubric_evaluation_end",
                     "grading_run_id": "grade-1",
                     "iteration": 0,
-                    "result": "needs_revision",
+                    "result": "max_iterations_reached",
                     "explanation": "One requirement remains.",
+                    "configured_model": "openai:gpt-test",
+                    "structured_output_strategy": "tool",
+                    "http_status": 429,
                     "criteria": [
                         {"name": "Works", "passed": True, "gap": ""},
                         {"name": "Tested", "passed": False, "gap": "No focused test."},
@@ -982,8 +985,16 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0]["rubric"], "- Works\n- Tested")
         self.assertEqual(result.rubric_status, "max_iterations_reached")
         self.assertEqual(result.rubric_evaluations[0]["result"], "max_iterations_reached")
+        self.assertEqual(
+            result.rubric_evaluations[0]["diagnostics"],
+            {
+                "configured_model": "openai:gpt-test",
+                "structured_output_strategy": "tool",
+                "http_status": 429,
+            },
+        )
         self.assertIn(("rubric_started", "grade-1", 1, 1), renderer.events)
-        self.assertIn(("rubric_status", "grade-1", 1, "max_iterations_reached", 1), renderer.events)
+        self.assertFalse(any(event[0] == "rubric_status" for event in renderer.events))
         self.assertIn(
             ("subagent_started", "general-purpose [research]", "check the result", "eval_subagent"),
             renderer.events,

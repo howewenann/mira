@@ -24,7 +24,7 @@ class SubagentCompilationTests(unittest.TestCase):
         interrupts = {"write_file": {"allowed_decisions": ["approve", "reject"]}}
 
         with (
-            patch("agent.subagent_compilation.resolve_model", side_effect=lambda value: value),
+            patch("agent.subagent_compilation.resolve_subagent_model", side_effect=lambda value: value),
             patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
             patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
         ):
@@ -36,6 +36,7 @@ class SubagentCompilationTests(unittest.TestCase):
                 skills=["/skills/project/"],
                 permissions=permissions,
                 interrupt_on=interrupts,
+                enable_todos=True,
             )
 
         self.assertEqual([item["name"] for item in compiled], ["general-purpose"])
@@ -72,7 +73,10 @@ class SubagentCompilationTests(unittest.TestCase):
         asynchronous = {"name": "remote", "description": "Remote", "graph_id": "graph"}
 
         with (
-            patch("agent.subagent_compilation.resolve_model", side_effect=lambda value: f"resolved:{value}"),
+            patch(
+                "agent.subagent_compilation.resolve_subagent_model",
+                side_effect=lambda value: f"resolved:{value}",
+            ),
             patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
             patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
         ):
@@ -95,6 +99,7 @@ class SubagentCompilationTests(unittest.TestCase):
         self.assertIs(researcher["middleware"][-1], custom_middleware)
         self.assertEqual(researcher["response_format"], static_schema)
         self.assertEqual(researcher["interrupt_on"], {})
+        self.assertFalse(any(isinstance(item, TodoListMiddleware) for item in researcher["middleware"]))
 
     def test_existing_general_purpose_is_not_duplicated(self) -> None:
         existing = {"name": "general-purpose", "description": "Custom", "runnable": object()}
@@ -120,7 +125,7 @@ class SubagentCompilationTests(unittest.TestCase):
         }
 
         with (
-            patch("agent.subagent_compilation.resolve_model", side_effect=lambda value: value),
+            patch("agent.subagent_compilation.resolve_subagent_model", side_effect=lambda value: value),
             patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
             patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec),
         ):

@@ -10,19 +10,25 @@ import yaml
 
 SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
+DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
 DYNAMIC_SUBAGENT_RESPONSE_SCHEMA = "response_schema"
+PLANNING_TODOS = "planning_todos"
 RUBRIC = "rubric"
 RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
-INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", "eval", "task", EXECUTE_TOOL)
+INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
+MANDATORY_APPROVAL_TOOLS = (DELETE_TOOL,)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system": {
         DYNAMIC_SUBAGENTS: {
             "enabled": False,
             DYNAMIC_SUBAGENT_RESPONSE_SCHEMA: True,
+        },
+        PLANNING_TODOS: {
+            "enabled": False,
         },
         RUBRIC: {
             "enabled": False,
@@ -41,6 +47,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "tools": {
             "write_file": {"enabled": True, "always_allow": False},
             "edit_file": {"enabled": True, "always_allow": False},
+            DELETE_TOOL: {"enabled": True, "always_allow": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
             "execute": {"enabled": False, "always_allow": False},
@@ -94,6 +101,9 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 settings["system"][DYNAMIC_SUBAGENTS][DYNAMIC_SUBAGENT_RESPONSE_SCHEMA] = dynamic_subagents[
                     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA
                 ]
+        planning_todos = system.get(PLANNING_TODOS)
+        if isinstance(planning_todos, dict) and isinstance(planning_todos.get("enabled"), bool):
+            settings["system"][PLANNING_TODOS]["enabled"] = planning_todos["enabled"]
         rubric = system.get(RUBRIC)
         if isinstance(rubric, dict):
             if isinstance(rubric.get("enabled"), bool):
@@ -127,6 +137,8 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 current["enabled"] = enabled
             if isinstance(always_allow, bool):
                 current["always_allow"] = always_allow
+            if name in MANDATORY_APPROVAL_TOOLS:
+                current["always_allow"] = False
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
 
@@ -229,6 +241,22 @@ def set_dynamic_subagent_response_schema(settings: dict[str, Any], enabled: bool
     return updated
 
 
+def planning_todos_enabled(config_or_settings: dict[str, Any] | None) -> bool:
+    """Return whether MIRA adds DeepAgents planning todos."""
+    if not isinstance(config_or_settings, dict):
+        return False
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return bool(normalized.get("system", {}).get(PLANNING_TODOS, {}).get("enabled", False))
+
+
+def set_planning_todos(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Return settings with planning todos enabled or disabled."""
+    updated = normalize_settings(settings)
+    updated["system"][PLANNING_TODOS]["enabled"] = bool(enabled)
+    return updated
+
+
 def rubric_enabled(config_or_settings: dict[str, Any] | None) -> bool:
     """Return whether goal-driven rubric grading is enabled."""
     if not isinstance(config_or_settings, dict):
@@ -273,6 +301,8 @@ def valid_rubric_max_iterations(value: Any) -> bool:
 
 def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether a tool is configured to skip HITL approval."""
+    if tool_name in MANDATORY_APPROVAL_TOOLS:
+        return False
     hitl = hitl_settings(config_or_settings)
     tools = hitl.get("tools", {})
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
@@ -302,7 +332,7 @@ def set_tool_always_allow(settings: dict[str, Any], tool_name: str, always_allow
     """Return settings with one tool approval toggle updated."""
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"enabled": True}))
-    current["always_allow"] = bool(always_allow)
+    current["always_allow"] = False if tool_name in MANDATORY_APPROVAL_TOOLS else bool(always_allow)
     updated["hitl"]["tools"][tool_name] = current
     return updated
 

@@ -2,7 +2,7 @@
 
 Minimal Iterative Reasoning Agent.
 
-MIRA is a small, educational Python coding agent with a Textual terminal UI,
+MIRA is a small, educational general-purpose Python agent with a Textual terminal UI,
 one-shot prompting, project-specific tools and context, planning, approvals,
 and resumable sessions.
 
@@ -10,6 +10,9 @@ For implementation rationale, see
 [ARCHITECTURE_DECISIONS.md](ARCHITECTURE_DECISIONS.md).
 
 ## Install
+
+MIRA requires Python 3.11 or newer. Its agent runtime is pinned to
+DeepAgents 0.7.0 and `langchain-quickjs` 0.3.5.
 
 With Conda:
 
@@ -47,7 +50,7 @@ are documented in `.env.example`.
 
 Workspace settings live in `.mira/settings.yml`. Use `/settings` in the TUI to
 manage Git protection, tools and approvals, execution environments, dynamic
-subagents, and optional rubric grading.
+subagents, optional planning todos, and rubric grading.
 
 ## Run
 
@@ -155,6 +158,8 @@ neither LangChain nor MIRA installed. See
 
 - MIRA checks for Git protection before allowing agent work in a workspace.
 - Dangerous tools use human approval unless allowed explicitly in `/settings`.
+- `write_file` creates or fully replaces a file; use `edit_file` for targeted
+  changes. Recursive `delete` always requires approval.
 - Sessions are stored under `.mira/_sessions/` and can be resumed with `-r` or
   `-s <session-id>`.
 - Error reports are stored under `.mira/_errors/`; `/clear-errors` removes them.

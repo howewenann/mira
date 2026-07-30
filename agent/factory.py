@@ -19,13 +19,14 @@ from agent.planning.policy import (
 )
 from agent.resources import build_resources
 from agent.subagent_compilation import compile_dynamic_subagents
-from agent.tools.specs import collect_tool_specs, tool_name
+from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_name
 from config.metadata import ModelMetadata
 from config.settings import (
     EXECUTE_TOOL,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     hitl_settings,
+    planning_todos_enabled,
     rubric_enabled,
     rubric_max_iterations,
     tool_always_allow,
@@ -38,6 +39,17 @@ PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
 _REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
+ACT_SYSTEM_PROMPT = """You are MIRA, a general-purpose agent.
+
+Follow the user's request and the instructions available in your context.
+Use the available tools when they help achieve the requested outcome.
+
+Inspect relevant context before consequential actions.
+Ask only when a material decision cannot be resolved from the available context.
+
+Respect tool permissions and approval requirements.
+Be accurate about what you completed, what failed, and what remains unresolved.
+"""
 
 
 def build_agent(
@@ -53,6 +65,7 @@ def build_agent(
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_action_permissions(),
+        system_prompt=ACT_SYSTEM_PROMPT,
         interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=ACTION_EXCLUDED_TOOLS,
         enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
@@ -114,6 +127,8 @@ def _build_agent(
     backend = resources.backend
     permissions = [] if enable_execute_backend else permissions
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
+    if not backend_supports_delete(backend):
+        excluded_tools = (*excluded_tools, "delete")
     rubric_middleware = (
         [RubricMiddleware(model=model, tools=None, max_iterations=rubric_max_iterations(config))]
         if enable_rubric
@@ -138,6 +153,10 @@ def _build_agent(
         if interrupt_on == SETTINGS_INTERRUPTS
         else interrupt_on
     )
+    if isinstance(resolved_interrupt_on, dict):
+        resolved_interrupt_on = {
+            name: rule for name, rule in resolved_interrupt_on.items() if name not in excluded_tools
+        }
     tools = [tool for tool in resources.tools if tool_name(tool) not in omitted_tools]
     subagents = resources.subagents
     settings = (config or {}).get("settings")
@@ -150,6 +169,7 @@ def _build_agent(
             skills=resources.skills,
             permissions=permissions,
             interrupt_on=resolved_interrupt_on,
+            enable_todos=planning_todos_enabled(settings),
         )
 
     agent = create_deep_agent(
@@ -207,14 +227,8 @@ def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None
     if provider:
         candidates.append(provider)
 
-    try:
-        from deepagents._models import get_model_identifier, get_model_provider
-
-        resolved_provider = str(get_model_provider(model) or "").strip()
-        identifier = str(get_model_identifier(model) or "").strip()
-    except Exception:
-        resolved_provider = ""
-        identifier = ""
+    resolved_provider = _model_provider(model)
+    identifier = _model_identifier(model)
 
     if resolved_provider and identifier and ":" not in identifier:
         candidates.append(f"{resolved_provider}:{identifier}")
@@ -228,6 +242,30 @@ def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None
         if _valid_summarization_profile_key(key) and key not in keys:
             keys.append(key)
     return keys
+
+
+def _model_identifier(model: Any) -> str:
+    """Return a public model identifier without importing DeepAgents internals."""
+    for attribute in ("model_name", "model", "model_id"):
+        value = getattr(model, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _model_provider(model: Any) -> str:
+    """Return LangChain's tracing provider label when a model exposes one."""
+    get_params = getattr(model, "_get_ls_params", None)
+    if not callable(get_params):
+        return ""
+    try:
+        params = get_params()
+    except (AttributeError, TypeError, NotImplementedError):
+        return ""
+    if not isinstance(params, dict):
+        return ""
+    value = params.get("ls_provider")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _valid_summarization_profile_key(key: str) -> bool:

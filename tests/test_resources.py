@@ -12,7 +12,13 @@ from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent import factory
 from agent.context_overflow import ProviderContextOverflowMiddleware
-from agent.middleware import ExecuteToolPromptMiddleware, QUICKJS_PTC_TOOLS
+from agent.middleware import (
+    ExecuteToolPromptMiddleware,
+    QUICKJS_MEMORY_LIMIT,
+    QUICKJS_PERSISTENCE_MODE,
+    QUICKJS_PTC_TOOLS,
+    QUICKJS_TIMEOUT_SECONDS,
+)
 from agent.resources import (
     EXECUTE_ENV_KEYS,
     ProjectShellBackend,
@@ -582,6 +588,9 @@ def get_tools(project_backend):
         self.assertIs(built, agent)
         code_middleware.assert_called_once()
         self.assertEqual(code_middleware.call_args.kwargs["ptc"], list(QUICKJS_PTC_TOOLS))
+        self.assertEqual(code_middleware.call_args.kwargs["memory_limit"], QUICKJS_MEMORY_LIMIT)
+        self.assertEqual(code_middleware.call_args.kwargs["timeout"], QUICKJS_TIMEOUT_SECONDS)
+        self.assertEqual(code_middleware.call_args.kwargs["mode"], QUICKJS_PERSISTENCE_MODE)
         self.assertNotIn("skills_backend", code_middleware.call_args.kwargs)
         kwargs = create_deep_agent.call_args.kwargs
         self.assertIn("auto-summary", kwargs["middleware"])
@@ -597,6 +606,37 @@ def get_tools(project_backend):
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
+
+    def test_action_and_plan_agents_share_ordered_opaque_memory_resources(self) -> None:
+        """Memory filenames should only determine stable ordering, not agent roles."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            memory_dir = workspace / ".mira" / "memories"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "zebra-notes.md").write_text("z", encoding="utf-8")
+            (memory_dir / "01-context.md").write_text("a", encoding="utf-8")
+            built_agents = [type("Agent", (), {})(), type("Agent", (), {})()]
+            with (
+                patch("agent.factory.get_llm", return_value="model"),
+                patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.factory.create_deep_agent", side_effect=built_agents) as create,
+            ):
+                factory.build_agent({}, workspace, "checkpointer")
+                factory.build_plan_agent({}, workspace, "checkpointer")
+
+        action_memory = create.call_args_list[0].kwargs["memory"]
+        plan_memory = create.call_args_list[1].kwargs["memory"]
+        self.assertEqual(action_memory, plan_memory)
+        self.assertEqual(
+            action_memory,
+            [
+                "/.mira/memories/AGENTS.md",
+                "/.mira/memories/01-context.md",
+                "/.mira/memories/zebra-notes.md",
+            ],
+        )
 
     def test_factory_enables_execute_with_local_shell_backend_without_permissions(self) -> None:
         """Execute mode should expose execute and avoid incompatible filesystem permissions."""
@@ -628,11 +668,16 @@ def get_tools(project_backend):
 
     def test_factory_registers_specific_and_provider_summarization_exclusions(self) -> None:
         """DeepAgents should exclude its hidden default summarization for resolved models."""
-        model = type("Model", (), {})()
+        model = type(
+            "Model",
+            (),
+            {
+                "model_name": "google/gemma",
+                "_get_ls_params": lambda self: {"ls_provider": "anyllm"},
+            },
+        )()
         with (
             patch("agent.factory.register_harness_profile") as register,
-            patch("deepagents._models.get_model_provider", return_value="anyllm"),
-            patch("deepagents._models.get_model_identifier", return_value="google/gemma"),
             patch.object(factory, "_REGISTERED_SUMMARIZATION_PROFILE_KEYS", set()),
         ):
             factory._register_summarization_exclusion({"llm_provider": "openai", "llm_model": "gpt-test"}, model)
@@ -642,11 +687,16 @@ def get_tools(project_backend):
 
     def test_factory_skips_invalid_ollama_summarization_profile_key(self) -> None:
         """Ollama model tags should not create a double-colon registry key."""
-        model = type("Model", (), {})()
+        model = type(
+            "Model",
+            (),
+            {
+                "model_name": "qwen3.6:27b",
+                "_get_ls_params": lambda self: {"ls_provider": "ollama"},
+            },
+        )()
         with (
             patch("agent.factory.register_harness_profile") as register,
-            patch("deepagents._models.get_model_provider", return_value="ollama"),
-            patch("deepagents._models.get_model_identifier", return_value="qwen3.6:27b"),
             patch.object(factory, "_REGISTERED_SUMMARIZATION_PROFILE_KEYS", set()),
         ):
             factory._register_summarization_exclusion(

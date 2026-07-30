@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, NotRequired
 
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, ModelResponse
 from langchain_core.messages import AIMessage
 from langchain_quickjs import CodeInterpreterMiddleware
@@ -22,9 +23,12 @@ from agent.planning.policy import (
     PRESENT_PLAN_TOOL,
 )
 from agent.tools.specs import tool_name as resource_tool_name
-from config.settings import dynamic_subagents_enabled
+from config.settings import dynamic_subagents_enabled, planning_todos_enabled
 
 QUICKJS_PTC_TOOLS = ("ls", "read_file", "glob", "grep")
+QUICKJS_MEMORY_LIMIT = 64 * 1024 * 1024
+QUICKJS_TIMEOUT_SECONDS = 5.0
+QUICKJS_PERSISTENCE_MODE = "thread"
 
 MIRA_EXECUTE_TOOL_DESCRIPTION = """Executes a shell command with proper handling and security measures.
 
@@ -128,12 +132,16 @@ def build_agent_middleware(
     summarization_middleware = create_mira_summarization_middleware(model=model, backend=backend)
     summarization_tool_middleware = create_mira_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
+        *([TodoListMiddleware()] if planning_todos_enabled(settings) else []),
         summarization_middleware,
         ModelResponseNormalizationMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
         CodeInterpreterMiddleware(
+            memory_limit=QUICKJS_MEMORY_LIMIT,
+            timeout=QUICKJS_TIMEOUT_SECONDS,
             ptc=list(QUICKJS_PTC_TOOLS),
             subagents=dynamic_subagents_enabled(settings),
+            mode=QUICKJS_PERSISTENCE_MODE,
         ),
         summarization_tool_middleware,
         ExecuteToolPromptMiddleware(),

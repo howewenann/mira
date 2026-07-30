@@ -3,11 +3,11 @@ name = "mira"
 dynamic = ["version"]
 description = "Minimal Iterative Reasoning Agent"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "coolname>=5.0.0",
-    "deepagents[quickjs]>=0.6.12",
-    "langchain-quickjs>=0.3.2",
+    "deepagents==0.7.0",
+    "langchain-quickjs==0.3.5",
     "langgraph>=1.2.5",
     "langchain-anyllm>=0.0.1a2",
     "lmstudio>=1.5.0",

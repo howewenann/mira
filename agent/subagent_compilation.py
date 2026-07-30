@@ -6,14 +6,14 @@ from collections.abc import Sequence
 from copy import deepcopy
 from typing import Any
 
-from deepagents._models import resolve_model
-from deepagents.middleware._fs_interrupt import _build_interrupt_on_from_permissions
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, create_sub_agent
 from deepagents.middleware.summarization import create_summarization_middleware
 from langchain.agents.middleware import TodoListMiddleware
+from langchain.chat_models import init_chat_model
+from langchain_core.language_models import BaseChatModel
 
 
 def compile_dynamic_subagents(
@@ -25,6 +25,7 @@ def compile_dynamic_subagents(
     skills: list[str] | None,
     permissions: list[FilesystemPermission] | None,
     interrupt_on: dict[str, Any] | None,
+    enable_todos: bool = False,
 ) -> list[dict[str, Any]]:
     """Return synchronous subagents as compiled runnables.
 
@@ -47,6 +48,7 @@ def compile_dynamic_subagents(
             backend=backend,
             permissions=permissions,
             interrupt_on=interrupt_on,
+            enable_todos=enable_todos,
         )
         if _is_raw_synchronous(spec)
         else spec
@@ -70,12 +72,13 @@ def _compile_raw_subagent(
     backend: Any,
     permissions: list[FilesystemPermission] | None,
     interrupt_on: dict[str, Any] | None,
+    enable_todos: bool,
 ) -> dict[str, Any]:
-    subagent_model = resolve_model(spec.get("model", model))
+    subagent_model = resolve_subagent_model(spec.get("model", model))
     subagent_tools = spec.get("tools") if "tools" in spec else tools
     subagent_permissions = spec.get("permissions", permissions)
     middleware: list[Any] = [
-        TodoListMiddleware(),
+        *([TodoListMiddleware()] if enable_todos else []),
         FilesystemMiddleware(backend=backend, _permissions=subagent_permissions),
         create_summarization_middleware(subagent_model, backend),
         PatchToolCallsMiddleware(),
@@ -86,10 +89,6 @@ def _compile_raw_subagent(
     middleware.extend(spec.get("middleware", []))
 
     selected_interrupts = spec.get("interrupt_on", interrupt_on)
-    filesystem_interrupts = _build_interrupt_on_from_permissions(subagent_permissions or [])
-    if filesystem_interrupts or selected_interrupts:
-        selected_interrupts = {**filesystem_interrupts, **(selected_interrupts or {})}
-
     materialized = {
         **spec,
         "model": subagent_model,
@@ -104,3 +103,10 @@ def _compile_raw_subagent(
         "description": materialized["description"],
         "runnable": create_sub_agent(materialized),
     }
+
+
+def resolve_subagent_model(model: Any) -> Any:
+    """Resolve a subagent model through LangChain's public model factory."""
+    if isinstance(model, BaseChatModel):
+        return model
+    return init_chat_model(model)

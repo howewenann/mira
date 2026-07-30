@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from deepagents.backends import BackendProtocol
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.subagents import TASK_TOOL_DESCRIPTION
-from langchain.agents.middleware.todo import TodoListMiddleware
 
 
 def collect_tool_specs(
@@ -20,11 +20,12 @@ def collect_tool_specs(
     excluded_tools: tuple[str, ...],
 ) -> list[dict[str, str]]:
     blocked = set(excluded_tools)
+    if not backend_supports_delete(backend):
+        blocked.add("delete")
     specs: list[dict[str, str]] = []
     environment = mira_environment_label()
 
     builtin_providers = [
-        TodoListMiddleware(),
         FilesystemMiddleware(backend=backend),
         *middleware,
     ]
@@ -53,6 +54,11 @@ def collect_tool_specs(
         )
 
     return specs
+
+
+def backend_supports_delete(backend: Any) -> bool:
+    """Return whether a backend implements DeepAgents' optional delete method."""
+    return isinstance(backend, BackendProtocol) and type(backend).delete is not BackendProtocol.delete
 
 
 def add_tool_spec(

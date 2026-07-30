@@ -548,6 +548,44 @@ UI labels them as `Group 1`, `Group 2`, and so on.
 keyboard or clipboard ownership changes, or tool/subagent events are projected
 differently.
 
+## DeepAgents Runtime Ownership
+
+**Decision:** MIRA pins DeepAgents 0.7.0 and `langchain-quickjs` 0.3.5. MIRA
+owns a small general-purpose action prompt and its existing planning prompt;
+DeepAgents owns the filesystem, delegation, streaming, and middleware
+execution. Project and bundled memory files remain opaque Markdown resources,
+resolved by the same deterministic resolver and passed identically to action
+and planning agents. Existing bundled-resource slots retain their precedence;
+new project files retain the resolver's deterministic order.
+
+Planning todos are optional and disabled by default because the upstream
+DeepAgents [evaluation](https://github.com/langchain-ai/deepagents/pull/4929)
+found no statistically significant accuracy improvement.
+Enabling the workspace setting adds one `TodoListMiddleware` to action and
+planning agents and to compiled dynamic subagents. `/tools` is derived from the
+actual middleware stack, so toggling or reloading cannot retain a stale or
+duplicate `write_todos` entry.
+
+DeepAgents 0.7 defines `write_file` as create-or-complete-replacement and
+`edit_file` as targeted replacement. MIRA keeps both behind the normal HITL
+policy, labels their different consequences in the approval surface, and
+exposes recursive `delete` only where the selected backend implements it.
+Delete is action-only, destructive, and always requires approval. Filesystem
+backends use explicit virtual paths rooted in the selected workspace.
+
+Rubric terminal events are accepted directly from DeepAgents, including
+`max_iterations_reached`. MIRA preserves the explanation and available grader
+diagnostics instead of synthesizing another iteration. QuickJS runs with
+explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
+not receive ambient filesystem, network, process, or clock access.
+
+**Where to check:** `agent/factory.py`, `agent/middleware.py`,
+`agent/subagent_compilation.py`, `agent/tools/specs.py`, `runtime/runner.py`,
+`runtime/rubric_events.py`, `config/settings.py`.
+
+**Update this when:** DeepAgents or QuickJS versions change, prompt ownership
+moves, todo defaults change, or filesystem/rubric semantics change.
+
 ## Sessions And Compaction
 
 **Decision:** MIRA stores durable session JSON for replayable UI history, while

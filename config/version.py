@@ -1,6 +1,6 @@
 """Single source of truth for MIRA's package and display version."""
 
-__version__ = "1.9.1"
+__version__ = "2.0.0"
 
 
 def display_version() -> str:

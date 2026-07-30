@@ -16,15 +16,18 @@ from textual.widgets import Button, Input, Static
 from config.settings import (
     DYNAMIC_SUBAGENTS,
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
+    DELETE_TOOL,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    PLANNING_TODOS,
     RUBRIC,
     RUBRIC_MAX_ITERATIONS_LIMIT,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
     git_protection_enabled,
+    planning_todos_enabled,
     rubric_enabled,
     rubric_max_iterations,
     set_dynamic_subagent_response_schema,
@@ -33,6 +36,7 @@ from config.settings import (
     set_execute_env_mode,
     set_execute_env_value,
     set_git_protection,
+    set_planning_todos,
     set_rubric_enabled,
     set_rubric_max_iterations,
     set_tool_always_allow,
@@ -41,7 +45,7 @@ from config.settings import (
     tool_enabled,
 )
 
-ToggleKind = Literal["git", "system", "response_schema", "rubric", "enabled", "always_allow"]
+ToggleKind = Literal["git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow"]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
     "conda_name": "conda env name",
@@ -111,6 +115,16 @@ class SettingsPanel(Vertical):
                         ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
                         dynamic_subagent_response_schema_enabled(self.settings),
                     )
+                with Horizontal(classes="settings-row"):
+                    yield Static("Planning todos", classes="settings-label")
+                    yield self._toggle_button(
+                        ToggleCell("todos", PLANNING_TODOS),
+                        planning_todos_enabled(self.settings),
+                    )
+                yield Static(
+                    "Adds write_todos; DeepAgents found no statistically significant accuracy difference.",
+                    classes="settings-help",
+                )
                 with Horizontal(classes="settings-row"):
                     yield Static("Rubric Middleware", classes="settings-label")
                     yield self._toggle_button(
@@ -284,6 +298,8 @@ class SettingsPanel(Vertical):
             updated = set_dynamic_subagents(self.settings, value)
         elif cell.kind == "response_schema":
             updated = set_dynamic_subagent_response_schema(self.settings, value)
+        elif cell.kind == "todos":
+            updated = set_planning_todos(self.settings, value)
         elif cell.kind == "rubric":
             updated = set_rubric_enabled(self.settings, value)
         elif cell.kind == "enabled":
@@ -341,7 +357,7 @@ class SettingsPanel(Vertical):
 
     def _cell_locked(self, cell: ToggleCell) -> bool:
         if cell.kind == "always_allow":
-            return not tool_enabled(self.settings, cell.name)
+            return cell.name == DELETE_TOOL or not tool_enabled(self.settings, cell.name)
         if cell.kind == "response_schema":
             return not dynamic_subagents_enabled(self.settings)
         return cell.locked
@@ -429,6 +445,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return dynamic_subagents_enabled(settings)
     if cell.kind == "response_schema":
         return dynamic_subagent_response_schema_enabled(settings)
+    if cell.kind == "todos":
+        return planning_todos_enabled(settings)
     if cell.kind == "rubric":
         return rubric_enabled(settings)
     if cell.kind == "enabled":
@@ -444,6 +462,8 @@ def button_id_for(cell: ToggleCell) -> str:
 
 def button_label(cell: ToggleCell, value: bool, *, locked: bool = False, enabled: bool = True) -> str:
     """Return display text for a settings toggle."""
+    if locked and cell.kind == "always_allow" and cell.name == DELETE_TOOL:
+        return "required"
     if locked and cell.kind == "always_allow" and not enabled:
         return "-"
     return "yes" if value else "no"

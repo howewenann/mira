@@ -27,9 +27,12 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_enabled(loaded, "execute"))
         self.assertFalse(settings.dynamic_subagents_enabled(loaded))
         self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
+        self.assertFalse(settings.planning_todos_enabled(loaded))
         self.assertFalse(settings.rubric_enabled(loaded))
         self.assertEqual(settings.rubric_max_iterations(loaded), 3)
         self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
+        self.assertTrue(settings.tool_enabled(loaded, "delete"))
+        self.assertFalse(settings.tool_always_allow(loaded, "delete"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
@@ -90,6 +93,27 @@ class SettingsTests(unittest.TestCase):
 
         updated = settings.set_dynamic_subagents(updated, False)
         self.assertFalse(settings.dynamic_subagents_enabled(updated))
+
+    def test_planning_todos_default_off_and_can_toggle(self) -> None:
+        """Planning todos should be an explicit, reversible opt-in."""
+        loaded = settings.normalize_settings({})
+
+        self.assertFalse(settings.planning_todos_enabled(loaded))
+        updated = settings.set_planning_todos(loaded, True)
+        self.assertTrue(settings.planning_todos_enabled(updated))
+        updated = settings.set_planning_todos(updated, False)
+        self.assertFalse(settings.planning_todos_enabled(updated))
+
+    def test_recursive_delete_always_requires_approval(self) -> None:
+        """Malformed or explicit settings must not bypass destructive approval."""
+        loaded = settings.normalize_settings(
+            {"hitl": {"tools": {"delete": {"enabled": True, "always_allow": True}}}}
+        )
+
+        self.assertTrue(settings.tool_enabled(loaded, "delete"))
+        self.assertFalse(settings.tool_always_allow(loaded, "delete"))
+        updated = settings.set_tool_always_allow(loaded, "delete", True)
+        self.assertFalse(settings.tool_always_allow(updated, "delete"))
 
     def test_dynamic_response_schema_defaults_on_and_can_toggle(self) -> None:
         """Dynamic response schemas should stay enabled for compatibility."""
@@ -170,6 +194,7 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             updated = settings.set_git_protection(settings.load_settings(workspace), False)
+            updated = settings.set_planning_todos(updated, True)
             updated = settings.set_tool_always_allow(updated, "web_search", False)
             updated = settings.set_tool_enabled(updated, "web_search", False)
 
@@ -185,6 +210,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("llm_direct", text)
         self.assertNotIn("llm_direct", loaded)
         self.assertFalse(settings.git_protection_enabled(loaded))
+        self.assertTrue(settings.planning_todos_enabled(loaded))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))
 

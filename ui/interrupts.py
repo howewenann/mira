@@ -12,6 +12,7 @@ ACTION_TEXT_LIMIT = 220
 ACTION_PREVIEW_VALUE_LIMIT = 68
 ACTION_PREVIEW_KEY_WIDTH = 10
 DEFAULT_APPROVAL_DECISIONS = ["approve", "edit", "reject"]
+APPROVAL_CONSEQUENCE = "_mira_consequence"
 DECISION_LABELS = {
     "approve": ("a", "Approve (a)"),
     "edit": ("e", "Edit (e)"),
@@ -181,11 +182,11 @@ def action_text(action: Any) -> str:
 
     lines = [
         _action_header(name, args),
-        "",
-        json.dumps(_preview_value(args), indent=2),
-        "",
-        "Full args available with e edit.",
     ]
+    consequence = compact_text(action.get(APPROVAL_CONSEQUENCE))
+    if consequence:
+        lines.extend(["", consequence])
+    lines.extend(["", json.dumps(_preview_value(args), indent=2), "", "Full args available with e edit."])
     return "\n".join(lines)
 
 
@@ -193,7 +194,10 @@ def action_title(action: Any) -> str:
     """Return the approval drawer title for one action."""
     if not isinstance(action, dict):
         return "Approval"
-    return f"Approval: {str(action.get('name') or 'tool')}"
+    name = str(action.get("name") or "tool")
+    if name == "delete":
+        return "Destructive approval: recursive delete"
+    return f"Approval: {name}"
 
 
 def action_preview(action: Any) -> str:
@@ -203,6 +207,9 @@ def action_preview(action: Any) -> str:
 
     args = action.get("args", {})
     rows: list[tuple[str, str]] = []
+    consequence = compact_text(action.get(APPROVAL_CONSEQUENCE))
+    if consequence:
+        rows.append(("effect", consequence))
     if isinstance(args, dict):
         target = _target_arg(args)
         if target:

@@ -26,6 +26,7 @@ BUILT_IN_TOOL_NAMES = {
     "read_file",
     "write_file",
     "edit_file",
+    "delete",
     "glob",
     "grep",
     "eval",

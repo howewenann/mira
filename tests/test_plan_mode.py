@@ -8,6 +8,7 @@ from io import StringIO
 from typing import Any
 from unittest.mock import patch
 
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.exceptions import ContextOverflowError
 from rich.console import Console
 from rich.text import Text
@@ -210,12 +211,47 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["interrupt_on"], factory._write_interrupts())
         self.assertEqual(kwargs["interrupt_on"]["write_file"]["allowed_decisions"], ["approve", "edit", "reject"])
         self.assertEqual(kwargs["interrupt_on"]["edit_file"]["allowed_decisions"], ["approve", "edit", "reject"])
-        self.assertIsNone(kwargs["system_prompt"])
+        self.assertEqual(kwargs["interrupt_on"]["delete"]["allowed_decisions"], ["approve", "edit", "reject"])
+        self.assertEqual(kwargs["system_prompt"], factory.ACT_SYSTEM_PROMPT)
         self.assertEqual(kwargs["permissions"][0].paths, ["/mira-defaults/**"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")
         self.assertEqual(kwargs["permissions"][1].operations, ["read", "write"])
         self.assertEqual(kwargs["permissions"][1].mode, "allow")
         self.assertTrue(any(tool_name(tool) == "grep" for tool in kwargs["tools"]))
+
+    def test_planning_todos_are_opt_in_for_action_and_plan_agents(self) -> None:
+        """Todo middleware and metadata should appear exactly once only when enabled."""
+        config = {"settings": {"system": {"planning_todos": {"enabled": True}}}}
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            action = factory.build_agent(config, ".", "checkpointer")
+            action_middleware = create.call_args.kwargs["middleware"]
+            plan = factory.build_plan_agent(config, ".", "checkpointer")
+            plan_middleware = create.call_args.kwargs["middleware"]
+
+        self.assertEqual(sum(isinstance(item, TodoListMiddleware) for item in action_middleware), 1)
+        self.assertEqual(sum(isinstance(item, TodoListMiddleware) for item in plan_middleware), 1)
+        self.assertEqual([item["name"] for item in action.mira_tool_specs].count("write_todos"), 1)
+        self.assertEqual([item["name"] for item in plan.mira_tool_specs].count("write_todos"), 1)
+
+    def test_planning_todos_are_absent_by_default(self) -> None:
+        """MIRA should not add todo middleware, state, or tool metadata by default."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            agent = factory.build_agent({}, ".", "checkpointer")
+
+        self.assertFalse(any(isinstance(item, TodoListMiddleware) for item in create.call_args.kwargs["middleware"]))
+        self.assertNotIn("write_todos", [item["name"] for item in agent.mira_tool_specs])
 
     def test_action_agent_respects_tool_always_allow_settings(self) -> None:
         """Configured always-allow tools should be removed from interrupts."""
@@ -244,6 +280,26 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("write_file", interrupts)
         self.assertIn("edit_file", interrupts)
         self.assertIn("web_search", interrupts)
+
+    def test_action_agent_hides_delete_for_unsupported_backend(self) -> None:
+        """Unsupported backends should expose neither delete nor a stale approval rule."""
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.factory.backend_supports_delete", return_value=False),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            agent = factory.build_agent({}, ".", "checkpointer")
+
+        kwargs = create.call_args.kwargs
+        visibility = next(
+            item for item in kwargs["middleware"] if isinstance(item, ModelToolVisibilityMiddleware)
+        )
+        self.assertIn("delete", visibility.excluded_tools)
+        self.assertNotIn("delete", kwargs["interrupt_on"])
+        self.assertNotIn("delete", [item["name"] for item in agent.mira_tool_specs])
 
     def test_action_agent_disables_dynamic_subagents_by_default(self) -> None:
         """QuickJS should not expose eval-internal task() unless the setting is enabled."""
@@ -320,6 +376,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             "settings": {
                 "system": {
                     "dynamic_subagents": {"enabled": True, "response_schema": False},
+                    "planning_todos": {"enabled": True},
                 }
             }
         }
@@ -336,6 +393,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             factory.build_agent(config, ".", "checkpointer")
 
         compile_subagents.assert_called_once()
+        self.assertTrue(compile_subagents.call_args.kwargs["enable_todos"])
         self.assertIs(create_deep_agent.call_args.kwargs["subagents"], compiled)
 
     def test_action_agent_leaves_subagents_raw_when_response_schemas_are_enabled(self) -> None:
@@ -398,6 +456,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("edit_file", names)
+        self.assertIn("delete", names)
         self.assertIn("grep", names)
         self.assertNotIn("prepare_goal", names)
         self.assertNotIn("present_plan", names)
@@ -429,6 +488,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
+        self.assertNotIn("delete", names)
         self.assertNotIn("execute", names)
         self.assertNotIn("task", names)
         self.assertNotIn("eval", names)

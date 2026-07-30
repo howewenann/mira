@@ -1061,3 +1061,49 @@ Expected: one grouped warning names both failed files and deduplicated missing
 modules, states normal `@tool` ownership and the project example path, performs
 no installation, creates no optional-resource crash report, and continues with
 the successful tool available.
+
+## DeepAgents 0.7 Upgrade
+
+Use a disposable Git-protected workspace and current-checkout invocation:
+
+```powershell
+conda run -n ai_agents python -m cli.main --workspace <workspace>
+```
+
+1. Ask a normal non-coding question in action mode. Expected: a concise,
+   general-purpose answer with no unsolicited coding workflow or todo list.
+2. Enter `/plan` and request a read-only investigation. Expected: MIRA keeps the
+   existing Plan intent, can read/search, and cannot write, edit, delete,
+   execute, delegate, or evaluate code.
+3. Add several arbitrarily named Markdown files under `.mira/memories`, then
+   inspect the action and planning runtime. Expected: both receive the same
+   resources in their configured deterministic order, without interpreting
+   filenames as roles.
+4. Inspect `/tools` with Planning todos off, toggle it on in `/settings`,
+   inspect again, then toggle it off. Expected: `write_todos` appears exactly
+   once only while enabled, both agents rebuild, and no stale entry remains.
+5. Enable Planning todos plus schema-free dynamic subagents. Expected: the main
+   action agent, planning agent, and compiled general-purpose worker each have
+   one todo capability, with no duplicate tool calls.
+6. Approve `write_file` for a missing path. Expected: the approval says it will
+   create a file and the requested complete content is written.
+7. Approve `write_file` for an existing file containing extra lines. Expected:
+   the approval says the entire file will be replaced and no old suffix remains.
+8. Approve `edit_file` for one exact substring. Expected: the approval describes
+   a targeted change and unmatched content remains intact.
+9. Request recursive deletion of a test directory in action mode. Expected:
+   `/tools` lists `delete` only for a supporting backend; the warning names
+   recursive, destructive behavior, approval cannot be disabled, reject keeps
+   the tree, and approve removes it.
+10. Repeat the delete request in planning mode. Expected: the tool is absent and
+    the filesystem permission backstop denies mutation.
+11. Run a rubric goal whose final pass reaches its cap, then provoke a grader
+    provider error if a safe test endpoint is available. Expected:
+    `max_iterations_reached` terminates without an extra review; explanations
+    and model/strategy/HTTP diagnostics remain visible.
+12. Ask `eval` to compute `1 + 1`, retain a variable across calls, evaluate
+    invalid syntax, throw an error, and inspect `typeof process`, `require`, and
+    `fetch`. Expected: async results and thread persistence work, errors are
+    readable, and ambient host/network APIs are unavailable. Separately run a
+    bounded infinite-loop probe and cancel an active eval; both must return
+    control without terminating MIRA.

@@ -38,6 +38,7 @@ from runtime.usage import (
     select_context_usage,
     usage_from_output,
 )
+from ui.interrupts import APPROVAL_CONSEQUENCE
 
 
 @dataclass
@@ -543,6 +544,7 @@ async def run_turn(
             )
             payload = Command(resume=answer)
         else:
+            annotate_filesystem_approvals(interrupts, getattr(agent, "mira_backend", None))
             decisions = await renderer.ask_approvals(interrupts)
             payload = Command(resume={"decisions": decisions})
 
@@ -577,6 +579,53 @@ def first_typed_interrupt(interrupts: list[Any], interrupt_type: str) -> Any | N
 def interrupt_value(interrupt: Any) -> Any:
     """Extract the LangGraph interrupt value from common payload shapes."""
     return getattr(interrupt, "value", interrupt)
+
+
+def annotate_filesystem_approvals(interrupts: list[Any], backend: Any) -> None:
+    """Add accurate filesystem consequences for approval renderers."""
+    for interrupt in interrupts:
+        value = interrupt_value(interrupt)
+        actions = value.get("action_requests") if isinstance(value, dict) else None
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            name = str(action.get("name") or "")
+            args = action.get("args")
+            if not isinstance(args, dict):
+                continue
+            if name == "write_file":
+                action[APPROVAL_CONSEQUENCE] = write_file_consequence(
+                    backend,
+                    str(args.get("file_path") or ""),
+                )
+            elif name == "edit_file":
+                action[APPROVAL_CONSEQUENCE] = (
+                    "Makes targeted replacements while preserving the rest of the existing file."
+                )
+            elif name == "delete":
+                action[APPROVAL_CONSEQUENCE] = (
+                    "Recursively deletes this path and every descendant. "
+                    "This is destructive and cannot be undone."
+                )
+
+
+def write_file_consequence(backend: Any, file_path: str) -> str:
+    """Describe whether DeepAgents write_file will create or replace."""
+    reader = getattr(backend, "read", None)
+    if not file_path or not callable(reader):
+        return "Writes the complete file; any existing content will be replaced."
+    try:
+        result = reader(file_path, offset=0, limit=1)
+    except Exception:
+        return "Writes the complete file; any existing content will be replaced."
+    error = str(getattr(result, "error", "") or "")
+    if not error:
+        return "Replaces the entire existing file."
+    if "not found" in error.lower():
+        return "Creates a new file."
+    return "Writes the complete file; any existing content will be replaced."
 
 
 def render_interrupt_tool_calls(

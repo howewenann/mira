@@ -32,6 +32,7 @@ from config.settings import (
     dynamic_subagents_enabled,
     execute_env_settings,
     load_settings,
+    planning_todos_enabled,
     rubric_enabled,
     rubric_max_iterations,
     save_settings,
@@ -3334,6 +3335,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("Response schemas", rendered)
+                self.assertIn("Planning todos", rendered)
+                self.assertIn("no statistically significant accuracy difference", rendered)
                 self.assertIn("Rubric Middleware", rendered)
                 self.assertIn("Maximum iterations", rendered)
                 self.assertIn("write_file", rendered)
@@ -3341,9 +3344,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("eval", rendered)
                 self.assertIn("task", rendered)
                 self.assertIn("execute", rendered)
+                self.assertIn("delete", rendered)
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
                 self.assertIn("settings-toggle-response_schema-response_schema", buttons)
+                self.assertIn("settings-toggle-todos-planning_todos", buttons)
                 self.assertIn("settings-toggle-rubric-rubric", buttons)
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
@@ -3363,6 +3368,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-response_schema-response_schema"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-todos-planning_todos"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-rubric-rubric"].label), "no")
                 rubric_input = panel.query_one("#settings-rubric-max-iterations", Input)
                 rubric_toggle = buttons["settings-toggle-rubric-rubric"]
@@ -3381,6 +3387,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "required")
+                self.assertTrue(buttons["settings-toggle-always_allow-delete"].disabled)
 
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
@@ -3572,6 +3580,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-response_schema-response_schema"].disabled)
                 self.assertEqual(len(calls), 1)
+
+    async def test_settings_panel_toggles_planning_todos(self) -> None:
+        """Planning todos should save and rebuild both agents through normal settings flow."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            calls = []
+
+            async def rebuild() -> None:
+                calls.append(dict(app.config or {}))
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                button_id = "settings-toggle-todos-planning_todos"
+                await wait_until(lambda: button_id in {button.id for button in panel.query(Button)})
+
+                panel.query_one(f"#{button_id}", Button).press()
+                await wait_until(lambda: planning_todos_enabled(load_settings(workspace)))
+
+                self.assertEqual(str(panel.query_one(f"#{button_id}", Button).label), "yes")
+                panel.query_one(f"#{button_id}", Button).press()
+                await wait_until(lambda: not planning_todos_enabled(load_settings(workspace)))
+
+                self.assertEqual(str(panel.query_one(f"#{button_id}", Button).label), "no")
+                self.assertEqual(len(calls), 2)
 
     async def test_settings_panel_toggles_dynamic_response_schemas(self) -> None:
         """Dynamic response schemas should save independently and rebuild agents."""

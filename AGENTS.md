@@ -94,5 +94,9 @@
   `LocalShellBackend`; disabling it uses `FilesystemBackend`.
 - Keep `execute.always_allow` conservative by default. Approval-mode behavior
   and always-allow behavior should stay transcript-compatible.
+- Treat `write_file` as create-or-replace and `edit_file` as targeted editing.
+  Keep recursive `delete` action-only and subject to mandatory approval.
+- Planning todos are opt-in. When enabled, keep their middleware and tool
+  metadata aligned across action, planning, and compiled dynamic subagents.
 - When fixing execute or HITL issues, compare real behavior in both modes and
   prefer restoring DeepAgents normal flow over reimplementing tool execution.

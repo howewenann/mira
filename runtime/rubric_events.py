@@ -90,13 +90,32 @@ def normalize_evaluation(event: dict[str, Any]) -> dict[str, Any]:
                     "gap": str(raw.get("gap") or "").strip(),
                 }
             )
-    return {
+    evaluation = {
         "grading_run_id": str(event.get("grading_run_id") or ""),
         "iteration": nonnegative_int(event.get("iteration")),
         "result": result,
         "explanation": str(event.get("explanation") or "").strip(),
         "criteria": criteria,
     }
+    diagnostics = rubric_diagnostics(event)
+    if diagnostics:
+        evaluation["diagnostics"] = diagnostics
+    return evaluation
+
+
+def rubric_diagnostics(event: dict[str, Any]) -> dict[str, Any]:
+    """Preserve structured DeepAgents grader diagnostics when supplied."""
+    diagnostics: dict[str, Any] = {}
+    configured_model = event.get("configured_model", event.get("rubric_grader_configured_model"))
+    if isinstance(configured_model, str) and configured_model.strip():
+        diagnostics["configured_model"] = configured_model.strip()
+    strategy = event.get("structured_output_strategy", event.get("rubric_grader_effective_strategy"))
+    if isinstance(strategy, str) and strategy.strip():
+        diagnostics["structured_output_strategy"] = strategy.strip()
+    http_status = event.get("http_status", event.get("status_code"))
+    if isinstance(http_status, int) and not isinstance(http_status, bool):
+        diagnostics["http_status"] = http_status
+    return diagnostics
 
 
 def nonnegative_int(value: Any) -> int:
@@ -124,6 +143,17 @@ def rubric_result_text(evaluation: dict[str, Any], max_iterations: int) -> str:
     }
     detail = labels.get(result, "Review failed")
     lines.append(f"{detail}: {explanation}" if explanation else detail)
+    diagnostics = evaluation.get("diagnostics")
+    if isinstance(diagnostics, dict) and diagnostics:
+        values = []
+        if diagnostics.get("configured_model"):
+            values.append(f"model={diagnostics['configured_model']}")
+        if diagnostics.get("structured_output_strategy"):
+            values.append(f"strategy={diagnostics['structured_output_strategy']}")
+        if isinstance(diagnostics.get("http_status"), int):
+            values.append(f"HTTP {diagnostics['http_status']}")
+        if values:
+            lines.append(f"Grader diagnostics: {', '.join(values)}")
     for item in criteria:
         if not isinstance(item, dict) or item.get("passed"):
             continue
