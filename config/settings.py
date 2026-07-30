@@ -19,7 +19,6 @@ RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
-MANDATORY_APPROVAL_TOOLS = (DELETE_TOOL,)
 DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system": {
@@ -137,8 +136,6 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 current["enabled"] = enabled
             if isinstance(always_allow, bool):
                 current["always_allow"] = always_allow
-            if name in MANDATORY_APPROVAL_TOOLS:
-                current["always_allow"] = False
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
 
@@ -301,8 +298,6 @@ def valid_rubric_max_iterations(value: Any) -> bool:
 
 def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether a tool is configured to skip HITL approval."""
-    if tool_name in MANDATORY_APPROVAL_TOOLS:
-        return False
     hitl = hitl_settings(config_or_settings)
     tools = hitl.get("tools", {})
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
@@ -332,7 +327,7 @@ def set_tool_always_allow(settings: dict[str, Any], tool_name: str, always_allow
     """Return settings with one tool approval toggle updated."""
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"enabled": True}))
-    current["always_allow"] = False if tool_name in MANDATORY_APPROVAL_TOOLS else bool(always_allow)
+    current["always_allow"] = bool(always_allow)
     updated["hitl"]["tools"][tool_name] = current
     return updated
 

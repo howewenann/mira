@@ -261,6 +261,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                     "tools": {
                         "write_file": {"always_allow": True},
                         "edit_file": {"always_allow": False},
+                        "delete": {"always_allow": True},
                         "web_search": {"always_allow": False},
                     }
                 }
@@ -278,6 +279,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         interrupts = create_deep_agent.call_args.kwargs["interrupt_on"]
         self.assertNotIn("write_file", interrupts)
+        self.assertNotIn("delete", interrupts)
         self.assertIn("edit_file", interrupts)
         self.assertIn("web_search", interrupts)
 

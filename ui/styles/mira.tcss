@@ -709,13 +709,6 @@ Button.proposal-action:focus {
     border: none;
 }
 
-.settings-help {
-    height: 1;
-    margin: 0 0 1 30;
-    color: #8b949e;
-    text-style: italic;
-}
-
 .settings-status {
     height: 1;
 }

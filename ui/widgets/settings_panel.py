@@ -16,7 +16,6 @@ from textual.widgets import Button, Input, Static
 from config.settings import (
     DYNAMIC_SUBAGENTS,
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
-    DELETE_TOOL,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
@@ -121,10 +120,6 @@ class SettingsPanel(Vertical):
                         ToggleCell("todos", PLANNING_TODOS),
                         planning_todos_enabled(self.settings),
                     )
-                yield Static(
-                    "Adds write_todos; DeepAgents found no statistically significant accuracy difference.",
-                    classes="settings-help",
-                )
                 with Horizontal(classes="settings-row"):
                     yield Static("Rubric Middleware", classes="settings-label")
                     yield self._toggle_button(
@@ -139,10 +134,6 @@ class SettingsPanel(Vertical):
                         classes="settings-input rubric-iterations-input",
                         disabled=not rubric_enabled(self.settings),
                     )
-                yield Static(
-                    f"Enter a whole number from 1 to {RUBRIC_MAX_ITERATIONS_LIMIT}.",
-                    classes="settings-help",
-                )
 
                 yield Static("Inbuilt Tools", classes="settings-section inbuilt")
                 yield SettingsHeaderRow("")
@@ -169,7 +160,6 @@ class SettingsPanel(Vertical):
                         id="settings-execute-env-mode",
                         classes="settings-value-button",
                     )
-                yield Static("Press Enter/click to change", classes="settings-help")
 
                 for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
                     with Horizontal(id=f"settings-execute-env-{key}-row", classes="settings-row settings-wide-row") as row:
@@ -181,13 +171,6 @@ class SettingsPanel(Vertical):
                             id=f"settings-execute-env-{key}",
                             classes="settings-input",
                         )
-                preview = Static(
-                    execute_env_preview(execute_env),
-                    id="settings-execute-env-preview",
-                    classes="settings-help",
-                )
-                preview.display = execute_env_mode in EXECUTE_ENV_FIELDS
-                yield preview
 
                 with Horizontal(classes="settings-row settings-wide-row"):
                     yield Static("Additional env var names", classes="settings-label")
@@ -197,7 +180,6 @@ class SettingsPanel(Vertical):
                         id="settings-execute-env-allow",
                         classes="settings-input",
                     )
-                yield Static("Examples only. Use comma-separated names.", classes="settings-help")
 
                 yield Static("Custom Tools", classes="settings-section custom")
                 yield SettingsHeaderRow("")
@@ -357,7 +339,7 @@ class SettingsPanel(Vertical):
 
     def _cell_locked(self, cell: ToggleCell) -> bool:
         if cell.kind == "always_allow":
-            return cell.name == DELETE_TOOL or not tool_enabled(self.settings, cell.name)
+            return not tool_enabled(self.settings, cell.name)
         if cell.kind == "response_schema":
             return not dynamic_subagents_enabled(self.settings)
         return cell.locked
@@ -372,9 +354,6 @@ class SettingsPanel(Vertical):
         for field_mode, (key, _, _) in EXECUTE_ENV_FIELDS.items():
             self.query_one(f"#settings-execute-env-{key}-row", Horizontal).display = mode == field_mode
             self.query_one(f"#settings-execute-env-{key}", Input).value = str(execute_env.get(key) or "")
-        preview = self.query_one("#settings-execute-env-preview", Static)
-        preview.update(execute_env_preview(execute_env))
-        preview.display = mode in EXECUTE_ENV_FIELDS
         self.query_one("#settings-execute-env-allow", Input).value = ", ".join(execute_env.get("allow") or [])
         if focus_id is not None:
             try:
@@ -419,24 +398,6 @@ def execute_env_mode_label(mode: str) -> str:
     return f"{EXECUTE_ENV_LABELS.get(mode, 'system shell')} >"
 
 
-def execute_env_preview(settings: dict[str, Any]) -> str:
-    """Return preview or validation text for the current execute environment mode."""
-    mode = str(settings.get("mode") or "system")
-    if mode == "conda_name" and settings.get("name"):
-        return f"Preview: conda run -n {settings['name']} <command>"
-    if mode == "conda_name":
-        return "Conda env name required before commands are wrapped."
-    if mode == "conda_prefix" and settings.get("prefix"):
-        return f"Preview: conda run -p {settings['prefix']} <command>"
-    if mode == "conda_prefix":
-        return "Conda env path required before commands are wrapped."
-    if mode == "venv" and settings.get("path"):
-        return f"Preview: {settings['path']}"
-    if mode == "venv":
-        return "Venv location required before PATH is adjusted."
-    return "Placeholder examples are not saved or applied."
-
-
 def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
     """Return the boolean value for a settings cell."""
     if cell.kind == "git":
@@ -462,9 +423,7 @@ def button_id_for(cell: ToggleCell) -> str:
 
 def button_label(cell: ToggleCell, value: bool, *, locked: bool = False, enabled: bool = True) -> str:
     """Return display text for a settings toggle."""
-    if locked and cell.kind == "always_allow" and cell.name == DELETE_TOOL:
-        return "required"
-    if locked and cell.kind == "always_allow" and not enabled:
+    if locked and cell.kind == "always_allow":
         return "-"
     return "yes" if value else "no"
 

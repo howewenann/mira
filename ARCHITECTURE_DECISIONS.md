@@ -570,8 +570,9 @@ DeepAgents 0.7 defines `write_file` as create-or-complete-replacement and
 `edit_file` as targeted replacement. MIRA keeps both behind the normal HITL
 policy, labels their different consequences in the approval surface, and
 exposes recursive `delete` only where the selected backend implements it.
-Delete is action-only, destructive, and always requires approval. Filesystem
-backends use explicit virtual paths rooted in the selected workspace.
+Delete is action-only and destructive; like other consequential tools, it uses
+the workspace's configurable HITL policy. Filesystem backends use explicit
+virtual paths rooted in the selected workspace.
 
 Rubric terminal events are accepted directly from DeepAgents, including
 `max_iterations_reached`. MIRA preserves the explanation and available grader

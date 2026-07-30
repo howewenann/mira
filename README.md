@@ -159,7 +159,7 @@ neither LangChain nor MIRA installed. See
 - MIRA checks for Git protection before allowing agent work in a workspace.
 - Dangerous tools use human approval unless allowed explicitly in `/settings`.
 - `write_file` creates or fully replaces a file; use `edit_file` for targeted
-  changes. Recursive `delete` always requires approval.
+  changes. Recursive `delete` follows the configured approval policy.
 - Sessions are stored under `.mira/_sessions/` and can be resumed with `-r` or
   `-s <session-id>`.
 - Error reports are stored under `.mira/_errors/`; `/clear-errors` removes them.

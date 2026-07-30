@@ -3282,6 +3282,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(tool_always_allow(load_settings(workspace), "edit_file"))
 
+    async def test_settings_command_can_always_allow_delete(self) -> None:
+        """Delete should use the same configurable approval toggle as other tools."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+
+                async def rebuild(**kwargs: Any) -> None:
+                    return None
+
+                with patch.object(app, "_rebuild_agents", rebuild):
+                    app._handle_settings_command()
+                    await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                    await wait_until(
+                        lambda: "settings-toggle-always_allow-delete"
+                        in {candidate.id for candidate in app.query_one(SettingsPanel).query(Button)}
+                    )
+                    button = app.query_one("#settings-toggle-always_allow-delete", Button)
+                    self.assertFalse(button.disabled)
+                    button.press()
+                    await wait_until(lambda: tool_always_allow(load_settings(workspace), "delete"))
+
+                self.assertEqual(str(button.label), "yes")
+
     async def test_settings_command_disables_git_without_deleting_git_directory(self) -> None:
         """Turning off Git protection should save settings and leave .git untouched."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -3327,16 +3353,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Inbuilt Tools", rendered)
                 self.assertIn("Execute Environment", rendered)
                 self.assertIn("Run commands in", rendered)
-                self.assertIn("Press Enter/click to change", rendered)
                 self.assertIn("Additional env var names", rendered)
-                self.assertIn("Examples only. Use comma-separated names.", rendered)
                 self.assertIn("Custom Tools", rendered)
                 self.assertNotIn("Tool", static_labels)
                 self.assertIn("Git Protection", rendered)
                 self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("Response schemas", rendered)
                 self.assertIn("Planning todos", rendered)
-                self.assertIn("no statistically significant accuracy difference", rendered)
                 self.assertIn("Rubric Middleware", rendered)
                 self.assertIn("Maximum iterations", rendered)
                 self.assertIn("write_file", rendered)
@@ -3387,8 +3410,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
-                self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "required")
-                self.assertTrue(buttons["settings-toggle-always_allow-delete"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
+                self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
+                self.assertNotIn("Adds write_todos", rendered)
+                self.assertNotIn("Enter a whole number", rendered)
+                self.assertNotIn("Press Enter/click", rendered)
+                self.assertNotIn("Examples only", rendered)
 
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
@@ -3511,20 +3538,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 execute_section = labels["Execute Environment"]
                 inbuilt_section = labels["Inbuilt Tools"]
-                last_system_row = labels["Enter a whole number from 1 to 20."]
+                last_system_row = labels["Maximum iterations"]
                 last_inbuilt_row = labels["execute"]
                 run_commands = labels["Run commands in"]
-                execute_help = labels["Examples only. Use comma-separated names."]
-                self.assertEqual(
-                    inbuilt_section.region.y,
-                    last_system_row.region.y + last_system_row.region.height + 1,
-                )
+                last_execute_row = labels["Additional env var names"]
+                self.assertGreater(inbuilt_section.region.y, last_system_row.region.y)
                 self.assertEqual(
                     execute_section.region.y,
                     last_inbuilt_row.region.y + last_inbuilt_row.region.height + 1,
                 )
                 self.assertEqual(run_commands.region.y, execute_section.region.y + execute_section.region.height)
-                self.assertEqual(custom_section.region.y, execute_help.region.y + execute_help.region.height + 2)
+                self.assertGreater(custom_section.region.y, last_execute_row.region.y)
 
     async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
         """Inbuilt tool enable buttons should save disabled state and lock approvals."""

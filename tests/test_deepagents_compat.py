@@ -31,15 +31,39 @@ class DeepAgentsFilesystemCompatibilityTests(unittest.TestCase):
             self.assertIsNone(backend.edit("/notes.txt", "replacement", "targeted").error)
             self.assertEqual((Path(directory) / "notes.txt").read_text(encoding="utf-8"), "targeted\n")
 
-    def test_delete_is_recursive_and_mandatory_hitl(self) -> None:
+    def test_delete_is_recursive_and_uses_configurable_hitl(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backend = FilesystemBackend(root_dir=Path(directory), virtual_mode=True)
             backend.write("/tree/child.txt", "content")
 
-            interrupts = _write_interrupts(
-                {"settings": {"hitl": {"tools": {"delete": {"enabled": True, "always_allow": True}}}}}
+            approval_interrupts = _write_interrupts(
+                {
+                    "settings": {
+                        "hitl": {
+                            "tools": {
+                                "delete": {"enabled": True, "always_allow": False},
+                                "write_file": {"enabled": True, "always_allow": False},
+                            }
+                        }
+                    }
+                }
             )
-            self.assertIn("delete", interrupts)
+            automatic_interrupts = _write_interrupts(
+                {
+                    "settings": {
+                        "hitl": {
+                            "tools": {
+                                "delete": {"enabled": True, "always_allow": True},
+                                "write_file": {"enabled": True, "always_allow": True},
+                            }
+                        }
+                    }
+                }
+            )
+            self.assertIn("delete", approval_interrupts)
+            self.assertIn("write_file", approval_interrupts)
+            self.assertNotIn("delete", automatic_interrupts)
+            self.assertNotIn("write_file", automatic_interrupts)
             rejected_target = Path(directory) / "tree"
             self.assertTrue(rejected_target.exists(), "a rejected request must not execute the backend operation")
             self.assertIsNone(backend.delete("/tree").error)

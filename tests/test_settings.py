@@ -104,15 +104,18 @@ class SettingsTests(unittest.TestCase):
         updated = settings.set_planning_todos(updated, False)
         self.assertFalse(settings.planning_todos_enabled(updated))
 
-    def test_recursive_delete_always_requires_approval(self) -> None:
-        """Malformed or explicit settings must not bypass destructive approval."""
+    def test_recursive_delete_uses_configurable_approval_policy(self) -> None:
+        """Delete should keep the conservative default while respecting opt-out."""
+        default = settings.normalize_settings({})
+        self.assertFalse(settings.tool_always_allow(default, "delete"))
+
         loaded = settings.normalize_settings(
             {"hitl": {"tools": {"delete": {"enabled": True, "always_allow": True}}}}
         )
 
         self.assertTrue(settings.tool_enabled(loaded, "delete"))
-        self.assertFalse(settings.tool_always_allow(loaded, "delete"))
-        updated = settings.set_tool_always_allow(loaded, "delete", True)
+        self.assertTrue(settings.tool_always_allow(loaded, "delete"))
+        updated = settings.set_tool_always_allow(loaded, "delete", False)
         self.assertFalse(settings.tool_always_allow(updated, "delete"))
 
     def test_dynamic_response_schema_defaults_on_and_can_toggle(self) -> None:
@@ -195,6 +198,7 @@ class SettingsTests(unittest.TestCase):
             workspace = Path(directory)
             updated = settings.set_git_protection(settings.load_settings(workspace), False)
             updated = settings.set_planning_todos(updated, True)
+            updated = settings.set_tool_always_allow(updated, "delete", True)
             updated = settings.set_tool_always_allow(updated, "web_search", False)
             updated = settings.set_tool_enabled(updated, "web_search", False)
 
@@ -211,6 +215,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("llm_direct", loaded)
         self.assertFalse(settings.git_protection_enabled(loaded))
         self.assertTrue(settings.planning_todos_enabled(loaded))
+        self.assertTrue(settings.tool_always_allow(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))
 

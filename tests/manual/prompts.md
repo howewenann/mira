@@ -1093,8 +1093,8 @@ conda run -n ai_agents python -m cli.main --workspace <workspace>
    a targeted change and unmatched content remains intact.
 9. Request recursive deletion of a test directory in action mode. Expected:
    `/tools` lists `delete` only for a supporting backend; the warning names
-   recursive, destructive behavior, approval cannot be disabled, reject keeps
-   the tree, and approve removes it.
+   recursive, destructive behavior, reject keeps the tree, and approve removes
+   it. With `always_allow` enabled, the same request runs without a dialog.
 10. Repeat the delete request in planning mode. Expected: the tool is absent and
     the filesystem permission backstop denies mutation.
 11. Run a rubric goal whose final pass reaches its cap, then provoke a grader
