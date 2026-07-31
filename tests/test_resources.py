@@ -64,13 +64,22 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 ),
             )
 
-    def test_default_memory_loads_without_project_memory(self) -> None:
-        """The bundled AGENTS.md should load when project examples are skipped."""
+    def test_default_memories_load_without_project_memory(self) -> None:
+        """Both bundled memories should load when project examples are skipped."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
 
-            self.assertEqual(resources.memory, ["/mira-defaults/memories/AGENTS.md"])
-            self.assertEqual(resources.metadata["memories"][0]["source"], "default")
+            self.assertEqual(
+                resources.memory,
+                [
+                    "/mira-defaults/memories/AGENTS.md",
+                    "/mira-defaults/memories/software-development.md",
+                ],
+            )
+            self.assertEqual(
+                [item["source"] for item in resources.metadata["memories"]],
+                ["default", "default"],
+            )
 
     def test_execute_disabled_uses_filesystem_backend(self) -> None:
         """Disabled execute should keep the normal filesystem backend."""
@@ -164,7 +173,14 @@ class ResourceDiscoveryTests(unittest.TestCase):
 
             resources = build_resources(workspace, create_examples=False)
 
-            self.assertEqual(resources.memory, ["/.mira/memories/AGENTS.md", "/.mira/memories/soul.md"])
+            self.assertEqual(
+                resources.memory,
+                [
+                    "/.mira/memories/AGENTS.md",
+                    "/mira-defaults/memories/software-development.md",
+                    "/.mira/memories/soul.md",
+                ],
+            )
             self.assertEqual(
                 resources.metadata["memories"],
                 [
@@ -175,10 +191,54 @@ class ResourceDiscoveryTests(unittest.TestCase):
                         "replaces": "default",
                     },
                     {
+                        "name": "software-development.md",
+                        "path": "/mira-defaults/memories/software-development.md",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
                         "name": "soul.md",
                         "path": "/.mira/memories/soul.md",
                         "source": "project",
                         "replaces": "",
+                    },
+                ],
+            )
+
+    def test_project_software_development_memory_replaces_only_bundled_match(self) -> None:
+        """Projects may replace the software guide without losing other defaults."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            memory_dir = workspace / ".mira" / "memories"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "software-development.md").write_text(
+                "project methodology",
+                encoding="utf-8",
+            )
+
+            resources = build_resources(workspace, create_examples=False)
+
+            self.assertEqual(
+                resources.memory,
+                [
+                    "/mira-defaults/memories/AGENTS.md",
+                    "/.mira/memories/software-development.md",
+                ],
+            )
+            self.assertEqual(
+                resources.metadata["memories"],
+                [
+                    {
+                        "name": "AGENTS.md",
+                        "path": "/mira-defaults/memories/AGENTS.md",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "software-development.md",
+                        "path": "/.mira/memories/software-development.md",
+                        "source": "project",
+                        "replaces": "default",
                     },
                 ],
             )
@@ -697,6 +757,7 @@ def get_tools(project_backend):
             action_memory,
             [
                 "/.mira/memories/AGENTS.md",
+                "/mira-defaults/memories/software-development.md",
                 "/.mira/memories/01-context.md",
                 "/.mira/memories/zebra-notes.md",
             ],

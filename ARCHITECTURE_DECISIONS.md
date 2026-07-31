@@ -172,7 +172,7 @@ approval behavior changes, or shell environment inheritance changes.
 ## Project Resources
 
 **Decision:** MIRA loads bundled defaults first, then project `.mira/` resources.
-Bundled defaults stay minimal: default memory plus MIRA's built-in project
+Bundled defaults stay minimal: default memories plus MIRA's built-in project
 tools. Project resources replace defaults by memory filename, skill name,
 subagent name, or tool name.
 
@@ -184,7 +184,7 @@ to inspect.
 **How it works at a high level:**
 
 - Defaults live under `agent/default_resources/` and are mounted read-only at
-  `/mira-defaults/...`; only default memory and built-in tools are shipped
+  `/mira-defaults/...`; only default memories and built-in tools are shipped
   there by default.
 - Project resources live under the workspace's `.mira/` folder and are mounted
   at `/.mira/...`.
@@ -197,9 +197,10 @@ to inspect.
 
 **Overwrite rules:**
 
-- Memories load from `*.md` and replace by filename. A project
-  `.mira/memories/AGENTS.md` replaces the bundled default `AGENTS.md`; extra
-  Markdown files are added as additional memories.
+- Memories load from `*.md` and replace by filename. For example, a project
+  `.mira/memories/AGENTS.md` replaces the bundled `AGENTS.md`, and a project
+  `.mira/memories/software-development.md` replaces the bundled software
+  development guide; extra Markdown files are added as additional memories.
 - Skills load from project folders containing `SKILL.md`. MIRA display metadata
   keys them by YAML frontmatter `name`, falling back to the folder name. If
   bundled default skills are added later, DeepAgents receives default skill
