@@ -32,7 +32,7 @@ class MiraJsonPlusSerializer(JsonPlusSerializer):
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
         """Deserialize checkpoint values and keep risky internals plain."""
-        return repair_loaded_checkpoint_value(normalize_checkpoint_value(super().loads_typed(data)))
+        return normalize_checkpoint_value(super().loads_typed(data))
 
 
 class MiraMemorySaver(MemorySaver):
@@ -138,69 +138,6 @@ def sanitize_checkpoint_value(value: Any) -> Any:
             return repr(value)
 
     return repr(value)
-
-
-def repair_loaded_checkpoint_value(value: Any) -> Any:
-    """Repair narrow legacy checkpoint shapes produced by older MIRA builds."""
-    if not isinstance(value, Mapping):
-        return value
-
-    channel_values = value.get("channel_values")
-    if not isinstance(channel_values, Mapping):
-        return value
-
-    messages = channel_values.get("messages")
-    if not is_legacy_corrupted_message_snapshot(messages):
-        return value
-
-    repaired = dict(value)
-    repaired_channels = dict(channel_values)
-    repaired_channels["messages"] = messages[0]
-    repaired["channel_values"] = repaired_channels
-    return repaired
-
-
-def is_legacy_corrupted_message_snapshot(value: Any) -> bool:
-    """Return whether value is the exact old `_DeltaSnapshot` -> nested-list bug."""
-    if not isinstance(value, list) or len(value) != 1:
-        return False
-    inner = value[0]
-    if not isinstance(inner, list) or not inner:
-        return False
-    return all(is_message_like(item) for item in inner)
-
-
-def is_message_like(value: Any) -> bool:
-    """Return whether value has a shape LangChain can convert into a message."""
-    if isinstance(value, BaseMessage):
-        return True
-    if isinstance(value, str):
-        return True
-    if isinstance(value, Mapping):
-        return bool({"role", "type"} & set(value.keys())) and "content" in value
-    if isinstance(value, tuple) and len(value) == 2:
-        return isinstance(value[0], str)
-    return False
-
-
-def message_snapshot_shape(value: Any, *, channel: str = "messages", source: str = "checkpoint") -> dict[str, Any]:
-    """Return compact diagnostic details for a checkpoint message snapshot."""
-    shape: dict[str, Any] = {
-        "channel": channel,
-        "kind": value.__class__.__name__,
-        "source": source,
-    }
-    if isinstance(value, _DeltaSnapshot):
-        shape["snapshot"] = True
-        value = value.value
-    if isinstance(value, list):
-        shape["outer_len"] = len(value)
-        shape["outer_item_types"] = [item.__class__.__name__ for item in value[:5]]
-        if len(value) == 1 and isinstance(value[0], list):
-            shape["nested"] = True
-            shape["inner_len"] = len(value[0])
-            shape["inner_item_types"] = [item.__class__.__name__ for item in value[0][:5]]
-    return shape
 
 
 def is_pydantic_serializer_internal(value: Any) -> bool:

@@ -756,9 +756,10 @@ Use a disposable workspace and retain its session file for replay checks.
 11. Attempt both replacement directions with incomplete formal work. Expected:
     the structured Replace/Keep choice appears; Keep preserves the old artifact,
     and accepting replacement still preserves it if generation later fails.
-12. Reload a session with `current_goal`, then a legacy `active_goal`. Expected:
-    exact current Goal replay; legacy Objective and criteria migrate, its embedded
-    Plan is ignored, and cleared/superseded legacy Goals do not become current.
+12. Reload a session with an exact `current_goal`, then try retired
+    `active_goal` and proposal-event shapes. Expected: the exact current Goal
+    replays; retired shapes are discarded and never become current or historical
+    Goal bubbles.
 13. Check `/plan-show` while a Goal is current and `/goal-show` while a Plan is
     current. Expected: deterministic guidance to the matching command.
 

@@ -249,7 +249,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)
 
-    def test_current_goal_survives_save_load_and_is_not_inferred_from_history(self) -> None:
+    def test_current_goal_survives_save_load_and_old_events_are_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
             record = store.new(session_id="thread-1", workspace=Path("workspace"))
@@ -267,6 +267,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
             store.save(record)
+            self.assertEqual(record["events"], [])
             self.assertIsNone(store.read(store.path("thread-1"))["current_goal"])
 
             replace_current_goal(
@@ -1024,7 +1025,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["evaluation"]["result"], "max_iterations_reached")
         self.assertEqual(events[0]["max_iterations"], 1)
 
-    def test_legacy_proposal_keeps_goal_fields_separately_recoverable(self) -> None:
+    def test_proposal_events_are_discarded(self) -> None:
         events = [
             {
                 "id": 1,
@@ -1043,38 +1044,21 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        goals = context.normalize_goals(events)
-        resume = context.build_resume_context({"events": events})
-
-        self.assertIn("Resolved decisions", goals[0]["objective"])
-        self.assertEqual(goals[0]["success_criteria"], "- Search returns ranked results.")
-        self.assertNotIn("plan", goals[0])
-        self.assertIn("Historical Goals (not authoritative):", resume)
-        self.assertIn("Success Criteria", resume)
+        self.assertEqual(context.normalize_events(events), [])
+        self.assertEqual(context.normalize_goals(events), [])
+        self.assertEqual(context.build_resume_context({"events": events}), "")
 
     def test_malformed_persisted_iteration_values_restore_defaults(self) -> None:
         events = [
             {
                 "id": 1,
-                "type": "proposal",
-                "proposal": {
-                    "id": "proposal-1",
-                    "original_objective": "Do it.",
-                    "objective": "Do it.",
-                    "criteria": "- Done.",
-                    "rubric_iterations": "invalid",
-                },
-            },
-            {
-                "id": 2,
                 "type": "rubric",
                 "evaluation": {"grading_run_id": "grade-1", "iteration": 0},
                 "max_iterations": 99,
             },
         ]
 
-        self.assertEqual(context.normalize_goals(events)[0]["rubric_iterations"], 3)
-        self.assertEqual(context.normalize_events(events)[1]["max_iterations"], 1)
+        self.assertEqual(context.normalize_events(events)[0]["max_iterations"], 1)
 
     def test_normalize_events_replays_control_events_in_original_order(self) -> None:
         record = {
@@ -1103,14 +1087,18 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                     "type": "plan",
                     "mode": "planning",
                     "status": "pending",
-                    "plan": {
-                        "id": "plan-1",
-                        "title": "Plan",
-                        "summary": ["One."],
-                        "key_changes": ["Two."],
-                        "test_plan": ["Three."],
-                        "assumptions": ["Four."],
-                    },
+                    "plan": plan_artifact(
+                        plan_id="plan-1",
+                        title="Plan",
+                        objective="Complete the requested outcome.",
+                        context_and_constraints="Preserve unrelated behavior.",
+                        key_changes=["Two."],
+                        test_plan=["Three."],
+                        assumptions=["Four."],
+                        success_criteria="- The requested outcome is complete.",
+                        rubric_enabled=False,
+                        rubric_iterations=3,
+                    ),
                 },
             ]
         }
@@ -1546,63 +1534,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recent request", first)
         self.assertEqual(second, "another request")
 
-    def test_resume_context_includes_recent_structured_plans(self) -> None:
-        record = {
-            "events": [
-                {
-                    "id": 1,
-                    "type": "tool_call",
-                    "mode": "planning",
-                    "name": "present_plan",
-                    "args": {"title": "hidden"},
-                },
-                {
-                    "id": 2,
-                    "type": "tool_result",
-                    "mode": "planning",
-                    "name": "present_plan",
-                    "output": "interrupt",
-                },
-                {
-                    "id": 3,
-                    "type": "plan",
-                    "mode": "planning",
-                    "status": "revision requested",
-                    "plan": {
-                        "id": "plan-1",
-                        "title": "Original Palindrome Plan",
-                        "summary": ["Create palindrome.py."],
-                        "key_changes": ["Add is_palindrome."],
-                        "test_plan": ["Run python palindrome.py."],
-                        "assumptions": ["Use Python."],
-                    },
-                },
-                {
-                    "id": 4,
-                    "type": "plan",
-                    "mode": "planning",
-                    "status": "approved for implementation",
-                    "plan": {
-                        "id": "plan-2",
-                        "title": "Revised Palindrome Plan",
-                        "summary": ["Create palindrome.py with docs."],
-                        "key_changes": ["Add type hints.", "Add a docstring."],
-                        "test_plan": ["Run python palindrome.py.", "Verify Racecar is true."],
-                        "assumptions": ["Use the project root."],
-                    },
-                },
-            ],
-        }
-
-        plans = context.normalize_plans(record["events"])
-        resume = context.build_resume_context(record)
-
-        self.assertEqual([plan["id"] for plan in plans], ["plan-1", "plan-2"])
-        self.assertEqual(resume, "")
-        self.assertNotIn("tool_call", resume)
-        self.assertNotIn("interrupt", resume)
-
-    def test_resume_context_does_not_treat_historical_plans_as_current(self) -> None:
+    def test_old_historical_plan_events_are_discarded(self) -> None:
         record = {
             "events": [
                 {
@@ -1619,9 +1551,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        resume = context.build_resume_context(record)
-
-        self.assertEqual(resume, "")
+        self.assertEqual(context.normalize_events(record["events"]), [])
+        self.assertEqual(context.build_resume_context(record), "")
 
     def test_resume_context_not_pending_for_historical_plan_events_only(self) -> None:
         record = {

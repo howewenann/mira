@@ -22,6 +22,7 @@ from config.metadata import ModelMetadata
 from config.runtime import RuntimeSnapshot
 from runtime import runner
 from runtime.context_usage import record_deepagents_context_tokens
+from session.plans import plan_artifact
 from ui import repl
 from ui.interrupts import prepare_goal_request
 from ui.runtime_snapshot import resources_table, runtime_report, tools_table
@@ -674,7 +675,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertFalse(mode["planning"])
-        self.assertNotIn("approved_plan", mode)
         self.assertIn("action mode", renderer.console.lines[-1])
 
     async def test_help_includes_plan_commands(self) -> None:
@@ -1070,64 +1070,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
 
-    async def test_run_user_turn_injects_approved_plan_once(self) -> None:
-        """An explicitly approved plan should be injected into one action request."""
-        renderer = RecordingRenderer()
-        session = {"id": "thread-1", "workspace": ".", "turns": 0}
-        store = FakeStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
-        mode["approved_plan"] = {
-            "title": "Create file",
-            "summary": ["Create test.txt with hello world."],
-            "key_changes": ["Write the file."],
-            "test_plan": ["Run the focused file creation check."],
-            "assumptions": ["Use the root directory."],
-        }
-        calls: list[tuple[Any, str, str]] = []
-        results = [
-            runner.TurnResult(final_text="done"),
-            runner.TurnResult(final_text="done again"),
-        ]
-
-        async def fake_run_turn(
-            agent: Any,
-            text: str,
-            renderer: Any,
-            thread_id: str,
-            **kwargs: Any,
-        ) -> runner.TurnResult:
-            """Record agent invocations and return scripted results."""
-            calls.append((agent, text, thread_id))
-            return results.pop(0)
-
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
-                agent="action-agent",
-                plan_agent="plan-agent",
-                renderer=renderer,
-                store=store,
-                session=session,
-                mode=mode,
-                text="do it",
-            )
-            await repl.run_user_turn(
-                agent="action-agent",
-                plan_agent="plan-agent",
-                renderer=renderer,
-                store=store,
-                session=session,
-                mode=mode,
-                text="do another thing",
-            )
-
-        self.assertEqual(calls[0][0], "action-agent")
-        self.assertIn("Previous planning context:", calls[0][1])
-        self.assertIn("Create test.txt with hello world.", calls[0][1])
-        self.assertIn("You are now in action mode.", calls[0][1])
-        self.assertIn("Do not assume planning-mode permission errors still apply", calls[0][1])
-        self.assertIn("User request:\ndo it", calls[0][1])
-        self.assertEqual(calls[1], ("action-agent", "do another thing", "thread-1"))
-
     async def test_run_user_turn_distinguishes_omitted_cleared_and_supplied_rubric(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
@@ -1209,7 +1151,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[3]["rubric"], "- It works.")
         self.assertEqual(calls[3]["rubric_max_iterations"], 4)
 
-    async def test_rubric_plan_revision_starts_in_finalize_stage(self) -> None:
+    async def test_plan_revision_starts_in_plan_finalize_stage(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         mode = repl.initial_mode(
@@ -1220,7 +1162,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         mode.update(
             {
                 "planning": True,
-                "planning_stage": "finalize",
+                "planning_stage": "plan_finalize",
                 "plan_thread_id": "thread-1:plan:revision",
             }
         )
@@ -1242,7 +1184,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(captured["agent"], "plan-agent")
-        self.assertEqual(captured["planning_stage"], "finalize")
+        self.assertEqual(captured["planning_stage"], "plan_finalize")
 
     async def test_run_user_turn_applies_live_usage_once(self) -> None:
         """Interactive usage callbacks should refresh dashboard without final double-counting."""
@@ -1488,7 +1430,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("current plan: no", renderer.console.lines[0])
 
     def test_session_summary_detects_goals_and_both_plan_shapes(self) -> None:
-        """Goals and plans should follow the active conversation proposal state."""
+        """Goals and Plans should reflect only current formal-work state."""
         session = {
             "id": "thread-1",
             "title": "Runtime cleanup",
@@ -1521,32 +1463,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Planning threads should be isolated from action memory."""
         self.assertEqual(repl.plan_thread_id({"id": "thread-1"}), "thread-1:plan")
         self.assertEqual(repl.plan_thread_id({"id": "thread-1"}, 2), "thread-1:plan:2")
-
-    def test_action_request_text_clears_approved_plan(self) -> None:
-        """The approved plan should be consumed only once."""
-        mode = {
-            "planning": False,
-            "approved_plan": {
-                "title": "Plan text",
-                "summary": ["Do the thing."],
-                "key_changes": ["Update the implementation."],
-                "test_plan": ["Run focused checks."],
-                "assumptions": ["No extra assumptions."],
-            },
-        }
-
-        text = repl.action_request_text(mode, "Implement")
-
-        self.assertIn("Previous planning context:", text)
-        self.assertIn("Title: Plan text", text)
-        self.assertIn("- Do the thing.", text)
-        self.assertIn("Test Plan:\n- Run focused checks.", text)
-        self.assertIn("Do not assume planning-mode permission errors still apply.", text)
-        self.assertIn("Use a todo/checklist", text)
-        self.assertIn("Run every feasible Test Plan command/check after implementation.", text)
-        self.assertIn("state exactly which one was skipped and why", text)
-        self.assertIn("User request:\nImplement", text)
-        self.assertIsNone(mode["approved_plan"])
 
     def test_invalid_plan_result_when_write_tool_was_used(self) -> None:
         """A plan is invalid if the write tool was called."""
@@ -1588,29 +1504,28 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", text)
         self.assertIn("User request:\nwrite a file", text)
 
-    def test_rubric_setting_does_not_change_plan_request_contract(self) -> None:
-        text = repl.plan_request_text("write a file", rubric_research=True)
-
-        self.assertEqual(text, repl.plan_request_text("write a file"))
-        self.assertIn("Call prepare_plan", text)
-        self.assertNotIn("prepare_goal", text)
-
-    def test_plan_revision_text_includes_old_plan_and_feedback(self) -> None:
+    def test_plan_revision_text_includes_current_plan_and_feedback(self) -> None:
         """Revision requests should not depend on planning-thread memory."""
         text = repl.plan_revision_text(
-            {
-                "title": "Palindrome Plan",
-                "summary": ["Create a helper."],
-                "key_changes": ["Add palindrome.py."],
-                "test_plan": ["Add unit tests."],
-                "assumptions": ["Use Python."],
-            },
+            plan_artifact(
+                plan_id="plan-1",
+                title="Palindrome Plan",
+                objective="Create a palindrome helper.",
+                context_and_constraints="Use the project root.",
+                key_changes=["Add palindrome.py."],
+                test_plan=["Add unit tests."],
+                assumptions=["Use Python."],
+                success_criteria="- Palindromes are identified correctly.",
+                rubric_enabled=False,
+                rubric_iterations=3,
+            ),
             "include a testing plan",
         )
 
         self.assertIn("Revise this structured plan.", text)
         self.assertIn("Title: Palindrome Plan", text)
-        self.assertIn("Summary:\n- Create a helper.", text)
+        self.assertIn("Objective:\nCreate a palindrome helper.", text)
+        self.assertIn("Success Criteria:\n- Palindromes are identified correctly.", text)
         self.assertIn("Key Changes:\n- Add palindrome.py.", text)
         self.assertIn("Test Plan:\n- Add unit tests.", text)
         self.assertIn("Assumptions:\n- Use Python.", text)
@@ -1640,7 +1555,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["objective"], "Goal")
         self.assertEqual(len(request["research_evidence"]), 4000)
 
-    async def test_explicit_goal_proposal_uses_plan_agent_without_persistent_plan_mode(self) -> None:
+    async def test_explicit_goal_request_uses_plan_agent_without_persistent_plan_mode(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         mode = repl.initial_mode(
@@ -1733,7 +1648,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(calls[0]["rubric"], "- Search works.")
         self.assertIn("<current_goal>", calls[0]["text"])
-        self.assertNotIn("<approved_plan>", calls[0]["text"])
         self.assertIsNone(calls[1]["rubric"])
 
     async def test_plans_command_is_removed(self) -> None:

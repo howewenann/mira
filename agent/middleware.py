@@ -245,13 +245,6 @@ class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
 
     def _stage_request(self, request: Any) -> Any:
         stage = str(request.state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH)
-        if stage == "research":
-            stage = PLANNING_STAGE_GOAL_RESEARCH
-        elif stage == "finalize":
-            # Preserve checkpoints created before Plan/Goal gained distinct
-            # finalization stage names. That legacy stage finalized through
-            # present_plan; all new Goal runs use goal_finalize explicitly.
-            stage = PLANNING_STAGE_PLAN_FINALIZE
         if stage in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
             expected_present = (
                 PRESENT_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_FINALIZE else PRESENT_PLAN_TOOL

@@ -51,12 +51,10 @@ def normalize_current_goal(value: Any) -> dict[str, Any] | None:
     goal_id = compact_text(value.get("id"))
     title = compact_text(value.get("title"))
     objective = str(value.get("objective") or "").strip()
-    criteria = str(value.get("success_criteria") or value.get("criteria") or "").strip()
+    criteria = str(value.get("success_criteria") or "").strip()
     if not all((goal_id, title, objective, criteria)):
         return None
     status = compact_text(value.get("status") or "proposed")
-    if status == "complete":
-        status = "completed"
     if status not in GOAL_STATUSES:
         status = "proposed"
     created_at = str(value.get("created_at") or now_iso())
@@ -74,48 +72,6 @@ def normalize_current_goal(value: Any) -> dict[str, Any] | None:
         "created_at": created_at,
         "updated_at": str(value.get("updated_at") or created_at),
     }
-
-
-def migrate_active_goal(value: Any) -> dict[str, Any] | None:
-    """Migrate one legacy embedded-Plan active_goal without retaining its Plan."""
-    if not isinstance(value, dict):
-        return None
-    legacy_status = compact_text(value.get("status") or "active")
-    if legacy_status in {"cleared", "superseded", "discarded"}:
-        return None
-    objective = str(value.get("objective") or value.get("original_objective") or "").strip()
-    criteria = str(value.get("criteria") or value.get("success_criteria") or "").strip()
-    goal_id = compact_text(value.get("id") or value.get("proposal_id"))
-    if not all((goal_id, objective, criteria)):
-        return None
-    plan = value.get("plan") if isinstance(value.get("plan"), dict) else {}
-    title = compact_text(value.get("title") or plan.get("title")) or compact_title(objective)
-    status = "completed" if legacy_status == "complete" else legacy_status
-    if status not in GOAL_STATUSES:
-        status = "active"
-    last_status = compact_text(value.get("last_rubric_status"))
-    completion_source = (
-        "rubric-verified"
-        if status == "completed" and last_status == "satisfied"
-        else ""
-    )
-    now = now_iso()
-    return normalize_current_goal(
-        {
-            "id": goal_id,
-            "title": title,
-            "objective": objective,
-            "success_criteria": criteria,
-            "status": status,
-            "rubric_enabled": True,
-            "rubric_iterations": value.get("rubric_iterations"),
-            "last_rubric_status": last_status,
-            "completion_source": completion_source,
-            "attempts": value.get("attempts", 1 if status != "proposed" else 0),
-            "created_at": value.get("created_at") or now,
-            "updated_at": value.get("updated_at") or value.get("created_at") or now,
-        }
-    )
 
 
 def goal_artifact(
@@ -268,11 +224,6 @@ def _set_plan_event_status(record: dict[str, Any], plan_id: str, status: str) ->
 
 def compact_text(value: Any) -> str:
     return " ".join(str(value or "").split())
-
-
-def compact_title(value: str) -> str:
-    words = compact_text(value).rstrip(".!?").split()
-    return " ".join(words[:8]) or "Goal"
 
 
 def nonnegative_int(value: Any) -> int:

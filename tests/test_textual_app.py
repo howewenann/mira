@@ -197,6 +197,15 @@ def make_app(
     )
 
 
+def stage_plan(app: MiraApp) -> None:
+    """Provide the exact criteria-first state required by present_plan."""
+    app.mode["plan_staging"] = {
+        "objective": "Complete the requested Plan outcome.",
+        "context_and_constraints": "Preserve unrelated behavior.",
+        "success_criteria": "- The requested Plan outcome is complete.",
+    }
+
+
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
 
@@ -946,7 +955,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Boundary Plan",
-            "summary": ["Separate phases."],
             "key_changes": ["Render a plan bubble."],
             "test_plan": ["Check reasoning block count."],
             "assumptions": ["The plan is visible."],
@@ -956,6 +964,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             app.reasoning_delta("first reasoning")
+            stage_plan(app)
             await app.present_plan(interrupt)
             app.reasoning_delta("second reasoning")
             await pilot.pause()
@@ -1212,26 +1221,27 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "Use /plan-show to display it.",
         )
 
-    async def test_legacy_goal_only_proposal_replays_without_actions(self) -> None:
+    async def test_proposal_events_do_not_replay(self) -> None:
         app = make_app()
-        legacy = {
-            "id": "legacy-1",
-            "kind": "goal",
-            "original_objective": "Legacy work.",
-            "objective": "Legacy work.",
-            "criteria": "- Legacy work is done.",
-            "plan": None,
-            "rubric_iterations": 3,
-        }
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            chat.restore_session({"current_goal": None, "events": [{"id": 1, "type": "proposal", "created_at": "now", "proposal": legacy, "status": "approved for implementation"}]})
+            chat.restore_session(
+                {
+                    "current_goal": None,
+                    "events": [
+                        {
+                            "id": 1,
+                            "type": "proposal",
+                            "created_at": "now",
+                            "proposal": {"id": "old", "objective": "Old work."},
+                        }
+                    ],
+                }
+            )
             await pilot.pause()
 
-            bubble = list(chat.query(".goal"))[-1]
-            self.assertIn("Objective", renderable_plain(bubble.query_one(".goal-body", Static)))
-            self.assertEqual(len(bubble.query(".goal-action")), 0)
+            self.assertEqual(len(chat.query(".goal")), 0)
 
     async def test_cancel_turn_detaches_reasoning_and_assistant_blocks(self) -> None:
         """New streamed output after cancellation should start fresh main bubbles."""
@@ -5391,7 +5401,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Ephemeral Structured Planning",
-            "summary": ["Use a temporary plan bubble."],
             "key_changes": ["Add present_plan.", "Remove /plans."],
             "test_plan": ["Verify the plan bubble controls."],
             "assumptions": ["Plans are temporary UI artifacts."],
@@ -5400,6 +5409,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
+            stage_plan(app)
             self.assertEqual(
                 await app.present_plan(interrupt),
                 "Plan and Success Criteria presented for user review.",
@@ -5450,7 +5460,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Shortcut Plan",
-            "summary": ["Keep shortcut labels honest."],
             "key_changes": ["Handle i, r, and d."],
             "test_plan": ["Press each visible shortcut."],
             "assumptions": ["The plan button row has focus."],
@@ -5458,6 +5467,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            stage_plan(app)
             await app.present_plan(interrupt)
             await pilot.pause()
 
@@ -5505,7 +5515,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Recall Plan",
-            "summary": ["Retain this objective."],
             "key_changes": ["Keep exact fields."],
             "test_plan": ["Check exact rendering."],
             "assumptions": ["No additional assumptions."],
@@ -5513,6 +5522,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            stage_plan(app)
             await app.present_plan(interrupt)
             await pilot.pause()
             expected = dict(app.session["current_plan"])
@@ -5548,7 +5558,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Cancellation Plan",
-            "summary": ["Keep the active plan intact."],
             "key_changes": ["Cancel an unrelated turn."],
             "test_plan": ["Verify plan actions remain visible."],
             "assumptions": ["The cancellation is unrelated."],
@@ -5557,6 +5566,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
+            stage_plan(app)
             await app.present_plan(interrupt)
             await pilot.pause()
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
@@ -5575,9 +5585,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
     def test_normalize_plan_fills_all_structured_sections(self) -> None:
         """Partial plan payloads should not drop sections in logs or replay."""
-        plan = normalize_plan({"title": "Partial", "summary": ["One."]})
+        plan = normalize_plan({"title": "Partial"})
 
-        self.assertEqual(plan["summary"], ["One."])
+        self.assertNotIn("summary", plan)
         self.assertEqual(plan["key_changes"], ["List the key implementation changes."])
         self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
         self.assertEqual(plan["assumptions"], ["No additional assumptions."])
@@ -5588,7 +5598,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Palindrome Plan",
-            "summary": ["Create a palindrome helper."],
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
             "assumptions": ["Use Python."],
@@ -5598,6 +5607,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
 
+                stage_plan(app)
                 await app.present_plan(interrupt)
                 await pilot.pause()
                 await app._handle_plan_action("revise", "plan-1")
@@ -5615,7 +5625,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Palindrome Plan",
-            "summary": ["Create a palindrome helper."],
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
             "assumptions": ["Use Python."],
@@ -5631,6 +5640,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
 
+                stage_plan(app)
                 await app.present_plan(interrupt)
                 await pilot.pause()
                 await app._handle_plan_action("revise", "plan-1")
@@ -5654,7 +5664,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Palindrome Plan",
-            "summary": ["Create a palindrome helper."],
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
             "assumptions": ["Use Python."],
@@ -5663,6 +5672,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
+            stage_plan(app)
             await app.present_plan(interrupt)
             await pilot.pause()
             app.query_one("#plan-revise-plan-1", Button).press()

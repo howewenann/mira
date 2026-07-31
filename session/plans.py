@@ -65,13 +65,13 @@ def normalize_current_plan(value: Any) -> dict[str, Any] | None:
     key_changes = compact_items(value.get("key_changes"))
     test_plan = compact_items(value.get("test_plan"))
     assumptions = compact_items(value.get("assumptions"))
-    criteria = str(value.get("success_criteria") or value.get("criteria") or "").strip()
+    criteria = str(value.get("success_criteria") or "").strip()
     if not all((plan_id, title, objective, context, key_changes, test_plan, assumptions, criteria)):
         return None
     status = compact_text(value.get("status") or "proposed")
     if status not in PLAN_STATUSES:
         status = "proposed"
-    rubric_applies = bool(value.get("rubric_enabled", value.get("automatic_evaluation", False)))
+    rubric_applies = bool(value.get("rubric_enabled", False))
     created_at = str(value.get("created_at") or now_iso())
     return {
         "id": plan_id,

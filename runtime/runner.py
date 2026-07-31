@@ -399,7 +399,7 @@ async def run_turn(
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
     if include_rubric_state:
         payload["rubric"] = rubric
-    if planning_stage in PLANNING_STAGES | {"research", "finalize"}:
+    if planning_stage in PLANNING_STAGES:
         payload["planning_stage"] = planning_stage
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
@@ -543,13 +543,7 @@ async def run_turn(
                 return result
             payload = Command(
                 resume=finalization,
-                update={
-                    "planning_stage": (
-                        "finalize"
-                        if planning_stage == "research"
-                        else PLANNING_STAGE_GOAL_FINALIZE
-                    )
-                },
+                update={"planning_stage": PLANNING_STAGE_GOAL_FINALIZE},
             )
         elif goal_interrupt is not None:
             call_id = ensure_control_tool_call(

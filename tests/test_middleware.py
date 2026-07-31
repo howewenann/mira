@@ -97,16 +97,16 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(updated_tools[1], grep_tool)
         self.assertEqual(execute_tool["description"], "old execute")
 
-    def test_rubric_planning_research_stage_hides_present_plan(self) -> None:
+    def test_plan_research_stage_hides_present_plan(self) -> None:
         middleware = PlanningStageMiddleware()
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
                 {"name": "ask_user"},
-                {"name": "prepare_goal"},
+                {"name": "prepare_plan"},
                 {"name": "present_plan"},
             ],
-            state={"planning_stage": "research"},
+            state={"planning_stage": "plan_research"},
             tool_choice="previous",
         )
 
@@ -114,15 +114,15 @@ class MiddlewareTests(unittest.TestCase):
 
         self.assertEqual(
             [tool["name"] for tool in updated.tools],
-            ["read_file", "ask_user", "prepare_goal"],
+            ["read_file", "ask_user", "prepare_plan"],
         )
         self.assertIsNone(updated.tool_choice)
 
-    def test_rubric_planning_finalize_stage_forces_present_plan_only(self) -> None:
+    def test_plan_finalize_stage_forces_present_plan_only(self) -> None:
         middleware = PlanningStageMiddleware()
         request = FakeModelRequest(
-            [{"name": "read_file"}, {"name": "prepare_goal"}, {"name": "present_plan"}],
-            state={"planning_stage": "finalize"},
+            [{"name": "read_file"}, {"name": "prepare_plan"}, {"name": "present_plan"}],
+            state={"planning_stage": "plan_finalize"},
         )
 
         updated = middleware._stage_request(request)
@@ -130,10 +130,10 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual([tool["name"] for tool in updated.tools], ["present_plan"])
         self.assertEqual(updated.tool_choice, "required")
 
-    def test_rubric_planning_finalize_requires_registered_present_plan(self) -> None:
+    def test_plan_finalize_requires_registered_present_plan(self) -> None:
         request = FakeModelRequest(
-            [{"name": "prepare_goal"}],
-            state={"planning_stage": "finalize"},
+            [{"name": "prepare_plan"}],
+            state={"planning_stage": "plan_finalize"},
         )
 
         with self.assertRaisesRegex(RuntimeError, "requires present_plan"):

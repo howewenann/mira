@@ -181,13 +181,6 @@ class Renderer:
         plan = plan_request(interrupt)
         lines = [str(plan.get("title") or "Plan"), ""]
         for heading, key in (
-            ("Objective", "objective"),
-            ("Context and Constraints", "context_and_constraints"),
-        ):
-            value = str(plan.get(key) or "").strip()
-            if value:
-                lines.extend([heading, value, ""])
-        for heading, key in (
             ("Key Changes", "key_changes"),
             ("Test Plan", "test_plan"),
             ("Assumptions", "assumptions"),

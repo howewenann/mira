@@ -19,7 +19,7 @@ from textual.widgets import Button, Static
 from runtime.output_events import normalize_response_delta
 from runtime.rubric_events import rubric_result_text
 from session.context import normalize_events
-from session.goals import GOAL_STATUSES, migrate_active_goal
+from session.goals import GOAL_STATUSES
 from ui.names import generate_slug
 from ui.terminal_colors import RUBRIC_BODY_COLOR, RUBRIC_HEADER_COLOR
 from ui.splash import loading_splash_text, splash_text
@@ -213,10 +213,6 @@ class ChatLog(VerticalScroll):
                     status=str(retained_goal.get("status") or "proposed") if is_current else event_status,
                     created_at=created_at,
                 )
-            elif event_type == "proposal":
-                legacy = migrate_active_goal({**event["proposal"], "status": event.get("status")})
-                if legacy is not None:
-                    self.present_goal(legacy, active=False, status=str(event.get("status") or "resolved"), created_at=created_at)
             elif event_type == "rubric":
                 self.rubric_evaluation_finished(
                     event["evaluation"],
@@ -1430,9 +1426,7 @@ class PlanBubble(Vertical):
             for item in items:
                 text.append(f"- {item}\n")
             text.append("\n")
-        criteria = str(
-            self.plan.get("success_criteria") or self.plan.get("criteria") or ""
-        ).strip()
+        criteria = str(self.plan.get("success_criteria") or "").strip()
         if criteria:
             text.append("Success Criteria\n", style=f"bold {RUBRIC_HEADER_COLOR}")
             text.append(criteria, style=RUBRIC_BODY_COLOR)
@@ -1559,7 +1553,7 @@ class GoalBubble(Vertical):
         text.append("Objective\n", style=f"bold {RUBRIC_HEADER_COLOR}")
         text.append(str(self.value.get("objective") or ""))
         text.append("\n\nSuccess Criteria\n", style=f"bold {RUBRIC_HEADER_COLOR}")
-        text.append(str(self.value.get("success_criteria") or self.value.get("criteria") or ""), style=RUBRIC_BODY_COLOR)
+        text.append(str(self.value.get("success_criteria") or ""), style=RUBRIC_BODY_COLOR)
         text.append("\n\n")
         if self.value.get("rubric_enabled"):
             policy = f"Automatic evaluation enabled, up to {int(self.value.get('rubric_iterations') or 3)} iterations."

@@ -834,7 +834,7 @@ def write_was_blocked(result: TurnResult) -> bool:
     return any(marker in value.lower() for value in tool_results for marker in PLAN_BLOCKED_RESULT_MARKERS)
 
 
-def plan_request_text(text: str, *, rubric_research: bool = False) -> str:  # noqa: ARG001
+def plan_request_text(text: str) -> str:
     """Wrap user input in the planning-mode instruction template."""
     return PLAN_REQUEST_TEMPLATE.format(
         disabled_tools=plan_disabled_tools_text(),
@@ -845,7 +845,7 @@ def plan_request_text(text: str, *, rubric_research: bool = False) -> str:  # no
 
 def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:
     """Return a planning-mode request that keeps revision context explicit."""
-    return PLAN_REVISION_TEMPLATE.format(plan=plan_text(plan), feedback=feedback.strip())
+    return PLAN_REVISION_TEMPLATE.format(plan=plan_artifact_text(plan), feedback=feedback.strip())
 
 
 def goal_revision_text(value: dict[str, Any], feedback: str) -> str:
@@ -876,16 +876,6 @@ def action_request_text(
             goal=goal_artifact_text(retained_goal),
             text=text,
         )
-    legacy_plan = mode.get("approved_plan")
-    if isinstance(legacy_plan, dict):
-        mode["approved_plan"] = None
-        return (
-            "Previous planning context:\n"
-            f"{plan_text(legacy_plan)}\n\n"
-            "You are now in action mode. Do not assume planning-mode permission errors still apply.\n"
-            f"{APPROVED_PLAN_EXECUTION_INSTRUCTIONS}\n\n"
-            f"User request:\n{text}"
-        )
     return text
 
 
@@ -896,24 +886,6 @@ def explicit_goal_request_text(text: str) -> str:
         optional_research=OPTIONAL_RESEARCH_POLICY,
         text=text,
     )
-
-
-def plan_text(plan: dict[str, Any]) -> str:
-    """Return structured plan text for action-mode injection."""
-    if plan.get("success_criteria"):
-        return plan_artifact_text(plan)
-    lines = [f"Title: {plan.get('title') or 'Plan'}"]
-    for heading, key in (
-        ("Summary", "summary"),
-        ("Key Changes", "key_changes"),
-        ("Test Plan", "test_plan"),
-        ("Assumptions", "assumptions"),
-    ):
-        items = plan.get(key)
-        if isinstance(items, list) and items:
-            lines.extend(["", f"{heading}:"])
-            lines.extend(f"- {item}" for item in items)
-    return "\n".join(lines)
 
 
 def write_line(renderer: Any, text: str, *, kind: str = "system") -> None:

@@ -272,9 +272,7 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(run_turn.await_args.kwargs["include_rubric_state"])
         event_types = [event["type"] for event in session["events"]]
         self.assertEqual(event_types, ["user", "assistant", "info"])
-        self.assertNotIn("active_goal", session)
         self.assertNotIn("plan", event_types)
-        self.assertNotIn("proposal", event_types)
         self.assertEqual(
             outcome_renderer.messages,
             [("info", "Rubric outcome: satisfied.")],

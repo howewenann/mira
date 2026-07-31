@@ -327,6 +327,9 @@ null. Supported
 statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
 `completed`. Transcript Plan bubbles remain immutable history; resume context
 labels only the populated current artifact as authoritative.
+Session normalization accepts only the current `current_plan` schema and exact
+Plan events; retired Summary, `criteria`, `automatic_evaluation`, generic-stage,
+and pre-staging presentation shapes are discarded rather than adapted.
 
 The Plan bubble uses Plan colours for Plan content, rubric colours for Success
 Criteria, and muted text for automatic-evaluation policy and status. Its actions
@@ -389,9 +392,10 @@ The durable `GoalArtifact` stores id, title, objective, Success Criteria,
 status, snapshotted rubric policy and cap, latest overall rubric result,
 completion source, attempts, and timestamps. Its statuses are `proposed`,
 `active`, `paused`, `max_iterations_reached`, and `completed`. Dedicated `goal`
-events preserve exact artifacts. Legacy `active_goal` records migrate without
-their embedded Plan, and readable proposal events replay only as inactive Goal
-history.
+events preserve exact artifacts. Session normalization accepts only the current
+`current_goal` schema and dedicated Goal events; retired `active_goal`, proposal
+events, embedded Plans, and renamed Goal fields are discarded rather than
+migrated.
 
 `GoalBubble` shows Objective and Success Criteria with Implement, Revise, and
 Close actions. Implement starts or restarts one explicit Act attempt. Revise

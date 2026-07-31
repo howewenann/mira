@@ -65,7 +65,6 @@ class Request:
 class CurrentPlanTests(unittest.TestCase):
     def test_plan_prompt_is_conversational_general_purpose_and_rubric_independent(self) -> None:
         prompt = plan_system_prompt()
-        self.assertEqual(prompt, plan_system_prompt(rubric=True))
         for outcome in ("DISCUSSION", "NEEDS_DECISION", "PLAN_READY"):
             self.assertIn(outcome, prompt)
         self.assertIn("Imperative wording never authorizes execution", prompt)
@@ -159,7 +158,17 @@ class CurrentPlanTests(unittest.TestCase):
         self.assertNotIn("Stale", resume)
 
     def test_sessions_without_current_plan_normalize_safely(self) -> None:
-        normalized = normalize_session({"id": "legacy", "events": []})
+        normalized = normalize_session({"id": "empty", "events": []})
+        self.assertIsNone(normalized["current_plan"])
+
+    def test_old_plan_field_names_are_not_accepted(self) -> None:
+        value = artifact()
+        value["criteria"] = value.pop("success_criteria")
+        value.pop("rubric_enabled")
+        value["automatic_evaluation"] = True
+
+        normalized = normalize_session({"id": "old", "events": [], "current_plan": value})
+
         self.assertIsNone(normalized["current_plan"])
 
     def test_plan_command_suffix_is_a_normal_message_on_the_persistent_thread(self) -> None:

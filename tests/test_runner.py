@@ -674,7 +674,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         interrupt = {
             "type": "present_plan",
             "title": "Plan",
-            "summary": ["Do one thing."],
             "key_changes": ["Change code."],
             "test_plan": ["Run focused checks."],
             "assumptions": ["Execute is available."],
@@ -1037,12 +1036,12 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_turn_resumes_prepare_goal_control_interrupt(self) -> None:
         interrupt = {
             "type": "prepare_goal",
-            "research_summary": "Existing index is SQLite.",
+            "research_evidence": "Existing index is SQLite.",
         }
         call = {
             "name": "prepare_goal",
             "id": "call-prepare",
-            "args": {"research_summary": interrupt["research_summary"]},
+            "args": {"research_evidence": interrupt["research_evidence"]},
             "completed": False,
         }
         agent = FakeAgent(
@@ -1062,13 +1061,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "research first",
             renderer,
             "thread-1",
-            planning_stage="research",
+            planning_stage="goal_research",
         )
 
         self.assertIn(("prepare_goal", interrupt), renderer.events)
         self.assertEqual(len(agent.payloads), 2)
-        self.assertEqual(agent.payloads[0]["planning_stage"], "research")
-        self.assertEqual(agent.payloads[1].update, {"planning_stage": "finalize"})
+        self.assertEqual(agent.payloads[0]["planning_stage"], "goal_research")
+        self.assertEqual(agent.payloads[1].update, {"planning_stage": "goal_finalize"})
         self.assertEqual(
             [
                 event

@@ -17,7 +17,7 @@ from pydantic_core import SchemaSerializer, SchemaValidator
 
 from deepagents._messages_reducer import _messages_delta_reducer
 
-from session.checkpoint import make_checkpointer, message_snapshot_shape, sanitize_checkpoint_value
+from session.checkpoint import make_checkpointer, sanitize_checkpoint_value
 
 
 class Finding(BaseModel):
@@ -109,43 +109,6 @@ class CheckpointTests(unittest.TestCase):
             "ToolMessage",
             "HumanMessage",
         ])
-
-    def test_load_repairs_legacy_corrupted_message_snapshot(self) -> None:
-        raw_serde = JsonPlusSerializer()
-        mira_serde = make_checkpointer().serde
-        corrupted = {
-            "channel_values": {
-                "messages": [[
-                    HumanMessage(content="user"),
-                    AIMessage(content="assistant"),
-                    ToolMessage(content="tool", tool_call_id="call-1"),
-                ]],
-                "state": [[AIMessage(content="not a messages channel")]],
-            },
-        }
-
-        data = raw_serde.dumps_typed(corrupted)
-        value = mira_serde.loads_typed(data)
-
-        self.assertEqual([message.__class__.__name__ for message in value["channel_values"]["messages"]], [
-            "HumanMessage",
-            "AIMessage",
-            "ToolMessage",
-        ])
-        self.assertIsInstance(value["channel_values"]["state"][0], list)
-
-    def test_message_snapshot_shape_reports_nested_corruption(self) -> None:
-        shape = message_snapshot_shape(
-            [[HumanMessage(content="user"), AIMessage(content="assistant")]],
-            source="write",
-        )
-
-        self.assertEqual(shape["channel"], "messages")
-        self.assertEqual(shape["source"], "write")
-        self.assertEqual(shape["outer_len"], 1)
-        self.assertTrue(shape["nested"])
-        self.assertEqual(shape["inner_len"], 2)
-        self.assertEqual(shape["inner_item_types"], ["HumanMessage", "AIMessage"])
 
     def test_checkpointer_serializes_message_type_markers(self) -> None:
         serde = make_checkpointer().serde

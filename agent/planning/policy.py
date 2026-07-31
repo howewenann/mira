@@ -26,11 +26,6 @@ PLANNING_STAGES = {
     PLANNING_STAGE_GOAL_FINALIZE,
 }
 
-# Compatibility aliases for callers and persisted checkpoints from the previous
-# rubric-specific planning implementation.
-PLANNING_STAGE_RESEARCH = PLANNING_STAGE_PLAN_RESEARCH
-PLANNING_STAGE_FINALIZE = PLANNING_STAGE_PLAN_FINALIZE
-
 SHARED_QUESTION_POLICY = """Whenever you need to ask the user a question, use ask_user instead of asking
 the question in prose.
 
@@ -113,7 +108,7 @@ def plan_disabled_tools_text() -> str:
     return ", ".join(PLAN_DISABLED_TOOLS)
 
 
-def plan_system_prompt(*, rubric: bool = False) -> str:  # noqa: ARG001
+def plan_system_prompt() -> str:
     """Build the stable, rubric-independent Plan agent prompt."""
     return f"""You are MIRA in Plan mode (planning mode), a read-only general-purpose environment.
 

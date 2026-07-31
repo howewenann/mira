@@ -65,7 +65,7 @@ def prepare_goal_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]
     return {
         "objective": str(value.get("objective") or "").strip()[:limit],
         "context_and_constraints": str(value.get("context_and_constraints") or "").strip()[:limit],
-        "research_evidence": str(value.get("research_evidence") or value.get("research_summary") or "").strip()[:limit],
+        "research_evidence": str(value.get("research_evidence") or "").strip()[:limit],
     }
 
 
@@ -98,10 +98,6 @@ def normalize_plan(value: dict[str, Any]) -> dict[str, Any]:
     assumptions = compact_items(value.get("assumptions"), fallback="No additional assumptions.")
     return {
         "title": title,
-        "objective": str(value.get("objective") or "").strip(),
-        "context_and_constraints": str(value.get("context_and_constraints") or "").strip(),
-        # Kept only to normalize legacy transcript/checkpoint payloads.
-        "summary": compact_items(value.get("summary")),
         "key_changes": key_changes,
         "test_plan": test_plan,
         "assumptions": assumptions,

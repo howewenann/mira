@@ -82,10 +82,10 @@ class CurrentGoalTests(unittest.TestCase):
         self.assertEqual(record["current_plan"]["id"], "plan-1")
         self.assertEqual(record["events"][0]["status"], "superseded")
 
-    def test_legacy_active_goal_migrates_without_embedded_plan(self) -> None:
+    def test_active_goal_is_not_migrated(self) -> None:
         normalized = normalize_session(
             {
-                "id": "legacy",
+                "id": "old-session",
                 "events": [],
                 "active_goal": {
                     "proposal_id": "proposal-1",
@@ -98,19 +98,15 @@ class CurrentGoalTests(unittest.TestCase):
                 },
             }
         )
-        goal = normalized["current_goal"]
-        self.assertEqual(goal["title"], "Hidden legacy plan")
-        self.assertEqual(goal["status"], "completed")
-        self.assertEqual(goal["completion_source"], "rubric-verified")
-        self.assertTrue(goal["rubric_enabled"])
-        self.assertNotIn("plan", goal)
+        self.assertIsNone(normalized["current_goal"])
         self.assertNotIn("active_goal", normalized)
 
-    def test_legacy_cleared_goal_is_not_restored(self) -> None:
-        normalized = normalize_session(
-            {"id": "legacy", "events": [], "active_goal": {"id": "old", "objective": "Old", "criteria": "- Done", "status": "cleared"}}
-        )
-        self.assertIsNone(normalized["current_goal"])
+    def test_old_goal_field_names_are_not_accepted(self) -> None:
+        value = artifact()
+        value["criteria"] = value.pop("success_criteria")
+        value["status"] = "complete"
+
+        self.assertIsNone(normalize_session({"id": "old", "events": [], "current_goal": value})["current_goal"])
 
     def test_newer_artifact_wins_and_timestamp_ties_prefer_plan(self) -> None:
         goal = artifact()

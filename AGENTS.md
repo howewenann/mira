@@ -112,6 +112,9 @@
 - Keep exactly one current formal artifact: `current_plan` or `current_goal`,
   never both. Confirm replacement of incomplete formal work and do not replace
   it until the new artifact is successfully presented.
+- Persist only the current Plan and Goal schemas. Do not migrate retired
+  `active_goal`, proposal-event, generic stage, pre-staging payload, or
+  nested-message checkpoint shapes.
 - `goal_show` and `/goal-show` must reuse the exact Goal bubble renderer.
   Implement and `/goal-resume` execute the retained Goal only for that explicit
   attempt; Revise replaces it; Close only hides controls; `/goal-clear` removes it.

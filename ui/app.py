@@ -63,6 +63,7 @@ from session.plans import (
     current_plan,
     pause_current_plan,
     plan_artifact,
+    plan_artifact_text,
     replace_current_plan,
     start_plan_attempt,
 )
@@ -85,7 +86,6 @@ from ui.repl import (
     handle_command,
     initial_mode,
     plan_command_prompt,
-    plan_text,
     plan_revision_text,
     plan_thread_id,
     refresh_agent_specs,
@@ -1258,7 +1258,7 @@ class MiraApp(App[None]):
         if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
             revision_context = (
                 "\n\nThe revision must be a complete replacement.\n"
-                f"<previous_plan>\n{plan_text(revision['previous_plan'])}\n</previous_plan>\n"
+                f"<previous_plan>\n{plan_artifact_text(revision['previous_plan'])}\n</previous_plan>\n"
                 f"<user_feedback>\n{revision.get('feedback') or ''}\n</user_feedback>"
             )
         return (
@@ -1275,16 +1275,7 @@ class MiraApp(App[None]):
         payload = plan_request(interrupt)
         staging = self.mode.get("plan_staging")
         if not isinstance(staging, dict):
-            # Narrow compatibility for legacy checkpoints that were already
-            # paused at present_plan when this schema was introduced.
-            summary = payload.get("summary") or []
-            staging = {
-                "objective": payload.get("objective")
-                or (summary[0] if summary else "Complete the requested outcome."),
-                "context_and_constraints": payload.get("context_and_constraints")
-                or "No additional constraints.",
-                "success_criteria": "Complete the stated Objective and verification checks.",
-            }
+            raise RuntimeError("present_plan requires staged Plan context and Success Criteria")
         plan_id = self._next_plan_id()
         artifact = plan_artifact(
             plan_id=plan_id,

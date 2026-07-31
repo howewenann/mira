@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from session.dashboard import normalize_dashboard
-from session.goals import goal_artifact_text, migrate_active_goal, normalize_current_goal
+from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
 
 UNTITLED_SESSION = "Untitled session"
@@ -22,12 +22,9 @@ SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORE
 def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
     plan = normalize_current_plan(record.get("current_plan"))
     goal = normalize_current_goal(record.get("current_goal"))
-    if goal is None:
-        goal = migrate_active_goal(record.get("active_goal"))
     if plan is not None and goal is not None:
         plan_updated = _artifact_timestamp(record.get("current_plan"))
-        goal_source = record.get("current_goal") or record.get("active_goal")
-        goal_updated = _artifact_timestamp(goal_source)
+        goal_updated = _artifact_timestamp(record.get("current_goal"))
         if goal_updated and plan_updated and goal_updated > plan_updated:
             plan = None
         else:
@@ -71,12 +68,12 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
                 continue
             event["text"] = text
         elif event_type == "plan":
-            plan = item.get("plan")
-            if not isinstance(plan, dict):
+            plan = normalize_current_plan(item.get("plan"))
+            if plan is None:
                 continue
             event["plan"] = plan
-            status = compact_line(item.get("status") or "pending")
-            event["status"] = status or "pending"
+            status = compact_line(item.get("status") or "proposed")
+            event["status"] = status or "proposed"
         elif event_type == "goal":
             goal = normalize_current_goal(item.get("goal"))
             if goal is None:
@@ -84,13 +81,6 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["goal"] = goal
             status = compact_line(item.get("status") or "proposed")
             event["status"] = status or "proposed"
-        elif event_type == "proposal":
-            proposal = item.get("proposal")
-            if not isinstance(proposal, dict):
-                continue
-            event["proposal"] = proposal
-            status = compact_line(item.get("status") or "pending")
-            event["status"] = status or "pending"
         elif event_type == "rubric":
             evaluation = item.get("evaluation")
             if not isinstance(evaluation, dict):
@@ -198,47 +188,15 @@ def normalize_compactions(value: Any) -> list[dict[str, Any]]:
     return compactions
 
 
-def normalize_plans(value: Any) -> list[dict[str, Any]]:
-    """Return compact structured plan events for model resume context."""
-    plans = []
-    for item in normalize_events(value):
-        if item["type"] != "plan":
-            continue
-        plan = item.get("plan")
-        if not isinstance(plan, dict):
-            continue
-        plans.append(
-            {
-                "id": compact_line(plan.get("id") or f"plan-{item['id']}"),
-                "status": compact_line(item.get("status") or "pending"),
-                "title": compact_line(plan.get("title") or "Implementation Plan"),
-                "summary": compact_items(plan.get("summary")),
-                "key_changes": compact_items(plan.get("key_changes")),
-                "test_plan": compact_items(plan.get("test_plan")),
-                "assumptions": compact_items(plan.get("assumptions")),
-                "created_at": item["created_at"],
-            }
-        )
-    return plans
-
-
 def normalize_goals(value: Any) -> list[dict[str, Any]]:
-    """Return dedicated Goal events plus readable legacy proposal events."""
+    """Return exact dedicated Goal events."""
     goals = []
     for item in normalize_events(value):
-        if item["type"] == "goal":
-            goal = normalize_current_goal(item.get("goal"))
-            if goal is not None:
-                goals.append({**goal, "event_status": compact_line(item.get("status")), "created_at": item["created_at"]})
+        if item["type"] != "goal":
             continue
-        if item["type"] != "proposal":
-            continue
-        legacy = item.get("proposal")
-        if not isinstance(legacy, dict):
-            continue
-        migrated = migrate_active_goal({**legacy, "status": item.get("status")})
-        if migrated is not None:
-            goals.append({**migrated, "event_status": compact_line(item.get("status")), "created_at": item["created_at"]})
+        goal = normalize_current_goal(item.get("goal"))
+        if goal is not None:
+            goals.append({**goal, "event_status": compact_line(item.get("status")), "created_at": item["created_at"]})
     return goals
 
 
@@ -425,20 +383,6 @@ def compact_line(value: Any) -> str:
 def compact_text(value: Any) -> str:
     lines = [compact_line(line) for line in str(value or "").splitlines()]
     return "\n".join(line for line in lines if line)
-
-
-def compact_items(value: Any) -> list[str]:
-    """Return compact non-empty list items for stored structured fields."""
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list | tuple):
-        return []
-    items = []
-    for item in value:
-        text = compact_line(item)
-        if text:
-            items.append(text)
-    return items
 
 
 def now_iso() -> str:
