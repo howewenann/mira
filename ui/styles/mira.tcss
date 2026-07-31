@@ -425,32 +425,28 @@ Button.plan-action:focus {
     text-style: bold;
 }
 
-.message.proposal {
+.message.goal {
     height: auto;
+    border: solid #C58FD6;
+    color: #F1DCF5;
 }
 
-.message.proposal.goal,
 .message.rubric {
     border: solid #C58FD6;
     color: #F1DCF5;
 }
 
-.message.proposal.plan-review {
-    border: solid #A0B86B;
-    color: #EEF5D8;
-}
-
-.proposal-body {
+.goal-body {
     height: auto;
 }
 
-.proposal-actions {
+.goal-actions {
     height: 1;
     min-height: 1;
     margin-top: 1;
 }
 
-Button.proposal-action {
+Button.goal-action {
     min-width: 12;
     width: auto;
     height: 1;
@@ -460,7 +456,7 @@ Button.proposal-action {
     text-align: center;
 }
 
-Button.proposal-action:focus {
+Button.goal-action:focus {
     background: #C58FD6;
     color: #0c0f10;
     text-style: bold;

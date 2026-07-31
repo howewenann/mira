@@ -308,9 +308,9 @@ Formal construction is always criteria-first:
 
 ```text
 prepare_plan
-â†’ SuccessCriteriaService
-â†’ forced present_plan
-â†’ Plan bubble
+-> SuccessCriteriaService
+-> forced present_plan
+-> Plan bubble
 ```
 
 The staging middleware exposes `prepare_plan` during conversation and only
@@ -320,12 +320,13 @@ Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
 
-The session stores exactly one authoritative `current_plan`: its stable id,
-Plan fields, separate Success Criteria, status, rubric policy and cap, latest
-overall rubric result, completion source, attempts, and timestamps. Supported
+When a Plan is current, `current_plan` stores its stable id, Plan fields,
+separate Success Criteria, status, rubric policy and cap, latest overall rubric
+result, completion source, attempts, and timestamps while `current_goal` is
+null. Supported
 statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
 `completed`. Transcript Plan bubbles remain immutable history; resume context
-labels only `current_plan` as authoritative.
+labels only the populated current artifact as authoritative.
 
 The Plan bubble uses Plan colours for Plan content, rubric colours for Success
 Criteria, and muted text for automatic-evaluation policy and status. Its actions
@@ -360,75 +361,80 @@ MIRA constructs.
 **Update this when:** Plan tools, construction stages, `current_plan` schema,
 review actions, recall commands, or execution completion rules change.
 
-## Goal-Driven Rubric Grading
+## Durable Criteria-Only Goals
 
-**Decision:** Rubric grading is an opt-in workspace setting under
-`system.rubric`, disabled by default with a three-iteration cap. Valid caps are
-1 through 20. Only the action agent receives DeepAgents' `RubricMiddleware`,
-using the active model, no grader tools, and the configured cap. The planning
-agent and the criteria service never receive that middleware. Changing either
-rubric setting rebuilds both agents and resolves any pending rubric proposal as
-`settings changed` so its displayed cap cannot become stale.
+**Decision:** Plan and Goal are alternative forms of formal work. A Plan stores
+an Objective, prescribed approach, and Success Criteria. A Goal stores only an
+Objective and Success Criteria, leaving the approach to the Act agent. Sessions
+have explicit `current_plan` and `current_goal` fields and normalization enforces
+that at most one is populated.
 
-MIRA keeps three invocation states distinct. Planning and rubric-disabled
-action turns omit rubric state. Ordinary rubric-enabled action turns send
-`rubric=None` to clear any checkpointed criteria. An approved goal or plan
-sends its Markdown criteria. The middleware's injected revision messages stay
-inside DeepAgents state and are not projected as user-authored session events.
+`/goal <prompt>` uses a dedicated read-only planning thread without changing
+the current Plan/Act mode: optional investigation and `ask_user`, then
+`prepare_goal` -> `SuccessCriteriaService` -> forced `present_goal` ->
+`GoalBubble`.
 
-**Goal compatibility:** `/goal <prompt>` remains TUI-only and retains its
-existing proposal, review, and `active_goal` behavior. Its `prepare_goal` entry
-uses the shared `SuccessCriteriaService` compatibility alias. `/plan` never
-calls `prepare_goal` and never creates or activates a Goal. Separate Plan and
-Goal research/finalisation stages keep the user-facing concepts modular. Goal
-can later adopt a `Goal + SuccessCriteria` artifact without claiming that UX
-redesign here.
+Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `plan_show`,
+and `goal_show`. Finalization exposes only `present_goal` with required tool
+choice. The visible command objective remains authoritative; bounded evidence
+may clarify but not enlarge it. Staging is transient, so failed or cancelled
+generation leaves current formal work unchanged. Goal construction never calls
+`present_plan` and never produces a hidden implementation Plan.
 
-The Goal compatibility path retains its existing optional read-only research
-and forced finalisation behavior. `SuccessCriteriaService`
-treats the objective as authoritative and receives only the effective
-objective, optional research context, and—during revision—the previous
-criteria and feedback, never the previous plan.
+`SuccessCriteriaService` treats the objective as authoritative and receives
+only the effective objective, optional research context, and previous criteria
+plus feedback during revision, never a previous Plan.
 
-**Durable active goals:** Implementing either proposal origin stores the exact
-approved objective, criteria, and plan as the session's authoritative
-`active_goal`. Each action turn receives that context and rubric until grading
-returns `satisfied`, the user runs `/goal clear`, or another approved proposal
-supersedes it. `max_iterations_reached` leaves the goal active; supplying the
-same rubric on the next action turn uses RubricMiddleware's native fresh-run
-reset. Session resume reads only the explicit active-goal field and never
-infers one from recent proposal history. `/goal show` and `/goal clear` are
-model-free controls; historical proposal and rubric events remain replayable.
+The durable `GoalArtifact` stores id, title, objective, Success Criteria,
+status, snapshotted rubric policy and cap, latest overall rubric result,
+completion source, attempts, and timestamps. Its statuses are `proposed`,
+`active`, `paused`, `max_iterations_reached`, and `completed`. Dedicated `goal`
+events preserve exact artifacts. Legacy `active_goal` records migrate without
+their embedded Plan, and readable proposal events replay only as inactive Goal
+history.
 
-Criteria generation and artifact finalization can each involve a silent model call.
-The TUI reuses its transient animated waiting block with phase-specific labels
-for Definition-of-Done drafting/revision and plan drafting; these blocks are not
-persisted as transcript events.
+`GoalBubble` shows Objective and Success Criteria with Implement, Revise, and
+Close actions. Implement starts or restarts one explicit Act attempt. Revise
+uses the read-only Goal pipeline and `SuccessCriteriaService.revise()` to create
+a complete replacement. Close hides controls without changing `current_goal`.
+`/goal-show` and `goal_show` share the exact renderer, `/goal-resume` accepts
+incomplete states, and `/goal-clear` removes only the current Goal.
+
+MIRA replaces current formal work only after the new Plan or Goal is presented
+successfully. Completed work may be replaced automatically. Incomplete work
+requires structured confirmation; acceptance is transient and does not clear
+the old artifact early. Successful replacement marks the old transcript event
+`superseded`, clears the opposite current field, and stores the new artifact.
+
+Goal construction is identical with rubrics on or off. A non-rubric successful
+attempt completes as `agent-declared`. A rubric-enabled attempt passes exact
+Success Criteria to DeepAgents: `needs_revision` continues, `satisfied`
+completes as `rubric-verified`, and `max_iterations_reached` remains resumable.
+Runtime, grader, or cancellation failures pause the Goal.
 
 **Streaming and persistence:** One custom-event dispatcher independently
 routes QuickJS Eval subagent events and DeepAgents rubric start/end events.
 Rubric passes are displayed one-based and include pass counts, failed criteria,
-gaps, and terminal verdicts. For DeepAgents 0.6.12, MIRA reads completed
-checkpoint `_rubric_status` because the final streamed event can still say
+gaps, and terminal verdicts. MIRA reads completed checkpoint `_rubric_status`
+because the final streamed event can still say
 `needs_revision` when the cap was reached; newer terminal statuses are accepted
 directly. Starts are transient. Completed evaluations are durable rubric
 events, never tools. TUI results update in place, while one-shot and trace
 surfaces emit concise blocks. Rubric colors are centralized as `#C58FD6` for
 headers/borders and `#F1DCF5` for body text and are isolated to rubric UI.
 
-**Why:** Users can agree on observable completion conditions before work while
-DeepAgents continues to own iterative grading and revision. Separating the
-objective, decisions, criteria, and plan avoids flattening recoverable state or
-making the planning agent grade its own output. Opt-in construction preserves
-the existing workflow when disabled.
+**Why:** Outcome-focused work should not force users to approve an approach.
+Keeping Goals criteria-only makes execution flexible while retaining the same
+durability, review, recall, replacement, and evaluation guarantees as Plans.
 
-**Where to check:** `agent/planning/criteria.py`, `agent/planning/proposals.py`,
-`agent/factory.py`, `agent/middleware.py`, `agent/default_resources/tools/prepare_goal.py`, `runtime/rubric_events.py`,
-`runtime/runner.py`, `session/context.py`, `session/recorder.py`, `ui/app.py`,
-`ui/repl.py`, and `ui/widgets/chat_log.py`.
+**Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
+`agent/middleware.py`, `agent/default_resources/tools/prepare_goal.py`,
+`agent/default_resources/tools/present_goal.py`, `runtime/runner.py`,
+`session/goals.py`, `session/context.py`, `ui/app.py`, `ui/repl.py`, and
+`ui/widgets/chat_log.py`.
 
-**Update this when:** Rubric ownership, criteria prompts, proposal persistence,
-terminal-status handling, or the goal/plan review lifecycle changes.
+**Update this when:** Goal construction, persistence, replacement, review,
+recall, migration, or execution completion rules change.
 
 ## Textual TUI And One-Shot Output
 
@@ -438,16 +444,16 @@ text through `--prompt/-p` or any readable, non-empty UTF-8 text file through
 `--file/-f`. Optional invocation-only rubric text comes from `--rubric` or
 `--rubric-file`; it enables the existing rubric middleware in memory for that
 one-shot run, uses the saved iteration cap, and does not persist a settings
-change or proposal state.
+change or formal-artifact state.
 
 **Why:** The TUI can preserve chat order, tool calls, tool results, subagent
 progress, settings, and session history in one place. The one-shot renderer
 stays simpler for scripts and quick prompts.
 
 All tools share one underlying lifecycle for call identity, visible start,
-completion or error, persistence, and replay. This includes the v1.9 control
-tools `ask_user`, `prepare_goal`, `prepare_plan`, `present_plan`, and
-`plan_show`: their dedicated question, criteria, and Plan surfaces remain, but
+completion or error, persistence, and replay. This includes the control
+tools `ask_user`, `prepare_goal`, `prepare_plan`, `present_goal`, `present_plan`,
+`goal_show`, and `plan_show`: their dedicated surfaces remain, but
 no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
@@ -496,7 +502,7 @@ inspection is split across `/runtime`, `/tools`, `/memories`, `/skills`, and
 or making a model/network request. `/help` keeps every command in one table but
 groups related commands under visually distinct soft-blue section headers.
 `/session` stays separate because it
-summarizes durable conversation state, including active goals and plans.
+summarizes durable conversation state, including the current Goal or Plan.
 `/new-chat` and the sidebar
 `+ New` action create and switch to a fresh saved session without deleting the
 current session. `/compact` is also TUI-only because it needs the active agent,

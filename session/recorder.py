@@ -10,6 +10,7 @@ from typing import Any
 from agent.context_overflow import pop_context_overflow_notice
 from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
+from session.goals import current_goal, goal_artifact_text
 from session.plans import current_plan, plan_artifact_text
 
 COMPACTION_POLL_SECONDS = 10.0
@@ -434,6 +435,13 @@ class RecordingRenderer:
 
         value = current_plan(self.recorder.record)
         if value is None:
+            if current_goal(self.recorder.record) is not None:
+                message = (
+                    "There is no current Plan. The current formal work is a Goal.\n"
+                    "Use /goal-show to display it."
+                )
+                self.system_message(message, kind="info")
+                return message
             self.system_message("no current Plan", kind="muted")
             return "No current Plan."
 
@@ -446,6 +454,37 @@ class RecordingRenderer:
                 kind="info",
             )
         return "Current Plan rendered."
+
+    async def show_goal(self, interrupt: Any = None) -> str:
+        """Render current_goal through the active UI, with a terminal fallback."""
+        callback = getattr(self.renderer, "show_goal", None)
+        if callable(callback):
+            outcome = callback(interrupt)
+            if hasattr(outcome, "__await__"):
+                outcome = await outcome
+            return str(outcome or "Current Goal rendered.")
+
+        value = current_goal(self.recorder.record)
+        if value is None:
+            if current_plan(self.recorder.record) is not None:
+                message = (
+                    "There is no current Goal. The current formal work is a Plan.\n"
+                    "Use /plan-show to display it."
+                )
+                self.system_message(message, kind="info")
+                return message
+            self.system_message("no current Goal", kind="muted")
+            return "No current Goal."
+
+        fallback = getattr(self.renderer, "render_current_goal", None)
+        if callable(fallback):
+            fallback(value)
+        else:
+            self.system_message(
+                f"{goal_artifact_text(value)}\n\nStatus: {value['status']}",
+                kind="info",
+            )
+        return "Current Goal rendered."
 
     def reasoning_delta(self, delta: str) -> None:
         event = self.recorder.reasoning_delta(delta)
@@ -775,13 +814,13 @@ def update_plan_event_status(record: dict[str, Any], plan_id: str, status: str) 
             event["status"] = status
 
 
-def update_proposal_event_status(record: dict[str, Any], proposal_id: str, status: str) -> None:
-    """Update the persisted status for an explicit goal proposal."""
+def update_goal_event_status(record: dict[str, Any], goal_id: str, status: str) -> None:
+    """Update the persisted status for a visible Goal event."""
     for event in record.get("events", []):
-        if not isinstance(event, dict) or event.get("type") != "proposal":
+        if not isinstance(event, dict) or event.get("type") != "goal":
             continue
-        value = event.get("proposal")
-        if isinstance(value, dict) and str(value.get("id") or "") == proposal_id:
+        goal = event.get("goal")
+        if isinstance(goal, dict) and str(goal.get("id") or "") == goal_id:
             event["status"] = status
             return
 

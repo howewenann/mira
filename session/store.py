@@ -69,8 +69,8 @@ class SessionStore:
             "updated_at": now,
             "turns": 0,
             "dashboard": normalize_dashboard(None),
-            "active_goal": None,
             "current_plan": None,
+            "current_goal": None,
             "events": [],
         }
 

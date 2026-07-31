@@ -139,6 +139,31 @@ class MiddlewareTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires present_plan"):
             PlanningStageMiddleware()._stage_request(request)
 
+    def test_goal_finalize_stage_forces_present_goal_only(self) -> None:
+        middleware = PlanningStageMiddleware()
+        request = FakeModelRequest(
+            [
+                {"name": "read_file"},
+                {"name": "present_goal"},
+                {"name": "present_plan"},
+            ],
+            state={"planning_stage": "goal_finalize"},
+        )
+
+        updated = middleware._stage_request(request)
+
+        self.assertEqual([tool["name"] for tool in updated.tools], ["present_goal"])
+        self.assertEqual(updated.tool_choice, "required")
+
+    def test_goal_finalize_requires_registered_present_goal(self) -> None:
+        request = FakeModelRequest(
+            [{"name": "present_plan"}],
+            state={"planning_stage": "goal_finalize"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires present_goal"):
+            PlanningStageMiddleware()._stage_request(request)
+
     def test_model_response_normalizer_adds_missing_anyllm_provider(self) -> None:
         """ChatAnyLLM messages should gain the provider identity DeepAgents expects."""
         message = AIMessage(

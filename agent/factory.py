@@ -15,6 +15,7 @@ from agent.planning.policy import (
     PLAN_DISABLED_TOOLS,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
+    PRESENT_GOAL_TOOL,
     PRESENT_PLAN_TOOL,
     SHARED_QUESTION_POLICY,
     plan_system_prompt,
@@ -36,7 +37,7 @@ from config.settings import (
 )
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
-ACTION_EXCLUDED_TOOLS = (PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL)
+ACTION_EXCLUDED_TOOLS = (PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL)
 PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
 _REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
@@ -84,7 +85,6 @@ def build_plan_agent(
     metadata: ModelMetadata | None = None,
 ) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
-    goal_enabled = rubric_enabled(config)
     agent = _build_agent(
         config=config,
         workspace=workspace,
@@ -96,7 +96,7 @@ def build_plan_agent(
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
         extra_middleware=[PlanningStageMiddleware()],
-        omitted_tools=() if goal_enabled else (PREPARE_GOAL_TOOL,),
+        omitted_tools=(),
     )
     return agent
 

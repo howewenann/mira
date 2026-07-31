@@ -19,6 +19,7 @@ from textual.widgets import Button, Static
 from runtime.output_events import normalize_response_delta
 from runtime.rubric_events import rubric_result_text
 from session.context import normalize_events
+from session.goals import GOAL_STATUSES, migrate_active_goal
 from ui.names import generate_slug
 from ui.terminal_colors import RUBRIC_BODY_COLOR, RUBRIC_HEADER_COLOR
 from ui.splash import loading_splash_text, splash_text
@@ -55,7 +56,7 @@ class ChatLog(VerticalScroll):
         self._compaction_spinner_index = 0
         self._compaction_running = False
         self._plan_widgets: dict[str, PlanBubble] = {}
-        self._proposal_widgets: dict[str, ProposalBubble] = {}
+        self._goal_widgets: dict[str, GoalBubble] = {}
         self._rubric_widgets: dict[tuple[str, int], Static] = {}
         self._rubric_evaluations: dict[tuple[str, int], dict[str, Any]] = {}
         self._fallback_suffixes = count(1)
@@ -124,9 +125,9 @@ class ChatLog(VerticalScroll):
         """Replay persisted visible session events."""
         self.finish_main()
         retained = session.get("current_plan")
-        retained_id = (
-            str(retained.get("id") or "") if isinstance(retained, dict) else ""
-        )
+        retained_id = str(retained.get("id") or "") if isinstance(retained, dict) else ""
+        retained_goal = session.get("current_goal")
+        retained_goal_id = str(retained_goal.get("id") or "") if isinstance(retained_goal, dict) else ""
         for event in normalize_events(session.get("events")):
             event_type = event["type"]
             created_at = str(event.get("created_at") or "")
@@ -198,13 +199,24 @@ class ChatLog(VerticalScroll):
                     ),
                     created_at=created_at,
                 )
-            elif event_type == "proposal":
-                self.present_proposal(
-                    event["proposal"],
-                    active=False,
-                    status=str(event.get("status") or "resolved"),
+            elif event_type == "goal":
+                event_goal = event["goal"]
+                goal_id = str(event_goal.get("id") or "")
+                is_current = bool(retained_goal_id and goal_id == retained_goal_id)
+                event_status = str(event.get("status") or "resolved")
+                is_actionable = is_current and event_status not in {
+                    "cleared", "closed", "revision requested", "superseded"
+                }
+                self.present_goal(
+                    retained_goal if is_current else event_goal,
+                    active=is_actionable,
+                    status=str(retained_goal.get("status") or "proposed") if is_current else event_status,
                     created_at=created_at,
                 )
+            elif event_type == "proposal":
+                legacy = migrate_active_goal({**event["proposal"], "status": event.get("status")})
+                if legacy is not None:
+                    self.present_goal(legacy, active=False, status=str(event.get("status") or "resolved"), created_at=created_at)
             elif event_type == "rubric":
                 self.rubric_evaluation_finished(
                     event["evaluation"],
@@ -686,7 +698,7 @@ class ChatLog(VerticalScroll):
             bubble.resolve(status)
             self._scroll_to_end()
 
-    def present_proposal(
+    def present_goal(
         self,
         value: dict[str, Any],
         *,
@@ -694,20 +706,20 @@ class ChatLog(VerticalScroll):
         status: str = "pending",
         created_at: str = "",
     ) -> None:
-        """Append an explicit goal or rubric-enabled plan proposal."""
+        """Append a dedicated Goal bubble."""
         self.finish_main()
-        proposal_id = str(value.get("id") or "")
-        bubble = ProposalBubble(value, active=active, status=status)
+        goal_id = str(value.get("id") or "")
+        bubble = GoalBubble(value, active=active, status=status)
         if timestamp := timestamp_text(created_at):
             bubble.border_subtitle = escape(timestamp)
         self.mount(bubble)
-        if proposal_id:
-            self._proposal_widgets[proposal_id] = bubble
+        if goal_id:
+            self._goal_widgets[goal_id] = bubble
         self._scroll_to_end()
 
-    def resolve_proposal(self, proposal_id: str, status: str) -> None:
-        """Mark an existing goal proposal as resolved."""
-        bubble = self._proposal_widgets.get(proposal_id)
+    def resolve_goal(self, goal_id: str, status: str) -> None:
+        """Mark an existing Goal bubble as resolved."""
+        bubble = self._goal_widgets.get(goal_id)
         if bubble is not None:
             bubble.resolve(status)
             self._scroll_to_end()
@@ -796,7 +808,7 @@ class ChatLog(VerticalScroll):
         self._compaction_spinner_index = 0
         self._compaction_running = False
         self._plan_widgets = {}
-        self._proposal_widgets = {}
+        self._goal_widgets = {}
         self._rubric_widgets = {}
         self._rubric_evaluations = {}
         self._tool_blocks = {}
@@ -1448,13 +1460,13 @@ class PlanBubble(Vertical):
         return text
 
 
-class ProposalActionButton(Button):
-    """Compact proposal control with the same review shortcuts as plans."""
+class GoalActionButton(Button):
+    """Compact Goal control with the same review shortcuts as plans."""
 
-    SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "d": "discard"}
+    SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "c": "close"}
 
     def on_key(self, event: Key) -> None:
-        bubble = self._proposal_bubble()
+        bubble = self._goal_bubble()
         if event.key in {"left", "right"} and bubble is not None:
             event.stop()
             bubble.focus_action_offset(self, -1 if event.key == "left" else 1)
@@ -1467,55 +1479,54 @@ class ProposalActionButton(Button):
         if action is None or bubble is None:
             return
         event.stop()
-        bubble.query_one(f"#proposal-{action}-{bubble.proposal_id}", Button).press()
+        bubble.query_one(f"#goal-{action}-{bubble.goal_id}", Button).press()
 
-    def _proposal_bubble(self) -> ProposalBubble | None:
+    def _goal_bubble(self) -> GoalBubble | None:
         bubble: Any = self.parent
-        while bubble is not None and not isinstance(bubble, ProposalBubble):
+        while bubble is not None and not isinstance(bubble, GoalBubble):
             bubble = bubble.parent
         return bubble
 
 
-class ProposalBubble(Vertical):
-    """Goal or rubric-enabled plan with separately rendered criteria."""
+class GoalBubble(Vertical):
+    """Criteria-only Goal with lifecycle status and review actions."""
 
-    def __init__(self, value: dict[str, Any], *, active: bool, status: str = "pending") -> None:
-        complete = isinstance(value.get("plan"), dict)
-        kind = "plan-review" if complete else "goal"
-        super().__init__(classes=f"message proposal {kind}")
-        self.value = value
+    def __init__(self, value: dict[str, Any], *, active: bool, status: str = "proposed") -> None:
+        super().__init__(classes="message goal")
+        self.value = dict(value)
         self.status = status
+        if status in GOAL_STATUSES:
+            self.value["status"] = status
         self.active = active
-        self._last_action_id = f"proposal-implement-{self.proposal_id}"
-        title = "plan + goal" if complete else "legacy goal"
-        self.border_title = title if status == "pending" else f"{title} - {status}"
+        self._last_action_id = f"goal-implement-{self.goal_id}"
+        self.border_title = "goal" if status == "proposed" else f"goal - {status}"
 
     @property
-    def proposal_id(self) -> str:
-        return str(self.value.get("id") or "proposal")
+    def goal_id(self) -> str:
+        return str(self.value.get("id") or "goal")
 
     def compose(self) -> Any:
-        yield Static(self._render_proposal(), classes="proposal-body")
+        yield Static(self._render_goal(), classes="goal-body")
         if self.active:
-            with Horizontal(classes="proposal-actions"):
+            with Horizontal(classes="goal-actions"):
                 for action, label in (
-                    ("implement", "Implement (i)"),
-                    ("revise", "Revise (r)"),
-                    ("discard", "Discard (d)"),
+                    ("implement", "Implement"),
+                    ("revise", "Revise"),
+                    ("close", "Close"),
                 ):
-                    yield ProposalActionButton(
+                    yield GoalActionButton(
                         label,
-                        id=f"proposal-{action}-{self.proposal_id}",
-                        classes="proposal-action",
+                        id=f"goal-{action}-{self.goal_id}",
+                        classes="goal-action",
                         compact=True,
                     )
 
     def on_mount(self) -> None:
         if self.active:
-            self.call_after_refresh(self.query_one(f"#proposal-implement-{self.proposal_id}", Button).focus)
+            self.call_after_refresh(self.query_one(f"#goal-implement-{self.goal_id}", Button).focus)
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
-        if isinstance(event.widget, ProposalActionButton) and event.widget.id:
+        if isinstance(event.widget, GoalActionButton) and event.widget.id:
             self._last_action_id = event.widget.id
 
     def on_click(self, event: Click) -> None:
@@ -1525,52 +1536,39 @@ class ProposalBubble(Vertical):
         self.query_one(f"#{self._last_action_id}", Button).focus()
 
     def focus_action_offset(self, focused: Button, offset: int) -> None:
-        buttons = list(self.query(ProposalActionButton))
+        buttons = list(self.query(GoalActionButton))
         if buttons and focused in buttons:
             buttons[(buttons.index(focused) + offset) % len(buttons)].focus()
 
     def resolve(self, status: str) -> None:
         self.status = status
+        if status in GOAL_STATUSES:
+            self.value["status"] = status
         self.active = False
-        base = "plan + goal" if isinstance(self.value.get("plan"), dict) else "legacy goal"
-        self.border_title = f"{base} - {status}"
+        self.border_title = f"goal - {status}"
         for button in self.query(Button):
             button.disabled = True
             button.display = False
-        self.query_one(".proposal-body", Static).update(self._render_proposal())
+        self.query_one(".goal-body", Static).update(self._render_goal())
 
-    def _render_proposal(self) -> Text:
+    def _render_goal(self) -> Text:
         text = Text()
-        plan = self.value.get("plan")
-        if isinstance(plan, dict):
-            text.append("PLAN\n", style="bold cyan")
-            text.append(str(plan.get("title") or "Implementation Plan"), style="bold")
-            text.append("\n\n")
-            for heading, key in (
-                ("Summary", "summary"),
-                ("Key Changes", "key_changes"),
-                ("Test Plan", "test_plan"),
-                ("Assumptions", "assumptions"),
-            ):
-                items = plan.get(key)
-                if not isinstance(items, list) or not items:
-                    continue
-                text.append(f"{heading}\n", style="bold cyan")
-                for item in items:
-                    text.append(f"- {item}\n")
-                text.append("\n")
-        else:
-            text.append("Original objective\n", style=f"bold {RUBRIC_HEADER_COLOR}")
-            text.append(str(self.value.get("original_objective") or ""), style=RUBRIC_BODY_COLOR)
-            text.append("\n\n")
-
-        text.append("GOAL / DEFINITION OF DONE\n", style=f"bold {RUBRIC_HEADER_COLOR}")
-        text.append(str(self.value.get("criteria") or ""), style=RUBRIC_BODY_COLOR)
+        text.append("GOAL\n", style=f"bold {RUBRIC_HEADER_COLOR}")
+        text.append(str(self.value.get("title") or "Goal"), style="bold")
         text.append("\n\n")
-        text.append(
-            f"Rubric iterations: {int(self.value.get('rubric_iterations') or 3)}",
-            style=f"bold {RUBRIC_HEADER_COLOR}",
-        )
-        if self.status != "pending":
-            text.append(f"\n\nStatus: {self.status}", style="bold yellow")
+        text.append("Objective\n", style=f"bold {RUBRIC_HEADER_COLOR}")
+        text.append(str(self.value.get("objective") or ""))
+        text.append("\n\nSuccess Criteria\n", style=f"bold {RUBRIC_HEADER_COLOR}")
+        text.append(str(self.value.get("success_criteria") or self.value.get("criteria") or ""), style=RUBRIC_BODY_COLOR)
+        text.append("\n\n")
+        if self.value.get("rubric_enabled"):
+            policy = f"Automatic evaluation enabled, up to {int(self.value.get('rubric_iterations') or 3)} iterations."
+        else:
+            policy = "Automatic evaluation disabled; completion is agent-declared."
+        details = [policy, f"Status: {self.value.get('status') or self.status or 'proposed'}"]
+        if self.value.get("last_rubric_status"):
+            details.append(f"Last result: {str(self.value['last_rubric_status']).replace('_', ' ')}")
+        if self.value.get("completion_source"):
+            details.append(f"Completion: {self.value['completion_source']}")
+        text.append(" · ".join(details), style="dim #9AA0A6")
         return text

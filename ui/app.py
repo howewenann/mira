@@ -22,15 +22,15 @@ from textual.widgets import Button, ListView, Static
 
 from agent.compaction import compact_after_turn
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
-from agent.planning.criteria import GoalCriteriaService, SuccessCriteriaService
+from agent.planning.criteria import SuccessCriteriaService
 from agent.planning.policy import (
+    GOAL_FINALIZATION_POLICY,
     PLAN_FINALIZATION_POLICY,
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
 )
-from agent.planning.proposals import effective_objective, proposal, proposal_title
 from agent.resources.tool_failures import ToolFailureFingerprint, tool_failure_fingerprint
 from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
 from config.settings import (
@@ -44,10 +44,19 @@ from config.settings import (
 )
 from runtime.diagnostics import get_diagnostics_logger
 from runtime.error_report import clear_error_reports, write_error_report
+from runtime.runner import FORMAL_CONSTRUCTION_CANCELLED
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event, sync_deepagents_compaction
-from session.goals import activate_goal, clear_active_goal, current_active_goal
+from session.goals import (
+    RESUMABLE_GOAL_STATUSES,
+    clear_current_goal,
+    current_goal,
+    goal_artifact,
+    pause_current_goal,
+    replace_current_goal,
+    start_goal_attempt,
+)
 from session.plans import (
     RESUMABLE_PLAN_STATUSES,
     clear_current_plan,
@@ -57,7 +66,7 @@ from session.plans import (
     replace_current_plan,
     start_plan_attempt,
 )
-from session.recorder import update_plan_event_status, update_proposal_event_status
+from session.recorder import update_goal_event_status, update_plan_event_status
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -67,9 +76,10 @@ from ui.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    goal_title_request,
     plan_request,
     prepare_plan_request,
-    research_summary_request,
+    prepare_goal_request,
 )
 from ui.repl import (
     handle_command,
@@ -79,7 +89,7 @@ from ui.repl import (
     plan_revision_text,
     plan_thread_id,
     refresh_agent_specs,
-    rubric_plan_revision_text,
+    goal_revision_text,
     run_user_turn,
 )
 from ui.runtime_snapshot import runtime_report
@@ -402,20 +412,22 @@ class MiraApp(App[None]):
             # Plan-mode message. Quoting inside the suffix is preserved.
             text = plan_prompt
 
+        if text == "/goal-show":
+            await self.show_goal()
+            self.action_focus_prompt()
+            return
+
+        if text == "/goal-clear":
+            self.clear_goal()
+            self.action_focus_prompt()
+            return
+
+        if text == "/goal-resume":
+            await self.resume_goal()
+            return
+
         if text == "/goal" or text.startswith("/goal "):
             objective = text.removeprefix("/goal").strip()
-            if objective == "show":
-                self._show_active_goal()
-                self.action_focus_prompt()
-                return
-            if objective == "clear":
-                self._clear_active_goal()
-                self.action_focus_prompt()
-                return
-            if not rubric_enabled((self.config or {}).get("settings")):
-                self.system_message("enable Rubric Middleware in /settings to use /goal", kind="info")
-                self.action_focus_prompt()
-                return
             if not objective:
                 self.system_message("usage: /goal <prompt>", kind="muted")
                 self.action_focus_prompt()
@@ -474,10 +486,15 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_active_goal_status()
+            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
+            if self.mode.get("executing_goal"):
+                pause_current_goal(self.session)
+                self.mode["current_goal"] = current_goal(self.session)
+                self.store.save(self.session)
+                self.mode["executing_goal"] = False
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -491,6 +508,11 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
             raise
         except ContextOverflowError as exc:
+            if self.mode.get("executing_goal"):
+                pause_current_goal(self.session)
+                self.mode["current_goal"] = current_goal(self.session)
+                self.store.save(self.session)
+                self.mode["executing_goal"] = False
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -504,6 +526,11 @@ class MiraApp(App[None]):
                 self.system_message(pop_context_overflow_notice(exc), kind="info")
             self._set_status(state="ready")
         except Exception as exc:
+            if self.mode.get("executing_goal"):
+                pause_current_goal(self.session)
+                self.mode["current_goal"] = current_goal(self.session)
+                self.store.save(self.session)
+                self.mode["executing_goal"] = False
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -517,7 +544,8 @@ class MiraApp(App[None]):
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.mode["proposal_run"] = None
+            self.mode["goal_staging"] = None
+            self.mode["goal_revision"] = None
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
@@ -582,16 +610,17 @@ class MiraApp(App[None]):
                 )
                 return
 
-    @on(Button.Pressed, ".proposal-action")
-    def press_proposal_action(self, event: Button.Pressed) -> None:
-        """Handle goal or rubric-enabled plan review actions."""
+    @on(Button.Pressed, ".goal-action")
+    def press_goal_action(self, event: Button.Pressed) -> None:
+        """Handle Goal review actions."""
+        event.stop()
         button_id = event.button.id or ""
-        for action in ("implement", "revise", "discard"):
-            prefix = f"proposal-{action}-"
+        for action in ("implement", "revise", "close"):
+            prefix = f"goal-{action}-"
             if button_id.startswith(prefix):
                 self.run_worker(
-                    self._handle_proposal_action(action, button_id[len(prefix):]),
-                    name=f"proposal-{action}",
+                    self._handle_goal_action(action, button_id[len(prefix):]),
+                    name=f"goal-{action}",
                     exclusive=False,
                 )
                 return
@@ -706,7 +735,6 @@ class MiraApp(App[None]):
                 self.system_message(f"kept plan \"{plan_title(plan)}\" active", kind="muted")
                 self.action_focus_prompt()
                 return
-            self.query_one(ChatLog).resolve_plan(plan_id, "revision requested")
             self.mode["planning"] = True
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.mode["plan_thread_id"] = plan_thread_id(self.session)
@@ -745,18 +773,22 @@ class MiraApp(App[None]):
             )
 
     async def _run_goal_command(self, objective: str) -> None:
-        """Run one explicit goal request through the read-only proposal agent."""
+        """Run one explicit Goal request through the read-only Goal agent."""
         try:
+            if not await self._confirm_formal_replacement("Goal"):
+                self.system_message("kept the current formal work", kind="muted")
+                return
             await self._refresh_model_metadata()
             self.mode["plan_runs"] = self.mode.get("plan_runs", 0) + 1
-            self.mode["proposal_run"] = {
-                "origin": "goal_command",
-                "original_objective": objective,
-                "resolved_decisions": [],
-                "criteria": "",
+            self.mode["goal_staging"] = {
+                "authoritative_objective": objective,
+                "objective": objective,
+                "context_and_constraints": "",
+                "research_evidence": "",
+                "success_criteria": "",
                 "stage": PLANNING_STAGE_GOAL_RESEARCH,
                 "thread_id": plan_thread_id(self.session, self.mode["plan_runs"]),
-                "explicit": True,
+                "replacement_confirmed": True,
             }
             await run_user_turn(
                 agent=self.agent,
@@ -772,18 +804,19 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_active_goal_status()
+            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
-            self.system_message("goal generation cancelled", kind="warning")
+            self.system_message("Goal generation cancelled", kind="warning")
             raise
         except Exception as exc:
             error_path = self._write_error_report(exc, source="tui.goal")
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.mode["proposal_run"] = None
+            self.mode["goal_staging"] = None
+            self.mode["goal_revision"] = None
             self.waiting_finished()
             self._waiting_label = "working..."
             self.turn_worker = None
@@ -792,64 +825,66 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
-    async def _handle_proposal_action(self, action: str, proposal_id: str) -> None:
-        """Resolve an active goal or rubric-enabled plan proposal."""
-        value = self.mode.get("current_proposal")
-        if not isinstance(value, dict) or str(value.get("id") or "") != proposal_id:
-            self.system_message("that proposal is no longer active", kind="warning")
+    async def _handle_goal_action(self, action: str, goal_id: str) -> None:
+        """Resolve an action from the current Goal bubble."""
+        value = current_goal(self.session)
+        if value is None or str(value.get("id") or "") != goal_id:
+            self.system_message("that Goal is no longer current", kind="warning")
             return
         if self.busy:
-            self.system_message("finish the current turn before resolving the proposal", kind="warning")
+            self.system_message("finish the current turn before resolving the Goal", kind="warning")
             return
 
-        if action == "discard":
-            self._resolve_current_proposal("discarded")
-            self.mode["planning"] = value.get("origin") == "plan_mode"
-            self.mode["planning_stage"] = (
-                PLANNING_STAGE_PLAN_RESEARCH
-                if self.mode["planning"]
-                else PLANNING_STAGE_GOAL_RESEARCH
-            )
-            self.system_message(f'discarded proposal "{proposal_title(value)}"', kind="muted")
+        if action == "close":
+            self.query_one(ChatLog).resolve_goal(goal_id, "closed")
+            update_goal_event_status(self.session, goal_id, "closed")
+            self.store.save(self.session)
+            self.system_message(f'closed Goal "{goal_title(value)}"', kind="muted")
             self.action_focus_prompt()
             return
 
         if action == "revise":
-            feedback = await self._prompt_text("Revise Proposal", "What should MIRA change about this proposal?")
+            feedback = await self._prompt_text("Revise Goal", "What should MIRA change about this Goal?")
             feedback = (feedback or "").strip()
             if not feedback:
-                self.system_message(f'kept proposal "{proposal_title(value)}" active', kind="muted")
+                self.system_message(f'kept Goal "{goal_title(value)}"', kind="muted")
                 self.action_focus_prompt()
                 return
-            self._resolve_current_proposal("revision requested")
             self.busy = True
             self._main_stream_active = False
             self._set_status(state="running")
             self.query_one(PromptBox).disabled = True
             self.turn_worker = self.run_worker(
-                self._run_proposal_revision(value, feedback),
-                name="proposal-revision",
+                self._run_goal_revision(value, feedback),
+                name="goal-revision",
                 exclusive=True,
             )
             return
 
         if action == "implement":
-            self._approve_current_proposal(value)
+            started = start_goal_attempt(self.session)
+            if started is None:
+                self.system_message("no current Goal", kind="muted")
+                return
+            self.mode["current_goal"] = started
+            self.mode["executing_goal"] = True
+            self.query_one(ChatLog).resolve_goal(goal_id, "active")
+            self.store.save(self.session)
             self.mode["planning"] = False
             self.mode["planning_stage"] = None
-            self.system_message(f'implementing proposal "{proposal_title(value)}"', kind="status")
+            self.system_message(f'implementing Goal "{goal_title(started)}"', kind="status")
             self.busy = True
             self._main_stream_active = False
             self._set_status(state="running")
             self.query_one(PromptBox).disabled = True
             self.turn_worker = self.run_worker(
-                self._run_turn_for_proposal(value),
-                name="proposal-implementation",
+                self._run_turn_for_goal(started),
+                name="goal-implementation",
                 exclusive=True,
             )
 
-    async def _run_turn_for_proposal(self, value: dict[str, Any]) -> None:
-        """Run the normal action agent from an approved proposal."""
+    async def _run_turn_for_goal(self, value: dict[str, Any]) -> None:
+        """Run the normal action agent for one explicit Goal attempt."""
         try:
             await self._refresh_model_metadata()
             await run_user_turn(
@@ -859,27 +894,31 @@ class MiraApp(App[None]):
                 store=self.store,
                 session=self.session,
                 mode=self.mode,
-                text="Implement the approved plan.",
-                display_text=f"Implement proposal: {proposal_title(value)}",
+                text="Work toward the retained Goal.",
+                display_text=f"Implement Goal: {goal_title(value)}",
                 record_user=False,
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_active_goal_status()
+            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
+            pause_current_goal(self.session)
+            self.mode["current_goal"] = current_goal(self.session)
+            self.mode["executing_goal"] = False
+            self.store.save(self.session)
             self.finish_turn(cancelled=True)
             self.system_message("turn cancelled", kind="warning")
             raise
         except Exception as exc:
+            pause_current_goal(self.session)
+            self.mode["current_goal"] = current_goal(self.session)
+            self.mode["executing_goal"] = False
+            self.store.save(self.session)
             self.finish_turn(cancelled=True)
-            error_path = self._write_error_report(
-                exc,
-                source="tui.proposal_turn",
-                context={"proposal": proposal_title(value)},
-            )
+            error_path = self._write_error_report(exc, source="tui.goal_turn", context={"goal": goal_title(value)})
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
@@ -889,29 +928,22 @@ class MiraApp(App[None]):
             self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
 
-    async def _run_proposal_revision(self, value: dict[str, Any], feedback: str) -> None:
-        """Run feedback through the same read-only proposal pipeline."""
+    async def _run_goal_revision(self, value: dict[str, Any], feedback: str) -> None:
+        """Run feedback through the same read-only Goal pipeline."""
         try:
             await self._refresh_model_metadata()
-            self.mode["planning"] = value.get("origin") == "plan_mode"
             self.mode["plan_runs"] = self.mode.get("plan_runs", 0) + 1
             thread_id = plan_thread_id(self.session, self.mode["plan_runs"])
-            self.mode["plan_thread_id"] = thread_id
-            self.mode["planning_stage"] = (
-                PLANNING_STAGE_PLAN_RESEARCH
-                if self.mode["planning"]
-                else PLANNING_STAGE_GOAL_RESEARCH
-            )
-            self.mode["proposal_run"] = {
-                "origin": str(value.get("origin") or "goal_command"),
-                "original_objective": str(value.get("original_objective") or ""),
-                "resolved_decisions": list(value.get("resolved_decisions") or []),
-                "criteria": "",
+            self.mode["goal_revision"] = {"previous_goal": value, "feedback": feedback}
+            self.mode["goal_staging"] = {
+                "authoritative_objective": str(value.get("objective") or ""),
+                "objective": str(value.get("objective") or ""),
+                "context_and_constraints": "",
+                "research_evidence": "",
+                "success_criteria": "",
                 "stage": PLANNING_STAGE_GOAL_RESEARCH,
                 "thread_id": thread_id,
-                "explicit": True,
-                "previous_proposal": value,
-                "feedback": feedback,
+                "replacement_confirmed": True,
             }
             await run_user_turn(
                 agent=self.agent,
@@ -920,14 +952,14 @@ class MiraApp(App[None]):
                 store=self.store,
                 session=self.session,
                 mode=self.mode,
-                text=rubric_plan_revision_text(value, feedback),
-                display_text=f"Revise proposal: {feedback}",
+                text=goal_revision_text(value, feedback),
+                display_text=f"Revise Goal: {feedback}",
                 record_user=True,
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_active_goal_status()
+            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -936,11 +968,12 @@ class MiraApp(App[None]):
             raise
         except Exception as exc:
             self.finish_turn(cancelled=True)
-            error_path = self._write_error_report(exc, source="tui.proposal_revision")
+            error_path = self._write_error_report(exc, source="tui.goal_revision")
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.mode["proposal_run"] = None
+            self.mode["goal_staging"] = None
+            self.mode["goal_revision"] = None
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
@@ -1045,20 +1078,20 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
-    def _next_proposal_id(self) -> str:
-        """Return a session-local review proposal id."""
+    def _next_goal_id(self) -> str:
+        """Return a session-local stable Goal id without colliding after reload."""
         existing = {
-            str(event.get("proposal", {}).get("id") or "")
+            str(event.get("goal", {}).get("id") or "")
             for event in self.session.get("events", [])
-            if isinstance(event, dict) and isinstance(event.get("proposal"), dict)
+            if isinstance(event, dict) and isinstance(event.get("goal"), dict)
         }
         counter = int(self.mode.get("plan_counter") or 0)
         while True:
             counter += 1
-            proposal_id = f"proposal-{counter}"
-            if proposal_id not in existing:
+            goal_id = f"goal-{counter}"
+            if goal_id not in existing:
                 self.mode["plan_counter"] = counter
-                return proposal_id
+                return goal_id
 
     def _next_plan_id(self) -> str:
         """Return a session-local stable Plan id without colliding after reload."""
@@ -1075,90 +1108,15 @@ class MiraApp(App[None]):
                 self.mode["plan_counter"] = counter
                 return plan_id
 
-    def _present_proposal(self, value: dict[str, Any]) -> None:
-        """Persist and render one active rubric proposal."""
-        current = self.mode.get("current_proposal")
-        if isinstance(current, dict):
-            self._resolve_current_proposal("superseded")
-        self.mode["current_proposal"] = value
-        event = append_event(
-            self.session,
-            {
-                "type": "proposal",
-                "mode": "planning" if value.get("origin") == "plan_mode" else "action",
-                "proposal": value,
-                "status": "pending",
-            },
+    def _refresh_goal_status(self) -> None:
+        """Reflect a terminal durable Goal status in its visible bubble."""
+        value = current_goal(self.session)
+        if value is None or value.get("status") == "active":
+            return
+        self.query_one(ChatLog).resolve_goal(
+            str(value.get("id") or ""),
+            str(value.get("status") or "completed"),
         )
-        self.store.save(self.session)
-        self.query_one(ChatLog).present_proposal(
-            value,
-            active=True,
-            status="pending",
-            created_at=str(event.get("created_at") or ""),
-        )
-
-    def _approve_current_proposal(self, value: dict[str, Any]) -> None:
-        """Resolve review and durably activate the exact approved proposal."""
-        previous = current_active_goal(self.session)
-        activate_goal(self.session, value)
-        if previous is not None:
-            self.query_one(ChatLog).resolve_proposal(previous["proposal_id"], "superseded")
-        proposal_id = str(value.get("id") or "")
-        self.mode["current_proposal"] = None
-        self.query_one(ChatLog).resolve_proposal(proposal_id, "approved for implementation")
-        update_proposal_event_status(self.session, proposal_id, "approved for implementation")
-        self.store.save(self.session)
-
-    def _show_active_goal(self) -> None:
-        """Render the authoritative active goal without invoking a model."""
-        value = current_active_goal(self.session)
-        if value is None:
-            self.system_message("no active goal", kind="muted")
-            return
-        lines = [
-            f"Active goal: {value['objective']}",
-            "",
-            "Plan:",
-            plan_text(value["plan"]),
-            "",
-            "Definition of Done:",
-            value["criteria"],
-            "",
-            f"Last rubric status: {value['last_rubric_status'] or 'not graded'}",
-        ]
-        self.system_message("\n".join(lines), kind="info")
-
-    def _clear_active_goal(self) -> None:
-        """Clear only the authoritative active goal and retain history."""
-        value = clear_active_goal(self.session)
-        if value is None:
-            self.system_message("no active goal", kind="muted")
-            return
-        self.query_one(ChatLog).resolve_proposal(value["proposal_id"], "cleared")
-        self.store.save(self.session)
-        self.system_message(f'cleared active goal "{proposal_title(value)}"', kind="muted")
-
-    def _refresh_active_goal_status(self) -> None:
-        """Reflect a terminal durable goal status in the visible proposal bubble."""
-        value = self.session.get("active_goal")
-        if not isinstance(value, dict) or value.get("status") == "active":
-            return
-        self.query_one(ChatLog).resolve_proposal(
-            str(value.get("proposal_id") or ""),
-            str(value.get("status") or "complete"),
-        )
-
-    def _resolve_current_proposal(self, status: str) -> None:
-        """Resolve the active rubric proposal in UI and durable history."""
-        value = self.mode.get("current_proposal")
-        if not isinstance(value, dict):
-            return
-        proposal_id = str(value.get("id") or "")
-        self.mode["current_proposal"] = None
-        self.query_one(ChatLog).resolve_proposal(proposal_id, status)
-        update_proposal_event_status(self.session, proposal_id, status)
-        self.store.save(self.session)
 
     def action_interrupt_or_quit(self) -> None:
         """Confirm before cancelling a turn or quitting the app."""
@@ -1264,12 +1222,19 @@ class MiraApp(App[None]):
     async def prepare_plan(self, interrupt: Any) -> str:
         """Generate Success Criteria before the forced Plan finalisation call."""
         self.waiting_finished()
+        revision = self.mode.get("plan_revision")
+        confirm = getattr(self, "_confirm_formal_replacement", None)
+        accepted = await confirm("Plan") if not isinstance(revision, dict) and callable(confirm) else True
+        if not accepted:
+            self.mode["plan_staging"] = None
+            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
+            self.system_message("kept the current formal work", kind="muted")
+            return FORMAL_CONSTRUCTION_CANCELLED
         request = prepare_plan_request(interrupt)
         objective = request["objective"]
         context = request["context_and_constraints"] or "No additional constraints."
         if not objective:
             raise RuntimeError("prepare_plan requires the authoritative user objective")
-        revision = self.mode.get("plan_revision")
         self.waiting_started("drafting Success Criteria...", immediate=True)
         service = SuccessCriteriaService(self.config or {})
         if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
@@ -1308,24 +1273,6 @@ class MiraApp(App[None]):
         """Persist and render one criteria-first PlanArtifact."""
         self.waiting_finished()
         payload = plan_request(interrupt)
-        proposal_run = self.mode.get("proposal_run")
-        if (
-            isinstance(proposal_run, dict)
-            and proposal_run.get("origin") == "goal_command"
-            and proposal_run.get("criteria")
-        ):
-            value = proposal(
-                proposal_id=self._next_proposal_id(),
-                origin="goal_command",
-                original_objective=str(proposal_run.get("original_objective") or ""),
-                decisions=list(proposal_run.get("resolved_decisions") or []),
-                criteria=str(proposal_run.get("criteria") or ""),
-                plan=payload,
-                rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
-            )
-            self.mode["proposal_run"] = None
-            self._present_proposal(value)
-            return "Plan and Definition of Done presented for Goal review."
         staging = self.mode.get("plan_staging")
         if not isinstance(staging, dict):
             # Narrow compatibility for legacy checkpoints that were already
@@ -1352,14 +1299,16 @@ class MiraApp(App[None]):
             rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
         )
 
-        previous = current_plan(self.session)
-        if previous is not None:
-            previous_id = str(previous.get("id") or "")
-            self.query_one(ChatLog).resolve_plan(previous_id, "superseded")
-            update_plan_event_status(self.session, previous_id, "superseded")
+        previous_plan = current_plan(self.session)
+        previous_goal = current_goal(self.session)
+        if previous_plan is not None:
+            self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
+        if previous_goal is not None:
+            self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
 
         artifact = replace_current_plan(self.session, artifact)
         self.mode["current_plan"] = artifact
+        self.mode["current_goal"] = None
         self.mode["plan_staging"] = None
         self.mode["plan_revision"] = None
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
@@ -1380,6 +1329,10 @@ class MiraApp(App[None]):
         """Render the exact current Plan without invoking or paraphrasing through a model."""
         value = current_plan(self.session)
         if value is None:
+            if current_goal(self.session) is not None:
+                message = "There is no current Plan. The current formal work is a Goal.\nUse /goal-show to display it."
+                self.system_message(message, kind="info")
+                return message
             self.system_message("no current Plan", kind="muted")
             return "No current Plan."
         self.mode["current_plan"] = value
@@ -1391,6 +1344,9 @@ class MiraApp(App[None]):
         value = clear_current_plan(self.session)
         self.mode["current_plan"] = None
         if value is None:
+            if current_goal(self.session) is not None:
+                self.system_message("There is no current Plan. Use /goal-clear to clear the current Goal.", kind="info")
+                return
             self.system_message("no current Plan", kind="muted")
             return
         self.query_one(ChatLog).resolve_plan(str(value["id"]), "cleared")
@@ -1431,47 +1387,177 @@ class MiraApp(App[None]):
             exclusive=True,
         )
 
-    async def prepare_goal(self, interrupt: Any) -> str:  # noqa: ARG002
-        """Generate criteria after planning research and decisions are complete."""
+    async def prepare_goal(self, interrupt: Any) -> str:
+        """Generate shared Success Criteria before forced Goal finalisation."""
         self.waiting_finished()
-        proposal_run = self.mode.get("proposal_run")
-        if not isinstance(proposal_run, dict):
-            raise RuntimeError("proposal context is unavailable for criteria generation")
-        original = str(proposal_run.get("original_objective") or "").strip()
-        decisions = list(proposal_run.get("resolved_decisions") or [])
-        if not original:
-            raise RuntimeError("planning objective is unavailable for criteria generation")
-        objective = effective_objective(original, decisions)
-        research_context = research_summary_request(interrupt)
-        self.waiting_started("drafting Definition of Done...", immediate=True)
-        previous = proposal_run.get("previous_proposal")
+        staging = self.mode.get("goal_staging")
+        if not isinstance(staging, dict):
+            raise RuntimeError("Goal staging context is unavailable")
+        request = prepare_goal_request(interrupt)
+        revision = self.mode.get("goal_revision")
+        if isinstance(revision, dict):
+            objective = request["objective"] or str(staging.get("authoritative_objective") or "")
+        else:
+            objective = str(staging.get("authoritative_objective") or "")
+        if not objective:
+            raise RuntimeError("prepare_goal requires the authoritative user objective")
+        context = request["context_and_constraints"]
+        evidence = request["research_evidence"]
+        research_context = "\n\n".join(value for value in (context, evidence) if value)
+        self.waiting_started("drafting Success Criteria...", immediate=True)
+        service = SuccessCriteriaService(self.config or {})
+        previous = revision.get("previous_goal") if isinstance(revision, dict) else None
         if isinstance(previous, dict):
-            criteria = await GoalCriteriaService(self.config or {}).revise(
+            criteria = await service.revise(
                 objective,
-                str(previous.get("criteria") or ""),
-                str(proposal_run.get("feedback") or ""),
+                str(previous.get("success_criteria") or ""),
+                str(revision.get("feedback") or ""),
                 research_context,
             )
         else:
-            criteria = await GoalCriteriaService(self.config or {}).generate(objective, research_context)
-        proposal_run["criteria"] = criteria
-        proposal_run["stage"] = PLANNING_STAGE_GOAL_FINALIZE
-        self.mode["planning_stage"] = PLANNING_STAGE_GOAL_FINALIZE
-        self.waiting_started("drafting plan...", immediate=True)
-        revision_context = ""
-        if isinstance(previous, dict):
-            revision_context = (
-                f"\n\n<previous_plan>\n{plan_text(previous.get('plan') or {})}\n</previous_plan>"
-                f"\n\n<user_feedback>\n{proposal_run.get('feedback') or ''}\n</user_feedback>"
-            )
-        return (
-            "MIRA generated the Definition of Done through the separate criteria pathway. "
-            "Now create the final plan using the original objective, these criteria, and your existing "
-            "read-only research. Call present_plan with the plan alone.\n\n"
-            f"<objective>\n{objective}\n</objective>\n\n"
-            f"<definition_of_done>\n{criteria}\n</definition_of_done>"
-            f"{revision_context}"
+            criteria = await service.generate(objective, research_context)
+        staging.update(
+            {
+                "objective": objective,
+                "context_and_constraints": context,
+                "research_evidence": evidence,
+                "success_criteria": criteria,
+                "stage": PLANNING_STAGE_GOAL_FINALIZE,
+            }
         )
+        self.mode["planning_stage"] = PLANNING_STAGE_GOAL_FINALIZE
+        self.waiting_started("finalizing Goal...", immediate=True)
+        return (
+            f"{GOAL_FINALIZATION_POLICY}\n\n"
+            f"<objective>\n{objective}\n</objective>\n\n"
+            f"<success_criteria>\n{criteria}\n</success_criteria>"
+        )
+
+    async def present_goal(self, interrupt: Any) -> str:
+        """Persist and render one criteria-only GoalArtifact."""
+        self.waiting_finished()
+        staging = self.mode.get("goal_staging")
+        if not isinstance(staging, dict) or not staging.get("success_criteria"):
+            raise RuntimeError("present_goal requires staged Objective and Success Criteria")
+        artifact = goal_artifact(
+            goal_id=self._next_goal_id(),
+            title=goal_title_request(interrupt),
+            objective=str(staging.get("objective") or ""),
+            success_criteria=str(staging.get("success_criteria") or ""),
+            rubric_enabled=bool(self.mode.get("rubric_enabled")),
+            rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
+        )
+        previous_plan = current_plan(self.session)
+        previous_goal = current_goal(self.session)
+        if previous_plan is not None:
+            self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
+        if previous_goal is not None:
+            self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
+        artifact = replace_current_goal(self.session, artifact)
+        self.mode["current_plan"] = None
+        self.mode["current_goal"] = artifact
+        self.mode["goal_staging"] = None
+        self.mode["goal_revision"] = None
+        self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
+        event = append_event(
+            self.session,
+            {"type": "goal", "mode": "planning" if self.mode.get("planning") else "action", "goal": artifact, "status": "proposed"},
+        )
+        self.store.save(self.session)
+        self.query_one(ChatLog).present_goal(
+            artifact,
+            active=True,
+            status="proposed",
+            created_at=str(event.get("created_at") or ""),
+        )
+        return "Goal and Success Criteria presented for user review."
+
+    async def show_goal(self, interrupt: Any = None) -> str:  # noqa: ARG002
+        """Render the exact current Goal without a model call."""
+        value = current_goal(self.session)
+        if value is None:
+            if current_plan(self.session) is not None:
+                message = "There is no current Goal. The current formal work is a Plan.\nUse /plan-show to display it."
+                self.system_message(message, kind="info")
+                return message
+            self.system_message("no current Goal", kind="muted")
+            return "No current Goal."
+        self.mode["current_goal"] = value
+        self.query_one(ChatLog).present_goal(value, active=True, status=value["status"])
+        return "Current Goal rendered."
+
+    def clear_goal(self) -> None:
+        """Clear current_goal without deleting historical transcript events."""
+        value = clear_current_goal(self.session)
+        self.mode["current_goal"] = None
+        if value is None:
+            if current_plan(self.session) is not None:
+                self.system_message("There is no current Goal. Use /plan-clear to clear the current Plan.", kind="info")
+                return
+            self.system_message("no current Goal", kind="muted")
+            return
+        self.query_one(ChatLog).resolve_goal(str(value["id"]), "cleared")
+        self.store.save(self.session)
+        self.system_message(f'cleared current Goal "{goal_title(value)}"', kind="muted")
+
+    async def resume_goal(self) -> None:
+        """Resume any incomplete current Goal immediately in Act mode."""
+        value = current_goal(self.session)
+        if value is None:
+            if current_plan(self.session) is not None:
+                self.system_message("There is no current Goal. Use /plan-resume to resume the current Plan.", kind="info")
+                return
+            self.system_message("no current Goal", kind="muted")
+            return
+        if value["status"] == "completed":
+            self.system_message(
+                "This Goal is already completed.\nUse /goal-show to reopen it and select Implement to run it again.",
+                kind="info",
+            )
+            return
+        if value["status"] not in RESUMABLE_GOAL_STATUSES:
+            self.system_message("the current Goal is not resumable", kind="warning")
+            return
+        started = start_goal_attempt(self.session)
+        if started is None:
+            return
+        self.mode["current_goal"] = started
+        self.mode["executing_goal"] = True
+        self.mode["planning"] = False
+        self.store.save(self.session)
+        self.query_one(ChatLog).resolve_goal(str(started["id"]), "active")
+        self.system_message(f'resuming Goal "{goal_title(started)}"', kind="status")
+        self.busy = True
+        self._main_stream_active = False
+        self._set_status(state="running")
+        self.query_one(PromptBox).disabled = True
+        self.turn_worker = self.run_worker(
+            self._run_turn_for_goal(started),
+            name="goal-resume",
+            exclusive=True,
+        )
+
+    async def _confirm_formal_replacement(self, new_kind: str) -> bool:
+        """Confirm replacement of one incomplete current Plan or Goal."""
+        plan = current_plan(self.session)
+        goal = current_goal(self.session)
+        current_kind = "Plan" if plan is not None else "Goal" if goal is not None else ""
+        current = plan or goal
+        if current is None or current.get("status") == "completed":
+            return True
+        answer = await self._prompt_choice(
+            "Replace Current Formal Work?",
+            (
+                f"A current {current_kind} is still incomplete.\n\n"
+                f"Creating this {new_kind} will replace it as the current formal work."
+            ),
+            [
+                ("replace", f"Replace Current {current_kind}"),
+                ("keep", f"Keep Current {current_kind}"),
+            ],
+            vertical=True,
+        )
+        return answer == "replace"
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
@@ -1715,17 +1801,11 @@ class MiraApp(App[None]):
             return False, "execute remains disabled"
         old_git_enabled = git_protection_enabled(old_settings)
         new_git_enabled = git_protection_enabled(settings)
-        rubric_changed = (
-            rubric_enabled(old_settings) != rubric_enabled(settings)
-            or rubric_max_iterations(old_settings) != rubric_max_iterations(settings)
-        )
         if not save_settings(self.workspace, settings):
             return False, "could not save .mira/settings.yml"
 
         self.config = dict(self.config or {})
         self.config["settings"] = settings
-        if rubric_changed and isinstance(self.mode.get("current_proposal"), dict):
-            self._resolve_current_proposal("settings changed")
         if new_git_enabled != old_git_enabled:
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
@@ -2205,16 +2285,6 @@ class MiraApp(App[None]):
         else:
             response = await self._prompt_text("Question", ASK_USER_OPEN_OPTION)
             result = (response or "").strip() or ASK_USER_OPEN_OPTION
-        if self.mode.get("planning") and self.mode.get("rubric_enabled"):
-            proposal_run = self.mode.get("proposal_run")
-            decisions = list(proposal_run.get("resolved_decisions") or []) if isinstance(proposal_run, dict) else []
-            decisions.append({"question": question, "answer": result})
-            if isinstance(proposal_run, dict):
-                proposal_run["resolved_decisions"] = decisions
-        elif isinstance(self.mode.get("proposal_run"), dict):
-            decisions = list(self.mode["proposal_run"].get("resolved_decisions") or [])
-            decisions.append({"question": question, "answer": result})
-            self.mode["proposal_run"]["resolved_decisions"] = decisions
         return result
 
     async def ask_create_git_repo(self, message: str) -> bool:
@@ -2639,6 +2709,8 @@ class MiraApp(App[None]):
             return "Plan"
         if self.mode.get("current_plan"):
             return "Plan Ready"
+        if self.mode.get("current_goal"):
+            return "Goal Ready"
         return "Action"
 
     def _record_prompt_history(self, text: str) -> None:
@@ -2691,3 +2763,8 @@ def append_prompt_history(path: Path, text: str) -> None:
 def plan_title(plan: dict[str, Any]) -> str:
     """Return a compact plan title for status text."""
     return str(plan.get("title") or "Implementation Plan")
+
+
+def goal_title(goal: dict[str, Any]) -> str:
+    """Return a compact Goal title for status text."""
+    return str(goal.get("title") or "Goal")

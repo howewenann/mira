@@ -318,7 +318,7 @@ Expected:
 Choose Revise and enter `Keep the same scope but add an exact verification
 command.` Verify one replacement plan appears and the old plan becomes inactive.
 
-With Rubric Middleware enabled, enter:
+With Rubric Middleware either enabled or disabled, enter:
 
 ```text
 /goal create a small typed slug helper with focused tests
@@ -326,17 +326,17 @@ With Rubric Middleware enabled, enter:
 
 Expected:
 
-- The existing Definition-of-Done drafting indicator is followed by one
-  actionable goal proposal.
-- `prepare_goal` and goal-generation internals never appear as ordinary
-  tool-call/result bubbles.
+- The Success Criteria indicator is followed by one actionable Goal bubble
+  containing Objective and Success Criteria but no Plan.
+- `prepare_goal` and forced `present_goal` retain stable call/result identity
+  without duplicating the dedicated Goal surface.
 - No partial criteria, partial goal, or additional goal status block appears.
 
 Choose Revise and enter `Require Unicode examples.` Verify the existing goal
-revision path produces one replacement proposal without any ordinary control-
-tool result.
+revision path produces one complete replacement Goal and leaves the old bubble
+as inactive history.
 
-Finally, with Rubric Middleware still enabled, enter `/plan`, then:
+Finally, enter `/plan`, then:
 
 ```text
 Plan a searchable notes index with focused tests. Use SQLite unless repository
@@ -345,10 +345,10 @@ inspection proves it incompatible.
 
 Expected:
 
-- The combined plan-and-goal flow retains its existing Definition of Done,
-  finalized plan, controls, ordering, and revision behavior.
-- Neither `prepare_goal` nor `present_plan` is rendered through the immediate
-  ordinary-result path.
+- The normal Plan flow remains approach + Success Criteria, with its existing
+  finalized Plan controls, ordering, and revision behavior.
+- Formal Plan construction uses `prepare_plan` and `present_plan`, never
+  `prepare_goal` or `present_goal`.
 
 Delete `.tmp_tool_results_manual` after completing the checks. Do not copy its
 `.mira/_sessions` or timing tool into the repository.
@@ -723,118 +723,44 @@ Expected:
 - The ordinary reasoning and reply remain visible; wording alone does not make
   MIRA classify the model call as compaction.
 
-## Goal-Driven Rubric Grading
+## Durable Criteria-Only Goal Lifecycle
 
-Use a disposable workspace and keep its session files for replay checks. Use
-mock models for deterministic criteria revision and iteration-cap behavior, and
-also run scenario 2 once with a real locally configured MIRA model where
-practical.
+Use a disposable workspace and retain its session file for replay checks.
 
-### Disabled compatibility precheck
-
-Leave Rubric Middleware disabled in `/settings`, then enter:
-
-```text
-/goal add a palindrome helper
-```
-
-Expected: MIRA directs you to Rubric Middleware in `/settings`; no model call or
-proposal event is created. Enter `/plan` and plan the same task. The legacy plan
-bubble and single planning flow remain unchanged, with no Definition of Done or
-visible `prepare_goal` control.
-
-### 1. Ordinary action prompt
-
-In action mode, enter:
-
-```text
-Explain the difference between a goal and a plan.
-```
-
-Expected: a direct action-agent response with no proposal, planning research,
-criteria generation, or rubric grading.
-
-### 2. Simple goal with no research
-
-Enable Rubric Middleware, leave maximum iterations at 3, then enter:
-
-```text
-/goal Write a short professional event announcement.
-```
-
-Expected: the planning agent may call `prepare_goal` immediately with an empty
-research summary. No file or web research is required. One combined Plan +
-Definition of Done bubble appears, the status remains action mode, and Implement
-runs through the action agent.
-
-### 3. Contextual goal
-
-```text
-/goal Finish the current session-resume implementation.
-```
-
-Expected: targeted read-only inspection precedes `prepare_goal`; the bounded
-research summary contains only material facts, and no write occurs before
-Implement.
-
-### 4. Persistent plan mode
-
-Enter `/plan`, submit a substantial implementation request, and verify the same
-combined proposal UI appears while planning mode remains persistent until
-Implement or `/act`.
-
-### 5. Plan-mode safe conversation
-
-Start a fresh planning turn and enter:
-
-```text
-Why is the current implementation structured this way?
-```
-
-Expected: a normal read-only response with no proposal or criteria generation.
-
-### 6. Revision without research
-
-Create another `/goal`, choose Revise, and enter:
-
-```text
-Make the plan shorter.
-```
-
-Expected: `prepare_goal` may be called immediately, criteria remain exactly
-unchanged where appropriate, the previous plan is absent from the criteria
-model request, and the complete plan is revised.
-
-### 7. Revision requiring research
-
-```text
-Use the same storage pattern as the existing session implementation.
-```
-
-Expected: targeted inspection resolves the storage facts, criteria change only
-if completion conditions changed, and the final plan follows the discovered
-session pattern.
-
-### 8. Rubric exhaustion and continuation
-
-Use a deterministic weak model or mocked grader that reaches the configured
-iteration cap. After `max_iterations_reached`, enter:
-
-```text
-Continue where we left off.
-```
-
-Expected: `/goal show` reports the same objective, plan, and criteria; no
-planning or criteria model call occurs; a fresh native rubric grading run starts
-with the exact stored criteria.
-
-### 9. Session restart and controls
-
-After an incomplete active goal, close MIRA, resume the same session, and enter
-`Continue`. Expected: the exact active goal is restored from session state and
-execution continues without proposal reconstruction. Verify `/goal clear`
-stops rubric attachment but leaves historical proposal/rubric blocks, while a
-newly implemented proposal explicitly supersedes an older active goal.
+1. With Rubric Middleware disabled, run `/goal Write a short professional event
+   announcement.` from Act, then again from Plan mode. Expected: both use
+   `prepare_goal` -> Success Criteria -> forced `present_goal`, keep the original
+   mode, and show the same criteria-only GoalBubble with no Plan.
+2. Enable rubrics and create the same Goal. Expected: construction is unchanged;
+   only the snapshotted automatic-evaluation policy differs.
+3. Create a contextual Goal that benefits from repository inspection. Expected:
+   only read-only discovery and `ask_user` are available before `prepare_goal`;
+   evidence clarifies but does not expand the exact visible objective.
+4. Select Revise and provide outcome-changing feedback. Expected:
+   `SuccessCriteriaService.revise()` preserves still-valid criteria, may update
+   the Objective, and a complete replacement Goal becomes current.
+5. Select Close, then run `/goal-show`. Expected: Close retains lifecycle state;
+   `/goal-show` renders the exact Goal again with Implement, Revise, and Close.
+6. Ask `Show me the current Goal.` Expected: `goal_show` uses the same bubble,
+   preserves its tool-call id, produces no duplicate output, and changes no state.
+7. Implement a rubric-disabled Goal. Expected: only this explicit attempt gets
+   Goal context, no Plan fields are injected, and success completes as
+   `agent-declared`; an error or cancellation pauses it.
+8. Implement a rubric-enabled Goal. Verify separate rubric bubbles,
+   `needs_revision` continuation, `satisfied` -> `rubric-verified`, and resumable
+   `max_iterations_reached` via `/goal-resume`.
+9. Reopen a completed Goal with `/goal-show` and select Implement. Expected: the
+   same Goal starts a new attempt and increments its attempt count.
+10. Replace a completed Plan with a Goal and a completed Goal with a Plan.
+    Expected: replacement is automatic only after successful presentation.
+11. Attempt both replacement directions with incomplete formal work. Expected:
+    the structured Replace/Keep choice appears; Keep preserves the old artifact,
+    and accepting replacement still preserves it if generation later fails.
+12. Reload a session with `current_goal`, then a legacy `active_goal`. Expected:
+    exact current Goal replay; legacy Objective and criteria migrate, its embedded
+    Plan is ignored, and cleared/superseded legacy Goals do not become current.
+13. Check `/plan-show` while a Goal is current and `/goal-show` while a Plan is
+    current. Expected: deterministic guidance to the matching command.
 
 ## Windows TUI Keyboard And Copy Matrix
 
@@ -1075,7 +1001,7 @@ Use one disposable Git-protected workspace.
 3. In Plan and Act modes, submit a request with one genuine preference choice.
    Expected: `ask_user`, never a prose question.
 4. Request a final implementation-ready Plan with automatic evaluation disabled.
-   Expected: `prepare_plan` â†’ Success Criteria â†’ forced `present_plan`; the
+   Expected: `prepare_plan` -> Success Criteria -> forced `present_plan`; the
    bubble shows Plan, Success Criteria, muted disabled policy, and Implement,
    Revise, Close.
 5. Repeat an equivalent request with automatic evaluation enabled. Expected:

@@ -266,9 +266,11 @@ description: Project-specific workflow.
 
             self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
             self.assertTrue(any(tool.name == "plan_show" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "goal_show" for tool in resources.tools))
             self.assertTrue(any(tool.name == "prepare_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "prepare_plan" for tool in resources.tools))
             self.assertTrue(any(tool.name == "present_plan" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "present_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
                 resources.metadata["tools"],
@@ -276,6 +278,12 @@ description: Project-specific workflow.
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "goal_show",
+                        "path": "/mira-defaults/tools/goal_show.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -294,6 +302,12 @@ description: Project-specific workflow.
                     {
                         "name": "prepare_plan",
                         "path": "/mira-defaults/tools/prepare_plan.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "present_goal",
+                        "path": "/mira-defaults/tools/present_goal.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -397,21 +411,29 @@ def project_status() -> str:
                 names,
                 [
                     "ask_user",
+                    "goal_show",
                     "plan_show",
                     "prepare_goal",
                     "prepare_plan",
+                    "present_goal",
                     "present_plan",
                     "grep",
                     "project_status",
                 ],
             )
-            self.assertEqual(resources.tools[5].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(resources.tools[7].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "goal_show",
+                        "path": "/mira-defaults/tools/goal_show.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -430,6 +452,12 @@ def project_status() -> str:
                     {
                         "name": "prepare_plan",
                         "path": "/mira-defaults/tools/prepare_plan.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "present_goal",
+                        "path": "/mira-defaults/tools/present_goal.py",
                         "source": "default",
                         "replaces": "",
                     },

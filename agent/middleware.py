@@ -24,6 +24,7 @@ from agent.planning.policy import (
     PLANNING_STAGE_PLAN_RESEARCH,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
+    PRESENT_GOAL_TOOL,
     PRESENT_PLAN_TOOL,
 )
 from agent.tools.specs import tool_name as resource_tool_name
@@ -247,11 +248,17 @@ class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
         if stage == "research":
             stage = PLANNING_STAGE_GOAL_RESEARCH
         elif stage == "finalize":
-            stage = PLANNING_STAGE_GOAL_FINALIZE
+            # Preserve checkpoints created before Plan/Goal gained distinct
+            # finalization stage names. That legacy stage finalized through
+            # present_plan; all new Goal runs use goal_finalize explicitly.
+            stage = PLANNING_STAGE_PLAN_FINALIZE
         if stage in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
-            tools = [tool for tool in request.tools if resource_tool_name(tool) == PRESENT_PLAN_TOOL]
+            expected_present = (
+                PRESENT_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_FINALIZE else PRESENT_PLAN_TOOL
+            )
+            tools = [tool for tool in request.tools if resource_tool_name(tool) == expected_present]
             if not tools:
-                raise RuntimeError("Plan finalization requires present_plan")
+                raise RuntimeError(f"formal finalization requires {expected_present}")
             # OpenAI-compatible providers do not consistently accept the
             # named-tool object produced by LangChain. With one visible tool,
             # ``required`` is equally deterministic and provider-portable.
@@ -260,7 +267,7 @@ class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
         expected_prepare = (
             PREPARE_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_RESEARCH else PREPARE_PLAN_TOOL
         )
-        hidden_controls = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL} - {
+        hidden_controls = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL} - {
             expected_prepare
         }
         tools = [

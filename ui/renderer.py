@@ -20,6 +20,7 @@ from ui.interrupts import (
     ask_user_request,
     plan_request,
 )
+from session.goals import goal_artifact_text
 from ui.terminal_transcript import DEFAULT_TOOL_OUTPUT_CHARS, TerminalTranscript
 
 __all__ = ["DEFAULT_TOOL_OUTPUT_CHARS", "Renderer"]
@@ -216,6 +217,20 @@ class Renderer:
             details.append(f"Completion: {plan['completion_source']}")
         body = f"{plan_artifact_text(plan)}\n\n{' · '.join(details)}"
         self.transcript.block("plan", body)
+
+    def render_current_goal(self, goal: dict[str, Any]) -> None:
+        """Render an exact retained Goal for the goal_show control tool."""
+        policy = (
+            "Automatic evaluation enabled."
+            if goal.get("rubric_enabled")
+            else "Automatic evaluation disabled."
+        )
+        details = [policy, f"Status: {goal.get('status') or 'proposed'}"]
+        if goal.get("last_rubric_status"):
+            details.append(f"Last result: {str(goal['last_rubric_status']).replace('_', ' ')}")
+        if goal.get("completion_source"):
+            details.append(f"Completion: {goal['completion_source']}")
+        self.transcript.block("goal", f"{goal_artifact_text(goal)}\n\n{' · '.join(details)}")
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
 
-from agent.planning.criteria import GoalCriteriaService
+from agent.planning.criteria import SuccessCriteriaService
 
 
 class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
@@ -15,7 +15,7 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         model = type("Model", (), {})()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="- Report exists\n- Evidence is cited"))
         with patch("agent.planning.criteria.get_llm", return_value=model):
-            result = await GoalCriteriaService({}).generate("Compare two options")
+            result = await SuccessCriteriaService({}).generate("Compare two options")
 
         self.assertEqual(result, "- Report exists\n- Evidence is cited")
         messages = model.ainvoke.await_args.args[0]
@@ -27,7 +27,7 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         model = type("Model", (), {})()
         model.ainvoke = AsyncMock(return_value=AIMessage(content="- Existing storage is reused"))
         with patch("agent.planning.criteria.get_llm", return_value=model):
-            await GoalCriteriaService({}).generate(
+            await SuccessCriteriaService({}).generate(
                 "Finish persistence",
                 "Sessions are JSON-backed and normalized on save.",
             )
@@ -41,7 +41,7 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         previous = "- The comparison covers both options"
         model.ainvoke = AsyncMock(return_value=AIMessage(content=previous))
         with patch("agent.planning.criteria.get_llm", return_value=model):
-            result = await GoalCriteriaService({}).revise(
+            result = await SuccessCriteriaService({}).revise(
                 "Compare two options",
                 previous,
                 "Make the plan shorter",
@@ -60,4 +60,4 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         model.ainvoke = AsyncMock(return_value=AIMessage(content="  "))
         with patch("agent.planning.criteria.get_llm", return_value=model):
             with self.assertRaisesRegex(RuntimeError, "empty response"):
-                await GoalCriteriaService({}).generate("Do work")
+                await SuccessCriteriaService({}).generate("Do work")

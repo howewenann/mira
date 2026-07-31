@@ -10,10 +10,12 @@ from unittest.mock import AsyncMock, patch
 
 from agent.middleware import PlanningStageMiddleware
 from agent.factory import ACT_SYSTEM_PROMPT
-from agent.planning.criteria import GoalCriteriaService, SuccessCriteriaService
+from agent.planning.criteria import SuccessCriteriaService
 from agent.planning.policy import (
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
+    PLANNING_STAGE_GOAL_FINALIZE,
+    PLANNING_STAGE_GOAL_RESEARCH,
     SHARED_QUESTION_POLICY,
     plan_system_prompt,
 )
@@ -72,9 +74,6 @@ class CurrentPlanTests(unittest.TestCase):
         self.assertIn(SHARED_QUESTION_POLICY, ACT_SYSTEM_PROMPT)
         self.assertNotIn("SAFE_CONVERSATION", prompt)
 
-    def test_success_criteria_service_is_shared_with_goal_compatibility(self) -> None:
-        self.assertIs(GoalCriteriaService, SuccessCriteriaService)
-
     def test_plan_stage_exposes_prepare_then_requires_present(self) -> None:
         tools = [
             {"name": "read_file"},
@@ -82,17 +81,27 @@ class CurrentPlanTests(unittest.TestCase):
             {"name": "prepare_goal"},
             {"name": "prepare_plan"},
             {"name": "present_plan"},
+            {"name": "present_goal"},
+            {"name": "goal_show"},
             {"name": "plan_show"},
         ]
         middleware = PlanningStageMiddleware()
         research = middleware._stage_request(Request(PLANNING_STAGE_PLAN_RESEARCH, tools))
         self.assertEqual(
             [tool["name"] for tool in research.tools],
-            ["read_file", "ask_user", "prepare_plan", "plan_show"],
+            ["read_file", "ask_user", "prepare_plan", "goal_show", "plan_show"],
         )
         final = middleware._stage_request(Request(PLANNING_STAGE_PLAN_FINALIZE, tools))
         self.assertEqual([tool["name"] for tool in final.tools], ["present_plan"])
         self.assertEqual(final.tool_choice, "required")
+        goal_research = middleware._stage_request(Request(PLANNING_STAGE_GOAL_RESEARCH, tools))
+        self.assertEqual(
+            [tool["name"] for tool in goal_research.tools],
+            ["read_file", "ask_user", "prepare_goal", "goal_show", "plan_show"],
+        )
+        goal_final = middleware._stage_request(Request(PLANNING_STAGE_GOAL_FINALIZE, tools))
+        self.assertEqual([tool["name"] for tool in goal_final.tools], ["present_goal"])
+        self.assertEqual(goal_final.tool_choice, "required")
 
     def test_current_plan_replaces_starts_completes_restarts_and_clears(self) -> None:
         record = {"events": []}

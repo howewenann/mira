@@ -14,7 +14,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
-from session.goals import activate_goal, clear_active_goal, current_active_goal, update_active_goal_after_turn
+from session.goals import (
+    clear_current_goal,
+    current_goal,
+    finish_goal_attempt,
+    goal_artifact,
+    replace_current_goal,
+    start_goal_attempt,
+)
 from session.plans import plan_artifact
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
@@ -230,19 +237,19 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at",
                 "turns",
                 "dashboard",
-                "active_goal",
                 "current_plan",
+                "current_goal",
                 "events",
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
-        self.assertIsNone(record["active_goal"])
         self.assertIsNone(record["current_plan"])
+        self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)
 
-    def test_active_goal_survives_save_load_and_is_not_inferred_from_history(self) -> None:
+    def test_current_goal_survives_save_load_and_is_not_inferred_from_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
             record = store.new(session_id="thread-1", workspace=Path("workspace"))
@@ -260,102 +267,68 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
             store.save(record)
-            self.assertIsNone(store.read(store.path("thread-1"))["active_goal"])
+            self.assertIsNone(store.read(store.path("thread-1"))["current_goal"])
 
-            activate_goal(
+            replace_current_goal(
                 record,
-                {
-                    "id": "proposal-1",
-                    "original_objective": "Build search.",
-                    "objective": "Build search.",
-                    "resolved_decisions": [],
-                    "criteria": "- Search works.",
-                    "plan": {"title": "Search", "summary": ["Add search."]},
-                    "origin": "goal_command",
-                    "rubric_iterations": 3,
-                },
+                goal_artifact(
+                    goal_id="goal-1",
+                    title="Search",
+                    objective="Build search.",
+                    success_criteria="- Search works.",
+                    rubric_enabled=False,
+                    rubric_iterations=3,
+                ),
             )
             store.save(record)
             restored = store.read(store.path("thread-1"))
 
-        self.assertEqual(restored["active_goal"]["objective"], "Build search.")
-        self.assertEqual(restored["active_goal"]["criteria"], "- Search works.")
-        self.assertEqual(restored["active_goal"]["plan"]["title"], "Search")
-        self.assertEqual(restored["active_goal"]["status"], "active")
+        self.assertEqual(restored["current_goal"]["objective"], "Build search.")
+        self.assertEqual(restored["current_goal"]["success_criteria"], "- Search works.")
+        self.assertNotIn("plan", restored["current_goal"])
+        self.assertEqual(restored["current_goal"]["status"], "proposed")
 
-    def test_active_goal_status_transitions_preserve_history(self) -> None:
+    def test_current_goal_status_transitions_preserve_history(self) -> None:
         record = {
             "events": [
-                {"type": "proposal", "proposal": {"id": "proposal-1"}, "status": "approved for implementation"}
+                {"type": "goal", "goal": {"id": "goal-1"}, "status": "proposed"}
             ]
         }
-        proposal = {
-            "id": "proposal-1",
-            "objective": "Write report.",
-            "criteria": "- Report exists.",
-            "plan": {"title": "Report"},
-            "origin": "plan_mode",
-            "rubric_iterations": 2,
-        }
-        activate_goal(record, proposal)
-        update_active_goal_after_turn(record, "max_iterations_reached")
-        self.assertEqual(current_active_goal(record)["last_rubric_status"], "max_iterations_reached")
-        update_active_goal_after_turn(record, "satisfied")
-        self.assertIsNone(current_active_goal(record))
-        self.assertEqual(record["active_goal"]["status"], "complete")
-        self.assertEqual(record["events"][0]["status"], "complete")
+        value = goal_artifact(goal_id="goal-1", title="Report", objective="Write report.", success_criteria="- Report exists.", rubric_enabled=True, rubric_iterations=2)
+        replace_current_goal(record, value)
+        start_goal_attempt(record)
+        capped = finish_goal_attempt(record, rubric_status="max_iterations_reached")
+        self.assertEqual(capped["status"], "max_iterations_reached")
+        start_goal_attempt(record)
+        completed = finish_goal_attempt(record, rubric_status="satisfied")
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["completion_source"], "rubric-verified")
+        self.assertEqual(record["events"][0]["status"], "completed")
+        self.assertEqual(clear_current_goal(record)["id"], "goal-1")
+        self.assertIsNone(current_goal(record))
 
-        activate_goal(record, {**proposal, "id": "proposal-2"})
-        cleared = clear_active_goal(record)
-        self.assertEqual(cleared["status"], "cleared")
-        self.assertIsNone(current_active_goal(record))
-
-    def test_new_active_goal_explicitly_supersedes_previous_proposal(self) -> None:
+    def test_new_current_goal_supersedes_previous_goal(self) -> None:
         record = {
             "events": [
-                {"type": "proposal", "proposal": {"id": "proposal-1"}, "status": "approved for implementation"},
-                {"type": "proposal", "proposal": {"id": "proposal-2"}, "status": "approved for implementation"},
+                {"type": "goal", "goal": {"id": "goal-1"}, "status": "proposed"},
             ]
         }
-        base = {
-            "objective": "Do work.",
-            "criteria": "- Work is done.",
-            "plan": {"title": "Work"},
-            "origin": "goal_command",
-            "rubric_iterations": 3,
-        }
-        activate_goal(record, {**base, "id": "proposal-1"})
-        activate_goal(record, {**base, "id": "proposal-2"})
-
+        first = goal_artifact(goal_id="goal-1", title="Work", objective="Do work.", success_criteria="- Work is done.", rubric_enabled=False, rubric_iterations=3)
+        replace_current_goal(record, first)
+        second = goal_artifact(goal_id="goal-2", title="More work", objective="Do more work.", success_criteria="- More work is done.", rubric_enabled=False, rubric_iterations=3)
+        replace_current_goal(record, second)
         self.assertEqual(record["events"][0]["status"], "superseded")
-        self.assertEqual(record["active_goal"]["proposal_id"], "proposal-2")
+        self.assertEqual(record["current_goal"]["id"], "goal-2")
 
-    def test_action_resume_context_can_exclude_duplicate_active_proposal(self) -> None:
-        proposal = {
-            "id": "proposal-1",
-            "objective": "Build search.",
-            "criteria": "- Search works.",
-            "plan": {"title": "Search"},
-            "origin": "goal_command",
-            "rubric_iterations": 3,
-        }
-        record = {
-            "active_goal": {
-                **proposal,
-                "proposal_id": "proposal-1",
-                "status": "active",
-                "last_rubric_status": "max_iterations_reached",
-            },
-            "events": [
-                {"id": 1, "type": "proposal", "proposal": proposal, "status": "approved for implementation"}
-            ],
-        }
+    def test_action_resume_context_can_exclude_duplicate_current_goal(self) -> None:
+        goal = goal_artifact(goal_id="goal-1", title="Search", objective="Build search.", success_criteria="- Search works.", rubric_enabled=True, rubric_iterations=3)
+        record = {"current_goal": goal, "events": [{"id": 1, "type": "goal", "goal": goal, "status": "proposed"}]}
 
         planning_context = context.build_resume_context(record)
-        action_context = context.build_resume_context(record, exclude_active_goal=True)
+        action_context = context.build_resume_context(record, exclude_current_goal=True)
 
-        self.assertIn("Recent goal-driven proposals", planning_context)
-        self.assertNotIn("Recent goal-driven proposals", action_context)
+        self.assertIn("Authoritative current Goal", planning_context)
+        self.assertNotIn("Authoritative current Goal", action_context)
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -935,9 +908,11 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recording = SessionRecordingRenderer(renderer, recorder)
         completions = {
             "ask_user": "Use A",
-            "prepare_goal": "Criteria are ready. Continue to present_plan.",
+            "prepare_goal": "Success Criteria are ready. Continue to present_goal.",
             "prepare_plan": "Success Criteria are ready. Continue to present_plan.",
+            "present_goal": "Goal presented for user review.",
             "present_plan": "Plan presented for user review.",
+            "goal_show": "Current Goal rendered.",
             "plan_show": "Current Plan rendered.",
         }
 
@@ -999,6 +974,37 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Current Plan rendered.")
         self.assertEqual(renderer.plans, [retained])
 
+    async def test_recording_renderer_show_mismatches_name_the_current_artifact(self) -> None:
+        goal = goal_artifact(
+            goal_id="goal-1",
+            title="Exact Goal",
+            objective="Deliver the result.",
+            success_criteria="- The result is complete.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        plan = plan_artifact(
+            plan_id="plan-1",
+            title="Exact Plan",
+            objective="Deliver the result.",
+            context_and_constraints="Preserve unrelated work.",
+            key_changes=["Produce the deliverable."],
+            test_plan=["Verify the result."],
+            assumptions=["No additional assumptions."],
+            success_criteria="- The result is complete.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        goal_recording = SessionRecordingRenderer(
+            object(), SessionRecorder({"events": [], "current_goal": goal}, Store(), "action")
+        )
+        plan_recording = SessionRecordingRenderer(
+            object(), SessionRecorder({"events": [], "current_plan": plan}, Store(), "action")
+        )
+
+        self.assertIn("Use /goal-show", await goal_recording.show_plan())
+        self.assertIn("Use /plan-show", await plan_recording.show_goal())
+
     def test_rubric_results_are_persisted_as_events_and_reconciled(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
@@ -1018,7 +1024,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["evaluation"]["result"], "max_iterations_reached")
         self.assertEqual(events[0]["max_iterations"], 1)
 
-    def test_normalize_proposals_keeps_goal_fields_separately_recoverable(self) -> None:
+    def test_legacy_proposal_keeps_goal_fields_separately_recoverable(self) -> None:
         events = [
             {
                 "id": 1,
@@ -1037,15 +1043,14 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        proposals = context.normalize_proposals(events)
+        goals = context.normalize_goals(events)
         resume = context.build_resume_context({"events": events})
 
-        self.assertEqual(proposals[0]["original_objective"], "Build search.")
-        self.assertIn("Resolved decisions", proposals[0]["objective"])
-        self.assertEqual(proposals[0]["criteria"], "- Search returns ranked results.")
-        self.assertEqual(proposals[0]["plan"]["title"], "Search plan")
-        self.assertIn("Recent goal-driven proposals:", resume)
-        self.assertIn("Definition of Done", resume)
+        self.assertIn("Resolved decisions", goals[0]["objective"])
+        self.assertEqual(goals[0]["success_criteria"], "- Search returns ranked results.")
+        self.assertNotIn("plan", goals[0])
+        self.assertIn("Historical Goals (not authoritative):", resume)
+        self.assertIn("Success Criteria", resume)
 
     def test_malformed_persisted_iteration_values_restore_defaults(self) -> None:
         events = [
@@ -1068,7 +1073,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        self.assertEqual(context.normalize_proposals(events)[0]["rubric_iterations"], 3)
+        self.assertEqual(context.normalize_goals(events)[0]["rubric_iterations"], 3)
         self.assertEqual(context.normalize_events(events)[1]["max_iterations"], 1)
 
     def test_normalize_events_replays_control_events_in_original_order(self) -> None:

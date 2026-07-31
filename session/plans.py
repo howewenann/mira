@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
-from session.goals import bounded_iterations
+from session.values import bounded_iterations
 
 PLAN_STATUSES = {
     "proposed",
@@ -139,10 +139,17 @@ def current_plan(record: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def replace_current_plan(record: dict[str, Any], value: dict[str, Any]) -> dict[str, Any]:
-    """Replace the authoritative Plan without creating a second history store."""
+    """Replace the authoritative Plan and supersede any current formal artifact."""
     normalized = normalize_current_plan(value)
     if normalized is None:
         raise ValueError("replacement Plan is incomplete")
+    previous_plan = current_plan(record)
+    if previous_plan is not None:
+        _set_plan_event_status(record, previous_plan["id"], "superseded")
+    previous_goal = record.get("current_goal")
+    if isinstance(previous_goal, dict):
+        _set_goal_event_status(record, str(previous_goal.get("id") or ""), "superseded")
+    record["current_goal"] = None
     record["current_plan"] = normalized
     return normalized
 
@@ -241,6 +248,16 @@ def _set_plan_event_status(record: dict[str, Any], plan_id: str, status: str) ->
             continue
         plan = event.get("plan")
         if event.get("type") == "plan" and isinstance(plan, dict) and str(plan.get("id") or "") == plan_id:
+            event["status"] = status
+            return
+
+
+def _set_goal_event_status(record: dict[str, Any], goal_id: str, status: str) -> None:
+    for event in record.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        goal = event.get("goal")
+        if event.get("type") == "goal" and isinstance(goal, dict) and str(goal.get("id") or "") == goal_id:
             event["status"] = status
             return
 

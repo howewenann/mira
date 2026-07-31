@@ -57,12 +57,24 @@ def plan_request(interrupt: Any) -> dict[str, Any]:
     return normalize_plan(value if isinstance(value, dict) else {})
 
 
-def research_summary_request(interrupt: Any, *, limit: int = 4000) -> str:
-    """Extract the bounded research handoff from prepare_goal."""
+def prepare_goal_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]:
+    """Extract the bounded objective and evidence handoff from prepare_goal."""
     value = getattr(interrupt, "value", interrupt)
     if not isinstance(value, dict):
-        return ""
-    return str(value.get("research_summary") or "").strip()[:limit]
+        return {"objective": "", "context_and_constraints": "", "research_evidence": ""}
+    return {
+        "objective": str(value.get("objective") or "").strip()[:limit],
+        "context_and_constraints": str(value.get("context_and_constraints") or "").strip()[:limit],
+        "research_evidence": str(value.get("research_evidence") or value.get("research_summary") or "").strip()[:limit],
+    }
+
+
+def goal_title_request(interrupt: Any) -> str:
+    """Extract the concise title supplied by present_goal."""
+    value = getattr(interrupt, "value", interrupt)
+    if not isinstance(value, dict):
+        return "Goal"
+    return compact_text(value.get("title")) or "Goal"
 
 
 def prepare_plan_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]:

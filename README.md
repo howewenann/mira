@@ -109,8 +109,8 @@ it only with a trusted local endpoint.
 | Enter Plan mode or send its first prompt | `/plan`, `/plan <prompt>` |
 | Return to action mode | `/act` |
 | Show, resume, or clear the current Plan | `/plan-show`, `/plan-resume`, `/plan-clear` |
-| Review a graded Plan + Goal proposal | `/goal <prompt>` |
-| Show or clear the active goal | `/goal show`, `/goal clear` |
+| Create an outcome-focused Goal | `/goal <prompt>` |
+| Show, resume, or clear the current Goal | `/goal-show`, `/goal-resume`, `/goal-clear` |
 | Compact older context | `/compact` |
 | Reload configuration and resources | `/reload` |
 | Repair unavailable custom tools | `/issues` |
@@ -120,15 +120,24 @@ Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 and are listed in `/help`.
 
 Plan mode is a continuous read-only conversation. Discuss and investigate
-normally; when a proposal is decision-complete, MIRA generates Success Criteria
+normally; when the work is decision-complete, MIRA generates Success Criteria
 before presenting one durable Plan with Implement, Revise, and Close actions.
 `/plan-show` reopens the exact retained Plan, `/plan-resume` continues incomplete
 work, and `/plan-clear` removes it without erasing transcript history. Rubric
 grading changes only execution-time evaluation, not Plan construction.
 
-Approved Goals remain active across turns and session resumes until satisfied,
-cleared, or superseded. Rubric grading and `/goal` are opt-in through
-`/settings`.
+Plan and Goal are alternative durable formal-work artifacts: a Plan contains an
+Objective, approach, and Success Criteria; a Goal contains only an Objective
+and Success Criteria, leaving the approach to the Act agent. MIRA retains one
+current Plan or Goal, never both. Replacing incomplete formal work requires
+confirmation, and replacement occurs only after the new artifact is presented.
+
+`/goal <prompt>` works with rubric grading on or off and presents Implement,
+Revise, and Close actions. `/goal-show` reopens the exact Goal, `/goal-resume`
+continues incomplete work, and `/goal-clear` removes it without deleting
+history. Successful non-rubric attempts are agent-declared; rubric-enabled
+attempts complete only when rubric-verified. A Goal never contains a hidden
+implementation Plan; agents reopen it through `goal_show`.
 
 ## Project Resources
 

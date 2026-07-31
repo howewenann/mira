@@ -12,6 +12,8 @@ PREPARE_PLAN_TOOL = "prepare_plan"
 PRESENT_PLAN_TOOL = "present_plan"
 PLAN_SHOW_TOOL = "plan_show"
 PREPARE_GOAL_TOOL = "prepare_goal"
+PRESENT_GOAL_TOOL = "present_goal"
+GOAL_SHOW_TOOL = "goal_show"
 
 PLANNING_STAGE_PLAN_RESEARCH = "plan_research"
 PLANNING_STAGE_PLAN_FINALIZE = "plan_finalize"
@@ -92,6 +94,11 @@ PLAN_FINALIZATION_POLICY = """MIRA has generated Success Criteria for a decision
 Use the supplied Objective, Context and Constraints, and Success Criteria as binding context.
 present_plan is the only visible tool and a call is required.
 Create the concise complete replacement Plan. Do not return the Plan in prose."""
+
+GOAL_FINALIZATION_POLICY = """MIRA has generated Success Criteria for a decision-complete Goal.
+Use the supplied authoritative Objective and Success Criteria as binding context.
+present_goal is the only visible tool and a call is required.
+Supply a concise user-facing title. Do not create a Plan or return the Goal in prose."""
 
 APPROVED_PLAN_EXECUTION_INSTRUCTIONS = """Execute the exact approved Plan and Success Criteria as binding context:
 - Use a todo/checklist when the Plan has multiple implementation or verification steps.

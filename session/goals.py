@@ -1,117 +1,286 @@
-"""Durable active-goal state derived from approved proposals."""
+"""One authoritative durable Goal and its execution lifecycle."""
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, TypedDict
 
-ACTIVE_GOAL_STATUSES = {"active", "complete", "cleared", "superseded"}
+from session.values import bounded_iterations
+
+GOAL_STATUSES = {
+    "proposed",
+    "active",
+    "paused",
+    "max_iterations_reached",
+    "completed",
+}
+RESUMABLE_GOAL_STATUSES = {
+    "proposed",
+    "active",
+    "paused",
+    "max_iterations_reached",
+}
 
 
-def normalize_active_goal(value: Any) -> dict[str, Any] | None:
-    """Return a safe active-goal record without inferring one from history."""
+class Goal(TypedDict):
+    """The user-visible Goal fields."""
+
+    title: str
+    objective: str
+    success_criteria: str
+
+
+class GoalArtifact(Goal):
+    """The exact retained Goal plus lifecycle metadata."""
+
+    id: str
+    status: str
+    rubric_enabled: bool
+    rubric_iterations: int
+    last_rubric_status: str
+    completion_source: str
+    attempts: int
+    created_at: str
+    updated_at: str
+
+
+def normalize_current_goal(value: Any) -> dict[str, Any] | None:
+    """Return a safe GoalArtifact without inferring one from chat prose."""
     if not isinstance(value, dict):
         return None
-    plan = value.get("plan")
-    if not isinstance(plan, dict):
-        return None
-    proposal_id = str(value.get("proposal_id") or value.get("id") or "").strip()
+    goal_id = compact_text(value.get("id"))
+    title = compact_text(value.get("title"))
     objective = str(value.get("objective") or "").strip()
-    criteria = str(value.get("criteria") or "").strip()
-    if not proposal_id or not objective or not criteria:
+    criteria = str(value.get("success_criteria") or value.get("criteria") or "").strip()
+    if not all((goal_id, title, objective, criteria)):
         return None
-    status = str(value.get("status") or "active").strip()
-    if status not in ACTIVE_GOAL_STATUSES:
-        status = "active"
-    origin = str(value.get("origin") or "goal_command")
-    if origin not in {"plan_mode", "goal_command"}:
-        origin = "goal_command"
-    raw_decisions = value.get("resolved_decisions")
-    decisions = raw_decisions if isinstance(raw_decisions, list) else []
+    status = compact_text(value.get("status") or "proposed")
+    if status == "complete":
+        status = "completed"
+    if status not in GOAL_STATUSES:
+        status = "proposed"
+    created_at = str(value.get("created_at") or now_iso())
     return {
-        "proposal_id": proposal_id,
-        "id": str(value.get("id") or proposal_id),
-        "original_objective": str(value.get("original_objective") or objective).strip(),
+        "id": goal_id,
+        "title": title,
         "objective": objective,
-        "resolved_decisions": [dict(item) for item in decisions if isinstance(item, dict)],
-        "criteria": criteria,
-        "plan": dict(plan),
-        "origin": origin,
-        "rubric_iterations": bounded_iterations(value.get("rubric_iterations")),
+        "success_criteria": criteria,
         "status": status,
-        "last_rubric_status": str(value.get("last_rubric_status") or "").strip(),
+        "rubric_enabled": bool(value.get("rubric_enabled", False)),
+        "rubric_iterations": bounded_iterations(value.get("rubric_iterations")),
+        "last_rubric_status": compact_text(value.get("last_rubric_status")),
+        "completion_source": compact_text(value.get("completion_source")),
+        "attempts": nonnegative_int(value.get("attempts")),
+        "created_at": created_at,
+        "updated_at": str(value.get("updated_at") or created_at),
     }
 
 
-def current_active_goal(record: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the authoritative goal only while it remains active."""
-    value = normalize_active_goal(record.get("active_goal"))
-    return value if value and value["status"] == "active" else None
-
-
-def activate_goal(record: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
-    """Persist an approved proposal and explicitly supersede a prior goal."""
-    previous = current_active_goal(record)
-    if previous is not None:
-        _set_proposal_status(record, previous["proposal_id"], "superseded")
-    value = normalize_active_goal(
+def migrate_active_goal(value: Any) -> dict[str, Any] | None:
+    """Migrate one legacy embedded-Plan active_goal without retaining its Plan."""
+    if not isinstance(value, dict):
+        return None
+    legacy_status = compact_text(value.get("status") or "active")
+    if legacy_status in {"cleared", "superseded", "discarded"}:
+        return None
+    objective = str(value.get("objective") or value.get("original_objective") or "").strip()
+    criteria = str(value.get("criteria") or value.get("success_criteria") or "").strip()
+    goal_id = compact_text(value.get("id") or value.get("proposal_id"))
+    if not all((goal_id, objective, criteria)):
+        return None
+    plan = value.get("plan") if isinstance(value.get("plan"), dict) else {}
+    title = compact_text(value.get("title") or plan.get("title")) or compact_title(objective)
+    status = "completed" if legacy_status == "complete" else legacy_status
+    if status not in GOAL_STATUSES:
+        status = "active"
+    last_status = compact_text(value.get("last_rubric_status"))
+    completion_source = (
+        "rubric-verified"
+        if status == "completed" and last_status == "satisfied"
+        else ""
+    )
+    now = now_iso()
+    return normalize_current_goal(
         {
-            **proposal,
-            "proposal_id": proposal.get("id"),
-            "status": "active",
+            "id": goal_id,
+            "title": title,
+            "objective": objective,
+            "success_criteria": criteria,
+            "status": status,
+            "rubric_enabled": True,
+            "rubric_iterations": value.get("rubric_iterations"),
+            "last_rubric_status": last_status,
+            "completion_source": completion_source,
+            "attempts": value.get("attempts", 1 if status != "proposed" else 0),
+            "created_at": value.get("created_at") or now,
+            "updated_at": value.get("updated_at") or value.get("created_at") or now,
+        }
+    )
+
+
+def goal_artifact(
+    *,
+    goal_id: str,
+    title: str,
+    objective: str,
+    success_criteria: str,
+    rubric_enabled: bool,
+    rubric_iterations: int,
+) -> dict[str, Any]:
+    """Create a complete proposed GoalArtifact."""
+    now = now_iso()
+    value = normalize_current_goal(
+        {
+            "id": goal_id,
+            "title": title,
+            "objective": objective,
+            "success_criteria": success_criteria,
+            "status": "proposed",
+            "rubric_enabled": rubric_enabled,
+            "rubric_iterations": rubric_iterations,
             "last_rubric_status": "",
+            "completion_source": "",
+            "attempts": 0,
+            "created_at": now,
+            "updated_at": now,
         }
     )
     if value is None:
-        raise ValueError("approved proposal is incomplete")
-    record["active_goal"] = value
+        raise ValueError("Goal title, Objective, and Success Criteria must be complete")
     return value
 
 
-def update_active_goal_after_turn(record: dict[str, Any], rubric_status: str) -> dict[str, Any] | None:
-    """Persist the latest rubric result and complete only satisfied goals."""
-    value = current_active_goal(record)
+def current_goal(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the session's single authoritative Goal."""
+    return normalize_current_goal(record.get("current_goal"))
+
+
+def replace_current_goal(record: dict[str, Any], value: dict[str, Any]) -> dict[str, Any]:
+    """Replace the authoritative Goal and supersede any current formal artifact."""
+    normalized = normalize_current_goal(value)
+    if normalized is None:
+        raise ValueError("replacement Goal is incomplete")
+    previous_goal = current_goal(record)
+    if previous_goal is not None:
+        _set_goal_event_status(record, previous_goal["id"], "superseded")
+    previous_plan = record.get("current_plan")
+    if isinstance(previous_plan, dict):
+        _set_plan_event_status(record, str(previous_plan.get("id") or ""), "superseded")
+    record["current_plan"] = None
+    record["current_goal"] = normalized
+    return normalized
+
+
+def start_goal_attempt(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Start or restart execution of the exact retained Goal."""
+    value = current_goal(record)
     if value is None:
         return None
-    status = str(rubric_status or "").strip()
-    value["last_rubric_status"] = status
-    if status == "satisfied":
-        value["status"] = "complete"
-        _set_proposal_status(record, value["proposal_id"], "complete")
-    record["active_goal"] = value
+    value["status"] = "active"
+    value["last_rubric_status"] = ""
+    value["completion_source"] = ""
+    value["attempts"] += 1
+    value["updated_at"] = now_iso()
+    record["current_goal"] = value
+    _set_goal_event_status(record, value["id"], "active")
     return value
 
 
-def clear_active_goal(record: dict[str, Any]) -> dict[str, Any] | None:
-    """Clear the active goal without deleting proposal or rubric history."""
-    value = current_active_goal(record)
-    if value is None:
-        return None
-    value["status"] = "cleared"
-    record["active_goal"] = value
-    _set_proposal_status(record, value["proposal_id"], "cleared")
+def finish_goal_attempt(
+    record: dict[str, Any],
+    *,
+    rubric_status: str = "",
+    outcome: str = "completed",
+) -> dict[str, Any] | None:
+    """Finish or pause the active Goal attempt from observable runtime state."""
+    value = current_goal(record)
+    if value is None or value["status"] != "active":
+        return value
+    status = compact_text(rubric_status)
+    if status:
+        value["last_rubric_status"] = status
+    if outcome != "completed":
+        value["status"] = "paused"
+    elif not value["rubric_enabled"]:
+        value["status"] = "completed"
+        value["completion_source"] = "agent-declared"
+    elif status == "satisfied":
+        value["status"] = "completed"
+        value["completion_source"] = "rubric-verified"
+    elif status == "max_iterations_reached":
+        value["status"] = "max_iterations_reached"
+    else:
+        value["status"] = "paused"
+    value["updated_at"] = now_iso()
+    record["current_goal"] = value
+    _set_goal_event_status(record, value["id"], value["status"])
     return value
 
 
-def _set_proposal_status(record: dict[str, Any], proposal_id: str, status: str) -> None:
+def pause_current_goal(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Leave an interrupted or failed active Goal resumable."""
+    value = current_goal(record)
+    if value is not None and value["status"] == "active":
+        value["status"] = "paused"
+        value["updated_at"] = now_iso()
+        record["current_goal"] = value
+        _set_goal_event_status(record, value["id"], "paused")
+    return value
+
+
+def clear_current_goal(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Remove only current_goal while retaining immutable transcript events."""
+    value = current_goal(record)
+    record["current_goal"] = None
+    return value
+
+
+def goal_artifact_text(value: dict[str, Any]) -> str:
+    """Render the exact Goal as binding model context."""
+    return "\n".join(
+        [
+            f"Title: {value.get('title') or 'Goal'}",
+            "",
+            "Objective:",
+            str(value.get("objective") or ""),
+            "",
+            "Success Criteria:",
+            str(value.get("success_criteria") or ""),
+        ]
+    )
+
+
+def _set_goal_event_status(record: dict[str, Any], goal_id: str, status: str) -> None:
     for event in record.get("events", []):
-        if not isinstance(event, dict):
-            continue
-        proposal = event.get("proposal")
-        if (
-            event.get("type") == "proposal"
-            and isinstance(proposal, dict)
-            and str(proposal.get("id") or "") == proposal_id
-        ):
+        goal = event.get("goal") if isinstance(event, dict) else None
+        if event.get("type") == "goal" and isinstance(goal, dict) and str(goal.get("id") or "") == goal_id:
             event["status"] = status
             return
 
 
-def bounded_iterations(value: Any) -> int:
-    """Return the persisted rubric cap within the supported range."""
-    if isinstance(value, bool):
-        return 3
+def _set_plan_event_status(record: dict[str, Any], plan_id: str, status: str) -> None:
+    for event in record.get("events", []):
+        plan = event.get("plan") if isinstance(event, dict) else None
+        if event.get("type") == "plan" and isinstance(plan, dict) and str(plan.get("id") or "") == plan_id:
+            event["status"] = status
+            return
+
+
+def compact_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def compact_title(value: str) -> str:
+    words = compact_text(value).rstrip(".!?").split()
+    return " ".join(words[:8]) or "Goal"
+
+
+def nonnegative_int(value: Any) -> int:
     try:
-        parsed = int(value)
+        return max(0, int(value))
     except (TypeError, ValueError):
-        return 3
-    return parsed if 1 <= parsed <= 20 else 3
+        return 0
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

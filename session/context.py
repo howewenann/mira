@@ -7,20 +7,31 @@ from datetime import datetime, timezone
 from typing import Any
 
 from session.dashboard import normalize_dashboard
-from session.goals import normalize_active_goal
+from session.goals import goal_artifact_text, migrate_active_goal, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
 RESUME_MESSAGE_LIMIT = 20
-RESUME_PLAN_LIMIT = 3
-RESUME_PROPOSAL_LIMIT = 3
+RESUME_GOAL_LIMIT = 3
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 
 
 def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
+    plan = normalize_current_plan(record.get("current_plan"))
+    goal = normalize_current_goal(record.get("current_goal"))
+    if goal is None:
+        goal = migrate_active_goal(record.get("active_goal"))
+    if plan is not None and goal is not None:
+        plan_updated = _artifact_timestamp(record.get("current_plan"))
+        goal_source = record.get("current_goal") or record.get("active_goal")
+        goal_updated = _artifact_timestamp(goal_source)
+        if goal_updated and plan_updated and goal_updated > plan_updated:
+            plan = None
+        else:
+            goal = None
     return {
         "id": str(record.get("id", "")),
         "title": safe_title(record.get("title")),
@@ -29,8 +40,8 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
         "turns": int(record.get("turns") or 0),
         "dashboard": normalize_dashboard(record.get("dashboard")),
-        "active_goal": normalize_active_goal(record.get("active_goal")),
-        "current_plan": normalize_current_plan(record.get("current_plan")),
+        "current_plan": plan,
+        "current_goal": goal,
         "events": normalize_events(record.get("events")),
     }
 
@@ -66,6 +77,13 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["plan"] = plan
             status = compact_line(item.get("status") or "pending")
             event["status"] = status or "pending"
+        elif event_type == "goal":
+            goal = normalize_current_goal(item.get("goal"))
+            if goal is None:
+                continue
+            event["goal"] = goal
+            status = compact_line(item.get("status") or "proposed")
+            event["status"] = status or "proposed"
         elif event_type == "proposal":
             proposal = item.get("proposal")
             if not isinstance(proposal, dict):
@@ -204,34 +222,24 @@ def normalize_plans(value: Any) -> list[dict[str, Any]]:
     return plans
 
 
-def normalize_proposals(value: Any) -> list[dict[str, Any]]:
-    """Return explicit goal/plan proposals for replay and resume context."""
-    proposals = []
+def normalize_goals(value: Any) -> list[dict[str, Any]]:
+    """Return dedicated Goal events plus readable legacy proposal events."""
+    goals = []
     for item in normalize_events(value):
+        if item["type"] == "goal":
+            goal = normalize_current_goal(item.get("goal"))
+            if goal is not None:
+                goals.append({**goal, "event_status": compact_line(item.get("status")), "created_at": item["created_at"]})
+            continue
         if item["type"] != "proposal":
             continue
-        value = item.get("proposal")
-        if not isinstance(value, dict):
+        legacy = item.get("proposal")
+        if not isinstance(legacy, dict):
             continue
-        plan = value.get("plan") if isinstance(value.get("plan"), dict) else None
-        raw_decisions = value.get("resolved_decisions")
-        decisions = raw_decisions if isinstance(raw_decisions, list) else []
-        proposals.append(
-            {
-                "id": compact_line(value.get("id") or f"proposal-{item['id']}"),
-                "kind": "plan" if value.get("kind") == "plan" or plan is not None else "goal",
-                "origin": compact_line(value.get("origin")),
-                "status": compact_line(item.get("status") or "pending"),
-                "original_objective": compact_text(value.get("original_objective")),
-                "objective": compact_text(value.get("objective")),
-                "resolved_decisions": [dict(decision) for decision in decisions if isinstance(decision, dict)],
-                "criteria": compact_text(value.get("criteria")),
-                "plan": plan,
-                "rubric_iterations": bounded_positive_int(value.get("rubric_iterations"), default=3, maximum=20),
-                "created_at": item["created_at"],
-            }
-        )
-    return proposals
+        migrated = migrate_active_goal({**legacy, "status": item.get("status")})
+        if migrated is not None:
+            goals.append({**migrated, "event_status": compact_line(item.get("status")), "created_at": item["created_at"]})
+    return goals
 
 
 def bounded_positive_int(value: Any, *, default: int, maximum: int) -> int:
@@ -339,16 +347,15 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
     return False
 
 
-def build_resume_context(record: dict[str, Any], *, exclude_active_goal: bool = False) -> str:
+def build_resume_context(record: dict[str, Any], *, exclude_current_goal: bool = False) -> str:
     compactions = normalize_compactions(record.get("events"))
     retained_plan = normalize_current_plan(record.get("current_plan"))
-    proposals = normalize_proposals(record.get("events"))
-    active_goal = normalize_active_goal(record.get("active_goal"))
-    if exclude_active_goal and active_goal and active_goal.get("status") == "active":
-        proposals = [value for value in proposals if value["id"] != active_goal["proposal_id"]]
-    proposals = proposals[-RESUME_PROPOSAL_LIMIT:]
+    retained_goal = normalize_current_goal(record.get("current_goal"))
+    historical_goals = normalize_goals(record.get("events"))[-RESUME_GOAL_LIMIT:]
+    if retained_goal is not None:
+        historical_goals = [value for value in historical_goals if value["id"] != retained_goal["id"]]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    if not compactions and not retained_plan and not proposals and not messages:
+    if not compactions and not retained_plan and not retained_goal and not historical_goals and not messages:
         return ""
 
     parts = ["Previous MIRA session context:"]
@@ -364,10 +371,13 @@ def build_resume_context(record: dict[str, Any], *, exclude_active_goal: bool = 
         parts.append(
             f"Status: {retained_plan['status']}\n{plan_artifact_text(retained_plan)}"
         )
-    if proposals:
-        parts.append("Recent goal-driven proposals:")
-        for value in proposals:
-            parts.append(proposal_context_text(value))
+    if retained_goal and not exclude_current_goal:
+        parts.append("Authoritative current Goal:")
+        parts.append(f"Status: {retained_goal['status']}\n{goal_artifact_text(retained_goal)}")
+    if historical_goals:
+        parts.append("Historical Goals (not authoritative):")
+        for value in historical_goals:
+            parts.append(f"{value['id']} ({value.get('event_status') or value['status']})\n{goal_artifact_text(value)}")
     if messages:
         parts.append("Recent visible transcript:")
         for message in messages:
@@ -380,12 +390,12 @@ def with_resume_context(
     session: dict[str, Any],
     text: str,
     *,
-    exclude_active_goal: bool = False,
+    exclude_current_goal: bool = False,
 ) -> str:
     if not session.pop("resume_context_pending", False):
         return text
 
-    context = build_resume_context(session, exclude_active_goal=exclude_active_goal)
+    context = build_resume_context(session, exclude_current_goal=exclude_current_goal)
     if not context:
         return text
     return f"{context}\n\nCurrent user request:\n{text}"
@@ -395,7 +405,8 @@ def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> Non
     record["resume_context_pending"] = resumed and (
         bool(normalize_compactions(record.get("events")))
         or bool(normalize_current_plan(record.get("current_plan")))
-        or bool(normalize_proposals(record.get("events")))
+        or bool(normalize_current_goal(record.get("current_goal")))
+        or bool(normalize_goals(record.get("events")))
         or bool(normalize_messages(record.get("events")))
     )
 
@@ -430,33 +441,11 @@ def compact_items(value: Any) -> list[str]:
     return items
 
 
-def plan_context_text(plan: dict[str, Any]) -> str:
-    """Return one structured plan block for resume context."""
-    lines = [f"{plan['id']} ({plan['status']}): {plan['title']}"]
-    for heading, key in (
-        ("Summary", "summary"),
-        ("Key Changes", "key_changes"),
-        ("Test Plan", "test_plan"),
-        ("Assumptions", "assumptions"),
-    ):
-        items = plan.get(key)
-        if not isinstance(items, list) or not items:
-            continue
-        lines.append(f"{heading}:")
-        lines.extend(f"- {item}" for item in items)
-    return "\n".join(lines)
-
-
-def proposal_context_text(value: dict[str, Any]) -> str:
-    """Return separately labelled objective, criteria, and optional plan context."""
-    label = value.get("origin") or value.get("kind") or "legacy"
-    lines = [f"{value['id']} ({value['status']}, {label})"]
-    lines.extend(["Objective:", value["objective"], "Definition of Done:", value["criteria"]])
-    plan = value.get("plan")
-    if isinstance(plan, dict):
-        lines.extend(["Plan:", plan_context_text({"id": value["id"], "status": value["status"], **plan})])
-    return "\n".join(lines)
-
-
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _artifact_timestamp(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("updated_at") or value.get("created_at") or "")

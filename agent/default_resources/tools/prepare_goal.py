@@ -1,4 +1,4 @@
-"""Default rubric-planning transition tool for MIRA."""
+"""Read-only preparation boundary for durable MIRA Goals."""
 
 from __future__ import annotations
 
@@ -6,21 +6,28 @@ from langchain.tools import tool
 from langgraph.types import interrupt
 
 PREPARE_GOAL_INTERRUPT_TYPE = "prepare_goal"
-RESEARCH_SUMMARY_MAX_CHARS = 4000
+GOAL_FIELD_MAX_CHARS = 4000
 
 
 @tool(
     "prepare_goal",
     description=(
-        "Signal that read-only research is complete and every material user decision has been resolved, "
-        "so MIRA can generate acceptance criteria before you produce the final plan. Call this instead of "
-        "present_plan on the first pass when rubric planning is enabled. Pass a concise research_summary of "
-        "only material facts, constraints, existing behavior, and relevant context; omit plans, new requirements, "
-        "and instructions, and use an empty string when no research was needed. After MIRA resumes the tool with "
-        "approved criteria, create the final plan with present_plan."
+        "Begin formal Goal construction when the Goal objective is sufficiently understood and every "
+        "material user decision is resolved. Pass the authoritative objective plus concise relevant "
+        "context, constraints, and bounded research evidence. MIRA will generate Success Criteria next. "
+        "Do not produce or include an implementation Plan, return the Goal in prose, or add unsupported "
+        "scope. Use ask_user first when user input is still required."
     ),
 )
-def prepare_goal(research_summary: str = "") -> str:
-    """Pause planning so MIRA can generate acceptance criteria."""
-    summary = str(research_summary or "").strip()[:RESEARCH_SUMMARY_MAX_CHARS]
-    return str(interrupt({"type": PREPARE_GOAL_INTERRUPT_TYPE, "research_summary": summary}))
+def prepare_goal(objective: str, context_and_constraints: str = "", research_evidence: str = "") -> str:
+    """Pause Goal construction while MIRA generates Success Criteria."""
+    return str(
+        interrupt(
+            {
+                "type": PREPARE_GOAL_INTERRUPT_TYPE,
+                "objective": str(objective or "").strip()[:GOAL_FIELD_MAX_CHARS],
+                "context_and_constraints": str(context_and_constraints or "").strip()[:GOAL_FIELD_MAX_CHARS],
+                "research_evidence": str(research_evidence or "").strip()[:GOAL_FIELD_MAX_CHARS],
+            }
+        )
+    )

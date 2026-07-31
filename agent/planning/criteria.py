@@ -89,11 +89,6 @@ class SuccessCriteriaService:
         return text
 
 
-# Compatibility for the existing Goal workflow. Goal will adopt the shared
-# user-facing name in a later, separately scoped UX redesign.
-GoalCriteriaService = SuccessCriteriaService
-
-
 def criteria_context(objective: str, research_context: str = "") -> str:
     """Return explicitly delimited objective and optional research evidence."""
     sections = [f"<objective>\n{objective.strip()}\n</objective>"]

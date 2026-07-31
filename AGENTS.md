@@ -106,5 +106,14 @@
 - `plan_show` and `/plan-show` must reuse the exact Plan bubble renderer.
   Implement and `/plan-resume` execute the retained Plan in Act; Revise replaces
   it; Close only hides controls; `/plan-clear` alone removes it.
+- Formal Goals always use `prepare_goal` -> `SuccessCriteriaService` -> forced
+  `present_goal`, regardless of rubric settings. A Goal contains only its exact
+  Objective and Success Criteria; never generate or persist a hidden Plan.
+- Keep exactly one current formal artifact: `current_plan` or `current_goal`,
+  never both. Confirm replacement of incomplete formal work and do not replace
+  it until the new artifact is successfully presented.
+- `goal_show` and `/goal-show` must reuse the exact Goal bubble renderer.
+  Implement and `/goal-resume` execute the retained Goal only for that explicit
+  attempt; Revise replaces it; Close only hides controls; `/goal-clear` removes it.
 - When fixing execute or HITL issues, compare real behavior in both modes and
   prefer restoring DeepAgents normal flow over reimplementing tool execution.

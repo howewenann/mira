@@ -496,9 +496,13 @@ class RunTurnRenderer(RecordingRenderer):
         self.events.append(("present_plan", interrupt))
         return "Plan presented for user review."
 
+    async def present_goal(self, interrupt: Any) -> str:
+        self.events.append(("present_goal", interrupt))
+        return "Goal presented for user review."
+
     async def prepare_goal(self, interrupt: Any) -> str:
         self.events.append(("prepare_goal", interrupt))
-        return "Criteria are ready. Continue to present_plan."
+        return "Success Criteria are ready. Continue to present_goal."
 
     async def prepare_plan(self, interrupt: Any) -> str:
         self.events.append(("prepare_plan", interrupt))
@@ -507,6 +511,10 @@ class RunTurnRenderer(RecordingRenderer):
     async def show_plan(self, interrupt: Any) -> str:
         self.events.append(("plan_show", interrupt))
         return "Current Plan rendered."
+
+    async def show_goal(self, interrupt: Any) -> str:
+        self.events.append(("goal_show", interrupt))
+        return "Current Goal rendered."
 
     def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
         self.events.append(("rubric_started", run_id, pass_number, max_iterations))
@@ -1073,7 +1081,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 (
                     "tool_result",
                     "prepare_goal",
-                    "Criteria are ready. Continue to present_plan.",
+                    "Success Criteria are ready. Continue to present_goal.",
                     "call-prepare",
                 ),
             ],
@@ -1167,6 +1175,30 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ),
             renderer.events,
         )
+
+    async def test_run_turn_goal_show_uses_control_lifecycle_and_returns(self) -> None:
+        interrupt = {"type": "goal_show"}
+        call = {"name": "goal_show", "id": "call-goal-show", "args": {}, "completed": False}
+        agent = FakeAgent([FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt])])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "Show the current Goal.", renderer, "thread-1")
+
+        self.assertEqual(result.final_text, "")
+        self.assertIn(("goal_show", interrupt), renderer.events)
+        self.assertIn(("tool_result", "goal_show", "Current Goal rendered.", "call-goal-show"), renderer.events)
+
+    async def test_run_turn_present_goal_uses_dedicated_surface(self) -> None:
+        interrupt = {"type": "present_goal", "title": "Search"}
+        call = {"name": "present_goal", "id": "call-present-goal", "args": {"title": "Search"}, "completed": False}
+        agent = FakeAgent([FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt])])
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(agent, "finalize", renderer, "thread-1")
+
+        self.assertEqual(result.final_text, "")
+        self.assertIn(("present_goal", interrupt), renderer.events)
+        self.assertIn(("tool_result", "present_goal", "Goal presented for user review.", "call-present-goal"), renderer.events)
 
     async def test_control_surface_error_updates_original_call(self) -> None:
         interrupt = {

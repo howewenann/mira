@@ -34,6 +34,8 @@ from runtime.rubric_events import RubricEventRenderer
 from runtime.subagent_events import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
 from runtime.tool_call_args import normalized_call, tool_call_args
 from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
+
+FORMAL_CONSTRUCTION_CANCELLED = "Formal construction cancelled; current formal work retained."
 from runtime.usage import (
     empty_usage,
     has_context_usage,
@@ -490,7 +492,9 @@ async def run_turn(
         )
         prepare_plan_interrupt = first_typed_interrupt(interrupts, "prepare_plan")
         prepare_goal_interrupt = first_typed_interrupt(interrupts, "prepare_goal")
+        goal_interrupt = first_typed_interrupt(interrupts, "present_goal")
         plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
+        goal_show_interrupt = first_typed_interrupt(interrupts, "goal_show")
         plan_show_interrupt = first_typed_interrupt(interrupts, "plan_show")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
         if prepare_plan_interrupt is not None:
@@ -510,6 +514,9 @@ async def run_turn(
                 result,
                 call_id,
             )
+            if finalization == FORMAL_CONSTRUCTION_CANCELLED:
+                result.final_text = ""
+                return result
             payload = Command(
                 resume=finalization,
                 update={"planning_stage": PLANNING_STAGE_PLAN_FINALIZE},
@@ -531,6 +538,9 @@ async def run_turn(
                 result,
                 call_id,
             )
+            if finalization == FORMAL_CONSTRUCTION_CANCELLED:
+                result.final_text = ""
+                return result
             payload = Command(
                 resume=finalization,
                 update={
@@ -541,6 +551,25 @@ async def run_turn(
                     )
                 },
             )
+        elif goal_interrupt is not None:
+            call_id = ensure_control_tool_call(
+                "present_goal",
+                goal_interrupt,
+                output.get("value"),
+                event_renderer,
+                result,
+                tool_call_start,
+                tool_draft_start,
+            )
+            await resolve_control_surface(
+                "present_goal",
+                renderer.present_goal(goal_interrupt),
+                event_renderer,
+                result,
+                call_id,
+            )
+            result.final_text = ""
+            return result
         elif plan_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "present_plan",
@@ -554,6 +583,25 @@ async def run_turn(
             await resolve_control_surface(
                 "present_plan",
                 renderer.present_plan(plan_interrupt),
+                event_renderer,
+                result,
+                call_id,
+            )
+            result.final_text = ""
+            return result
+        elif goal_show_interrupt is not None:
+            call_id = ensure_control_tool_call(
+                "goal_show",
+                goal_show_interrupt,
+                output.get("value"),
+                event_renderer,
+                result,
+                tool_call_start,
+                tool_draft_start,
+            )
+            await resolve_control_surface(
+                "goal_show",
+                renderer.show_goal(goal_show_interrupt),
                 event_renderer,
                 result,
                 call_id,

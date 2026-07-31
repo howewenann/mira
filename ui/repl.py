@@ -20,9 +20,13 @@ from agent.planning.policy import (
     PLAN_DISABLED_TOOLS,
     PLAN_PROJECT_WRITE_TOOLS,
     PLANNING_STAGE_GOAL_RESEARCH,
+    PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
     OPTIONAL_RESEARCH_POLICY,
+    PREPARE_GOAL_TOOL,
+    PREPARE_PLAN_TOOL,
+    PRESENT_GOAL_TOOL,
     PRESENT_PLAN_TOOL,
     plan_disabled_tools_text,
 )
@@ -31,7 +35,7 @@ from runtime.context_usage import context_usage_scope
 from runtime.runner import TurnResult, run_turn
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.context import mark_resume_context_pending, update_title, with_resume_context
-from session.goals import current_active_goal, update_active_goal_after_turn
+from session.goals import current_goal, finish_goal_attempt, goal_artifact_text
 from session.plans import (
     current_plan,
     finish_plan_attempt,
@@ -53,23 +57,17 @@ The Plan, Success Criteria, approved assumptions, and constraints are binding.
 Current instruction:
 {text}"""
 
-ACTIVE_GOAL_CONTEXT_TEMPLATE = """Continue work under this approved active goal. The objective, Definition of Done, and plan are binding context for this action turn.
+GOAL_CONTEXT_TEMPLATE = """Work toward the exact retained Goal in Act mode.
 
-<objective>
-{objective}
-</objective>
+<current_goal>
+{goal}
+</current_goal>
 
-<definition_of_done>
-{criteria}
-</definition_of_done>
+The Objective and Success Criteria are binding.
+Choose the implementation approach using available context and tools.
+Report the result and evidence actually completed.
 
-<approved_plan>
-{plan}
-</approved_plan>
-
-{execution_instructions}
-
-Current user request:
+Current instruction:
 {text}"""
 
 PLAN_REVISION_TEMPLATE = """Revise this structured plan.
@@ -86,7 +84,7 @@ constraints, deliverables, or conditions of completion. Perform only necessary
 read-only discovery, resolve required decisions through ask_user, then call
 prepare_plan. Do not draft the final Plan in prose."""
 
-RUBRIC_PLAN_REVISION_TEMPLATE = """Revise this complete proposal through the shared read-only proposal pipeline.
+GOAL_REVISION_TEMPLATE = """Revise this complete Goal through MIRA's read-only Goal pipeline.
 
 The original user objective is authoritative.
 
@@ -94,31 +92,27 @@ The original user objective is authoritative.
 {objective}
 </objective>
 
-<previous_plan>
-{plan}
-</previous_plan>
-
-<previous_definition_of_done>
+<previous_success_criteria>
 {criteria}
-</previous_definition_of_done>
+</previous_success_criteria>
 
 <user_feedback>
 {feedback}
 </user_feedback>
 
-Perform only necessary read-only discovery, then call prepare_goal. The same feedback will be used first to revise the Definition of Done and then to revise the complete plan. Do not draft the final plan before prepare_goal."""
+Perform only necessary read-only discovery, resolve required decisions through ask_user, then call prepare_goal. The revised Goal is a complete replacement and may change the Objective when the feedback changes the desired outcome. Do not create an implementation Plan or return the Goal in prose."""
 
-EXPLICIT_PROPOSAL_REQUEST_TEMPLATE = """You are handling an explicit proposal request through MIRA's shared read-only proposal pipeline.
+EXPLICIT_GOAL_REQUEST_TEMPLATE = """You are handling an explicit Goal request through MIRA's read-only Goal pipeline.
 This request is IMPLEMENTATION intent. Do not classify it as SAFE_CONVERSATION or answer with ordinary prose.
 The following tools are disabled: {disabled_tools}.
 Do not call a disabled tool or attempt the requested change.
 
 {optional_research}
 
-Proposal request:
+Authoritative Goal objective:
 {text}
 
-If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the proposal is decision-complete. present_plan is unavailable until MIRA generates the Definition of Done."""
+Preserve that objective exactly unless this is an explicit Goal revision whose feedback changes the desired outcome. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require present_goal. Never create an implementation Plan."""
 
 PLAN_REQUEST_TEMPLATE = """You are in planning mode (Plan mode).
 The following tools are disabled: {disabled_tools}.
@@ -157,9 +151,10 @@ COMMAND_HELP_SECTIONS = (
             ("/plan-show", "show the exact retained current Plan"),
             ("/plan-resume", "resume an incomplete retained Plan in Act mode"),
             ("/plan-clear", "remove the retained current Plan without deleting history"),
-            ("/goal <prompt>", "review a Definition of Done before action when rubric grading is enabled"),
-            ("/goal show", "show the durable active goal"),
-            ("/goal clear", "clear the active goal without deleting history"),
+            ("/goal <prompt>", "create a durable Objective + Success Criteria Goal"),
+            ("/goal-show", "show the exact retained current Goal"),
+            ("/goal-resume", "resume an incomplete retained Goal in Act mode"),
+            ("/goal-clear", "remove the retained current Goal without deleting history"),
             ("/act", "return to action mode"),
         ),
     ),
@@ -198,8 +193,20 @@ DEFAULT_TOOL_SPECS = [
         "description": "Begin criteria-first construction of a decision-complete Plan.",
     },
     {
+        "name": "prepare_goal",
+        "description": "Begin criteria-first construction of a decision-complete Goal.",
+    },
+    {
+        "name": "present_goal",
+        "description": "Present a Goal title after Success Criteria generation.",
+    },
+    {
         "name": "plan_show",
         "description": "Render the exact retained current Plan.",
+    },
+    {
+        "name": "goal_show",
+        "description": "Render the exact retained current Goal.",
     },
     {"name": "write_todos", "description": ""},
     {"name": "ls", "description": ""},
@@ -224,10 +231,12 @@ def initial_mode(
         "planning": False,
         "current_plan": current_plan(session or {}),
         "executing_plan": False,
+        "current_goal": current_goal(session or {}),
+        "executing_goal": False,
         "plan_staging": None,
         "plan_revision": None,
-        "current_proposal": None,
-        "proposal_run": None,
+        "goal_staging": None,
+        "goal_revision": None,
         "planning_stage": PLANNING_STAGE_PLAN_RESEARCH,
         "rubric_enabled": rubric_enabled(settings),
         "rubric_max_iterations": rubric_max_iterations(settings),
@@ -295,21 +304,21 @@ async def run_user_turn(
             usage_updated()
 
     approved_rubric: str | None = None
-    proposal_run = mode.get("proposal_run") if isinstance(mode.get("proposal_run"), dict) else None
-    active_goal: dict[str, Any] | None = None
+    goal_staging = mode.get("goal_staging") if isinstance(mode.get("goal_staging"), dict) else None
+    retained_goal: dict[str, Any] | None = None
     retained_plan: dict[str, Any] | None = None
-    using_planning_agent = bool(mode["planning"] or proposal_run is not None)
+    using_planning_agent = bool(mode["planning"] or goal_staging is not None)
     if using_planning_agent:
         active_agent = plan_agent
-        thread_id = str((proposal_run or {}).get("thread_id") or mode["plan_thread_id"])
+        thread_id = str((goal_staging or {}).get("thread_id") or mode["plan_thread_id"])
         mode_name = "planning" if mode["planning"] else "action"
         planning_stage = str(
-            (proposal_run or {}).get("stage")
+            (goal_staging or {}).get("stage")
             or mode.get("planning_stage")
             or PLANNING_STAGE_PLAN_RESEARCH
         )
-        if proposal_run is not None and proposal_run.get("explicit"):
-            proposal_text = explicit_proposal_request_text(text)
+        if goal_staging is not None:
+            proposal_text = explicit_goal_request_text(text)
         else:
             proposal_text = plan_request_text(text)
         request_text = with_resume_context(
@@ -321,24 +330,24 @@ async def run_user_turn(
         thread_id = session["id"]
         mode_name = "action"
         retained_plan = current_plan(session) if mode.get("executing_plan") else None
-        active_goal = None if retained_plan else current_active_goal(session)
+        retained_goal = current_goal(session) if mode.get("executing_goal") and retained_plan is None else None
         approved_rubric = (
             str(retained_plan.get("success_criteria") or "")
             if retained_plan and retained_plan.get("rubric_enabled")
-            else str(active_goal.get("criteria") or "")
-            if active_goal
+            else str(retained_goal.get("success_criteria") or "")
+            if retained_goal and retained_goal.get("rubric_enabled")
             else None
         )
         action_text = action_request_text(
             mode,
             text,
-            active_goal=active_goal,
+            retained_goal=retained_goal,
             retained_plan=retained_plan,
         )
         request_text = with_resume_context(
             session,
             action_text,
-            exclude_active_goal=active_goal is not None,
+            exclude_current_goal=retained_goal is not None,
         )
         planning_stage = None
 
@@ -375,7 +384,7 @@ async def run_user_turn(
                 usage_callback=apply_live_usage,
                 rubric=approved_rubric,
                 rubric_max_iterations=int(
-                    (active_goal or {}).get("rubric_iterations")
+                    (retained_goal or {}).get("rubric_iterations")
                     or (retained_plan or {}).get("rubric_iterations")
                     or mode.get("rubric_max_iterations")
                     or 3
@@ -421,8 +430,10 @@ async def run_user_turn(
             context_limit_tokens=context_limit_tokens,
             context_limit_source=context_limit_source,
         )
-    if active_goal is not None:
-        update_active_goal_after_turn(session, result.rubric_status)
+    if mode.get("executing_goal"):
+        finish_goal_attempt(session, rubric_status=result.rubric_status)
+        mode["current_goal"] = current_goal(session)
+        mode["executing_goal"] = False
     if mode.get("executing_plan"):
         finish_plan_attempt(session, rubric_status=result.rubric_status)
         mode["current_plan"] = current_plan(session)
@@ -516,6 +527,36 @@ async def handle_command(
             write_line(renderer, "Plan resume is unavailable in this interface.", kind="warning")
         return True
 
+    if text == "/goal-show":
+        callback = getattr(renderer, "show_goal", None)
+        if callable(callback):
+            outcome = callback(None)
+            if inspect.isawaitable(outcome):
+                await outcome
+        else:
+            write_line(renderer, "Goal display is unavailable in this interface.", kind="warning")
+        return True
+
+    if text == "/goal-clear":
+        callback = getattr(renderer, "clear_goal", None)
+        if callable(callback):
+            outcome = callback()
+            if inspect.isawaitable(outcome):
+                await outcome
+        else:
+            write_line(renderer, "Goal clearing is unavailable in this interface.", kind="warning")
+        return True
+
+    if text == "/goal-resume":
+        callback = getattr(renderer, "resume_goal", None)
+        if callable(callback):
+            outcome = callback()
+            if inspect.isawaitable(outcome):
+                await outcome
+        else:
+            write_line(renderer, "Goal resume is unavailable in this interface.", kind="warning")
+        return True
+
     if text == "/act":
         mode["planning"] = False
         mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
@@ -565,18 +606,15 @@ def print_help(renderer: Any) -> None:
 
 def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
     """Return session details as one command output block."""
-    current_proposal = mode.get("current_proposal")
-    has_goal = current_active_goal(session) is not None
-    has_plan = current_plan(session) is not None or bool(mode.get("current_plan")) or (
-        isinstance(current_proposal, dict) and isinstance(current_proposal.get("plan"), dict)
-    ) or has_goal
+    has_goal = current_goal(session) is not None
+    has_plan = current_plan(session) is not None or bool(mode.get("current_plan"))
     return "\n".join(
         [
             f"session: {session['id']}",
             f"title: {session.get('title', 'Untitled session')}",
             f"mode: {'planning' if mode['planning'] else 'action'}",
-            f"active goal: {'yes' if has_goal else 'no'}",
-            f"active plan: {'yes' if has_plan else 'no'}",
+            f"current goal: {'yes' if has_goal else 'no'}",
+            f"current plan: {'yes' if has_plan else 'no'}",
             f"workspace: {session['workspace']}",
             f"turns: {session['turns']}",
         ]
@@ -613,17 +651,16 @@ def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, s
     if isinstance(tools, list) and tools:
         normalized = normalize_tool_specs(tools)
         if planning:
-            if mode.get("planning_stage") == PLANNING_STAGE_PLAN_FINALIZE:
-                return [tool for tool in normalized if tool["name"] == PRESENT_PLAN_TOOL]
-            return [
-                tool
-                for tool in normalized
-                if tool["name"] not in {PRESENT_PLAN_TOOL, "prepare_goal"}
-            ]
+            if mode.get("planning_stage") in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
+                expected = PRESENT_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_FINALIZE else PRESENT_PLAN_TOOL
+                return [tool for tool in normalized if tool["name"] == expected]
+            expected_prepare = PREPARE_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_RESEARCH else PREPARE_PLAN_TOOL
+            hidden = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL} - {expected_prepare}
+            return [tool for tool in normalized if tool["name"] not in hidden]
         return normalized
 
     if not planning:
-        blocked = {PRESENT_PLAN_TOOL, "prepare_plan", "prepare_goal"}
+        blocked = {PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL, PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL}
         return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
     blocked = set(PLAN_DISABLED_TOOLS)
@@ -811,13 +848,11 @@ def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:
     return PLAN_REVISION_TEMPLATE.format(plan=plan_text(plan), feedback=feedback.strip())
 
 
-def rubric_plan_revision_text(value: dict[str, Any], feedback: str) -> str:
-    """Return a complete proposal revision request for read-only discovery."""
-    plan = value.get("plan") if isinstance(value.get("plan"), dict) else {}
-    return RUBRIC_PLAN_REVISION_TEMPLATE.format(
-        objective=str(value.get("objective") or value.get("original_objective") or "").strip(),
-        plan=plan_text(plan),
-        criteria=str(value.get("criteria") or "").strip(),
+def goal_revision_text(value: dict[str, Any], feedback: str) -> str:
+    """Return a complete Goal revision request for read-only discovery."""
+    return GOAL_REVISION_TEMPLATE.format(
+        objective=str(value.get("objective") or "").strip(),
+        criteria=str(value.get("success_criteria") or "").strip(),
         feedback=feedback.strip(),
     )
 
@@ -826,7 +861,7 @@ def action_request_text(
     mode: dict[str, Any],
     text: str,
     *,
-    active_goal: dict[str, Any] | None = None,
+    retained_goal: dict[str, Any] | None = None,
     retained_plan: dict[str, Any] | None = None,
 ) -> str:
     """Inject the exact retained Plan or an existing active Goal."""
@@ -836,12 +871,9 @@ def action_request_text(
             execution_instructions=APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
             text=text,
         )
-    if isinstance(active_goal, dict) and isinstance(active_goal.get("plan"), dict):
-        return ACTIVE_GOAL_CONTEXT_TEMPLATE.format(
-            objective=str(active_goal.get("objective") or ""),
-            criteria=str(active_goal.get("criteria") or ""),
-            plan=plan_text(active_goal["plan"]),
-            execution_instructions=APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+    if isinstance(retained_goal, dict):
+        return GOAL_CONTEXT_TEMPLATE.format(
+            goal=goal_artifact_text(retained_goal),
             text=text,
         )
     legacy_plan = mode.get("approved_plan")
@@ -857,9 +889,9 @@ def action_request_text(
     return text
 
 
-def explicit_proposal_request_text(text: str) -> str:
-    """Force an explicit goal command or proposal revision through prepare_goal."""
-    return EXPLICIT_PROPOSAL_REQUEST_TEMPLATE.format(
+def explicit_goal_request_text(text: str) -> str:
+    """Force an explicit Goal command or revision through prepare_goal."""
+    return EXPLICIT_GOAL_REQUEST_TEMPLATE.format(
         disabled_tools=plan_disabled_tools_text(),
         optional_research=OPTIONAL_RESEARCH_POLICY,
         text=text,
