@@ -165,7 +165,7 @@ Now do a separate long reasoning task about how cancellation should work in term
 
 Expected:
 
-- The existing plan bubble still shows Implement, Revise, and Discard.
+- The existing Plan bubble still shows Implement, Revise, and Close.
 - The cancelled unrelated turn does not resolve, discard, or rewrite the plan.
 
 ## LM Studio Tool Calling And Reasoning
@@ -309,9 +309,10 @@ Plan a small improvement to README navigation without editing files yet.
 
 Expected:
 
-- The existing actionable plan bubble appears with Implement, Revise, and
-  Discard exactly as before.
-- `present_plan` never appears as an ordinary tool-call/result bubble.
+- The existing actionable Plan bubble appears with Implement, Revise, and
+  Close.
+- `prepare_plan` and `present_plan` use the same stable call/result lifecycle
+  as other control tools while retaining the dedicated Plan surface.
 - No partial plan content or new plan status block appears.
 
 Choose Revise and enter `Keep the same scope but add an exact verification
@@ -436,20 +437,21 @@ find all dead code for refactoring
 Expected:
 
 - MIRA inspects the repository without using a disabled planning tool.
-- MIRA's reasoning classifies the request as implementation intent before it
-  begins repository research.
-- If a material scope decision is needed, MIRA calls `ask_user` with concise
+- If a required scope decision cannot be discovered, MIRA calls `ask_user` with concise
   choices instead of asking an open-ended chat question.
-- MIRA shows a structured plan bubble with Implement, Revise, and Discard.
-- Implement, Revise, and Discard are compact, borderless one-row buttons that
+- When decision-complete, the visible tool sequence is `prepare_plan`, Success
+  Criteria generation, forced `present_plan`.
+- MIRA shows a Plan bubble with Implement, Revise, and Close.
+- Implement, Revise, and Close are compact, borderless one-row buttons that
   match the prompt-panel button treatment.
 - Implement receives focus when the plan appears; Left/Right wraps across the
-  actions, `i`/`r`/`d` activates the matching action, and Escape returns focus
+  actions, `i`/`r`/`c` activates the matching action, and Escape returns focus
   to the prompt.
 - After clicking the prompt, clicking the active plan body restores the last
   focused action and makes the plan shortcuts active again.
-- Discarding a plan returns focus to the prompt immediately.
-- The plan bubble includes Summary, Key Changes, Test Plan, and Assumptions.
+- Closing a Plan returns focus to the prompt without clearing `current_plan`.
+- The Plan bubble includes Objective, Context and Constraints, Key Changes,
+  Test Plan, Assumptions, and a separate Success Criteria section.
 - The Test Plan names an exact command/check to run and an expected result.
 - MIRA does not write or edit `test.txt` until Implement is chosen.
 
@@ -470,7 +472,7 @@ Then choose Implement on the plan bubble.
 
 Expected:
 
-- MIRA resolves the plan bubble as approved for implementation.
+- MIRA marks `current_plan` active and switches to Act.
 - MIRA shows a `write_file` tool call.
 - MIRA shows an approval prompt.
 - After implementation, MIRA runs the planned check or names the skipped check
@@ -480,16 +482,15 @@ Expected:
 Then enter:
 
 ```text
-/plan
-show me the previous plan
+/plan-show
 ```
 
 Expected:
 
-- MIRA stays in planning mode.
-- MIRA recalls the previously saved structured plan from session context.
-- MIRA does not say there is no previous plan.
-- MIRA does not recreate an active plan bubble unless it is explicitly proposing a new/revised plan.
+- MIRA renders the exact retained Plan bubble without a model call.
+- The current status and concise automatic-evaluation result are muted.
+- Asking `Show me the previous plan.` causes `plan_show` to render that same
+  exact bubble rather than paraphrasing it.
 
 ## Structured Plan Recall
 
@@ -518,25 +519,25 @@ Expected:
 
 - MIRA presents a revised palindrome plan that keeps the original task context.
 
-Then choose Discard or Implement, then enter:
+Then choose Close or Implement, then enter:
 
 ```text
-/plan
-show me the previous palindrome plan
+/plan-show
 ```
 
 Expected:
 
-- MIRA recalls the saved palindrome plan, including Summary, Key Changes, Test Plan, and Assumptions.
-- MIRA includes the plan status such as discarded, revision requested, or approved for implementation.
+- MIRA renders the exact current Plan and Success Criteria.
+- Historical replaced bubbles remain inactive transcript items.
 
 ## Ask User Prompt Layout
 
 ### Autonomous Planning Decisions
 
-Run each prompt in a fresh `/plan` thread. MIRA should call `ask_user` before
-showing alternatives in prose. Select the recommended or first option; the
-resumed turn should finish with `present_plan`.
+Run each prompt in the persistent `/plan` conversation. MIRA should call
+`ask_user` before showing required choices in prose. Select the recommended or
+first option; the resumed turn should call `prepare_plan`, generate Success
+Criteria, and finish through forced `present_plan`.
 
 1. `Plan making the codebase neater. The work can focus on runtime architecture, code-quality standardization, or UI cleanup; none has been selected.`
 2. `Plan replacing session storage. JSON Lines and SQLite are both acceptable, and the persistence tradeoff has not been decided.`
@@ -1061,6 +1062,41 @@ Expected: one grouped warning names both failed files and deduplicated missing
 modules, states normal `@tool` ownership and the project example path, performs
 no installation, creates no optional-resource crash report, and continues with
 the successful tool available.
+
+## Conversational Durable Plan Lifecycle
+
+Use one disposable Git-protected workspace.
+
+1. Enter `/plan`, then `Explain how current session persistence works.`
+   Expected: read-only prose discussion; no forced Plan.
+2. Enter `/plan Check the current implementation and design a reliable current
+   Plan lifecycle.` Expected: the suffix is recorded as a normal Plan-mode user
+   message on the same persistent Plan thread.
+3. In Plan and Act modes, submit a request with one genuine preference choice.
+   Expected: `ask_user`, never a prose question.
+4. Request a final implementation-ready Plan with automatic evaluation disabled.
+   Expected: `prepare_plan` â†’ Success Criteria â†’ forced `present_plan`; the
+   bubble shows Plan, Success Criteria, muted disabled policy, and Implement,
+   Revise, Close.
+5. Repeat an equivalent request with automatic evaluation enabled. Expected:
+   the same Plan construction and comparable Plan/criteria content; only muted
+   policy text adds the configured iteration cap.
+6. Close the Plan, run `/plan-show`, then ask `Show me the previous plan.`
+   Expected: both display the exact retained Plan; the latter calls `plan_show`.
+7. Revise only the implementation approach. Expected: a complete replacement
+   Plan with byte-identical Success Criteria. Revise the required outcome next;
+   expected criteria are regenerated to reflect that change.
+8. With evaluation disabled, Implement. Expected: `active` then `completed`
+   with agent-declared completion. `/plan-resume` rejects the completed Plan.
+   Reopen it and Implement again; expected: a new attempt on the same Plan id.
+9. With evaluation enabled, exercise `needs_revision`, `satisfied`, and
+   `max_iterations_reached`. Expected: separate rubric bubbles; satisfied is
+   rubric-verified completion; the maximum state remains resumable.
+10. Close an incomplete Plan, exit, resume the session, and run `/plan-show`.
+    Expected: exact Plan fields, Success Criteria, status, rubric summary, and
+    actions return. Run `/plan-resume`; expected: immediate Act execution.
+11. Run `/plan-clear`. Expected: `current_plan` is removed while historical
+    Plan and rubric bubbles remain in the transcript.
 
 ## DeepAgents 0.7 Upgrade
 

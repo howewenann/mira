@@ -18,8 +18,12 @@ from agent.compaction import (
 )
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.planning.policy import (
-    PLANNING_STAGE_FINALIZE,
-    PLANNING_STAGE_RESEARCH,
+    PLANNING_STAGE_GOAL_FINALIZE,
+    PLANNING_STAGE_GOAL_RESEARCH,
+    PLANNING_STAGE_PLAN_FINALIZE,
+    PLANNING_STAGE_PLAN_RESEARCH,
+    PREPARE_GOAL_TOOL,
+    PREPARE_PLAN_TOOL,
     PRESENT_PLAN_TOOL,
 )
 from agent.tools.specs import tool_name as resource_tool_name
@@ -218,13 +222,15 @@ class ModelToolVisibilityMiddleware(AgentMiddleware[Any, Any, Any]):
 
 
 class PlanningStageState(AgentState):
-    """Checkpointed stage for rubric-enabled planning tool visibility."""
+    """Checkpointed stage for Plan/Goal construction tool visibility."""
 
-    planning_stage: NotRequired[Literal["research", "finalize"]]
+    planning_stage: NotRequired[
+        Literal["plan_research", "plan_finalize", "goal_research", "goal_finalize"]
+    ]
 
 
 class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
-    """Expose only the planning tools valid for the current rubric stage."""
+    """Expose only the control tools valid for the current construction stage."""
 
     state_schema = PlanningStageState
 
@@ -237,17 +243,29 @@ class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
         return await handler(self._stage_request(request))
 
     def _stage_request(self, request: Any) -> Any:
-        stage = str(request.state.get("planning_stage") or PLANNING_STAGE_RESEARCH)
-        if stage == PLANNING_STAGE_FINALIZE:
+        stage = str(request.state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH)
+        if stage == "research":
+            stage = PLANNING_STAGE_GOAL_RESEARCH
+        elif stage == "finalize":
+            stage = PLANNING_STAGE_GOAL_FINALIZE
+        if stage in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
             tools = [tool for tool in request.tools if resource_tool_name(tool) == PRESENT_PLAN_TOOL]
             if not tools:
-                raise RuntimeError("rubric planning finalization requires present_plan")
+                raise RuntimeError("Plan finalization requires present_plan")
             # OpenAI-compatible providers do not consistently accept the
             # named-tool object produced by LangChain. With one visible tool,
             # ``required`` is equally deterministic and provider-portable.
             return request.override(tools=tools, tool_choice="required")
 
-        tools = [tool for tool in request.tools if resource_tool_name(tool) != PRESENT_PLAN_TOOL]
+        expected_prepare = (
+            PREPARE_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_RESEARCH else PREPARE_PLAN_TOOL
+        )
+        hidden_controls = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL} - {
+            expected_prepare
+        }
+        tools = [
+            tool for tool in request.tools if resource_tool_name(tool) not in hidden_controls
+        ]
         return request.override(tools=tools, tool_choice=None)
 
 

@@ -106,8 +106,9 @@ it only with a trusted local endpoint.
 | Show all commands | `/help` |
 | Change workspace settings | `/settings` |
 | Start a new saved chat | `/new-chat` |
-| Enter planning mode | `/plan` |
+| Enter Plan mode or send its first prompt | `/plan`, `/plan <prompt>` |
 | Return to action mode | `/act` |
+| Show, resume, or clear the current Plan | `/plan-show`, `/plan-resume`, `/plan-clear` |
 | Review a graded Plan + Goal proposal | `/goal <prompt>` |
 | Show or clear the active goal | `/goal show`, `/goal clear` |
 | Compact older context | `/compact` |
@@ -118,11 +119,16 @@ Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 `/skills`, and `/subagents`. Destructive cleanup commands require confirmation
 and are listed in `/help`.
 
-Planning mode is read-only. With rubric grading enabled, `/plan` implementation
-requests and one-shot `/goal` requests share the same Plan + Definition of Done
-review. Approved goals remain active across turns and session resumes until
-satisfied, cleared, or superseded. Rubric grading and proposal creation through
-`/goal` are opt-in through `/settings`.
+Plan mode is a continuous read-only conversation. Discuss and investigate
+normally; when a proposal is decision-complete, MIRA generates Success Criteria
+before presenting one durable Plan with Implement, Revise, and Close actions.
+`/plan-show` reopens the exact retained Plan, `/plan-resume` continues incomplete
+work, and `/plan-clear` removes it without erasing transcript history. Rubric
+grading changes only execution-time evaluation, not Plan construction.
+
+Approved Goals remain active across turns and session resumes until satisfied,
+cleared, or superseded. Rubric grading and `/goal` are opt-in through
+`/settings`.
 
 ## Project Resources
 

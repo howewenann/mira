@@ -353,8 +353,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
         self.assertTrue(any(isinstance(item, PlanningStageMiddleware) for item in plan_kwargs["middleware"]))
 
-    def test_disabled_plan_prompt_and_tools_remain_unchanged(self) -> None:
-        """The default planning agent must retain its existing prompt and tools."""
+    def test_disabled_plan_uses_the_same_criteria_first_tools(self) -> None:
+        """Rubric settings must not change Plan construction."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
@@ -367,8 +367,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         rubric.assert_not_called()
         self.assertEqual(create.call_args.kwargs["system_prompt"], factory.PLAN_SYSTEM_PROMPT)
-        self.assertNotIn("prepare_goal", [tool_name(tool) for tool in create.call_args.kwargs["tools"]])
-        self.assertFalse(
+        names = [tool_name(tool) for tool in create.call_args.kwargs["tools"]]
+        self.assertIn("prepare_plan", names)
+        self.assertIn("plan_show", names)
+        self.assertNotIn("prepare_goal", names)
+        self.assertTrue(
             any(isinstance(item, PlanningStageMiddleware) for item in create.call_args.kwargs["middleware"])
         )
 
@@ -485,6 +488,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         names = [tool["name"] for tool in agent.mira_tool_specs]
         self.assertIn("ask_user", names)
+        self.assertIn("prepare_plan", names)
+        self.assertIn("plan_show", names)
         self.assertIn("present_plan", names)
         self.assertNotIn("prepare_goal", names)
         self.assertIn("read_file", names)
@@ -558,23 +563,25 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         for tool in PLAN_DISABLED_TOOLS:
             self.assertNotIn(tool, planning_names)
 
-    def test_rubric_planning_tool_display_matches_current_stage(self) -> None:
+    def test_plan_tool_display_matches_current_stage(self) -> None:
         mode = {
             "rubric_enabled": True,
             "planning_tools": [
                 {"name": "read_file"},
                 {"name": "ask_user"},
                 {"name": "prepare_goal"},
+                {"name": "prepare_plan"},
                 {"name": "present_plan"},
+                {"name": "plan_show"},
             ],
-            "planning_stage": "research",
+            "planning_stage": "plan_research",
         }
 
         research = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
-        mode["planning_stage"] = "finalize"
+        mode["planning_stage"] = "plan_finalize"
         finalize = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
 
-        self.assertEqual(research, ["read_file", "ask_user", "prepare_goal"])
+        self.assertEqual(research, ["read_file", "ask_user", "prepare_plan", "plan_show"])
         self.assertEqual(finalize, ["present_plan"])
 
     async def test_plan_and_act_commands_toggle_mode(self) -> None:
@@ -586,7 +593,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         handled = await repl.handle_command("/plan", renderer, session, "model", mode)
         self.assertTrue(handled)
         self.assertTrue(mode["planning"])
-        self.assertIn("planning mode", renderer.console.lines[-1])
+        self.assertIn("Plan mode", renderer.console.lines[-1])
         self.assertIn(f"{plan_disabled_tools_text()} disabled", renderer.console.lines[-1])
 
         handled = await repl.handle_command("/act", renderer, session, "model", mode)
@@ -594,29 +601,28 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
 
-    async def test_plan_command_primes_resume_context_for_saved_plans(self) -> None:
-        """Starting a fresh planning thread should carry recent plan context."""
+    async def test_plan_command_primes_resume_context_for_current_plan(self) -> None:
+        """Plan mode should carry only the authoritative retained Plan."""
         renderer = RecordingRenderer()
         mode: dict[str, Any] = {"planning": False}
         session = {
             "id": "thread-1",
             "workspace": ".",
             "turns": 1,
-            "events": [
-                {
-                    "id": 1,
-                    "type": "plan",
-                    "status": "approved for implementation",
-                    "plan": {
-                        "id": "plan-1",
-                        "title": "Palindrome Plan",
-                        "summary": ["Create palindrome.py."],
-                        "key_changes": ["Add is_palindrome."],
-                        "test_plan": ["Run python palindrome.py."],
-                        "assumptions": ["Use Python."],
-                    },
-                }
-            ],
+            "current_plan": {
+                "id": "plan-1",
+                "title": "Palindrome Plan",
+                "objective": "Create palindrome.py.",
+                "context_and_constraints": "Use Python.",
+                "key_changes": ["Add is_palindrome."],
+                "test_plan": ["Run python palindrome.py."],
+                "assumptions": ["Use Python."],
+                "success_criteria": "- Palindromes are detected.",
+                "status": "proposed",
+                "rubric_enabled": False,
+                "rubric_iterations": 3,
+            },
+            "events": [],
         }
         calls: list[str] = []
 
@@ -645,8 +651,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="show me the previous plan",
             )
 
-        self.assertIn("Recent structured plans:", calls[0])
-        self.assertIn("plan-1 (approved for implementation): Palindrome Plan", calls[0])
+        self.assertIn("Authoritative current Plan:", calls[0])
+        self.assertIn("Title: Palindrome Plan", calls[0])
         self.assertIn("Current user request:", calls[0])
         self.assertFalse(session.get("resume_context_pending"))
 
@@ -673,7 +679,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(renderer.console.lines)
         self.assertIn("Commands", output)
         self.assertIn("/plan", output)
-        self.assertIn("enter safe planning mode", output)
+        self.assertIn("enter conversational read-only Plan mode", output)
+        self.assertIn("/plan-show", output)
+        self.assertIn("/plan-resume", output)
+        self.assertIn("/plan-clear", output)
         self.assertIn("/act", output)
         self.assertIn("return to action mode", output)
         self.assertIn("/settings", output)
@@ -1045,10 +1054,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(calls[0][0], "plan-agent")
-        self.assertIn("You are in planning mode.", calls[0][1])
+        self.assertIn("You are in planning mode (Plan mode).", calls[0][1])
         self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", calls[0][1])
         self.assertIn("User request:\nwrite a file", calls[0][1])
-        self.assertEqual(calls[0][2], "thread-1:plan:1")
+        self.assertEqual(calls[0][2], "thread-1:plan")
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
 
@@ -1106,7 +1115,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Previous planning context:", calls[0][1])
         self.assertIn("Create test.txt with hello world.", calls[0][1])
         self.assertIn("You are now in action mode.", calls[0][1])
-        self.assertIn("Write/edit tools are available again", calls[0][1])
+        self.assertIn("Do not assume planning-mode permission errors still apply", calls[0][1])
         self.assertIn("User request:\ndo it", calls[0][1])
         self.assertEqual(calls[1], ("action-agent", "do another thing", "thread-1"))
 
@@ -1179,9 +1188,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(calls[0]["include_rubric_state"])
         self.assertFalse(calls[1]["include_rubric_state"])
-        self.assertEqual(calls[1]["planning_stage"], "research")
-        self.assertIn("call prepare_goal", calls[1]["text"])
-        self.assertNotIn("Fill every present_plan section", calls[1]["text"])
+        self.assertEqual(calls[1]["planning_stage"], "plan_research")
+        self.assertIn("Call prepare_plan", calls[1]["text"])
+        self.assertNotIn("prepare_goal", calls[1]["text"])
         self.assertTrue(calls[2]["include_rubric_state"])
         self.assertIsNone(calls[2]["rubric"])
         self.assertEqual(calls[3]["rubric"], "- It works.")
@@ -1558,48 +1567,26 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Planning requests should include the non-mutating instructions."""
         text = repl.plan_request_text("write a file")
 
-        self.assertIn("You are in planning mode.", text)
-        self.assertIn("use normal assistant messages", text)
-        self.assertIn("Never ask a user-facing question in a normal assistant message", text)
-        self.assertIn("not limited to software or coding work", text)
-        self.assertIn("outcomes, scope, audience, priorities, behavior, presentation", text)
-        self.assertIn("separate discoverable facts from user preferences", text)
-        self.assertIn("multiple reasonable meanings", text)
-        self.assertIn("call ask_user immediately", text)
-        self.assertIn("A recommendation does not remove the need to call ask_user", text)
-        self.assertIn("ask_user is an intermediate planning step, never the final outcome", text)
-        self.assertIn("treat that answer as context for the original IMPLEMENTATION request", text)
-        self.assertIn("Never present alternatives in prose", text)
-        self.assertIn("preserve them as separate, mutually exclusive ask_user options", text)
-        self.assertIn("Do not merge, replace, or invent alternatives", text)
-        self.assertIn("classify the current user request as exactly one", text)
-        self.assertIn("SAFE_CONVERSATION", text)
-        self.assertIn("IMPLEMENTATION", text)
-        self.assertIn("A normal assistant message is not a valid final outcome", text)
-        self.assertIn("Do not wait for the user to say 'show me the plan'", text)
-        self.assertIn("you must call present_plan", text)
+        self.assertIn("You are in planning mode (Plan mode).", text)
+        self.assertIn("DISCUSSION", text)
+        self.assertIn("NEEDS_DECISION", text)
+        self.assertIn("PLAN_READY", text)
+        self.assertIn("Imperative wording never authorizes execution", text)
+        self.assertIn("Call ask_user", text)
+        self.assertIn("Call prepare_plan", text)
+        self.assertIn("A prose Plan is not a valid terminal result", text)
+        self.assertIn("research, analysis, writing, communication, data work", text)
+        self.assertNotIn("SAFE_CONVERSATION", text)
+        self.assertNotIn("IMPLEMENTATION", text)
         self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", text)
         self.assertIn("User request:\nwrite a file", text)
-        self.assertGreater(text.index("Before returning, check the intent you classified"), text.index("User request:\nwrite a file"))
-        self.assertIn("repository research and prose findings are intermediate work", text)
-        self.assertIn("move the decision plus 1-3 choices into ask_user", text)
-        self.assertIn("does not change IMPLEMENTATION into SAFE_CONVERSATION", text)
-        self.assertIn("Never end an IMPLEMENTATION turn with assistant prose or a user-facing question", text)
-        self.assertIn("Fill every present_plan section", text)
-        self.assertIn("Use this exact content template when calling present_plan", text)
-        self.assertIn("as JSON arrays of strings, never as single strings", text)
-        self.assertIn("Goal: the user-visible outcome", text)
-        self.assertIn("Run: exact command/check to execute after implementation.", text)
-        self.assertIn("Do not use vague Test Plan items", text)
-        self.assertIn("If execute is unavailable", text)
 
-    def test_rubric_research_request_ends_with_prepare_goal_contract(self) -> None:
+    def test_rubric_setting_does_not_change_plan_request_contract(self) -> None:
         text = repl.plan_request_text("write a file", rubric_research=True)
 
-        self.assertIn("rubric-enabled planning research mode", text)
-        self.assertIn("call prepare_goal", text)
-        self.assertIn("present_plan is unavailable during this research stage", text)
-        self.assertNotIn("Fill every present_plan section", text)
+        self.assertEqual(text, repl.plan_request_text("write a file"))
+        self.assertIn("Call prepare_plan", text)
+        self.assertNotIn("prepare_goal", text)
 
     def test_plan_revision_text_includes_old_plan_and_feedback(self) -> None:
         """Revision requests should not depend on planning-thread memory."""
@@ -1621,7 +1608,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Test Plan:\n- Add unit tests.", text)
         self.assertIn("Assumptions:\n- Use Python.", text)
         self.assertIn("User feedback:\ninclude a testing plan", text)
-        self.assertIn("Create a revised plan using present_plan", text)
+        self.assertIn("complete replacement", text)
+        self.assertIn("then call\nprepare_plan", text)
 
     def test_rubric_plan_revision_keeps_fields_delimited_and_feedback_identical(self) -> None:
         text = repl.rubric_plan_revision_text(
@@ -1680,7 +1668,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mode["planning"])
         self.assertEqual(captured["agent"], "plan-agent")
         self.assertIn("Do not classify it as SAFE_CONVERSATION", captured["text"])
-        self.assertIn("call prepare_goal immediately", captured["text"])
+        self.assertIn("call prepare_goal as soon as", captured["text"])
 
     async def test_active_goal_continues_after_exhaustion_and_completes_when_satisfied(self) -> None:
         renderer = RecordingRenderer()
@@ -1767,18 +1755,17 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(tool, prompt)
 
         self.assertIn("Never call disabled tools", prompt)
-        self.assertIn("Never ask a user-facing question in a normal assistant message", prompt)
-        self.assertIn("before using tools or answering, classify", prompt)
-        self.assertIn("Do not classify by punctuation, keywords alone, or regex-style text matching", prompt)
+        self.assertIn("use ask_user instead of asking", prompt)
+        self.assertIn("DISCUSSION", prompt)
+        self.assertIn("NEEDS_DECISION", prompt)
+        self.assertIn("PLAN_READY", prompt)
         self.assertNotIn("find a way to make the code base neater", prompt.lower())
         self.assertNotIn("make this neater", prompt.lower())
-        self.assertIn("IMPLEMENTATION must call ask_user", prompt)
-        self.assertIn("Test Plan bullets", prompt)
-        self.assertIn("Use this exact content template when calling present_plan", prompt)
-        self.assertIn("Success criteria", prompt)
-        self.assertIn("Run: exact command/check to execute after implementation.", prompt)
-        self.assertIn("Do not use vague Test Plan items", prompt)
-        self.assertIn("If execute is unavailable", prompt)
+        self.assertIn("Call ask_user", prompt)
+        self.assertIn("Call prepare_plan", prompt)
+        self.assertIn("Test Plan", prompt)
+        self.assertIn("Success Criteria", prompt)
+        self.assertNotIn("SAFE_CONVERSATION", prompt)
 
 
 if __name__ == "__main__":

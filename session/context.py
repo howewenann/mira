@@ -8,6 +8,7 @@ from typing import Any
 
 from session.dashboard import normalize_dashboard
 from session.goals import normalize_active_goal
+from session.plans import normalize_current_plan, plan_artifact_text
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -29,6 +30,7 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "turns": int(record.get("turns") or 0),
         "dashboard": normalize_dashboard(record.get("dashboard")),
         "active_goal": normalize_active_goal(record.get("active_goal")),
+        "current_plan": normalize_current_plan(record.get("current_plan")),
         "events": normalize_events(record.get("events")),
     }
 
@@ -339,14 +341,14 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
 
 def build_resume_context(record: dict[str, Any], *, exclude_active_goal: bool = False) -> str:
     compactions = normalize_compactions(record.get("events"))
-    plans = normalize_plans(record.get("events"))[-RESUME_PLAN_LIMIT:]
+    retained_plan = normalize_current_plan(record.get("current_plan"))
     proposals = normalize_proposals(record.get("events"))
     active_goal = normalize_active_goal(record.get("active_goal"))
     if exclude_active_goal and active_goal and active_goal.get("status") == "active":
         proposals = [value for value in proposals if value["id"] != active_goal["proposal_id"]]
     proposals = proposals[-RESUME_PROPOSAL_LIMIT:]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    if not compactions and not plans and not proposals and not messages:
+    if not compactions and not retained_plan and not proposals and not messages:
         return ""
 
     parts = ["Previous MIRA session context:"]
@@ -357,10 +359,11 @@ def build_resume_context(record: dict[str, Any], *, exclude_active_goal: bool = 
             parts.append(latest["summary"])
         if latest["file_path"]:
             parts.append(f"Evicted conversation archive: {latest['file_path']}")
-    if plans:
-        parts.append("Recent structured plans:")
-        for plan in plans:
-            parts.append(plan_context_text(plan))
+    if retained_plan:
+        parts.append("Authoritative current Plan:")
+        parts.append(
+            f"Status: {retained_plan['status']}\n{plan_artifact_text(retained_plan)}"
+        )
     if proposals:
         parts.append("Recent goal-driven proposals:")
         for value in proposals:
@@ -391,7 +394,7 @@ def with_resume_context(
 def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> None:
     record["resume_context_pending"] = resumed and (
         bool(normalize_compactions(record.get("events")))
-        or bool(normalize_plans(record.get("events")))
+        or bool(normalize_current_plan(record.get("current_plan")))
         or bool(normalize_proposals(record.get("events")))
         or bool(normalize_messages(record.get("events")))
     )

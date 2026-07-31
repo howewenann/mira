@@ -65,16 +65,31 @@ def research_summary_request(interrupt: Any, *, limit: int = 4000) -> str:
     return str(value.get("research_summary") or "").strip()[:limit]
 
 
+def prepare_plan_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]:
+    """Extract the bounded objective and context handoff from prepare_plan."""
+    value = getattr(interrupt, "value", interrupt)
+    if not isinstance(value, dict):
+        return {"objective": "", "context_and_constraints": ""}
+    return {
+        "objective": str(value.get("objective") or "").strip()[:limit],
+        "context_and_constraints": str(value.get("context_and_constraints") or "").strip()[
+            :limit
+        ],
+    }
+
+
 def normalize_plan(value: dict[str, Any]) -> dict[str, Any]:
     """Return a compact structured plan from an interrupt payload."""
-    title = compact_text(value.get("title")) or "Implementation Plan"
-    summary = compact_items(value.get("summary"), fallback="Summarize the intended change before implementation.")
+    title = compact_text(value.get("title")) or "Plan"
     key_changes = compact_items(value.get("key_changes"), fallback="List the key implementation changes.")
     test_plan = compact_items(value.get("test_plan"), fallback="Describe the tests or checks to create.")
-    assumptions = compact_items(value.get("assumptions"), fallback="No additional assumptions identified.")
+    assumptions = compact_items(value.get("assumptions"), fallback="No additional assumptions.")
     return {
         "title": title,
-        "summary": summary,
+        "objective": str(value.get("objective") or "").strip(),
+        "context_and_constraints": str(value.get("context_and_constraints") or "").strip(),
+        # Kept only to normalize legacy transcript/checkpoint payloads.
+        "summary": compact_items(value.get("summary")),
         "key_changes": key_changes,
         "test_plan": test_plan,
         "assumptions": assumptions,

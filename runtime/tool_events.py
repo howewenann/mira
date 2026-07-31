@@ -10,7 +10,7 @@ from langgraph.types import Command
 from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
-CONTROL_TOOLS = {"ask_user", "prepare_goal", "present_plan"}
+CONTROL_TOOLS = {"ask_user", "prepare_goal", "prepare_plan", "present_plan", "plan_show"}
 WATCHER_SHUTDOWN_SECONDS = 0.1
 
 

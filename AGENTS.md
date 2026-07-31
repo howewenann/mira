@@ -99,5 +99,12 @@
   policy.
 - Planning todos are opt-in. When enabled, keep their middleware and tool
   metadata aligned across action, planning, and compiled dynamic subagents.
+- Plan mode is one persistent read-only conversation. Formal Plans always use
+  `prepare_plan` -> `SuccessCriteriaService` -> forced `present_plan`, regardless
+  of rubric settings. Keep exactly one durable session `current_plan`; do not
+  route Plan construction through `prepare_goal` or activate a Goal.
+- `plan_show` and `/plan-show` must reuse the exact Plan bubble renderer.
+  Implement and `/plan-resume` execute the retained Plan in Act; Revise replaces
+  it; Close only hides controls; `/plan-clear` alone removes it.
 - When fixing execute or HITL issues, compare real behavior in both modes and
   prefer restoring DeepAgents normal flow over reimplementing tool execution.

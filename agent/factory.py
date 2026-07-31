@@ -14,7 +14,9 @@ from agent.planning.policy import (
     PLAN_DENIED_FS_OPERATIONS,
     PLAN_DISABLED_TOOLS,
     PREPARE_GOAL_TOOL,
+    PREPARE_PLAN_TOOL,
     PRESENT_PLAN_TOOL,
+    SHARED_QUESTION_POLICY,
     plan_system_prompt,
 )
 from agent.resources import build_resources
@@ -34,7 +36,7 @@ from config.settings import (
 )
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
-ACTION_EXCLUDED_TOOLS = (PRESENT_PLAN_TOOL,)
+ACTION_EXCLUDED_TOOLS = (PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL)
 PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
 _REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
@@ -45,11 +47,12 @@ Follow the user's request and the instructions available in your context.
 Use the available tools when they help achieve the requested outcome.
 
 Inspect relevant context before consequential actions.
-Ask only when a material decision cannot be resolved from the available context.
+
+{question_policy}
 
 Respect tool permissions and approval requirements.
 Be accurate about what you completed, what failed, and what remains unresolved.
-"""
+""".format(question_policy=SHARED_QUESTION_POLICY)
 
 
 def build_agent(
@@ -81,19 +84,19 @@ def build_plan_agent(
     metadata: ModelMetadata | None = None,
 ) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
-    enabled = rubric_enabled(config)
+    goal_enabled = rubric_enabled(config)
     agent = _build_agent(
         config=config,
         workspace=workspace,
         checkpointer=checkpointer,
         metadata=metadata,
         permissions=_plan_permissions(),
-        system_prompt=plan_system_prompt(rubric=enabled) if enabled else PLAN_SYSTEM_PROMPT,
+        system_prompt=PLAN_SYSTEM_PROMPT,
         interrupt_on=None,
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
-        extra_middleware=[PlanningStageMiddleware()] if enabled else None,
-        omitted_tools=() if enabled else (PREPARE_GOAL_TOOL,),
+        extra_middleware=[PlanningStageMiddleware()],
+        omitted_tools=() if goal_enabled else (PREPARE_GOAL_TOOL,),
     )
     return agent
 
@@ -110,7 +113,7 @@ def _build_agent(
     excluded_tools: tuple[str, ...] = (),
     enable_execute_backend: bool = False,
     enable_rubric: bool = False,
-    omitted_tools: tuple[str, ...] = (PREPARE_GOAL_TOOL,),
+    omitted_tools: tuple[str, ...] = (PREPARE_GOAL_TOOL, PREPARE_PLAN_TOOL),
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 

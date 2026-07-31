@@ -291,72 +291,74 @@ settings-panel tool behavior changes.
 
 ## Planning Mode
 
-**Decision:** Planning mode has a separate agent with `write_file`, `edit_file`,
-`execute`, `task`, and `eval` hidden from the model; filesystem permissions also
-deny writes as a backstop. This keeps shell execution, programmatic evaluation,
-and delegation paths out of planning mode rather than relying on their normal
-action-mode approval behavior. Planning mode still supports ordinary read-only
-conversation, explanations, findings, brainstorming, and existing-plan recall.
-Requests with implementation intent must produce a structured plan through the
-`present_plan` tool once decision-complete, without requiring the user to ask
-for the plan explicitly. Material questions must use `ask_user` choices rather
-than an open-ended assistant message. At the start of each turn, the planning
-prompt requires a semantic classification: safe conversation may end in prose,
-while implementation intent must end through `ask_user` or `present_plan`.
-Material decisions are defined generically: reasonable interpretations or
-choices that produce meaningfully different outcomes, scope, audience,
-priorities, behavior, presentation, constraints, resources, compatibility, or
-risk. MIRA separates discoverable facts from preferences and resolves the
-latter before dependent research. `ask_user` is an intermediate step whose
-answer preserves implementation intent until `present_plan`, and user-supplied
-alternatives remain separate choices. This policy applies to any planned
-change, not only software work.
-Each wrapped planning request repeats this terminal contract after the user's
-text so lengthy repository research does not displace it from the model's final
-output decision.
-This uses the existing planning-agent call, not punctuation/regex
-classification or an extra model-judge request.
-Structured plans are shown as ephemeral plan bubbles with explicit Implement,
-Revise, and Discard actions. Their compact one-row styling and visible keyboard
-shortcut labels intentionally mirror prompt-panel choices without changing
-PromptPanel itself. An active plan focuses Implement after mounting, Left/Right
-wraps through its action row, and Escape returns focus to the prompt; shortcuts
-remain local to the plan controls so typing cannot resolve a plan accidentally.
-Clicking the active plan bubble restores its most recently focused action.
-Discarding a plan resolves the bubble in place and returns keyboard focus to
-the prompt so the next request can be typed immediately.
-Every structured plan includes Summary, Key Changes, Test Plan, and
-Assumptions. Planning prompts include an exact content template so Summary names
-goal, context, and success criteria; Key Changes name concrete implementation
-steps; Test Plan names exact test artifacts, commands/checks, and expected
-results; and Assumptions records explicit defaults. When an approved plan is
-implemented, MIRA treats the Test Plan as required follow-through: feasible
-checks should run after building, while skipped checks must be named with a
-reason. Todo/checklist use is encouraged during implementation for multi-step
-plans, but it does not replace running the planned checks. When execute is
-unavailable, MIRA still plans the test artifacts and says the tests were not
-run.
-Revise opens a focused feedback prompt, then sends the previous structured plan
-and the user's feedback through planning mode so the replacement plan keeps
-context. Resolved plan bubbles remain inactive transcript history; only the
-newest unresolved plan is actionable.
-Recent structured plan events are included in lightweight model resume context
-so mode switches and resumed sessions can answer plan follow-ups. Raw reasoning,
-tool-call, and tool-result events remain excluded from normal model history.
+**Decision:** `/plan` enters one persistent read-only Plan conversation;
+`/plan <prompt>` enters that same mode and submits the suffix through the normal
+Plan message path. Imperative language never enables execution. The Plan prompt
+uses three non-persisted outcomes: `DISCUSSION` returns ordinary read-only prose,
+`NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls `prepare_plan`. There
+is no classifier model, structured response format, prose regex, or compliance
+retry.
 
-**Why:** Users need a mode where MIRA can converse and investigate safely while
-still recognizing when an implementation-ready plan is the useful outcome.
-Hiding every tool path that can mutate or delegate improves model behavior;
-permissions provide a filesystem safety fallback. Prompt-level semantic policy
-avoids brittle text heuristics. Plan execution remains an explicit user action,
-not an automatic side effect of leaving planning mode.
+Both Plan and Act compose one shared question policy: discover facts from
+available context first and use `ask_user` whenever user input is required.
+Plan mode additionally hides write, delete, execute, evaluation, and delegation
+tools and denies filesystem writes as a backstop.
 
-**Where to check:** `agent/factory.py`, `agent/planning/policy.py`, `ui/app.py`,
-`ui/repl.py`, `tests/test_plan_mode.py`, `tests/test_textual_app.py`.
+Formal construction is always criteria-first:
 
-**Update this when:** Planning mode gains or loses tools, changes how plan
-bubbles are presented, resolved, or replayed into model context, or changes its
-filesystem permissions.
+```text
+prepare_plan
+â†’ SuccessCriteriaService
+â†’ forced present_plan
+â†’ Plan bubble
+```
+
+The staging middleware exposes `prepare_plan` during conversation and only
+`present_plan` during finalisation, with required tool choice. The generated
+Success Criteria are binding context. The model supplies Title, Key Changes,
+Test Plan, and Assumptions around the staged Objective and Context and
+Constraints; no Summary field exists. This path and its model inputs are
+identical whether automatic rubric evaluation is enabled or disabled.
+
+The session stores exactly one authoritative `current_plan`: its stable id,
+Plan fields, separate Success Criteria, status, rubric policy and cap, latest
+overall rubric result, completion source, attempts, and timestamps. Supported
+statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
+`completed`. Transcript Plan bubbles remain immutable history; resume context
+labels only `current_plan` as authoritative.
+
+The Plan bubble uses Plan colours for Plan content, rubric colours for Success
+Criteria, and muted text for automatic-evaluation policy and status. Its actions
+are Implement, Revise, and Close. Implement starts or restarts the exact Plan in
+Act mode. Revise stays in the persistent Plan conversation, creates a complete
+replacement, and calls `SuccessCriteriaService.revise()` for both rubric
+settings; approach-only feedback preserves criteria. Close hides controls
+without changing or deleting `current_plan`.
+
+`/plan-show` and the read-only `plan_show` control tool call the same renderer
+and make no Plan-generating model call. `/plan-clear` removes only
+`current_plan`. `/plan-resume` accepts every incomplete state, including a
+never-run `proposed` Plan, switches to Act, and continues immediately; completed
+Plans must be deliberately reopened and implemented again.
+
+Rubric-disabled successful attempts complete as `agent-declared`. Rubric-enabled
+attempts pass the exact Success Criteria to DeepAgents: `satisfied` completes as
+`rubric-verified`, `needs_revision` continues upstream iteration,
+`max_iterations_reached` remains resumable, and runtime, grader, or cancellation
+failures pause the Plan. Detailed evaluations remain separate rubric events.
+
+**Why:** This preserves safe conversational planning while making the final
+artifact exact, durable, criteria-led, and independently recallable after
+compaction or reload. Rubrics evaluate execution rather than changing what Plan
+MIRA constructs.
+
+**Where to check:** `agent/planning/policy.py`,
+`agent/planning/criteria.py`, `agent/middleware.py`, `session/plans.py`,
+`runtime/runner.py`, `ui/app.py`, `ui/repl.py`, and
+`ui/widgets/chat_log.py`.
+
+**Update this when:** Plan tools, construction stages, `current_plan` schema,
+review actions, recall commands, or execution completion rules change.
 
 ## Goal-Driven Rubric Grading
 
@@ -374,37 +376,19 @@ action turns omit rubric state. Ordinary rubric-enabled action turns send
 sends its Markdown criteria. The middleware's injected revision messages stay
 inside DeepAgents state and are not projected as user-authored session events.
 
-**Proposal lifecycle:** `/goal <prompt>` is TUI-only because it requires an
-interactive review bubble. It temporarily routes through the same read-only
-planning agent used by rubric-enabled `/plan` without setting persistent
-planning mode. Both origins produce one complete proposal containing the id,
-origin, original and effective objectives, structured resolved decisions,
-criteria, structured plan, and iteration cap. The origin controls navigation;
-rendering, revision, persistence, and implementation are shared.
+**Goal compatibility:** `/goal <prompt>` remains TUI-only and retains its
+existing proposal, review, and `active_goal` behavior. Its `prepare_goal` entry
+uses the shared `SuccessCriteriaService` compatibility alias. `/plan` never
+calls `prepare_goal` and never creates or activates a Goal. Separate Plan and
+Goal research/finalisation stages keep the user-facing concepts modular. Goal
+can later adopt a `Goal + SuccessCriteria` artifact without claiming that UX
+redesign here.
 
-Rubric-enabled planning adds one hidden control interrupt, `prepare_goal`. The
-planning agent calls it as soon as available context is sufficient, after any
-necessary read-only research and material `ask_user` decisions. Research is
-optional and the tool carries only a bounded summary of material evidence; the
-full tool transcript never crosses into criteria generation. A focused
-`PlanningStageMiddleware` owns a checkpointed
-`research | finalize` state using LangChain's middleware state schema. It keeps
-the compiled tool registry stable while filtering each model request: research
-hides `present_plan`; after the interrupt, the runner resumes with a native
-LangGraph `Command` that also updates the stage to `finalize`; finalization
-exposes only `present_plan` and sets the provider-portable `required` tool
-choice. Requiring a call is deterministic with one exposed tool and avoids the
-named-tool object rejected by some OpenAI-compatible providers. The wrapped
-research request repeats a stage-specific `ask_user`/`prepare_goal` terminal
-contract instead of the legacy `present_plan` reminder. `GoalCriteriaService`
+The Goal compatibility path retains its existing optional read-only research
+and forced finalisation behavior. `SuccessCriteriaService`
 treats the objective as authoritative and receives only the effective
 objective, optional research context, and—during revision—the previous
-criteria and feedback, never the previous plan. MIRA then resumes the same
-planning thread to produce the plan alone. Revisions use the same discovery,
-criteria, and finalization sequence with the previous plan supplied only to
-plan finalization. Disabled
-planning does not install the stage middleware and keeps the legacy prompt,
-tools, plan event, rendering, and action handoff unchanged.
+criteria and feedback, never the previous plan.
 
 **Durable active goals:** Implementing either proposal origin stores the exact
 approved objective, criteria, and plan as the session's authoritative
@@ -416,7 +400,7 @@ reset. Session resume reads only the explicit active-goal field and never
 infers one from recent proposal history. `/goal show` and `/goal clear` are
 model-free controls; historical proposal and rubric events remain replayable.
 
-Criteria generation and plan finalization can each involve a silent model call.
+Criteria generation and artifact finalization can each involve a silent model call.
 The TUI reuses its transient animated waiting block with phase-specific labels
 for Definition-of-Done drafting/revision and plan drafting; these blocks are not
 persisted as transcript events.
@@ -462,9 +446,9 @@ stays simpler for scripts and quick prompts.
 
 All tools share one underlying lifecycle for call identity, visible start,
 completion or error, persistence, and replay. This includes the v1.9 control
-tools `ask_user`, `prepare_goal`, and `present_plan`: their existing dedicated
-question, criteria, and Plan surfaces remain, but no longer suppress the
-ordinary call/result block. The stable call id associates each surface outcome
+tools `ask_user`, `prepare_goal`, `prepare_plan`, `present_plan`, and
+`plan_show`: their dedicated question, criteria, and Plan surfaces remain, but
+no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
 

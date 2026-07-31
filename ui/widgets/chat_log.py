@@ -12,6 +12,7 @@ from typing import Any
 from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.events import Click, DescendantFocus, Key
 from textual.widgets import Button, Static
 
@@ -122,6 +123,10 @@ class ChatLog(VerticalScroll):
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""
         self.finish_main()
+        retained = session.get("current_plan")
+        retained_id = (
+            str(retained.get("id") or "") if isinstance(retained, dict) else ""
+        )
         for event in normalize_events(session.get("events")):
             event_type = event["type"]
             created_at = str(event.get("created_at") or "")
@@ -172,10 +177,25 @@ class ChatLog(VerticalScroll):
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type == "plan":
+                event_plan = event["plan"]
+                plan_id = str(event_plan.get("id") or "")
+                is_current = bool(retained_id and plan_id == retained_id)
+                event_status = str(event.get("status") or "resolved")
+                is_actionable = is_current and event_status not in {
+                    "cleared",
+                    "closed",
+                    "completed",
+                    "revision requested",
+                    "superseded",
+                }
                 self.present_plan(
-                    event["plan"],
-                    active=False,
-                    status=str(event.get("status") or "resolved"),
+                    retained if is_current else event_plan,
+                    active=is_actionable,
+                    status=(
+                        str(retained.get("status") or "proposed")
+                        if is_current
+                        else event_status
+                    ),
                     created_at=created_at,
                 )
             elif event_type == "proposal":
@@ -1266,7 +1286,7 @@ def pending_result(value: str) -> tuple[str, bool]:
 class PlanActionButton(Button):
     """Compact plan control with shortcuts matching its visible label."""
 
-    SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "d": "discard"}
+    SHORTCUT_ACTIONS = {"i": "implement", "r": "revise", "c": "close"}
 
     def on_key(self, event: Key) -> None:
         bubble = self._plan_bubble()
@@ -1315,22 +1335,29 @@ class PlanBubble(Vertical):
         if self.active:
             with Horizontal(classes="plan-actions"):
                 yield PlanActionButton(
-                    "Implement (i)",
+                    "Implement",
                     id=f"plan-implement-{self.plan_id}",
                     classes="plan-action",
                     compact=True,
                 )
                 yield PlanActionButton(
-                    "Revise (r)", id=f"plan-revise-{self.plan_id}", classes="plan-action", compact=True
+                    "Revise", id=f"plan-revise-{self.plan_id}", classes="plan-action", compact=True
                 )
                 yield PlanActionButton(
-                    "Discard (d)", id=f"plan-discard-{self.plan_id}", classes="plan-action", compact=True
+                    "Close", id=f"plan-close-{self.plan_id}", classes="plan-action", compact=True
                 )
 
     def on_mount(self) -> None:
         """Focus the first action after an active plan is fully mounted."""
         if self.active:
-            self.call_after_refresh(self.query_one(f"#plan-implement-{self.plan_id}", Button).focus)
+            self.call_after_refresh(self._focus_implement)
+
+    def _focus_implement(self) -> None:
+        """Focus Implement after composed children are available."""
+        try:
+            self.query_one(f"#plan-implement-{self.plan_id}", Button).focus()
+        except NoMatches:
+            return
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         """Remember the most recently focused plan action."""
@@ -1368,10 +1395,18 @@ class PlanBubble(Vertical):
 
     def _render_plan(self) -> Text:
         text = Text()
-        text.append(str(self.plan.get("title") or "Implementation Plan"), style="bold")
+        text.append(str(self.plan.get("title") or "Plan"), style="bold #A0B86B")
         text.append("\n\n")
         for heading, key in (
-            ("Summary", "summary"),
+            ("Objective", "objective"),
+            ("Context and Constraints", "context_and_constraints"),
+        ):
+            value = str(self.plan.get(key) or "").strip()
+            if not value:
+                continue
+            text.append(f"{heading}\n", style="bold #A0B86B")
+            text.append(f"{value}\n\n")
+        for heading, key in (
             ("Key Changes", "key_changes"),
             ("Test Plan", "test_plan"),
             ("Assumptions", "assumptions"),
@@ -1379,12 +1414,37 @@ class PlanBubble(Vertical):
             items = self.plan.get(key)
             if not isinstance(items, list) or not items:
                 continue
-            text.append(f"{heading}\n", style="bold cyan")
+            text.append(f"{heading}\n", style="bold #A0B86B")
             for item in items:
                 text.append(f"- {item}\n")
             text.append("\n")
-        if self.status != "pending":
-            text.append(f"Status: {self.status}", style="bold yellow")
+        criteria = str(
+            self.plan.get("success_criteria") or self.plan.get("criteria") or ""
+        ).strip()
+        if criteria:
+            text.append("Success Criteria\n", style=f"bold {RUBRIC_HEADER_COLOR}")
+            text.append(criteria, style=RUBRIC_BODY_COLOR)
+            text.append("\n\n")
+        if self.plan.get("rubric_enabled"):
+            iterations = int(self.plan.get("rubric_iterations") or 3)
+            policy = (
+                "Automatic evaluation enabled. Success Criteria will be evaluated "
+                f"after implementation, up to {iterations} iterations."
+            )
+        else:
+            policy = (
+                "Automatic evaluation disabled. Success Criteria will guide "
+                "implementation but will not be automatically evaluated."
+            )
+        last_result = str(self.plan.get("last_rubric_status") or "").strip()
+        actual_status = str(self.plan.get("status") or self.status or "proposed")
+        completion = str(self.plan.get("completion_source") or "").strip()
+        details = [policy, f"Status: {actual_status}"]
+        if last_result:
+            details.append(f"Last result: {last_result.replace('_', ' ')}")
+        if completion:
+            details.append(f"Completion: {completion}")
+        text.append(" · ".join(details), style="dim #9AA0A6")
         return text
 
 

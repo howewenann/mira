@@ -11,32 +11,28 @@ PRESENT_PLAN_INTERRUPT_TYPE = "present_plan"
 @tool(
     "present_plan",
     description=(
-        "Present a concrete implementation plan to the user for review. "
-        "In planning mode, you must use this when the user has implementation intent and the proposal is "
-        "decision-complete, even when the user did not explicitly ask to see a plan. Also use it for explicit "
-        "new, revised, final, or implementation-ready plan requests. Do not use it for ordinary safe "
-        "conversation, read-only findings with no intended project change, or recall of an existing plan. "
-        "Fill every section: title, summary, key_changes, test_plan, and assumptions. Pass summary, "
-        "key_changes, test_plan, and assumptions as lists of strings, never as single strings."
+        "Present the final concise Plan after MIRA has generated Success Criteria. "
+        "This tool is required in the formal finalisation stage and is unavailable during "
+        "ordinary Plan discussion and research. Supply title, key_changes, test_plan, and "
+        "assumptions as the complete Plan around the binding Objective, Context and "
+        "Constraints, and Success Criteria supplied by MIRA. Do not add a Summary section."
     ),
 )
 def present_plan(
     title: str,
-    summary: list[str],
     key_changes: list[str],
     test_plan: list[str],
     assumptions: list[str],
 ) -> str:
-    """Pause and present one structured implementation plan."""
+    """Pause and present one complete Plan."""
     return str(
         interrupt(
             {
                 "type": PRESENT_PLAN_INTERRUPT_TYPE,
-                "title": clean_text(title) or "Implementation Plan",
-                "summary": clean_items(summary, fallback="Summarize the intended change before implementation."),
+                "title": clean_text(title) or "Plan",
                 "key_changes": clean_items(key_changes, fallback="List the key implementation changes."),
                 "test_plan": clean_items(test_plan, fallback="Describe the tests or checks to create."),
-                "assumptions": clean_items(assumptions, fallback="No additional assumptions identified."),
+                "assumptions": clean_items(assumptions, fallback="No additional assumptions."),
             }
         )
     )
@@ -58,4 +54,4 @@ def clean_items(values: str | list[str], *, fallback: str) -> list[str]:
         text = clean_text(str(value))
         if text:
             items.append(text)
-    return items or [fallback]
+    return items or ([fallback] if fallback else [])

@@ -265,7 +265,9 @@ description: Project-specific workflow.
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "plan_show" for tool in resources.tools))
             self.assertTrue(any(tool.name == "prepare_goal" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "prepare_plan" for tool in resources.tools))
             self.assertTrue(any(tool.name == "present_plan" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
@@ -278,8 +280,20 @@ description: Project-specific workflow.
                         "replaces": "",
                     },
                     {
+                        "name": "plan_show",
+                        "path": "/mira-defaults/tools/plan_show.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
                         "name": "prepare_goal",
                         "path": "/mira-defaults/tools/prepare_goal.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "prepare_plan",
+                        "path": "/mira-defaults/tools/prepare_plan.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -306,8 +320,8 @@ description: Project-specific workflow.
 
             description = str(ask_user.description)
 
-            self.assertIn("every user-facing question that needs an answer must use ask_user", description)
-            self.assertIn("never ask it in a normal assistant message", description)
+            self.assertIn("either Plan or Act mode", description)
+            self.assertIn("Prefer this tool over asking any user-facing question in prose", description)
             self.assertIn("without asking for ask_user, answer normally in chat", description)
             self.assertIn("explicitly asks you to use ask_user with many options", description)
             self.assertIn("include every requested option", description)
@@ -315,18 +329,17 @@ description: Project-specific workflow.
             self.assertIn("good options: ['test_checkpoint.py', 'test_config.py']", description)
             self.assertIn("bad options: ['1. test_checkpoint.py', '2. test_config.py']", description)
 
-    def test_present_plan_description_requires_implementation_intent(self) -> None:
-        """The planning tool should not wait for an explicit request when implementation is intended."""
+    def test_present_plan_description_is_for_forced_finalisation(self) -> None:
+        """present_plan should be reserved for criteria-first finalisation."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
             present_plan = next(tool for tool in resources.tools if tool.name == "present_plan")
 
             description = str(present_plan.description)
 
-            self.assertIn("must use this when the user has implementation intent", description)
-            self.assertIn("did not explicitly ask to see a plan", description)
-            self.assertIn("recall of an existing plan", description)
-            self.assertIn("as lists of strings, never as single strings", description)
+            self.assertIn("after MIRA has generated Success Criteria", description)
+            self.assertIn("required in the formal finalisation stage", description)
+            self.assertIn("Do not add a Summary section", description)
 
     def test_regex_grep_matches_regex_patterns(self) -> None:
         """The default grep should treat the pattern as regex."""
@@ -380,8 +393,19 @@ def project_status() -> str:
             resources = build_resources(workspace, create_examples=False)
 
             names = [tool.name for tool in resources.tools]
-            self.assertEqual(names, ["ask_user", "prepare_goal", "present_plan", "grep", "project_status"])
-            self.assertEqual(resources.tools[3].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(
+                names,
+                [
+                    "ask_user",
+                    "plan_show",
+                    "prepare_goal",
+                    "prepare_plan",
+                    "present_plan",
+                    "grep",
+                    "project_status",
+                ],
+            )
+            self.assertEqual(resources.tools[5].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
@@ -392,8 +416,20 @@ def project_status() -> str:
                         "replaces": "",
                     },
                     {
+                        "name": "plan_show",
+                        "path": "/mira-defaults/tools/plan_show.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
                         "name": "prepare_goal",
                         "path": "/mira-defaults/tools/prepare_goal.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "prepare_plan",
+                        "path": "/mira-defaults/tools/prepare_plan.py",
                         "source": "default",
                         "replaces": "",
                     },

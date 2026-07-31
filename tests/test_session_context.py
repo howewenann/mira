@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.goals import activate_goal, clear_active_goal, current_active_goal, update_active_goal_after_turn
+from session.plans import plan_artifact
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from session.store import SessionStore
@@ -230,6 +231,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "turns",
                 "dashboard",
                 "active_goal",
+                "current_plan",
                 "events",
             ],
         )
@@ -237,6 +239,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
         self.assertIsNone(record["active_goal"])
+        self.assertIsNone(record["current_plan"])
         self.assertNotIn("llm_direct", record)
 
     def test_active_goal_survives_save_load_and_is_not_inferred_from_history(self) -> None:
@@ -933,7 +936,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         completions = {
             "ask_user": "Use A",
             "prepare_goal": "Criteria are ready. Continue to present_plan.",
+            "prepare_plan": "Success Criteria are ready. Continue to present_plan.",
             "present_plan": "Plan presented for user review.",
+            "plan_show": "Current Plan rendered.",
         }
 
         for name in CONTROL_TOOLS:
@@ -961,6 +966,38 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             {event[1] for event in renderer.events if event[0] == "tool_result"},
             CONTROL_TOOLS,
         )
+
+    async def test_recording_renderer_plan_show_uses_exact_terminal_fallback(self) -> None:
+        class TerminalFallback:
+            def __init__(self) -> None:
+                self.plans: list[dict[str, Any]] = []
+
+            def render_current_plan(self, value: dict[str, Any]) -> None:
+                self.plans.append(value)
+
+        retained = plan_artifact(
+            plan_id="plan-1",
+            title="Exact Plan",
+            objective="Deliver the requested result.",
+            context_and_constraints="Preserve unrelated work.",
+            key_changes=["Produce the deliverable."],
+            test_plan=["Verify the observable result."],
+            assumptions=["No additional assumptions."],
+            success_criteria="- The result is complete.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        record = {"events": [], "current_plan": retained}
+        renderer = TerminalFallback()
+        recording = SessionRecordingRenderer(
+            renderer,
+            SessionRecorder(record, Store(), "action"),
+        )
+
+        result = await recording.show_plan({"type": "plan_show"})
+
+        self.assertEqual(result, "Current Plan rendered.")
+        self.assertEqual(renderer.plans, [retained])
 
     def test_rubric_results_are_persisted_as_events_and_reconciled(self) -> None:
         record = {"events": []}
@@ -1556,17 +1593,11 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         resume = context.build_resume_context(record)
 
         self.assertEqual([plan["id"] for plan in plans], ["plan-1", "plan-2"])
-        self.assertIn("Recent structured plans:", resume)
-        self.assertIn("plan-1 (revision requested): Original Palindrome Plan", resume)
-        self.assertIn("plan-2 (approved for implementation): Revised Palindrome Plan", resume)
-        self.assertIn("Summary:\n- Create palindrome.py with docs.", resume)
-        self.assertIn("Key Changes:\n- Add type hints.\n- Add a docstring.", resume)
-        self.assertIn("Test Plan:\n- Run python palindrome.py.\n- Verify Racecar is true.", resume)
-        self.assertIn("Assumptions:\n- Use the project root.", resume)
+        self.assertEqual(resume, "")
         self.assertNotIn("tool_call", resume)
         self.assertNotIn("interrupt", resume)
 
-    def test_resume_context_limits_recent_structured_plans(self) -> None:
+    def test_resume_context_does_not_treat_historical_plans_as_current(self) -> None:
         record = {
             "events": [
                 {
@@ -1585,12 +1616,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         resume = context.build_resume_context(record)
 
-        self.assertNotIn("plan-1 (pending): Plan 1", resume)
-        self.assertIn("plan-2 (discarded): Plan 2", resume)
-        self.assertIn("plan-3 (pending): Plan 3", resume)
-        self.assertIn("plan-4 (pending): Plan 4", resume)
+        self.assertEqual(resume, "")
 
-    def test_resume_context_pending_when_only_plan_events_exist(self) -> None:
+    def test_resume_context_not_pending_for_historical_plan_events_only(self) -> None:
         record = {
             "events": [
                 {
@@ -1604,7 +1632,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         context.mark_resume_context_pending(record, resumed=True)
 
-        self.assertTrue(record["resume_context_pending"])
+        self.assertFalse(record["resume_context_pending"])
 
 
 if __name__ == "__main__":

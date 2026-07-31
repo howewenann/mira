@@ -1,0 +1,269 @@
+"""One authoritative durable Plan and its execution lifecycle."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, TypedDict
+
+from session.goals import bounded_iterations
+
+PLAN_STATUSES = {
+    "proposed",
+    "active",
+    "paused",
+    "max_iterations_reached",
+    "completed",
+}
+RESUMABLE_PLAN_STATUSES = {
+    "proposed",
+    "active",
+    "paused",
+    "max_iterations_reached",
+}
+
+
+class Plan(TypedDict):
+    """The user-visible Plan fields."""
+
+    title: str
+    objective: str
+    context_and_constraints: str
+    key_changes: list[str]
+    test_plan: list[str]
+    assumptions: list[str]
+
+
+class SuccessCriteria(TypedDict):
+    """Success Criteria kept separate from the Plan fields."""
+
+    markdown: str
+
+
+class PlanArtifact(Plan):
+    """The exact retained Plan plus Success Criteria and lifecycle metadata."""
+
+    id: str
+    success_criteria: str
+    status: str
+    rubric_enabled: bool
+    rubric_iterations: int
+    last_rubric_status: str
+    completion_source: str
+    attempts: int
+    created_at: str
+    updated_at: str
+
+
+def normalize_current_plan(value: Any) -> dict[str, Any] | None:
+    """Return a safe PlanArtifact without inferring one from transcript history."""
+    if not isinstance(value, dict):
+        return None
+    plan_id = compact_text(value.get("id"))
+    title = compact_text(value.get("title"))
+    objective = str(value.get("objective") or "").strip()
+    context = str(value.get("context_and_constraints") or "").strip()
+    key_changes = compact_items(value.get("key_changes"))
+    test_plan = compact_items(value.get("test_plan"))
+    assumptions = compact_items(value.get("assumptions"))
+    criteria = str(value.get("success_criteria") or value.get("criteria") or "").strip()
+    if not all((plan_id, title, objective, context, key_changes, test_plan, assumptions, criteria)):
+        return None
+    status = compact_text(value.get("status") or "proposed")
+    if status not in PLAN_STATUSES:
+        status = "proposed"
+    rubric_applies = bool(value.get("rubric_enabled", value.get("automatic_evaluation", False)))
+    created_at = str(value.get("created_at") or now_iso())
+    return {
+        "id": plan_id,
+        "title": title,
+        "objective": objective,
+        "context_and_constraints": context,
+        "key_changes": key_changes,
+        "test_plan": test_plan,
+        "assumptions": assumptions,
+        "success_criteria": criteria,
+        "status": status,
+        "rubric_enabled": rubric_applies,
+        "rubric_iterations": bounded_iterations(value.get("rubric_iterations")),
+        "last_rubric_status": compact_text(value.get("last_rubric_status")),
+        "completion_source": compact_text(value.get("completion_source")),
+        "attempts": nonnegative_int(value.get("attempts")),
+        "created_at": created_at,
+        "updated_at": str(value.get("updated_at") or created_at),
+    }
+
+
+def plan_artifact(
+    *,
+    plan_id: str,
+    title: str,
+    objective: str,
+    context_and_constraints: str,
+    key_changes: list[str],
+    test_plan: list[str],
+    assumptions: list[str],
+    success_criteria: str,
+    rubric_enabled: bool,
+    rubric_iterations: int,
+) -> dict[str, Any]:
+    """Create a complete proposed PlanArtifact."""
+    now = now_iso()
+    value = normalize_current_plan(
+        {
+            "id": plan_id,
+            "title": title,
+            "objective": objective,
+            "context_and_constraints": context_and_constraints,
+            "key_changes": key_changes,
+            "test_plan": test_plan,
+            "assumptions": assumptions,
+            "success_criteria": success_criteria,
+            "status": "proposed",
+            "rubric_enabled": rubric_enabled,
+            "rubric_iterations": rubric_iterations,
+            "last_rubric_status": "",
+            "completion_source": "",
+            "attempts": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    if value is None:
+        raise ValueError("Plan fields and Success Criteria must be complete")
+    return value
+
+
+def current_plan(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the session's single authoritative Plan."""
+    return normalize_current_plan(record.get("current_plan"))
+
+
+def replace_current_plan(record: dict[str, Any], value: dict[str, Any]) -> dict[str, Any]:
+    """Replace the authoritative Plan without creating a second history store."""
+    normalized = normalize_current_plan(value)
+    if normalized is None:
+        raise ValueError("replacement Plan is incomplete")
+    record["current_plan"] = normalized
+    return normalized
+
+
+def start_plan_attempt(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Start or restart execution of the exact retained Plan."""
+    value = current_plan(record)
+    if value is None:
+        return None
+    value["status"] = "active"
+    value["last_rubric_status"] = ""
+    value["completion_source"] = ""
+    value["attempts"] += 1
+    value["updated_at"] = now_iso()
+    record["current_plan"] = value
+    _set_plan_event_status(record, value["id"], "active")
+    return value
+
+
+def finish_plan_attempt(
+    record: dict[str, Any],
+    *,
+    rubric_status: str = "",
+    outcome: str = "completed",
+) -> dict[str, Any] | None:
+    """Finish or pause the active Plan attempt from observable runtime state."""
+    value = current_plan(record)
+    if value is None or value["status"] != "active":
+        return value
+    status = compact_text(rubric_status)
+    if status:
+        value["last_rubric_status"] = status
+    if outcome != "completed":
+        value["status"] = "paused"
+    elif not value["rubric_enabled"]:
+        value["status"] = "completed"
+        value["completion_source"] = "agent-declared"
+    elif status == "satisfied":
+        value["status"] = "completed"
+        value["completion_source"] = "rubric-verified"
+    elif status == "max_iterations_reached":
+        value["status"] = "max_iterations_reached"
+    else:
+        value["status"] = "paused"
+    value["updated_at"] = now_iso()
+    record["current_plan"] = value
+    _set_plan_event_status(record, value["id"], value["status"])
+    return value
+
+
+def pause_current_plan(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Leave an interrupted or failed active Plan resumable."""
+    value = current_plan(record)
+    if value is None:
+        return None
+    if value["status"] == "active":
+        value["status"] = "paused"
+        value["updated_at"] = now_iso()
+        record["current_plan"] = value
+        _set_plan_event_status(record, value["id"], "paused")
+    return value
+
+
+def clear_current_plan(record: dict[str, Any]) -> dict[str, Any] | None:
+    """Remove only current_plan while retaining immutable transcript events."""
+    value = current_plan(record)
+    record["current_plan"] = None
+    return value
+
+
+def plan_artifact_text(value: dict[str, Any]) -> str:
+    """Render the exact Plan and Success Criteria as binding model context."""
+    lines = [
+        f"Title: {value.get('title') or 'Plan'}",
+        "",
+        "Objective:",
+        str(value.get("objective") or ""),
+        "",
+        "Context and Constraints:",
+        str(value.get("context_and_constraints") or ""),
+    ]
+    for heading, key in (
+        ("Key Changes", "key_changes"),
+        ("Test Plan", "test_plan"),
+        ("Assumptions", "assumptions"),
+    ):
+        lines.extend(["", f"{heading}:"])
+        lines.extend(f"- {item}" for item in value.get(key, []))
+    lines.extend(["", "Success Criteria:", str(value.get("success_criteria") or "")])
+    return "\n".join(lines)
+
+
+def _set_plan_event_status(record: dict[str, Any], plan_id: str, status: str) -> None:
+    for event in record.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        plan = event.get("plan")
+        if event.get("type") == "plan" and isinstance(plan, dict) and str(plan.get("id") or "") == plan_id:
+            event["status"] = status
+            return
+
+
+def compact_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def compact_items(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list | tuple):
+        return []
+    return [text for item in value if (text := compact_text(item))]
+
+
+def nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

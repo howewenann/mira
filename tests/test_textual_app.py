@@ -223,7 +223,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         completions = {
             "ask_user": "Use A",
             "prepare_goal": "Criteria are ready. Continue to present_plan.",
+            "prepare_plan": "Success Criteria are ready. Continue to present_plan.",
             "present_plan": "Plan presented for user review.",
+            "plan_show": "Current Plan rendered.",
         }
 
         async with app.run_test() as pilot:
@@ -1043,7 +1045,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 resume = await app.prepare_goal({"type": "prepare_goal", "research_summary": "Existing index is SQLite."})
 
-        self.assertEqual(app.mode["planning_stage"], "finalize")
+        self.assertEqual(app.mode["planning_stage"], "goal_finalize")
         self.assertEqual(app.mode["proposal_run"]["criteria"], "- Ranked search works.")
         self.assertIn("Resolved planning decisions", service.generate.await_args.args[0])
         self.assertEqual(service.generate.await_args.args[1], "Existing index is SQLite.")
@@ -2230,6 +2232,27 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("enable Rubric Middleware in /settings to use /goal", rendered)
             self.assertFalse(app.busy)
             self.assertEqual(app.session.get("turns", 0), 0)
+
+    async def test_plan_prompt_suffix_enters_mode_and_uses_normal_turn_path(self) -> None:
+        app = make_app()
+        captured: dict[str, Any] = {}
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        with patch("ui.app.run_user_turn", fake_run_user_turn):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, '/plan   "keep quoted text"')
+                )
+                await wait_until(lambda: not app.busy)
+
+        self.assertTrue(app.mode["planning"])
+        self.assertEqual(app.mode["plan_thread_id"], "thread-1:plan")
+        self.assertEqual(captured["text"], '"keep quoted text"')
+        self.assertNotIn("display_text", captured)
 
     async def test_compact_command_updates_action_thread_without_adding_turn(self) -> None:
         app = make_app()
@@ -4854,6 +4877,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
+            await wait_until(
+                lambda: "judge"
+                in renderable_plain(panel.query_one("#subagents-tasks", Static))
+            )
             header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
             groups = renderable_plain(panel.query_one("#subagents-groups", Static))
             tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
@@ -4901,6 +4928,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
+            await wait_until(
+                lambda: "retry"
+                in renderable_plain(panel.query_one("#subagents-tasks", Static))
+            )
             groups = renderable_plain(panel.query_one("#subagents-groups", Static))
             tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
 
@@ -5275,6 +5306,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 lambda: len({row.region.y for row in panel.query(".prompt-panel-button-row")}) > 1
             )
             await wait_until(lambda: all(row.region.height == 1 for row in panel.query(".prompt-panel-button-row")))
+            await wait_until(
+                lambda: list(panel.query(Button))[0].styles.background
+                == PROMPT_BUTTON_FOCUS_BACKGROUND
+            )
             rows = list(panel.query(".prompt-panel-button-row"))
             buttons = list(panel.query(Button))
             row_positions = {row.region.y for row in rows}
@@ -5354,8 +5389,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(task, timeout=2), "c")
 
-    async def test_present_plan_bubble_discards_to_inactive_history(self) -> None:
-        """Structured plans should render with real buttons and resolve in place."""
+    async def test_present_plan_bubble_closes_but_retains_current_plan(self) -> None:
+        """Close should hide controls without clearing the authoritative Plan."""
         app = make_app()
         interrupt = {
             "type": "present_plan",
@@ -5369,39 +5404,49 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            self.assertEqual(await app.present_plan(interrupt), "Plan presented for user review.")
+            self.assertEqual(
+                await app.present_plan(interrupt),
+                "Plan and Success Criteria presented for user review.",
+            )
             await pilot.pause()
 
             self.assertIsNotNone(app.mode["current_plan"])
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Ephemeral Structured Planning", rendered)
-            self.assertIn("Summary", rendered)
+            self.assertIn("Objective", rendered)
+            self.assertIn("Context and Constraints", rendered)
             self.assertIn("Key Changes", rendered)
             self.assertIn("Test Plan", rendered)
             self.assertIn("Assumptions", rendered)
+            self.assertIn("Success Criteria", rendered)
             buttons = list(app.query(".plan-action"))
             self.assertEqual(len(buttons), 3)
             self.assertEqual(
                 [button.label.plain for button in buttons],
-                ["Implement (i)", "Revise (r)", "Discard (d)"],
+                ["Implement", "Revise", "Close"],
             )
             self.assertEqual(len(app.query(".plan-actions")), 1)
             self.assertTrue(all(button.compact for button in buttons))
             self.assertTrue(all(button.region.height == 1 for button in buttons))
             self.assertTrue(all(all(edge[0] == "" for edge in button.styles.border) for button in buttons))
 
-            discard_button = app.query_one("#plan-discard-plan-1", Button)
-            discard_button.scroll_visible(animate=False, immediate=True)
+            close_button = app.query_one("#plan-close-plan-1", Button)
+            close_button.scroll_visible(animate=False, immediate=True)
             await pilot.pause()
-            await pilot.click("#plan-discard-plan-1")
-            await wait_until(lambda: app.mode["current_plan"] is None)
+            await pilot.click("#plan-close-plan-1")
+            await wait_until(
+                lambda: len(
+                    [button for button in app.query(".plan-action") if button.display]
+                )
+                == 0
+            )
             await wait_until(lambda: app.query_one(PromptBox).has_focus)
 
-            self.assertIsNone(app.mode["current_plan"])
+            self.assertIsNotNone(app.mode["current_plan"])
             self.assertTrue(app.query_one(PromptBox).has_focus)
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-            self.assertIn("Status: discarded", rendered)
+            self.assertIn("Status: proposed", rendered)
 
     async def test_present_plan_shortcuts_match_visible_button_labels(self) -> None:
         """Presented plan controls should focus and honor visible keyboard controls."""
@@ -5424,26 +5469,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(lambda: first_button.has_focus)
 
             revise_button = app.query_one("#plan-revise-plan-1", Button)
-            discard_button = app.query_one("#plan-discard-plan-1", Button)
+            close_button = app.query_one("#plan-close-plan-1", Button)
             await pilot.press("right")
             await wait_until(lambda: revise_button.has_focus)
             await pilot.press("right")
-            await wait_until(lambda: discard_button.has_focus)
+            await wait_until(lambda: close_button.has_focus)
             await pilot.press("right")
             await wait_until(lambda: first_button.has_focus)
             await pilot.press("left")
-            await wait_until(lambda: discard_button.has_focus)
+            await wait_until(lambda: close_button.has_focus)
             await pilot.press("right")
             await wait_until(lambda: first_button.has_focus)
 
             app.query_one("#prompt").focus()
             await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
+            app.query_one(".plan-body").scroll_visible(animate=False, immediate=True)
+            await pilot.pause()
             await pilot.click(".plan-body")
             await wait_until(lambda: first_button.has_focus)
 
             with patch.object(app, "_handle_plan_action", new_callable=AsyncMock) as handle_action:
                 for count, (shortcut, action) in enumerate(
-                    (("i", "implement"), ("r", "revise"), ("d", "discard")),
+                    (("i", "implement"), ("r", "revise"), ("c", "close")),
                     start=1,
                 ):
                     await pilot.press(shortcut)
@@ -5456,6 +5503,48 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("escape")
             await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
+
+    async def test_plan_show_reopens_exact_plan_and_clear_keeps_history(self) -> None:
+        app = make_app()
+        interrupt = {
+            "type": "present_plan",
+            "title": "Recall Plan",
+            "summary": ["Retain this objective."],
+            "key_changes": ["Keep exact fields."],
+            "test_plan": ["Check exact rendering."],
+            "assumptions": ["No additional assumptions."],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await app.present_plan(interrupt)
+            await pilot.pause()
+            expected = dict(app.session["current_plan"])
+            event_count = len(app.session["events"])
+            await app._handle_plan_action("close", "plan-1")
+            self.assertEqual(app.session["current_plan"], expected)
+            self.assertEqual(
+                next(
+                    event["status"]
+                    for event in app.session["events"]
+                    if event.get("type") == "plan"
+                ),
+                "closed",
+            )
+
+            self.assertEqual(await app.show_plan(), "Current Plan rendered.")
+            await pilot.pause()
+            self.assertEqual(app.session["current_plan"], expected)
+            self.assertEqual(len(app.session["events"]), event_count)
+            self.assertEqual(
+                len([button for button in app.query(".plan-action") if button.display]),
+                3,
+            )
+
+            app.clear_plan()
+            self.assertIsNone(app.session["current_plan"])
+            self.assertEqual(len(app.session["events"]), event_count)
+            self.assertIn("Recall Plan", renderable_plain(app.query_one(".plan-body")))
 
     async def test_cancel_turn_keeps_unrelated_plan_bubble_active(self) -> None:
         """Cancelling a later turn should not discard an active plan bubble."""
@@ -5486,7 +5575,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Cancellation Plan", rendered)
-            self.assertNotIn("Status:", rendered)
+            self.assertIn("Status: proposed", rendered)
 
     def test_normalize_plan_fills_all_structured_sections(self) -> None:
         """Partial plan payloads should not drop sections in logs or replay."""
@@ -5495,7 +5584,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["summary"], ["One."])
         self.assertEqual(plan["key_changes"], ["List the key implementation changes."])
         self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
-        self.assertEqual(plan["assumptions"], ["No additional assumptions identified."])
+        self.assertEqual(plan["assumptions"], ["No additional assumptions."])
 
     async def test_present_plan_revise_cancel_keeps_plan_active(self) -> None:
         """Cancelling a revision prompt should leave the current plan actionable."""
@@ -5551,7 +5640,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._handle_plan_action("revise", "plan-1")
                 await wait_until(lambda: len(calls) == 1)
 
-                self.assertIsNone(app.mode["current_plan"])
+                self.assertIsNotNone(app.mode["current_plan"])
                 self.assertTrue(app.mode["planning"])
                 self.assertEqual(calls[0]["display_text"], "Revise plan: include a testing plan")
                 self.assertTrue(calls[0]["record_user"])
@@ -5561,7 +5650,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Test Plan:\n- Add unit tests for palindrome inputs.", calls[0]["text"])
                 self.assertIn("User feedback:\ninclude a testing plan", calls[0]["text"])
                 rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-                self.assertIn("Status: revision requested", rendered)
+                self.assertIn("Status: proposed", rendered)
 
     async def test_present_plan_revise_button_opens_feedback_prompt(self) -> None:
         """The Revise button should ask for feedback before resolving the plan."""

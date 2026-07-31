@@ -8,6 +8,7 @@ from itertools import count
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
+from session.plans import plan_artifact_text
 from ui.terminal_colors import TerminalColorizer, enable_console_colors
 from ui.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -177,9 +178,15 @@ class Renderer:
     async def present_plan(self, interrupt: Any) -> str:
         """Print a structured plan in one-shot terminal mode."""
         plan = plan_request(interrupt)
-        lines = [str(plan.get("title") or "Implementation Plan"), ""]
+        lines = [str(plan.get("title") or "Plan"), ""]
         for heading, key in (
-            ("Summary", "summary"),
+            ("Objective", "objective"),
+            ("Context and Constraints", "context_and_constraints"),
+        ):
+            value = str(plan.get(key) or "").strip()
+            if value:
+                lines.extend([heading, value, ""])
+        for heading, key in (
             ("Key Changes", "key_changes"),
             ("Test Plan", "test_plan"),
             ("Assumptions", "assumptions"),
@@ -192,6 +199,23 @@ class Renderer:
             lines.append("")
         self.transcript.block("plan", "\n".join(lines).rstrip())
         return "Plan presented for user review."
+
+    def render_current_plan(self, plan: dict[str, Any]) -> None:
+        """Render an exact retained Plan for the plan_show control tool."""
+        policy = (
+            "Automatic evaluation enabled."
+            if plan.get("rubric_enabled")
+            else "Automatic evaluation disabled."
+        )
+        details = [policy, f"Status: {plan.get('status') or 'proposed'}"]
+        if plan.get("last_rubric_status"):
+            details.append(
+                f"Last result: {str(plan['last_rubric_status']).replace('_', ' ')}"
+            )
+        if plan.get("completion_source"):
+            details.append(f"Completion: {plan['completion_source']}")
+        body = f"{plan_artifact_text(plan)}\n\n{' · '.join(details)}"
+        self.transcript.block("plan", body)
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""

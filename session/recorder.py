@@ -10,6 +10,7 @@ from typing import Any
 from agent.context_overflow import pop_context_overflow_notice
 from runtime.output_events import normalize_response_delta
 from session.context import append_event, sync_deepagents_compaction, update_event_text
+from session.plans import current_plan, plan_artifact_text
 
 COMPACTION_POLL_SECONDS = 10.0
 
@@ -421,6 +422,30 @@ class RecordingRenderer:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
+
+    async def show_plan(self, interrupt: Any = None) -> str:
+        """Render current_plan through the active UI, with a terminal fallback."""
+        callback = getattr(self.renderer, "show_plan", None)
+        if callable(callback):
+            outcome = callback(interrupt)
+            if hasattr(outcome, "__await__"):
+                outcome = await outcome
+            return str(outcome or "Current Plan rendered.")
+
+        value = current_plan(self.recorder.record)
+        if value is None:
+            self.system_message("no current Plan", kind="muted")
+            return "No current Plan."
+
+        fallback = getattr(self.renderer, "render_current_plan", None)
+        if callable(fallback):
+            fallback(value)
+        else:
+            self.system_message(
+                f"{plan_artifact_text(value)}\n\nStatus: {value['status']}",
+                kind="info",
+            )
+        return "Current Plan rendered."
 
     def reasoning_delta(self, delta: str) -> None:
         event = self.recorder.reasoning_delta(delta)
