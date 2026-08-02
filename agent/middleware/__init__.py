@@ -8,40 +8,40 @@ from agent.middleware.correction import (
     CorrectionRule,
     CorrectionState,
 )
-from agent.middleware.execute_tool_prompt import (
+from agent.middleware.execute_tool_description_rewrite import (
     MIRA_EXECUTE_TOOL_DESCRIPTION,
-    ExecuteToolPromptMiddleware,
+    ExecuteToolDescriptionRewriteMiddleware,
     execute_tool_with_mira_description,
 )
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
-from agent.middleware.pipeline import (
-    AgentMiddlewarePipeline,
+from agent.middleware.builder import (
+    AgentMiddlewareBundle,
     QUICKJS_MEMORY_LIMIT,
     QUICKJS_PERSISTENCE_MODE,
     QUICKJS_PTC_TOOLS,
     QUICKJS_TIMEOUT_SECONDS,
     build_agent_middleware,
 )
-from agent.middleware.planning_stage import (
-    PlanningStageMiddleware,
+from agent.middleware.planning_stage_enforcement import (
+    PlanningStageEnforcementMiddleware,
     PlanningStageState,
     planning_control_tool_error,
 )
 
 __all__ = [
-    "AgentMiddlewarePipeline",
+    "AgentMiddlewareBundle",
     "CORRECTION_EVENT",
     "CORRECTION_SOURCE",
     "CorrectionDecision",
     "CorrectionMiddleware",
     "CorrectionRule",
     "CorrectionState",
-    "ExecuteToolPromptMiddleware",
+    "ExecuteToolDescriptionRewriteMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
     "ModelResponseNormalizationMiddleware",
     "ModelToolVisibilityMiddleware",
-    "PlanningStageMiddleware",
+    "PlanningStageEnforcementMiddleware",
     "PlanningStageState",
     "QUICKJS_MEMORY_LIMIT",
     "QUICKJS_PERSISTENCE_MODE",

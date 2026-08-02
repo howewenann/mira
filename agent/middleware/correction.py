@@ -17,7 +17,6 @@ class CorrectionDecision:
     """Result of checking one natural-stop assistant message."""
 
     accepted: bool
-    replacement: AIMessage | None = None
     failed_check: str = ""
     retry_prompt: str = ""
 
@@ -151,10 +150,7 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
         retries = dict(state.get("_correction_retries") or {})
         if decision.accepted:
             retries.pop(rule.protocol_id, None)
-            update: dict[str, Any] = {"_correction_retries": retries}
-            if decision.replacement is not None:
-                update["messages"] = [decision.replacement]
-            return update
+            return {"_correction_retries": retries}
 
         used = int(retries.get(rule.protocol_id) or 0)
         if used >= self.max_retries:

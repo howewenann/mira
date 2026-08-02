@@ -35,7 +35,7 @@ class PlanningStageState(AgentState):
     ]
 
 
-class PlanningStageMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
+class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
     """Expose and execute only the formal controls valid for the current stage."""
 
     state_schema = PlanningStageState
@@ -130,7 +130,7 @@ def planning_control_tool_error(name: str, current_stage: str, expected_stage: s
 
 __all__ = [
     "CONTROL_TOOL_STAGES",
-    "PlanningStageMiddleware",
+    "PlanningStageEnforcementMiddleware",
     "PlanningStageState",
     "planning_control_tool_error",
 ]

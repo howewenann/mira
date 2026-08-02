@@ -132,8 +132,8 @@ auto-added raw one by name. DeepAgents therefore rejects a dynamic
 `responseSchema` before starting the child while ordinary text delegation and
 static response formats continue to work. Keeping these choices in workspace
 settings makes them inspectable without changing QuickJS or installed packages.
-The always-on Plan/Goal next-action protocol has one workspace System Setting,
-`system.planning_next_action.max_retries` (default `2`, range `1`-`20`). It
+The always-on Plan/Goal response-status protocol has one workspace System Setting,
+`system.planning_response_status.max_retries` (default `2`, range `1`-`20`). It
 counts recovery calls after the first rejected response. Changing it follows
 the normal settings application path and rebuilds both agents; it is a bound,
 not a feature toggle.
@@ -331,17 +331,18 @@ Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
 
-Plan research also uses a deterministic terminal next-action contract. The
+Plan research also uses a deterministic terminal response-status contract. The
 generic `CorrectionMiddleware` appends the Plan-owned rule's contract
 transiently to every model request, including requests after tool results,
 because a reminder stored only on the initial user message becomes stale as the
 tool loop grows. Research keeps optional tool choice. A response with any tool
 call bypasses correction. At a natural no-tool stop, the final non-empty textual
-line must be exactly one stage-valid marker; only `NEXT_ACTION: ANSWER` may
-terminate. `RESEARCH`, `ASK_USER`, and `PREPARE_PLAN` retain the rejected
-assistant response, append a named correction prompt, and use LangGraph's native
-jump to the model node without replaying completed tools. Missing, duplicated,
-malformed, non-terminal, empty, reasoning-only, or Goal-only markers take the
+line must be exactly one stage-valid `RESPONSE_STATUS` line; only
+`RESPONSE_STATUS: COMPLETE` may terminate. `NEEDS_RESEARCH`,
+`NEEDS_USER_INPUT`, and `READY_TO_PREPARE_PLAN` retain the rejected assistant
+response, append a named correction prompt, and use LangGraph's native jump to
+the model node without replaying completed tools. Missing, duplicated,
+malformed, non-terminal, empty, reasoning-only, or Goal-only statuses take the
 same bounded recovery path with general feedback. Finalisation is isolated from
 this contract and remains a forced single `present_plan` call.
 
@@ -350,13 +351,15 @@ prose and its correction prompt remain paired in checkpoint and durable visible
 history so neither the user nor the model sees a hanging correction. A generic
 correction bubble shows the failed check, exact retry prompt, and retry count.
 Exhaustion retains the last candidate, shows the failed check and exhausted
-limit, then appends an explicit incomplete response. Exact terminal markers are
-held out of user-visible streaming and stripped from accepted message content.
-This reliability check is always active and does not call or mutate user
-rubrics. It deliberately trusts an exact `ANSWER` classification: a dishonest
-model can still label unfinished prose as complete. Provider-specific channels,
-English false-progress heuristics, and always-on semantic grading were rejected
-because they are less portable or would add a second model judgment.
+limit, then appends an explicit incomplete response. The exact status line is
+ordinary assistant text: it remains visible and byte-identical in model state,
+checkpoints, sessions, reload context, one-shot output, TUI output, and traces.
+There is no separate accepted-status event or bubble. This reliability check is
+always active and does not call or mutate user rubrics. It deliberately trusts
+an exact `COMPLETE` classification: a dishonest model can still label unfinished
+prose as complete. Provider-specific channels, English false-progress
+heuristics, and always-on semantic grading were rejected because they are less
+portable or would add a second model judgment.
 
 When a Plan is current, `current_plan` stores its stable id, Plan fields,
 separate Success Criteria, status, rubric policy and cap, latest overall rubric
@@ -425,10 +428,10 @@ generation leaves current formal work unchanged. Goal construction never calls
 
 Goal research uses the same transient natural-stop protocol and bounded retry
 state as Plan research, but its only preparation marker and tool are
-`NEXT_ACTION: PREPARE_GOAL` and `prepare_goal`. Plan preparation is not exposed
-and a Plan-only marker is malformed. Conversely, Goal preparation is absent
-from Plan research. Goal finalisation remains outside validation and retains
-the single required `present_goal` call.
+`RESPONSE_STATUS: READY_TO_PREPARE_GOAL` and `prepare_goal`. Plan preparation is
+not exposed and a Plan-only status is malformed. Conversely, Goal preparation
+is absent from Plan research. Goal finalisation remains outside validation and
+retains the single required `present_goal` call.
 
 `SuccessCriteriaService` treats the objective as authoritative and receives
 only the effective objective, optional research context, and previous criteria
@@ -492,8 +495,8 @@ recall, migration, or execution completion rules change.
 grading as separate harness capabilities. `CorrectionMiddleware` owns only the
 generic no-tool natural-stop lifecycle: transient reminders, rule selection,
 bounded counters, correction events, model feedback, retry jumps, acceptance,
-and exhaustion. Workflow rules under `agent/planning/` define Plan/Goal markers,
-checks, prompts, and terminal failure text. Rubrics remain optional semantic
+and exhaustion. Workflow rules under `agent/planning/` define Plan/Goal response
+statuses, checks, prompts, and terminal failure text. Rubrics remain optional semantic
 review by a grader model and share no implementation with deterministic
 correction.
 
@@ -517,13 +520,16 @@ persistence, or renderer failures remain fatal because another model attempt
 cannot repair them.
 
 The middleware package mirrors these ownership boundaries:
-`pipeline.py` assembles ordering, `correction.py` implements generic correction,
-`planning_stage.py` enforces formal stages, and the execute prompt, tool
-visibility, and response normalization each live in a responsibility-named
-module. Correction events are durable transcript events and are projected as
-correction context, not user context, when a saved session is resumed.
+`builder.py` returns the ordered `AgentMiddlewareBundle`; `correction.py`
+implements generic correction; `planning_stage_enforcement.py` enforces formal
+stages; and `execute_tool_description_rewrite.py`,
+`model_tool_visibility.py`, and `model_response_normalization.py` each name the
+behavior they own. Correction events are durable transcript events and are
+projected as correction context, not user context, when a saved session is
+resumed. Accepted response statuses need no special projection because they are
+preserved as ordinary assistant prose.
 
-**Where to check:** `agent/middleware/`, `agent/planning/next_action.py`,
+**Where to check:** `agent/middleware/`, `agent/planning/response_status.py`,
 `runtime/correction_events.py`, `runtime/runner.py`, `session/context.py`.
 
 **Update this when:** A new correction rule is added, correction visibility or

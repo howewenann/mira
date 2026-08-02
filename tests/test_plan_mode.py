@@ -15,7 +15,7 @@ from rich.text import Text
 
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
-from agent.middleware import CorrectionMiddleware, ModelToolVisibilityMiddleware, PlanningStageMiddleware
+from agent.middleware import CorrectionMiddleware, ModelToolVisibilityMiddleware, PlanningStageEnforcementMiddleware
 from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
 from agent.tools.specs import mira_environment_label, tool_name
 from config.metadata import ModelMetadata
@@ -181,9 +181,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The planning agent should hide writes instead of requesting approval."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -200,9 +200,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The action agent should keep write approval interrupts enabled."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -225,9 +225,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         config = {"settings": {"system": {"planning_todos": {"enabled": True}}}}
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             action = factory.build_agent(config, ".", "checkpointer")
@@ -244,9 +244,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """MIRA should not add todo middleware, state, or tool metadata by default."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -271,9 +271,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -289,9 +289,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.factory.backend_supports_delete", return_value=False),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -308,9 +308,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """QuickJS should not expose eval-internal task() unless the setting is enabled."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code") as code_middleware,
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer")
@@ -323,9 +323,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code") as code_middleware,
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -337,9 +337,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         config = {"settings": {"system": {"rubric": {"enabled": True, "max_iterations": 5}}}}
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.RubricMiddleware", return_value="rubric") as rubric,
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
@@ -352,20 +352,20 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("rubric", action_middleware)
         self.assertNotIn("rubric", plan_kwargs["middleware"])
         self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
-        self.assertTrue(any(isinstance(item, PlanningStageMiddleware) for item in plan_kwargs["middleware"]))
+        self.assertTrue(any(isinstance(item, PlanningStageEnforcementMiddleware) for item in plan_kwargs["middleware"]))
 
-    def test_planning_next_action_cap_is_passed_to_correction_middleware(self) -> None:
+    def test_planning_response_status_cap_is_passed_to_correction_middleware(self) -> None:
         """The workspace recovery cap should configure the shared Plan/Goal middleware."""
         config = {
             "settings": {
-                "system": {"planning_next_action": {"max_retries": 7}}
+                "system": {"planning_response_status": {"max_retries": 7}}
             }
         }
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             factory.build_plan_agent(config, ".", "checkpointer")
@@ -381,9 +381,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Rubric settings must not change Plan construction."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.RubricMiddleware") as rubric,
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
@@ -398,7 +398,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("present_goal", names)
         self.assertIn("goal_show", names)
         self.assertTrue(
-            any(isinstance(item, PlanningStageMiddleware) for item in create.call_args.kwargs["middleware"])
+            any(isinstance(item, PlanningStageEnforcementMiddleware) for item in create.call_args.kwargs["middleware"])
         )
 
     def test_action_agent_compiles_subagents_when_response_schemas_are_disabled(self) -> None:
@@ -415,9 +415,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.compile_dynamic_subagents", return_value=compiled) as compile_subagents,
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
@@ -439,9 +439,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.compile_dynamic_subagents") as compile_subagents,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
@@ -456,9 +456,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("agent.factory.get_llm", return_value=model) as get_llm,
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary") as auto_summary,
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary") as summary,
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary") as auto_summary,
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary") as summary,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer", metadata=metadata)
@@ -474,9 +474,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Built agents should expose tool metadata for the UI."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
             patch("agent.tools.specs.mira_environment_label", return_value="ai_agents"),
         ):
@@ -508,9 +508,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Plan agents should hide mutating and delegation tool metadata."""
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -536,9 +536,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         config = {"settings": {"hitl": {"tools": {"edit_file": {"enabled": False, "always_allow": False}}}}}
         with (
             patch("agent.factory.get_llm", return_value="model"),
-            patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
-            patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_agent(config, ".", "checkpointer")

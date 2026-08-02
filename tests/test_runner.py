@@ -18,7 +18,7 @@ from agent.compaction import (
     sanitize_messages_for_archive,
 )
 from agent.middleware import CORRECTION_EVENT, CORRECTION_SOURCE
-from agent.planning.next_action import PLANNING_NEXT_ACTION_FAILURE
+from agent.planning.response_status import PLANNING_RESPONSE_STATUS_FAILURE
 from runtime.context_usage import context_usage_scope
 from runtime import runner
 from runtime.message_events import consume_messages
@@ -2421,41 +2421,40 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_planning_next_action_marker_is_held_and_suppressed(self) -> None:
+    async def test_planning_response_status_is_streamed_byte_visible(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
                 Message(
                     text=AsyncItems(
-                        ["调查完成。\n", "NEXT_ACTION", ": ANSWER", "\n\n"]
+                        ["调查完成。\n", "RESPONSE_STATUS", ": COMPLETE", "\n\n"]
                     )
                 )
             ]
         )
 
-        await consume_messages(messages, renderer, filter_planning_next_action=True)
+        await consume_messages(messages, renderer)
 
         visible = "".join(event[1] for event in renderer.events if event[0] == "text")
-        self.assertEqual(visible, "调查完成。\n\n")
-        self.assertNotIn("NEXT_ACTION", visible)
+        self.assertEqual(visible, "调查完成。\nRESPONSE_STATUS: COMPLETE\n\n")
 
-    async def test_planning_filter_preserves_nonterminal_or_inexact_marker_text(self) -> None:
+    async def test_response_status_text_is_not_specially_filtered(self) -> None:
         renderer = RecordingRenderer()
         messages = AsyncItems(
             [
                 Message(
                     text=AsyncItems(
-                        ["NEXT_ACTION: ANSWER \n", "This line remains visible."]
+                        ["RESPONSE_STATUS: COMPLETE \n", "This line remains visible."]
                     )
                 )
             ]
         )
 
-        await consume_messages(messages, renderer, filter_planning_next_action=True)
+        await consume_messages(messages, renderer)
 
         self.assertEqual(
             "".join(event[1] for event in renderer.events if event[0] == "text"),
-            "NEXT_ACTION: ANSWER \nThis line remains visible.",
+            "RESPONSE_STATUS: COMPLETE \nThis line remains visible.",
         )
 
     async def test_internal_planning_feedback_stream_is_hidden(self) -> None:
@@ -2476,13 +2475,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_correction_custom_events_preserve_prose_and_render_details(self) -> None:
         stream = FakeStream(
-            output={"messages": [OutputMessage(PLANNING_NEXT_ACTION_FAILURE)]},
+            output={"messages": [OutputMessage(PLANNING_RESPONSE_STATUS_FAILURE)]},
             custom_events=[
                 {
                     "type": CORRECTION_EVENT,
-                    "protocol": "plan_next_action",
+                    "protocol": "plan_response_status",
                     "workflow": "Plan",
-                    "failed_check": "NEXT_ACTION: RESEARCH had no tool call.",
+                    "failed_check": "RESPONSE_STATUS: NEEDS_RESEARCH had no tool call.",
                     "retry_prompt": "Perform the research now.",
                     "attempt": 1,
                     "max_retries": 2,
@@ -2503,7 +2502,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(corrections), 1)
         self.assertEqual(corrections[0][1]["workflow"], "Plan")
         self.assertEqual(corrections[0][1]["retry_prompt"], "Perform the research now.")
-        self.assertEqual(result.final_text, PLANNING_NEXT_ACTION_FAILURE)
+        self.assertEqual(result.final_text, PLANNING_RESPONSE_STATUS_FAILURE)
 
     async def test_message_finalized_task_calls_are_hidden_in_runner_mode(self) -> None:
         renderer = RecordingRenderer()

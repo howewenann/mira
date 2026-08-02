@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,7 +29,7 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.dynamic_subagents_enabled(loaded))
         self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
         self.assertFalse(settings.planning_todos_enabled(loaded))
-        self.assertEqual(settings.planning_next_action_max_retries(loaded), 2)
+        self.assertEqual(settings.planning_response_status_max_retries(loaded), 2)
         self.assertFalse(settings.rubric_enabled(loaded))
         self.assertEqual(settings.rubric_max_iterations(loaded), 3)
         self.assertFalse(settings.tool_always_allow(loaded, "custom_search"))
@@ -151,21 +152,42 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.rubric_enabled(malformed))
         self.assertEqual(settings.rubric_max_iterations(malformed), 3)
 
-    def test_planning_next_action_retries_normalize_and_preserve_invalid_values(self) -> None:
+    def test_planning_response_status_retries_normalize_and_preserve_invalid_values(self) -> None:
         """The shared Plan/Goal retry cap should follow rubric-style bounds."""
         loaded = settings.normalize_settings(
-            {"system": {"planning_next_action": {"max_retries": 5}}}
+            {"system": {"planning_response_status": {"max_retries": 5}}}
         )
-        self.assertEqual(settings.planning_next_action_max_retries(loaded), 5)
+        self.assertEqual(settings.planning_response_status_max_retries(loaded), 5)
+
+        for value in (1, 20):
+            updated = settings.set_planning_response_status_max_retries(loaded, value)
+            self.assertEqual(settings.planning_response_status_max_retries(updated), value)
 
         for value in (0, -1, 21, True, "4"):
-            updated = settings.set_planning_next_action_max_retries(loaded, value)
-            self.assertEqual(settings.planning_next_action_max_retries(updated), 5)
+            updated = settings.set_planning_response_status_max_retries(loaded, value)
+            self.assertEqual(settings.planning_response_status_max_retries(updated), 5)
 
         malformed = settings.normalize_settings(
-            {"system": {"planning_next_action": {"max_retries": 0}}}
+            {"system": {"planning_response_status": {"max_retries": 0}}}
         )
-        self.assertEqual(settings.planning_next_action_max_retries(malformed), 2)
+        self.assertEqual(settings.planning_response_status_max_retries(malformed), 2)
+
+    def test_retired_planning_next_action_key_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            retired = deepcopy(settings.DEFAULT_SETTINGS)
+            retired["system"]["planning_next_action"] = retired["system"].pop(
+                "planning_response_status"
+            )
+            self.assertTrue(settings.save_settings(workspace, retired))
+            path = settings.settings_path(workspace)
+            text = path.read_text(encoding="utf-8").replace(
+                "planning_response_status:", "planning_next_action:"
+            )
+            path.write_text(text, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "current schema"):
+                settings.load_settings(workspace)
 
     def test_existing_partial_or_malformed_yaml_is_rejected(self) -> None:
         """Only a missing file receives defaults; existing files must match exactly."""
@@ -211,7 +233,7 @@ class SettingsTests(unittest.TestCase):
             workspace = Path(directory)
             updated = settings.set_git_protection(settings.load_settings(workspace), False)
             updated = settings.set_planning_todos(updated, True)
-            updated = settings.set_planning_next_action_max_retries(updated, 4)
+            updated = settings.set_planning_response_status_max_retries(updated, 4)
             updated = settings.set_tool_always_allow(updated, "delete", True)
             updated = settings.set_tool_always_allow(updated, "web_search", False)
             updated = settings.set_tool_enabled(updated, "web_search", False)
@@ -229,7 +251,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("llm_direct", loaded)
         self.assertFalse(settings.git_protection_enabled(loaded))
         self.assertTrue(settings.planning_todos_enabled(loaded))
-        self.assertEqual(settings.planning_next_action_max_retries(loaded), 4)
+        self.assertEqual(settings.planning_response_status_max_retries(loaded), 4)
         self.assertTrue(settings.tool_always_allow(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))

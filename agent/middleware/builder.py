@@ -1,4 +1,4 @@
-"""Construction and ordering of MIRA's default middleware pipeline."""
+"""Build the ordered middleware bundle used by MIRA agents."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from agent.compaction import (
     create_mira_summarization_tool_middleware,
 )
 from agent.context_overflow import ProviderContextOverflowMiddleware
-from agent.middleware.execute_tool_prompt import ExecuteToolPromptMiddleware
+from agent.middleware.execute_tool_description_rewrite import (
+    ExecuteToolDescriptionRewriteMiddleware,
+)
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from config.settings import dynamic_subagents_enabled, planning_todos_enabled
 
@@ -26,8 +28,8 @@ QUICKJS_PERSISTENCE_MODE = "thread"
 
 
 @dataclass(frozen=True)
-class AgentMiddlewarePipeline:
-    """Middleware items plus the summarization instance MIRA observes."""
+class AgentMiddlewareBundle:
+    """Built middleware items plus the summarization instance MIRA observes."""
 
     items: list[Any]
     summarization: Any
@@ -40,8 +42,8 @@ def build_agent_middleware(
     workspace: Path,
     settings: dict[str, Any] | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
-) -> AgentMiddlewarePipeline:
-    """Build MIRA's ordered user middleware pipeline for DeepAgents."""
+) -> AgentMiddlewareBundle:
+    """Build MIRA's ordered user middleware bundle for DeepAgents."""
     summarization_middleware = create_mira_summarization_middleware(model=model, backend=backend)
     summarization_tool_middleware = create_mira_summarization_tool_middleware(model=model, backend=backend)
     middleware: list[Any] = [
@@ -57,14 +59,14 @@ def build_agent_middleware(
             mode=QUICKJS_PERSISTENCE_MODE,
         ),
         summarization_tool_middleware,
-        ExecuteToolPromptMiddleware(),
+        ExecuteToolDescriptionRewriteMiddleware(),
     ]
     middleware.extend(extra_middleware or [])
-    return AgentMiddlewarePipeline(items=middleware, summarization=summarization_middleware)
+    return AgentMiddlewareBundle(items=middleware, summarization=summarization_middleware)
 
 
 __all__ = [
-    "AgentMiddlewarePipeline",
+    "AgentMiddlewareBundle",
     "QUICKJS_MEMORY_LIMIT",
     "QUICKJS_PERSISTENCE_MODE",
     "QUICKJS_PTC_TOOLS",

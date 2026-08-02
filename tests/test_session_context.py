@@ -826,13 +826,15 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         renderer = RunTurnRenderer()
         recording = SessionRecordingRenderer(renderer, recorder)
 
-        recording.text_delta("I'll inspect next.\n")
+        recording.text_delta("I'll inspect next.\nRESPONSE_STATUS: NEEDS_RESEARCH")
         recording.correction(
             {
                 "type": "correction",
-                "protocol": "plan_next_action",
+                "protocol": "plan_response_status",
                 "workflow": "Plan",
-                "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                "failed_check": (
+                    "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
+                ),
                 "retry_prompt": "Perform that research now.",
                 "attempt": 1,
                 "max_retries": 2,
@@ -844,7 +846,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(event["type"], event.get("text")) for event in events],
             [
-                ("assistant", "I'll inspect next."),
+                ("assistant", "I'll inspect next.\nRESPONSE_STATUS: NEEDS_RESEARCH"),
                 ("correction", None),
                 ("assistant", "Inspection complete."),
             ],
@@ -856,19 +858,37 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(event[0] == "correction" for event in renderer.events))
 
+    def test_complete_response_status_survives_session_and_resume_context(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "planning")
+        recording = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+
+        exact = "Navigation explained.\nRESPONSE_STATUS: COMPLETE"
+        recording.text_delta(exact)
+        recording.finish_main()
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual(events[-1]["text"], exact)
+        resume = context.build_resume_context(
+            {"events": events, "current_plan": None, "current_goal": None}
+        )
+        self.assertIn(exact, resume)
+
     def test_correction_exhaustion_keeps_last_candidate_and_appends_failure(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
         recording = SessionRecordingRenderer(renderer, recorder)
 
-        recording.text_delta("Still researching.")
+        recording.text_delta("Still researching.\nRESPONSE_STATUS: NEEDS_RESEARCH")
         recording.correction(
             {
                 "type": "correction",
-                "protocol": "plan_next_action",
+                "protocol": "plan_response_status",
                 "workflow": "Plan",
-                "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                "failed_check": (
+                    "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
+                ),
                 "attempt": 2,
                 "max_retries": 2,
                 "exhausted": True,
@@ -878,7 +898,10 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["assistant", "correction", "assistant"])
-        self.assertEqual(events[0]["text"], "Still researching.")
+        self.assertEqual(
+            events[0]["text"],
+            "Still researching.\nRESPONSE_STATUS: NEEDS_RESEARCH",
+        )
         self.assertTrue(events[1]["exhausted"])
         self.assertEqual(events[2]["text"], "MIRA could not produce a valid response.")
         self.assertIn(

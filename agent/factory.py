@@ -12,10 +12,10 @@ from agent.llm import get_llm
 from agent.middleware import (
     CorrectionMiddleware,
     ModelToolVisibilityMiddleware,
-    PlanningStageMiddleware,
+    PlanningStageEnforcementMiddleware,
     build_agent_middleware,
 )
-from agent.planning.next_action import PlanningNextActionRule
+from agent.planning.response_status import PlanningResponseStatusRule
 from agent.planning.policy import (
     PLAN_DENIED_FS_OPERATIONS,
     PLAN_DISABLED_TOOLS,
@@ -36,7 +36,7 @@ from config.settings import (
     dynamic_subagents_enabled,
     hitl_settings,
     planning_todos_enabled,
-    planning_next_action_max_retries,
+    planning_response_status_max_retries,
     rubric_enabled,
     rubric_max_iterations,
     tool_always_allow,
@@ -103,13 +103,13 @@ def build_plan_agent(
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
         extra_middleware=[
-            PlanningStageMiddleware(),
+            PlanningStageEnforcementMiddleware(),
             CorrectionMiddleware(
                 rules=(
-                    PlanningNextActionRule(workflow="plan"),
-                    PlanningNextActionRule(workflow="goal"),
+                    PlanningResponseStatusRule(workflow="plan"),
+                    PlanningResponseStatusRule(workflow="goal"),
                 ),
-                max_retries=planning_next_action_max_retries(config),
+                max_retries=planning_response_status_max_retries(config),
             ),
         ],
         omitted_tools=(),

@@ -32,7 +32,7 @@ from config.settings import (
     dynamic_subagents_enabled,
     execute_env_settings,
     load_settings,
-    planning_next_action_max_retries,
+    planning_response_status_max_retries,
     planning_todos_enabled,
     rubric_enabled,
     rubric_max_iterations,
@@ -1801,25 +1801,33 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 34)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            chat.text_delta("I'll research that next.")
+            chat.text_delta("I'll research that next.\nRESPONSE_STATUS: NEEDS_RESEARCH")
             chat.correction(
                 {
                     "workflow": "Plan",
-                    "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                    "failed_check": (
+                        "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
+                    ),
                     "retry_prompt": "Perform that research now.",
                     "attempt": 1,
                     "max_retries": 2,
                 }
             )
-            chat.text_delta("Research complete.")
+            chat.text_delta("Research complete.\nRESPONSE_STATUS: COMPLETE")
             await pilot.pause()
 
             assistants = list(chat.query(".message.assistant"))
             corrections = list(chat.query(".message.correction"))
-            self.assertEqual([renderable_plain(block) for block in assistants], ["I'll research that next.", "Research complete."])
+            self.assertEqual(
+                [renderable_plain(block) for block in assistants],
+                [
+                    "I'll research that next.\nRESPONSE_STATUS: NEEDS_RESEARCH",
+                    "Research complete.\nRESPONSE_STATUS: COMPLETE",
+                ],
+            )
             self.assertEqual(len(corrections), 1)
             correction = renderable_plain(corrections[0])
-            self.assertIn("Check failed: NEXT_ACTION: RESEARCH", correction)
+            self.assertIn("Check failed: RESPONSE_STATUS: NEEDS_RESEARCH", correction)
             self.assertIn("Retry prompt: Perform that research now.", correction)
             self.assertIn("Retry 1 of 2", correction)
 
@@ -3428,7 +3436,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("Response schemas", rendered)
                 self.assertIn("Planning todos", rendered)
-                self.assertIn("Next-action retries", rendered)
+                self.assertIn("Response-status retries", rendered)
                 self.assertIn("Rubric Middleware", rendered)
                 self.assertIn("Maximum iterations", rendered)
                 self.assertIn("write_file", rendered)
@@ -3463,8 +3471,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-todos-planning_todos"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-rubric-rubric"].label), "no")
                 rubric_input = panel.query_one("#settings-rubric-max-iterations", Input)
-                next_action_input = panel.query_one(
-                    "#settings-planning-next-action-max-retries", Input
+                response_status_input = panel.query_one(
+                    "#settings-planning-response-status-max-retries", Input
                 )
                 rubric_toggle = buttons["settings-toggle-rubric-rubric"]
                 self.assertEqual(rubric_input.value, "3")
@@ -3474,8 +3482,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rubric_input.styles.height, rubric_toggle.styles.height)
                 self.assertEqual(rubric_input.styles.border_top[0], "")
                 self.assertEqual(rubric_input.styles.background, Color.parse("#151a1d"))
-                self.assertEqual(next_action_input.value, "2")
-                self.assertFalse(next_action_input.disabled)
+                self.assertEqual(response_status_input.value, "2")
+                self.assertFalse(response_status_input.disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -3531,7 +3539,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rubric_max_iterations(load_settings(workspace)), 5)
                 self.assertEqual(len(rebuilds), 2)
 
-    async def test_settings_panel_validates_and_persists_next_action_retries(self) -> None:
+    async def test_settings_panel_validates_and_persists_response_status_retries(self) -> None:
         """The always-on recovery cap should restore invalid values and rebuild agents."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -3548,23 +3556,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
                 await wait_until(
-                    lambda: len(panel.query("#settings-planning-next-action-max-retries")) == 1
+                    lambda: len(panel.query("#settings-planning-response-status-max-retries")) == 1
                 )
                 control = panel.query_one(
-                    "#settings-planning-next-action-max-retries", Input
+                    "#settings-planning-response-status-max-retries", Input
                 )
 
                 self.assertFalse(control.disabled)
                 control.value = "0"
                 await panel.submit_execute_env_input(Input.Submitted(control, "0"))
                 self.assertEqual(control.value, "2")
-                self.assertEqual(planning_next_action_max_retries(load_settings(workspace)), 2)
+                self.assertEqual(planning_response_status_max_retries(load_settings(workspace)), 2)
                 self.assertIn("1 to 20", str(panel.query_one("#settings-status", Static).render()))
 
                 control.value = "5"
                 await panel.submit_execute_env_input(Input.Submitted(control, "5"))
                 self.assertEqual(control.value, "5")
-                self.assertEqual(planning_next_action_max_retries(load_settings(workspace)), 5)
+                self.assertEqual(planning_response_status_max_retries(load_settings(workspace)), 5)
                 self.assertEqual(len(rebuilds), 1)
 
     async def test_rubric_setting_change_keeps_goal_snapshot(self) -> None:

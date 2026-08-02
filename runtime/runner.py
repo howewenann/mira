@@ -448,8 +448,6 @@ async def run_turn(
                 result,
                 render_normal_tools=False,
                 invocation_metadata=message_metadata,
-                filter_planning_next_action=planning_stage
-                in {PLANNING_STAGE_PLAN_RESEARCH, PLANNING_STAGE_GOAL_RESEARCH},
             ),
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),

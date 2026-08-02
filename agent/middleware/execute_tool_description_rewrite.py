@@ -90,7 +90,7 @@ Note: This tool is only available if the backend supports execution
 an error message."""
 
 
-class ExecuteToolPromptMiddleware(AgentMiddleware[Any, Any, Any]):
+class ExecuteToolDescriptionRewriteMiddleware(AgentMiddleware[Any, Any, Any]):
     """Replace the visible execute tool description with MIRA guidance."""
 
     def wrap_model_call(self, request: Any, handler: Any) -> Any:
@@ -131,7 +131,7 @@ def execute_tool_with_mira_description(tool: Any) -> Any:
 
 
 __all__ = [
-    "ExecuteToolPromptMiddleware",
+    "ExecuteToolDescriptionRewriteMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
     "execute_tool_with_mira_description",
 ]

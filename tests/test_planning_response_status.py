@@ -1,4 +1,4 @@
-"""Integration coverage for Plan/Goal next-action retry routing."""
+"""Integration coverage for Plan/Goal response-status correction routing."""
 
 from __future__ import annotations
 
@@ -10,17 +10,24 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from agent.middleware import CORRECTION_SOURCE, CorrectionMiddleware, PlanningStageMiddleware
-from agent.planning.next_action import PLANNING_NEXT_ACTION_FAILURE, PlanningNextActionRule
+from agent.middleware import (
+    CORRECTION_SOURCE,
+    CorrectionMiddleware,
+    PlanningStageEnforcementMiddleware,
+)
+from agent.planning.response_status import (
+    PLANNING_RESPONSE_STATUS_FAILURE,
+    PlanningResponseStatusRule,
+)
 
 
 def correction_middleware(max_retries: int = 2) -> list[Any]:
     return [
-        PlanningStageMiddleware(),
+        PlanningStageEnforcementMiddleware(),
         CorrectionMiddleware(
             rules=(
-                PlanningNextActionRule(workflow="plan"),
-                PlanningNextActionRule(workflow="goal"),
+                PlanningResponseStatusRule(workflow="plan"),
+                PlanningResponseStatusRule(workflow="goal"),
             ),
             max_retries=max_retries,
         ),
@@ -76,13 +83,13 @@ def goal_show_stub() -> str:
     return "current Goal shown"
 
 
-class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
+class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Exercise native after_agent revision routing with a real graph."""
 
     async def test_invalid_plan_prose_retries_then_runs_tool_and_accepts_answer(self) -> None:
         model = BindableFakeModel(
             responses=[
-                AIMessage(content="I'll inspect next.\nNEXT_ACTION: RESEARCH"),
+                AIMessage(content="I'll inspect next.\nRESPONSE_STATUS: NEEDS_RESEARCH"),
                 AIMessage(
                     content="Inspecting now.",
                     tool_calls=[
@@ -93,7 +100,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                 ),
-                AIMessage(content="Investigation complete.\nNEXT_ACTION: ANSWER"),
+                AIMessage(content="Investigation complete.\nRESPONSE_STATUS: COMPLETE"),
             ]
         )
         graph = create_agent(
@@ -116,7 +123,10 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(messages[3].tool_calls[0]["id"], "call-read")
         self.assertEqual(messages[4].content, "contents:session/store.py")
-        self.assertEqual(messages[5].content, "Investigation complete.\n")
+        self.assertEqual(
+            messages[5].content,
+            "Investigation complete.\nRESPONSE_STATUS: COMPLETE",
+        )
         self.assertTrue(
             any(
                 getattr(message, "additional_kwargs", {}).get("lc_source")
@@ -128,7 +138,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_research_rejects_plan_marker_then_uses_prepare_goal(self) -> None:
         model = BindableFakeModel(
             responses=[
-                AIMessage(content="Ready.\nNEXT_ACTION: PREPARE_PLAN"),
+                AIMessage(content="Ready.\nRESPONSE_STATUS: READY_TO_PREPARE_PLAN"),
                 AIMessage(
                     content="",
                     tool_calls=[
@@ -139,7 +149,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                 ),
-                AIMessage(content="Goal prepared.\nNEXT_ACTION: ANSWER"),
+                AIMessage(content="Goal prepared.\nRESPONSE_STATUS: COMPLETE"),
             ]
         )
         graph = create_agent(
@@ -163,7 +173,9 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for message in result["messages"]
             )
         )
-        self.assertTrue(any("PREPARE_PLAN" in str(message.content) for message in result["messages"]))
+        self.assertTrue(
+            any("READY_TO_PREPARE_PLAN" in str(message.content) for message in result["messages"])
+        )
         self.assertTrue(
             any(
                 getattr(message, "additional_kwargs", {}).get("lc_source") == CORRECTION_SOURCE
@@ -171,28 +183,38 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_configured_retry_cap_finishes_with_explicit_incomplete_message(self) -> None:
-        model = BindableFakeModel(
-            responses=[
-                AIMessage(content="Later.\nNEXT_ACTION: RESEARCH"),
-                AIMessage(content="Still later.\nNEXT_ACTION: RESEARCH"),
-            ]
-        )
-        graph = create_agent(
-            model=model,
-            tools=[],
-            middleware=correction_middleware(max_retries=1),
-        )
+    async def test_configured_retry_caps_finish_with_explicit_incomplete_message(self) -> None:
+        for cap in (1, 2):
+            with self.subTest(cap=cap):
+                model = BindableFakeModel(
+                    responses=[
+                        AIMessage(
+                            content=(
+                                f"Still unresolved {attempt}.\n"
+                                "RESPONSE_STATUS: NEEDS_RESEARCH"
+                            )
+                        )
+                        for attempt in range(cap + 1)
+                    ]
+                )
+                graph = create_agent(
+                    model=model,
+                    tools=[],
+                    middleware=correction_middleware(max_retries=cap),
+                )
 
-        result = await graph.ainvoke(
-            {
-                "messages": [HumanMessage(content="inspect")],
-                "planning_stage": "plan_research",
-            }
-        )
+                result = await graph.ainvoke(
+                    {
+                        "messages": [HumanMessage(content="inspect")],
+                        "planning_stage": "plan_research",
+                    }
+                )
 
-        self.assertEqual(len(result["messages"]), 6)
-        self.assertEqual(result["messages"][-1].content, PLANNING_NEXT_ACTION_FAILURE)
+                self.assertEqual(len(result["messages"]), 2 * cap + 4)
+                self.assertEqual(
+                    result["messages"][-1].content,
+                    PLANNING_RESPONSE_STATUS_FAILURE,
+                )
 
     async def test_wrong_stage_present_plan_returns_tool_error_then_model_uses_plan_show(self) -> None:
         model = BindableFakeModel(
@@ -213,7 +235,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         {"name": "plan_show", "args": {}, "id": "call-show"}
                     ],
                 ),
-                AIMessage(content="The retained Plan is shown.\nNEXT_ACTION: ANSWER"),
+                AIMessage(content="The retained Plan is shown.\nRESPONSE_STATUS: COMPLETE"),
             ]
         )
         graph = create_agent(
@@ -243,7 +265,10 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plan_show", str(wrong.content))
         self.assertEqual(shown.status, "success")
         self.assertEqual(shown.content, "current Plan shown")
-        self.assertEqual(result["messages"][-1].content, "The retained Plan is shown.\n")
+        self.assertEqual(
+            result["messages"][-1].content,
+            "The retained Plan is shown.\nRESPONSE_STATUS: COMPLETE",
+        )
 
     async def test_wrong_stage_present_goal_returns_tool_error_then_model_uses_goal_show(self) -> None:
         model = BindableFakeModel(
@@ -264,7 +289,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         {"name": "goal_show", "args": {}, "id": "call-goal-show"}
                     ],
                 ),
-                AIMessage(content="The retained Goal is shown.\nNEXT_ACTION: ANSWER"),
+                AIMessage(content="The retained Goal is shown.\nRESPONSE_STATUS: COMPLETE"),
             ]
         )
         graph = create_agent(
@@ -293,7 +318,10 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wrong.status, "error")
         self.assertIn("goal_show", str(wrong.content))
         self.assertEqual(shown.content, "current Goal shown")
-        self.assertEqual(result["messages"][-1].content, "The retained Goal is shown.\n")
+        self.assertEqual(
+            result["messages"][-1].content,
+            "The retained Goal is shown.\nRESPONSE_STATUS: COMPLETE",
+        )
 
     async def test_valid_stage_missing_arguments_use_native_toolnode_retry(self) -> None:
         model = BindableFakeModel(
@@ -314,7 +342,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         }
                     ],
                 ),
-                AIMessage(content="Plan prepared.\nNEXT_ACTION: ANSWER"),
+                AIMessage(content="Plan prepared.\nRESPONSE_STATUS: COMPLETE"),
             ]
         )
         graph = create_agent(
@@ -344,7 +372,10 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("objective", str(invalid.content))
         self.assertEqual(valid.status, "success")
         self.assertEqual(valid.content, "prepared:Ship it")
-        self.assertEqual(result["messages"][-1].content, "Plan prepared.\n")
+        self.assertEqual(
+            result["messages"][-1].content,
+            "Plan prepared.\nRESPONSE_STATUS: COMPLETE",
+        )
 
 
 if __name__ == "__main__":

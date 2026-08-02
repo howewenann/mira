@@ -1029,7 +1029,7 @@ Use one disposable Git-protected workspace.
 In a disposable workspace, confirm invalid settings and malformed or conflicting
 Plan/Goal sessions are rejected. Raw compaction summary aliases must not persist.
 
-## Unified Plan/Goal Next-Action Protocol
+## Unified Plan/Goal Response-Status Protocol
 
 Use current-checkout MIRA with LM Studio model `google/gemma-4-12b` and a
 disposable workspace. Enter continuous Plan mode with `/plan`; use `/goal
@@ -1037,38 +1037,41 @@ disposable workspace. Enter continuous Plan mode with `/plan`; use `/goal
 the scenario requests persistence evidence.
 
 1. With retry cap `2`, ask for a high-level explanation of session storage
-   without code changes. Expected: complete prose, no visible `NEXT_ACTION`, no
-   forced Plan.
+   without code changes. Expected: complete prose ending visibly with
+   `RESPONSE_STATUS: COMPLETE`, with no forced Plan.
 2. Ask Plan mode to inspect session loading, normalization, updates, and saving
-   before explaining them. Expected: read-only calls occur, the later answer is
-   marker-free, and research does not loop.
+   before explaining them. Expected: tool-call responses omit a status, read-only
+   calls occur, and the later answer visibly ends with `RESPONSE_STATUS: COMPLETE`.
 3. Ask Plan mode to investigate session architecture and propose the smallest
    coherent session-duplication change. Repeat several times. Expected:
    false-progress prose remains immediately before a `Plan check` bubble that
    shows the failed check and exact retry prompt; actual research follows, and
-   the outcome is `ask_user`, `prepare_plan`, or a complete grounded answer.
-4. Use a deterministic fake response ending in `NEXT_ACTION: RESEARCH` without
-   a call, then one with no marker. Expected: specific then general correction,
-   rejected prose and both correction bubbles remain in visible/model history.
+   the outcome is `ask_user`, `prepare_plan`, or a complete grounded answer with
+   its terminal response status visible.
+4. Use a deterministic fake response ending in
+   `RESPONSE_STATUS: NEEDS_RESEARCH` without a call, then one with no status.
+   Expected: specific then general correction; rejected prose, its exact status,
+   and both correction bubbles remain in visible/model history.
 5. Ask for a session-duplication design while explicitly leaving full-transcript
    versus metadata-only behavior undecided. Expected: `ask_user`; after choosing,
    request an implementation-ready Plan and verify `prepare_plan` followed by
    the unchanged forced `present_plan` bubble.
 6. Run `/goal Prepare a durable criteria-only Goal for the same duplication
    outcome.` Expected: Goal research can use only `PREPARE_GOAL`/`prepare_goal`;
-   finalization forces only `present_goal`. A Plan marker from a fake response
+   finalization forces only `present_goal`. A Plan-only status from a fake response
    is rejected as malformed.
 7. Disable rubrics and repeat scenario 3, then enable them and run an existing
    Goal rubric scenario. Expected: protocol behavior is unchanged, no grader is
    called during research recovery, and rubric state/history is unchanged.
 8. Ask in Chinese to inspect and explain session loading and saving. Expected:
-   Chinese prose remains intact and the exact ASCII marker is hidden.
+   Chinese prose remains intact and the exact ASCII status remains visible.
 9. After success, inspect session JSON, run `/reload`, and reopen the transcript.
-   Expected: accepted answer once; no marker; rejected prose and its technical
-   correction bubble remain paired and ordered in session, reload, one-shot,
-   and trace output without appearing as user-authored text.
+   Expected: the accepted answer and exact status appear once; rejected prose,
+   its status, and its technical correction bubble remain paired and ordered in
+   session, reload, one-shot, and trace output without appearing as user-authored
+   text.
 10. Test caps `1` and `2` with a fake model that always ends with
-    `NEXT_ACTION: RESEARCH` and no call. Expected: respectively two and three
+    `RESPONSE_STATUS: NEEDS_RESEARCH` and no call. Expected: respectively two and three
     total model attempts, retained rejected candidates and correction bubbles,
     followed by the explicit incomplete response. Enter
     `0` or `21` in Settings. Expected: the previous normalized value is restored
@@ -1080,31 +1083,31 @@ the scenario requests persistence evidence.
     pending interrupt. Repeat symmetrically for `present_goal`/`goal_show`.
 
 Record actual Gemma behavior here after each real run: model/provider, cap,
-scenario, tool sequence, retry count, final outcome, and whether any marker or
+scenario, tool sequence, retry count, final outcome, and whether any status or
 provisional text appeared or persisted.
 
 Observed 2026-08-02 with `lmstudio:google/gemma-4-12b` through the real planning
-agent in disposable workspaces:
+agent:
 
-- Plan discussion, cap `1`: `ls` succeeded, then Gemma returned one complete
-  prose answer. No correction was needed and the terminal marker was absent
-  from final graph output.
-- Goal discussion, cap `2`: Gemma returned one complete prose answer without a
-  tool call. No correction was needed and the terminal marker was absent from
-  final graph output.
-- Invalid value `0` against previous cap `5`: normalization restored `5`, and
-  the planning agent rebuilt successfully with that normalized value. The
-  focused Textual test also verifies the visible `1`-`20` range message and one
-  rebuild after a valid submission.
-- Deterministic graph scenarios cover behavior Gemma did not naturally produce
-  in these runs: cap `1` and `2` exhaustion retain every rejected candidate and
-  paired correction; a Goal cross-stage Plan marker is corrected; wrong-stage
-  `present_plan`/`present_goal` calls return native tool errors and can be
-  followed by `plan_show`/`goal_show` without an interrupt.
-
-These runs verify model and graph behavior but do not replace the interactive
-terminal checks for transient bubble visibility, `/reload`, or user-driven
-`ask_user`/formal Plan and Goal controls.
+- Plan discussion, cap `1`: one no-tool response stated that Plan mode is
+  read-only and ended exactly with visible `RESPONSE_STATUS: COMPLETE`. No
+  correction retry occurred.
+- Goal discussion, cap `2`: one no-tool response answered the Goal-resume
+  question and ended exactly with visible `RESPONSE_STATUS: COMPLETE`. No
+  correction retry occurred.
+- README-navigation scenario, cap `1`: Gemma inspected the requested context
+  and called `prepare_plan` with a concrete navigation objective and constraints.
+  The tool-call response correctly omitted `RESPONSE_STATUS`. The bare graph
+  smoke harness reached the normal control-tool interrupt but did not drive the
+  interactive finalization UI, so the resulting Plan bubble was not inspected
+  in this run.
+- Invalid value `0` against previous cap `5`: the setter restored `5`. The
+  focused Textual test verifies the visible `1`-`20` range message and exactly
+  one agent rebuild after a valid submission.
+- Deterministic graph tests cover paths Gemma did not naturally exercise here:
+  caps `1` and `2` exhaustion, specific and general correction prompts,
+  cross-workflow statuses, and recoverable `present_plan`/`present_goal` stage
+  errors followed by `plan_show`/`goal_show`.
 
 ## DeepAgents 0.7 Upgrade
 

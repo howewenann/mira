@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from agent.middleware import PlanningStageMiddleware
+from agent.middleware import PlanningStageEnforcementMiddleware
 from agent.factory import ACT_SYSTEM_PROMPT
 from agent.planning.criteria import SuccessCriteriaService
 from agent.planning.policy import (
@@ -84,7 +84,7 @@ class CurrentPlanTests(unittest.TestCase):
             {"name": "goal_show"},
             {"name": "plan_show"},
         ]
-        middleware = PlanningStageMiddleware()
+        middleware = PlanningStageEnforcementMiddleware()
         research = middleware._stage_request(Request(PLANNING_STAGE_PLAN_RESEARCH, tools))
         self.assertEqual(
             [tool["name"] for tool in research.tools],
