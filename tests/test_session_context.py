@@ -159,16 +159,10 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             store = SessionStore(Path(directory))
 
             explicit = store.load("thread-1", resume=False, workspace=Path("workspace"))
-            custom = {
-                "id": "custom-session",
-                "title": "Custom Session",
-                "workspace": "workspace",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
-                "turns": 0,
-                "dashboard": {},
-                "events": [],
-            }
+            custom = store.new(session_id="custom-session", workspace=Path("workspace"))
+            custom["title"] = "Custom Session"
+            custom["created_at"] = "2026-01-01T00:00:00+00:00"
+            custom["updated_at"] = "2026-01-01T00:00:00+00:00"
             store.save(custom)
             loaded = store.load("custom-session", resume=False, workspace=Path("workspace"))
 
@@ -230,6 +224,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             list(record.keys()),
             [
+                "schema_version",
                 "id",
                 "title",
                 "workspace",
@@ -248,6 +243,21 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["current_plan"])
         self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)
+
+    def test_transient_resume_flag_is_not_persisted(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+        record["resume_context_pending"] = True
+
+        normalized = context.normalize_session(record)
+
+        self.assertNotIn("resume_context_pending", normalized)
+
+    def test_unknown_session_field_is_rejected(self) -> None:
+        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
+        record["legacy_field"] = True
+
+        with self.assertRaisesRegex(ValueError, "current schema"):
+            context.normalize_session(record)
 
     def test_current_goal_survives_save_load_and_old_events_are_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -511,22 +521,24 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compactions[0]["file_path"], "/.mira/conversation_history/thread-1.md")
         self.assertEqual(compactions[0]["summary"], "Debugged Qwen helper latency.")
 
-    async def test_compaction_summary_string_is_copied(self) -> None:
-        record = {"events": []}
-        agent = AgentWithState(
-            {
-                "_summarization_event": {
-                    "cutoff_index": 4,
-                    "file_path": "/.mira/conversation_history/thread-1.md",
-                    "summary": "Earlier messages were summarized.",
-                }
-            }
-        )
+    async def test_legacy_compaction_summary_aliases_are_ignored(self) -> None:
+        for alias in ("summary", "summary_text"):
+            with self.subTest(alias=alias):
+                record = {"events": []}
+                agent = AgentWithState(
+                    {
+                        "_summarization_event": {
+                            "cutoff_index": 4,
+                            "file_path": "/.mira/conversation_history/thread-1.md",
+                            alias: "Earlier messages were summarized.",
+                        }
+                    }
+                )
 
-        await context.sync_deepagents_compaction(record, agent, "thread-1")
+                await context.sync_deepagents_compaction(record, agent, "thread-1")
 
-        compactions = context.normalize_compactions(record["events"])
-        self.assertEqual(compactions[0]["summary"], "Earlier messages were summarized.")
+                compactions = context.normalize_compactions(record["events"])
+                self.assertEqual(compactions[0]["summary"], "")
 
     async def test_post_turn_compaction_updates_summary_event_and_sanitizes_archive_messages(self) -> None:
         summarization = FakeSummarization()

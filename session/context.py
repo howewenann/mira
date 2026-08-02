@@ -9,6 +9,7 @@ from typing import Any
 from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
+from session.values import SESSION_SCHEMA_VERSION
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -17,19 +18,45 @@ RESUME_MESSAGE_LIMIT = 20
 RESUME_GOAL_LIMIT = 3
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
+SESSION_FIELDS = {
+    "schema_version",
+    "id",
+    "title",
+    "workspace",
+    "created_at",
+    "updated_at",
+    "turns",
+    "dashboard",
+    "current_plan",
+    "current_goal",
+    "events",
+}
+SESSION_TRANSIENT_FIELDS = {"resume_context_pending"}
 
 
 def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
-    plan = normalize_current_plan(record.get("current_plan"))
-    goal = normalize_current_goal(record.get("current_goal"))
+    if not isinstance(record, dict):
+        raise ValueError("session does not match the current schema")
+    fields = set(record)
+    allowed_fields = SESSION_FIELDS | SESSION_TRANSIENT_FIELDS
+    if not SESSION_FIELDS.issubset(fields) or not fields <= allowed_fields:
+        raise ValueError("session does not match the current schema")
+    if record.get("schema_version") != SESSION_SCHEMA_VERSION:
+        raise ValueError(
+            f"session does not match schema version {SESSION_SCHEMA_VERSION}"
+        )
+    raw_plan = record["current_plan"]
+    raw_goal = record["current_goal"]
+    plan = normalize_current_plan(raw_plan)
+    goal = normalize_current_goal(raw_goal)
+    if raw_plan is not None and plan is None:
+        raise ValueError("current_plan does not match the current schema")
+    if raw_goal is not None and goal is None:
+        raise ValueError("current_goal does not match the current schema")
     if plan is not None and goal is not None:
-        plan_updated = _artifact_timestamp(record.get("current_plan"))
-        goal_updated = _artifact_timestamp(record.get("current_goal"))
-        if goal_updated and plan_updated and goal_updated > plan_updated:
-            plan = None
-        else:
-            goal = None
+        raise ValueError("session cannot contain both current_plan and current_goal")
     return {
+        "schema_version": SESSION_SCHEMA_VERSION,
         "id": str(record.get("id", "")),
         "title": safe_title(record.get("title")),
         "workspace": str(record.get("workspace", "")),
@@ -263,11 +290,7 @@ async def agent_state(agent: Any, thread_id: str) -> dict[str, Any]:
 def compaction_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
     cutoff_index = int(event.get("cutoff_index") or 0)
     file_path = compact_line(event.get("file_path"))
-    summary = first_summary_text(
-        event.get("summary_message"),
-        event.get("summary"),
-        event.get("summary_text"),
-    )
+    summary = summary_text(event.get("summary_message"))
     if not summary and not file_path and cutoff_index <= 0:
         return None
     return {
@@ -276,14 +299,6 @@ def compaction_from_event(event: dict[str, Any]) -> dict[str, Any] | None:
         "summary": summary,
         "created_at": now_iso(),
     }
-
-
-def first_summary_text(*values: Any) -> str:
-    for value in values:
-        summary = summary_text(value)
-        if summary:
-            return summary
-    return ""
 
 
 def summary_text(message: Any) -> str:
@@ -387,9 +402,3 @@ def compact_text(value: Any) -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _artifact_timestamp(value: Any) -> str:
-    if not isinstance(value, dict):
-        return ""
-    return str(value.get("updated_at") or value.get("created_at") or "")

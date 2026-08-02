@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
-from session.values import bounded_iterations
+from session.values import strict_items, strict_text, valid_attempts, valid_iterations
 
 PLAN_STATUSES = {
     "proposed",
@@ -13,6 +13,24 @@ PLAN_STATUSES = {
     "paused",
     "max_iterations_reached",
     "completed",
+}
+PLAN_ARTIFACT_FIELDS = {
+    "id",
+    "title",
+    "objective",
+    "context_and_constraints",
+    "key_changes",
+    "test_plan",
+    "assumptions",
+    "success_criteria",
+    "status",
+    "rubric_enabled",
+    "rubric_iterations",
+    "last_rubric_status",
+    "completion_source",
+    "attempts",
+    "created_at",
+    "updated_at",
 }
 RESUMABLE_PLAN_STATUSES = {
     "proposed",
@@ -55,24 +73,41 @@ class PlanArtifact(Plan):
 
 
 def normalize_current_plan(value: Any) -> dict[str, Any] | None:
-    """Return a safe PlanArtifact without inferring one from transcript history."""
+    """Return an exact current PlanArtifact without legacy coercion."""
     if not isinstance(value, dict):
         return None
-    plan_id = compact_text(value.get("id"))
-    title = compact_text(value.get("title"))
-    objective = str(value.get("objective") or "").strip()
-    context = str(value.get("context_and_constraints") or "").strip()
-    key_changes = compact_items(value.get("key_changes"))
-    test_plan = compact_items(value.get("test_plan"))
-    assumptions = compact_items(value.get("assumptions"))
-    criteria = str(value.get("success_criteria") or "").strip()
+    if set(value) != PLAN_ARTIFACT_FIELDS:
+        return None
+    plan_id = strict_text(value["id"], compact=True)
+    title = strict_text(value["title"], compact=True)
+    objective = strict_text(value["objective"])
+    context = strict_text(value["context_and_constraints"])
+    key_changes = strict_items(value["key_changes"])
+    test_plan = strict_items(value["test_plan"])
+    assumptions = strict_items(value["assumptions"])
+    criteria = strict_text(value["success_criteria"])
     if not all((plan_id, title, objective, context, key_changes, test_plan, assumptions, criteria)):
         return None
-    status = compact_text(value.get("status") or "proposed")
+    status = strict_text(value["status"], compact=True)
     if status not in PLAN_STATUSES:
-        status = "proposed"
-    rubric_applies = bool(value.get("rubric_enabled", False))
-    created_at = str(value.get("created_at") or now_iso())
+        return None
+    rubric_applies = value["rubric_enabled"]
+    rubric_iterations = value["rubric_iterations"]
+    attempts = value["attempts"]
+    if not isinstance(rubric_applies, bool):
+        return None
+    if not valid_iterations(rubric_iterations) or not valid_attempts(attempts):
+        return None
+    last_rubric_status = strict_text(
+        value["last_rubric_status"], compact=True, allow_empty=True
+    )
+    completion_source = strict_text(
+        value["completion_source"], compact=True, allow_empty=True
+    )
+    created_at = strict_text(value["created_at"])
+    updated_at = strict_text(value["updated_at"])
+    if created_at is None or updated_at is None:
+        return None
     return {
         "id": plan_id,
         "title": title,
@@ -84,12 +119,12 @@ def normalize_current_plan(value: Any) -> dict[str, Any] | None:
         "success_criteria": criteria,
         "status": status,
         "rubric_enabled": rubric_applies,
-        "rubric_iterations": bounded_iterations(value.get("rubric_iterations")),
-        "last_rubric_status": compact_text(value.get("last_rubric_status")),
-        "completion_source": compact_text(value.get("completion_source")),
-        "attempts": nonnegative_int(value.get("attempts")),
+        "rubric_iterations": rubric_iterations,
+        "last_rubric_status": last_rubric_status,
+        "completion_source": completion_source,
+        "attempts": attempts,
         "created_at": created_at,
-        "updated_at": str(value.get("updated_at") or created_at),
+        "updated_at": updated_at,
     }
 
 
@@ -264,22 +299,6 @@ def _set_goal_event_status(record: dict[str, Any], goal_id: str, status: str) ->
 
 def compact_text(value: Any) -> str:
     return " ".join(str(value or "").split())
-
-
-def compact_items(value: Any) -> list[str]:
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list | tuple):
-        return []
-    return [text for item in value if (text := compact_text(item))]
-
-
-def nonnegative_int(value: Any) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
 
 
 def now_iso() -> str:

@@ -167,8 +167,8 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.planning_next_action_max_retries(malformed), 2)
 
-    def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
-        """Partial settings should merge with defaults; malformed YAML should not crash."""
+    def test_existing_partial_or_malformed_yaml_is_rejected(self) -> None:
+        """Only a missing file receives defaults; existing files must match exactly."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             path = settings.settings_path(workspace)
@@ -188,27 +188,22 @@ class SettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            loaded = settings.load_settings(workspace)
-            self.assertTrue(settings.dynamic_subagents_enabled(loaded))
-            self.assertFalse(settings.dynamic_subagent_response_schema_enabled(loaded))
-            self.assertFalse(settings.git_protection_enabled(loaded))
-            self.assertFalse(settings.tool_enabled(loaded, "write_file"))
-            self.assertTrue(settings.tool_always_allow(loaded, "write_file"))
-
-            updated = settings.set_tool_enabled(loaded, "write_file", True)
-            self.assertTrue(settings.tool_enabled(updated, "write_file"))
-            updated = settings.set_tool_enabled(updated, "write_file", False)
-            self.assertFalse(settings.tool_enabled(updated, "write_file"))
-
-            updated = settings.set_tool_enabled(loaded, "execute", True)
-            self.assertTrue(settings.tool_enabled(updated, "execute"))
-            updated = settings.set_tool_enabled(updated, "execute", False)
-            self.assertFalse(settings.tool_enabled(updated, "execute"))
+            with self.assertRaisesRegex(ValueError, "schema version"):
+                settings.load_settings(workspace)
 
             path.write_text("hitl: [", encoding="utf-8")
-            loaded = settings.load_settings(workspace)
-            self.assertTrue(settings.git_protection_enabled(loaded))
-            self.assertFalse(settings.tool_always_allow(loaded, "write_file"))
+            with self.assertRaisesRegex(ValueError, "invalid settings YAML"):
+                settings.load_settings(workspace)
+
+            self.assertTrue(settings.save_settings(workspace, settings.DEFAULT_SETTINGS))
+            exact = path.read_text(encoding="utf-8")
+            path.write_text(f"{exact}unknown: true\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema version"):
+                settings.load_settings(workspace)
+
+            path.write_text(exact.replace("max_retries: 2", "max_retries: 0"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "schema version"):
+                settings.load_settings(workspace)
 
     def test_save_settings_writes_expected_yaml(self) -> None:
         """Saving toggles should persist the normalized schema."""
@@ -226,6 +221,7 @@ class SettingsTests(unittest.TestCase):
             loaded = settings.load_settings(workspace)
 
         self.assertIn("settings.yml", str(settings.settings_path(workspace)))
+        self.assertIn("schema_version: 1", text)
         self.assertIn("git_protection", text)
         self.assertIn("response_schema: true", text)
         self.assertIn("web_search", text)

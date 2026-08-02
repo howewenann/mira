@@ -11,6 +11,7 @@ from typing import Any
 
 from session.context import normalize_session
 from session.dashboard import normalize_dashboard
+from session.values import SESSION_SCHEMA_VERSION
 
 
 def new_session_id() -> str:
@@ -62,6 +63,7 @@ class SessionStore:
         now = datetime.now(timezone.utc).isoformat()
 
         return {
+            "schema_version": SESSION_SCHEMA_VERSION,
             "id": session_id or new_session_id(),
             "title": "Untitled session",
             "workspace": str(workspace),

@@ -9,6 +9,7 @@ from typing import Any
 import yaml
 
 SETTINGS_FILE = "settings.yml"
+SETTINGS_SCHEMA_VERSION = 1
 EXECUTE_TOOL = "execute"
 DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
@@ -23,6 +24,7 @@ RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "schema_version": SETTINGS_SCHEMA_VERSION,
     "system": {
         DYNAMIC_SUBAGENTS: {
             "enabled": False,
@@ -66,13 +68,24 @@ def settings_path(workspace: Path) -> Path:
 
 
 def load_settings(workspace: Path) -> dict[str, Any]:
-    """Load normalized workspace settings, falling back to defaults."""
+    """Load one exact current settings file or defaults for a new workspace."""
     path = settings_path(workspace)
+    if not path.exists():
+        return deepcopy(DEFAULT_SETTINGS)
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        raw = {}
-    return normalize_settings(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"invalid settings YAML: {path}") from exc
+    normalized = normalize_settings(raw)
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema_version") != SETTINGS_SCHEMA_VERSION
+        or raw != normalized
+    ):
+        raise ValueError(
+            f"settings file does not match schema version {SETTINGS_SCHEMA_VERSION}: {path}"
+        )
+    return normalized
 
 
 def save_settings(workspace: Path, settings: dict[str, Any]) -> bool:

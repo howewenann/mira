@@ -137,6 +137,12 @@ The always-on Plan/Goal next-action protocol has one workspace System Setting,
 counts recovery calls after the first rejected response. Changing it follows
 the normal settings application path and rebuilds both agents; it is a bound,
 not a feature toggle.
+Workspace settings use one explicit current schema version. A missing
+`.mira/settings.yml` starts from the complete defaults, but an existing file
+must contain that version and the complete normalized schema. MIRA rejects
+partial, malformed, extra, or retired settings instead of filling fields or
+migrating them. Saving from the Settings panel always writes the complete
+current document.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
 `agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
@@ -360,9 +366,10 @@ null. Supported
 statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
 `completed`. Transcript Plan bubbles remain immutable history; resume context
 labels only the populated current artifact as authoritative.
-Session normalization accepts only the current `current_plan` schema and exact
-Plan events; retired Summary, `criteria`, `automatic_evaluation`, generic-stage,
-and pre-staging presentation shapes are discarded rather than adapted.
+Session normalization requires the exact current `current_plan` fields and
+types. A populated malformed or retired Plan artifact rejects the session;
+retired Summary, generic-stage, and pre-staging transcript event shapes are
+not projected as Plan events.
 
 The Plan bubble uses Plan colours for Plan content, rubric colours for Success
 Criteria, and muted text for automatic-evaluation policy and status. Its actions
@@ -402,8 +409,8 @@ review actions, recall commands, or execution completion rules change.
 **Decision:** Plan and Goal are alternative forms of formal work. A Plan stores
 an Objective, prescribed approach, and Success Criteria. A Goal stores only an
 Objective and Success Criteria, leaving the approach to the Act agent. Sessions
-have explicit `current_plan` and `current_goal` fields and normalization enforces
-that at most one is populated.
+have explicit `current_plan` and `current_goal` fields and normalization rejects
+a record when both are populated; timestamps never pick a winner.
 
 `/goal <prompt>` uses a dedicated read-only planning thread without changing
 the current Plan/Act mode: optional investigation and `ask_user`, then
@@ -432,10 +439,10 @@ The durable `GoalArtifact` stores id, title, objective, Success Criteria,
 status, snapshotted rubric policy and cap, latest overall rubric result,
 completion source, attempts, and timestamps. Its statuses are `proposed`,
 `active`, `paused`, `max_iterations_reached`, and `completed`. Dedicated `goal`
-events preserve exact artifacts. Session normalization accepts only the current
-`current_goal` schema and dedicated Goal events; retired `active_goal`, proposal
-events, embedded Plans, and renamed Goal fields are discarded rather than
-migrated.
+events preserve exact artifacts. Session normalization requires the exact
+current `current_goal` fields and types; a populated malformed or retired Goal
+artifact rejects the session. Retired proposal events are not projected as
+Goal events.
 
 `GoalBubble` shows Objective and Success Criteria with Implement, Revise, and
 Close actions. Implement starts or restarts one explicit Act attempt. Revise
@@ -629,6 +636,13 @@ DeepAgents handles runtime context counting and compaction.
 **Why:** Session files should be stable user-facing history after restart.
 Starting a new chat is therefore non-destructive: MIRA creates another session
 record and makes it active instead of clearing the previous one.
+Every session record carries one explicit current schema version and must have
+the exact current top-level fields. MIRA does not fill missing session fields,
+migrate retired `active_goal` or artifact shapes, or repair a record containing
+both a current Plan and current Goal. Such a file is rejected so the persisted
+source of truth cannot be silently reinterpreted. The in-memory
+`resume_context_pending` flag is the sole transient exception and is removed
+before persistence.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result
@@ -643,6 +657,9 @@ occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
 response metadata required by DeepAgents' reported-token validation. MIRA's
 model-response normalization fills only that missing integration identity and
 leaves DeepAgents' eligibility thresholds unchanged.
+MIRA reads compaction summary prose only from the canonical
+`_summarization_event.summary_message`; retired raw `summary` and
+`summary_text` aliases are ignored.
 DeepAgents marks summary-model invocations with `lc_source="summarization"`.
 MIRA observes that invocation metadata before LangGraph publishes each message
 stream and drains marked streams without rendering or recording their internal

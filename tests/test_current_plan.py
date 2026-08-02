@@ -157,9 +157,9 @@ class CurrentPlanTests(unittest.TestCase):
         self.assertIn("Durable Plan", resume)
         self.assertNotIn("Stale", resume)
 
-    def test_sessions_without_current_plan_normalize_safely(self) -> None:
-        normalized = normalize_session({"id": "empty", "events": []})
-        self.assertIsNone(normalized["current_plan"])
+    def test_sessions_without_current_schema_fields_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "current schema"):
+            normalize_session({"id": "empty", "events": []})
 
     def test_old_plan_field_names_are_not_accepted(self) -> None:
         value = artifact()
@@ -167,9 +167,32 @@ class CurrentPlanTests(unittest.TestCase):
         value.pop("rubric_enabled")
         value["automatic_evaluation"] = True
 
-        normalized = normalize_session({"id": "old", "events": [], "current_plan": value})
+        record = SessionStore(Path(".")).new(session_id="old", workspace=Path("workspace"))
+        record["current_plan"] = value
 
-        self.assertIsNone(normalized["current_plan"])
+        with self.assertRaisesRegex(ValueError, "current_plan"):
+            normalize_session(record)
+
+    def test_current_plan_values_are_not_coerced(self) -> None:
+        invalid_values = []
+        string_list = artifact()
+        string_list["key_changes"] = "Add the feature."
+        invalid_values.append(string_list)
+        string_attempts = artifact()
+        string_attempts["attempts"] = "0"
+        invalid_values.append(string_attempts)
+        boolean_iterations = artifact()
+        boolean_iterations["rubric_iterations"] = True
+        invalid_values.append(boolean_iterations)
+
+        for value in invalid_values:
+            with self.subTest(value=value):
+                record = SessionStore(Path(".")).new(
+                    session_id="strict-plan", workspace=Path("workspace")
+                )
+                record["current_plan"] = value
+                with self.assertRaisesRegex(ValueError, "current_plan"):
+                    normalize_session(record)
 
     def test_plan_command_suffix_is_a_normal_message_on_the_persistent_thread(self) -> None:
         session = {"id": "session-1"}
