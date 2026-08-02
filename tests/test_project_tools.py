@@ -223,6 +223,16 @@ class ProjectToolProxyTests(unittest.TestCase):
         self.assertIn("public_project", interrupts)
         self.assertNotIn("_invoke_project_tool", interrupts)
 
+    def test_public_project_name_defaults_enabled_and_requires_approval(self) -> None:
+        metadata = [
+            {"name": "public_project", "source": "project", "path": "/.mira/tools/project.py"}
+        ]
+
+        interrupts = factory._write_interrupts({}, metadata)
+
+        self.assertTrue(factory.tool_enabled({}, "public_project"))
+        self.assertIn("public_project", interrupts)
+
     def test_proxy_uses_public_identity_schema_and_child_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

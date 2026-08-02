@@ -30,7 +30,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.planning_todos_enabled(loaded))
         self.assertFalse(settings.rubric_enabled(loaded))
         self.assertEqual(settings.rubric_max_iterations(loaded), 3)
-        self.assertTrue(settings.tool_always_allow(loaded, "web_search"))
+        self.assertFalse(settings.tool_always_allow(loaded, "custom_search"))
+        self.assertTrue(settings.tool_enabled(loaded, "custom_search"))
         self.assertTrue(settings.tool_enabled(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "delete"))
         self.assertEqual(

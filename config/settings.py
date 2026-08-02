@@ -19,7 +19,6 @@ RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
-DEFAULT_APPROVAL_TOOLS = INBUILT_DANGEROUS_TOOLS
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system": {
         DYNAMIC_SUBAGENTS: {
@@ -303,7 +302,7 @@ def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str)
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
     if isinstance(spec, dict) and isinstance(spec.get("always_allow"), bool):
         return bool(spec["always_allow"])
-    return tool_name not in DEFAULT_APPROVAL_TOOLS
+    return False
 
 
 def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:

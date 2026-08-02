@@ -261,7 +261,9 @@ supported export shapes change.
 **Decision:** Dangerous built-in tools require approval by default. Built-in
 dangerous tools and project tools can be enabled or disabled through settings;
 disabled project tools remain visible in metadata even when they are not
-exposed to the agent. QuickJS programmatic tool calling is limited to
+exposed to the agent. Newly discovered project tools are enabled by default but
+require approval unless explicitly configured as always allowed. QuickJS
+programmatic tool calling is limited to
 `ls`, `read_file`, `glob`, and `grep`; dynamic subagent delegation uses
 QuickJS' top-level `task()` helper only when the System Settings toggle is
 enabled, while destructive file tools, shell execution, and interrupt/control
