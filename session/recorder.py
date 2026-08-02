@@ -9,6 +9,7 @@ from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
 from runtime.output_events import normalize_response_delta
+from runtime.correction_events import normalize_correction_event
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 from session.goals import current_goal, goal_artifact_text
 from session.plans import current_plan, plan_artifact_text
@@ -293,6 +294,15 @@ class SessionRecorder:
                 self.save()
                 return
 
+    def correction(self, value: dict[str, Any]) -> dict[str, Any]:
+        """Persist one visible deterministic correction event."""
+        self.finish_main()
+        event = normalize_correction_event(value)
+        event["mode"] = self.mode
+        stored = append_event(self.record, event)
+        self.save()
+        return stored
+
     def ensure_assistant(self, text: str) -> None:
         text = text.strip()
         if not text:
@@ -316,47 +326,6 @@ class SessionRecorder:
     def _close_assistant_phase(self) -> None:
         self._assistant_id = None
         self._assistant_text = ""
-
-    def discard_last_assistant(self) -> bool:
-        """Remove the currently streamed assistant answer after a cutoff retry."""
-        event_id = self._assistant_id or self._last_assistant_id
-        if event_id is None:
-            return False
-        self.record["events"] = [
-            event
-            for event in self.record.get("events", [])
-            if not (isinstance(event, dict) and int(event.get("id") or 0) == event_id)
-        ]
-        self.save()
-        self._assistant_id = None
-        self._last_assistant_id = None
-        self._assistant_text = ""
-        self._assistant_seen = False
-        return True
-
-    def replace_last_assistant(self, text: str) -> dict[str, Any]:
-        """Replace a provisional assistant answer with authoritative text."""
-        value = str(text or "").strip()
-        event_id = self._assistant_id or self._last_assistant_id
-        if event_id is None:
-            event = append_event(
-                self.record,
-                {"type": "assistant", "mode": self.mode, "text": value},
-            )
-            event_id = int(event["id"])
-        else:
-            update_event_text(self.record, event_id, value)
-            event = next(
-                item
-                for item in self.record.get("events", [])
-                if isinstance(item, dict) and int(item.get("id") or 0) == event_id
-            )
-        self._assistant_id = event_id
-        self._last_assistant_id = event_id
-        self._assistant_text = value
-        self._assistant_seen = True
-        self.save()
-        return event
 
     def _move_event_before(self, event: dict[str, Any], before_id: int | None) -> None:
         if before_id is None:
@@ -722,6 +691,13 @@ class RecordingRenderer:
         if callable(callback):
             callback(run_id, pass_number, max_iterations)
 
+    def correction(self, value: dict[str, Any]) -> None:
+        """Persist and render one correction bubble in transcript order."""
+        event = self.recorder.correction(value)
+        callback = getattr(self.renderer, "correction", None)
+        if callable(callback):
+            call_renderer(callback, value, created_at=event_created_at(event))
+
     def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
         """Persist and forward one completed rubric evaluation."""
         event = self.recorder.rubric_evaluation_finished(evaluation, max_iterations)
@@ -777,23 +753,6 @@ class RecordingRenderer:
     def finish_main(self) -> None:
         self.renderer.finish_main()
         self.recorder.finish_main()
-
-    def discard_last_assistant(self) -> None:
-        removed = self.recorder.discard_last_assistant()
-        if not removed:
-            return
-        callback = getattr(self.renderer, "discard_last_assistant", None)
-        if callable(callback):
-            callback()
-
-    def replace_last_assistant(self, text: str) -> None:
-        """Replace provisional output in persistence and the active renderer."""
-        self.recorder.replace_last_assistant(text)
-        callback = getattr(self.renderer, "replace_last_assistant", None)
-        if callable(callback):
-            callback(text)
-        else:
-            self.renderer.text_delta(text)
 
     def context_notice_rendered(self) -> bool:
         """Return whether this turn already rendered a context-pressure notice."""

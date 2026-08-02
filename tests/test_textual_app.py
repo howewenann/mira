@@ -1795,25 +1795,33 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             copy.assert_called_once_with("clicked assistant text")
 
-    async def test_protocol_exhaustion_without_provisional_text_keeps_prior_assistant(self) -> None:
-        """A held marker-only candidate must create, not overwrite, the next reply."""
+    async def test_correction_bubble_keeps_rejected_prose_and_shows_retry_prompt(self) -> None:
         app = make_app()
 
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=(100, 34)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            chat.assistant_message("prior answer")
-            chat.user_message("next request", planning=True)
-            chat.replace_last_assistant("MIRA could not produce a valid response.")
+            chat.text_delta("I'll research that next.")
+            chat.correction(
+                {
+                    "workflow": "Plan",
+                    "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                    "retry_prompt": "Perform that research now.",
+                    "attempt": 1,
+                    "max_retries": 2,
+                }
+            )
+            chat.text_delta("Research complete.")
             await pilot.pause()
 
             assistants = list(chat.query(".message.assistant"))
-            self.assertEqual(len(assistants), 2)
-            self.assertEqual(renderable_plain(assistants[0]), "prior answer")
-            self.assertEqual(
-                renderable_plain(assistants[1]),
-                "MIRA could not produce a valid response.",
-            )
+            corrections = list(chat.query(".message.correction"))
+            self.assertEqual([renderable_plain(block) for block in assistants], ["I'll research that next.", "Research complete."])
+            self.assertEqual(len(corrections), 1)
+            correction = renderable_plain(corrections[0])
+            self.assertIn("Check failed: NEXT_ACTION: RESEARCH", correction)
+            self.assertIn("Retry prompt: Perform that research now.", correction)
+            self.assertIn("Retry 1 of 2", correction)
 
     async def test_ctrl_c_copies_chat_selection_with_container_or_no_focus(self) -> None:
         app = make_app()

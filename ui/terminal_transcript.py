@@ -7,6 +7,7 @@ import re
 from typing import Any, Callable
 
 from runtime.rubric_events import rubric_result_text
+from runtime.correction_events import correction_text, correction_title
 from ui.names import generate_slug
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -89,6 +90,10 @@ class TerminalTranscript:
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Write a system/status/error block."""
         self.block(kind, text)
+
+    def correction(self, event: dict[str, Any]) -> None:
+        """Write one deterministic correction as a dedicated block."""
+        self.block(correction_title(event), correction_text(event))
 
     def compaction_started(self) -> None:
         """Write a context compaction status."""

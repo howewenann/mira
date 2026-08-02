@@ -39,6 +39,11 @@ class TraceStream:
         """Trace a system/status/error message."""
         self._emit("system_message", text, kind=kind)
 
+    def correction(self, event: dict[str, Any]) -> None:
+        """Trace one visible deterministic correction."""
+        self.transcript.correction(event)
+        self._flush()
+
     def command_output(self, value: Any) -> None:
         """Trace command output."""
         self.line(f"command: {self.transcript.truncate(value)}")
@@ -54,19 +59,6 @@ class TraceStream:
     def discard_reasoning(self) -> None:
         """Drop buffered reasoning later classified as internal."""
         self.transcript.discard_reasoning()
-
-    def discard_last_assistant(self) -> None:
-        """Drop buffered provisional assistant output before it reaches the trace."""
-        self._buffer = []
-        self.transcript = TerminalTranscript(
-            self._write,
-            tool_output_chars=self._output_chars,
-        )
-
-    def replace_last_assistant(self, text: str) -> None:
-        """Replace buffered provisional assistant output with authoritative text."""
-        self.discard_last_assistant()
-        self.assistant_delta(text)
 
     def flush_all(self) -> None:
         """Write any buffered transcript output."""

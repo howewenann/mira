@@ -1044,11 +1044,12 @@ the scenario requests persistence evidence.
    marker-free, and research does not loop.
 3. Ask Plan mode to investigate session architecture and propose the smallest
    coherent session-duplication change. Repeat several times. Expected:
-   false-progress prose is discarded, actual research follows, and the outcome
-   is `ask_user`, `prepare_plan`, or a complete grounded answer.
+   false-progress prose remains immediately before a `Plan check` bubble that
+   shows the failed check and exact retry prompt; actual research follows, and
+   the outcome is `ask_user`, `prepare_plan`, or a complete grounded answer.
 4. Use a deterministic fake response ending in `NEXT_ACTION: RESEARCH` without
    a call, then one with no marker. Expected: specific then general correction,
-   no committed provisional prose.
+   rejected prose and both correction bubbles remain in visible/model history.
 5. Ask for a session-duplication design while explicitly leaving full-transcript
    versus metadata-only behavior undecided. Expected: `ask_user`; after choosing,
    request an implementation-ready Plan and verify `prepare_plan` followed by
@@ -1063,34 +1064,43 @@ the scenario requests persistence evidence.
 8. Ask in Chinese to inspect and explain session loading and saving. Expected:
    Chinese prose remains intact and the exact ASCII marker is hidden.
 9. After success, inspect session JSON, run `/reload`, and reopen the transcript.
-   Expected: accepted answer once; no marker, rejected prose, or internal
-   correction in session, reload, final output, or trace.
+   Expected: accepted answer once; no marker; rejected prose and its technical
+   correction bubble remain paired and ordered in session, reload, one-shot,
+   and trace output without appearing as user-authored text.
 10. Test caps `1` and `2` with a fake model that always ends with
     `NEXT_ACTION: RESEARCH` and no call. Expected: respectively two and three
-    total model attempts, followed by the explicit incomplete response. Enter
+    total model attempts, retained rejected candidates and correction bubbles,
+    followed by the explicit incomplete response. Enter
     `0` or `21` in Settings. Expected: the previous normalized value is restored
     and the UI displays the `1`-`20` range.
+11. Create a Plan, then ask `show me the plan again` while forcing the model to
+    call `present_plan`. Expected: `present_plan` returns a visible native tool
+    error before any interrupt, the error directs the model to `plan_show`, and
+    the model can call `plan_show` in the same turn without a MIRA exception or
+    pending interrupt. Repeat symmetrically for `present_goal`/`goal_show`.
 
 Record actual Gemma behavior here after each real run: model/provider, cap,
 scenario, tool sequence, retry count, final outcome, and whether any marker or
 provisional text appeared or persisted.
 
 Observed 2026-08-02 with `lmstudio:google/gemma-4-12b` through the real planning
-agent (direct graph smoke in a disposable workspace):
+agent in disposable workspaces:
 
-- Plan forced-false-progress, cap `1`: two model calls; only the explicit
-  incomplete response remained in authoritative messages.
-- Plan forced-false-progress, cap `2`: three model calls; only the explicit
-  incomplete response remained in authoritative messages.
-- Goal cross-stage `NEXT_ACTION: PREPARE_PLAN`, cap `1`: two model calls; the
-  marker was rejected and only the explicit incomplete response remained.
-- Plan discussion, cap `2`: `ls` then a complete prose answer; no marker or
-  correction remained in the result.
-- Goal discussion, cap `2`: one complete prose answer; no marker or correction
-  remained in the result.
-- Invalid values `0` and `21` against previous cap `5`: normalization restored
-  `5` in both cases. The focused Textual test verified the same restore/range
-  message through Settings and one agent rebuild after a valid submission.
+- Plan discussion, cap `1`: `ls` succeeded, then Gemma returned one complete
+  prose answer. No correction was needed and the terminal marker was absent
+  from final graph output.
+- Goal discussion, cap `2`: Gemma returned one complete prose answer without a
+  tool call. No correction was needed and the terminal marker was absent from
+  final graph output.
+- Invalid value `0` against previous cap `5`: normalization restored `5`, and
+  the planning agent rebuilt successfully with that normalized value. The
+  focused Textual test also verifies the visible `1`-`20` range message and one
+  rebuild after a valid submission.
+- Deterministic graph scenarios cover behavior Gemma did not naturally produce
+  in these runs: cap `1` and `2` exhaustion retain every rejected candidate and
+  paired correction; a Goal cross-stage Plan marker is corrected; wrong-stage
+  `present_plan`/`present_goal` calls return native tool errors and can be
+  followed by `plan_show`/`goal_show` without an interrupt.
 
 These runs verify model and graph behavior but do not replace the interactive
 terminal checks for transient bubble visibility, `/reload`, or user-driven

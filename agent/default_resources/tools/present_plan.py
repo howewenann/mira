@@ -15,7 +15,9 @@ PRESENT_PLAN_INTERRUPT_TYPE = "present_plan"
         "This tool is required in the formal finalisation stage and is unavailable during "
         "ordinary Plan discussion and research. Supply title, key_changes, test_plan, and "
         "assumptions as the complete Plan around the binding Objective, Context and "
-        "Constraints, and Success Criteria supplied by MIRA. Do not add a Summary section."
+        "Constraints, and Success Criteria supplied by MIRA. Use plan_show to display the "
+        "retained Plan and prepare_plan to construct a new or revised Plan. Do not add a "
+        "Summary section."
     ),
 )
 def present_plan(

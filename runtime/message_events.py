@@ -6,13 +6,11 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from agent.planning.policy import (
-    PLANNING_NEXT_ACTION_SOURCE,
-    strip_terminal_planning_next_action_text,
-)
+from agent.middleware.correction import CORRECTION_SOURCE
+from agent.planning.next_action import strip_terminal_planning_next_action_text
 from runtime.message_metadata import MessageInvocationMetadata
 from runtime.output_events import (
-    is_planning_next_action_metadata_message,
+    is_correction_metadata_message,
     is_summarization_metadata_message,
     normalize_response_delta,
     visible_message_text,
@@ -58,8 +56,8 @@ async def consume_messages(
         is_protocol_message = (
             invocation_metadata is not None
             and invocation_metadata.for_message(message).get("lc_source")
-            == PLANNING_NEXT_ACTION_SOURCE
-        ) or is_planning_next_action_metadata_message(message)
+            == CORRECTION_SOURCE
+        ) or is_correction_metadata_message(message)
         if is_protocol_message:
             await _drain_message(message)
             call_renderer(renderer, "model_stream_finished")

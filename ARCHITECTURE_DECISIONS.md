@@ -172,7 +172,7 @@ virtual paths such as `/tmp.py` are run from the project shell as
 workspace-relative paths instead of host-root absolute paths.
 
 **Where to check:** `agent/resources/__init__.py`, `config/settings.py`,
-`agent/factory.py`, `agent/middleware.py`, `ui/app.py`.
+`agent/factory.py`, `agent/middleware/`, `ui/app.py`.
 
 **Update this when:** `execute` is exposed by a different backend, default
 approval behavior changes, or shell environment inheritance changes.
@@ -294,7 +294,7 @@ LangGraph interrupt/resume path; MIRA only formats the prompt surface so user
 decisions remain readable in narrow terminals.
 
 **Where to check:** `config/settings.py`, `agent/factory.py`,
-`agent/middleware.py`, `agent/resources/__init__.py`, `ui/interrupts.py`,
+`agent/middleware/`, `agent/resources/__init__.py`, `ui/interrupts.py`,
 `runtime/runner.py`.
 
 **Update this when:** Approval defaults, interrupt payload handling, or
@@ -332,29 +332,31 @@ Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
 
 Plan research also uses a deterministic terminal next-action contract. The
-middleware appends the contract transiently to every model request, including
-requests after tool results, because a reminder stored only on the initial user
-message becomes stale as the tool loop grows. Research keeps optional tool
-choice. A response with any tool call bypasses this check. At a natural no-tool
-stop, the final non-empty textual line must be exactly one stage-valid marker;
-only `NEXT_ACTION: ANSWER` may terminate. `RESEARCH`, `ASK_USER`, and
-`PREPARE_PLAN` remove the provisional response, add hidden corrective feedback,
-and use LangGraph's native jump to the model node without replaying completed
-tools. Missing, duplicated, malformed, non-terminal, empty, reasoning-only, or
-Goal-only markers take the same bounded recovery path with general feedback.
-Finalisation is isolated from this contract and remains a forced single
-`present_plan` call.
+generic `CorrectionMiddleware` appends the Plan-owned rule's contract
+transiently to every model request, including requests after tool results,
+because a reminder stored only on the initial user message becomes stale as the
+tool loop grows. Research keeps optional tool choice. A response with any tool
+call bypasses correction. At a natural no-tool stop, the final non-empty textual
+line must be exactly one stage-valid marker; only `NEXT_ACTION: ANSWER` may
+terminate. `RESEARCH`, `ASK_USER`, and `PREPARE_PLAN` retain the rejected
+assistant response, append a named correction prompt, and use LangGraph's native
+jump to the model node without replaying completed tools. Missing, duplicated,
+malformed, non-terminal, empty, reasoning-only, or Goal-only markers take the
+same bounded recovery path with general feedback. Finalisation is isolated from
+this contract and remains a forced single `present_plan` call.
 
-The retry cap counts retries after the initial rejected candidate. Exhaustion
-replaces that candidate with an explicit incomplete response. Exact terminal
-markers are held out of streaming and stripped from accepted message content;
-retry events remove provisional UI/session/trace prose, and hidden corrections
-are removed from checkpoint state. This reliability check is always active and
-does not call or mutate user rubrics. It deliberately trusts an exact `ANSWER`
-classification: a dishonest model can still label unfinished prose as complete.
-Provider-specific channels, English false-progress heuristics, and always-on
-semantic grading were rejected because they are less portable or would add a
-second model judgment.
+The retry cap counts retries after the initial rejected candidate. Rejected
+prose and its correction prompt remain paired in checkpoint and durable visible
+history so neither the user nor the model sees a hanging correction. A generic
+correction bubble shows the failed check, exact retry prompt, and retry count.
+Exhaustion retains the last candidate, shows the failed check and exhausted
+limit, then appends an explicit incomplete response. Exact terminal markers are
+held out of user-visible streaming and stripped from accepted message content.
+This reliability check is always active and does not call or mutate user
+rubrics. It deliberately trusts an exact `ANSWER` classification: a dishonest
+model can still label unfinished prose as complete. Provider-specific channels,
+English false-progress heuristics, and always-on semantic grading were rejected
+because they are less portable or would add a second model judgment.
 
 When a Plan is current, `current_plan` stores its stable id, Plan fields,
 separate Success Criteria, status, rubric policy and cap, latest overall rubric
@@ -394,7 +396,7 @@ compaction or reload. Rubrics evaluate execution rather than changing what Plan
 MIRA constructs.
 
 **Where to check:** `agent/planning/policy.py`,
-`agent/planning/criteria.py`, `agent/middleware.py`, `session/plans.py`,
+`agent/planning/criteria.py`, `agent/middleware/`, `session/plans.py`,
 `runtime/runner.py`, `ui/app.py`, `ui/repl.py`, and
 `ui/widgets/chat_log.py`.
 
@@ -476,13 +478,57 @@ Keeping Goals criteria-only makes execution flexible while retaining the same
 durability, review, recall, replacement, and evaluation guarantees as Plans.
 
 **Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
-`agent/middleware.py`, `agent/default_resources/tools/prepare_goal.py`,
+`agent/middleware/`, `agent/default_resources/tools/prepare_goal.py`,
 `agent/default_resources/tools/present_goal.py`, `runtime/runner.py`,
 `session/goals.py`, `session/context.py`, `ui/app.py`, `ui/repl.py`, and
 `ui/widgets/chat_log.py`.
 
 **Update this when:** Goal construction, persistence, replacement, review,
 recall, migration, or execution completion rules change.
+
+## Model Correction And Control-Tool Recovery
+
+**Decision:** MIRA treats deterministic response correction and semantic Rubric
+grading as separate harness capabilities. `CorrectionMiddleware` owns only the
+generic no-tool natural-stop lifecycle: transient reminders, rule selection,
+bounded counters, correction events, model feedback, retry jumps, acceptance,
+and exhaustion. Workflow rules under `agent/planning/` define Plan/Goal markers,
+checks, prompts, and terminal failure text. Rubrics remain optional semantic
+review by a grader model and share no implementation with deterministic
+correction.
+
+Planning stages have two matching enforcement layers. Request-time filtering
+shows only the formal controls valid for the current stage. A native
+`wrap_tool_call` guard then rejects remembered or hallucinated wrong-stage
+`prepare_plan`, `present_plan`, `prepare_goal`, or `present_goal` calls with an
+error `ToolMessage` before their handler can call `interrupt()`. The standard
+agent edge returns that result to the model, which may select the correct tool;
+these calls never consume natural-stop correction retries.
+
+**Why:** A weak model may call a registered control remembered from transcript
+history even when its schema is hidden from the current request. Tool visibility
+is guidance, not an execution boundary. LangGraph deliberately bubbles
+`GraphInterrupt` out of ToolNode and checkpoints the suspended tool. An error
+raised later by MIRA's UI control surface is outside ToolNode, so re-raising it
+leaves no error `ToolMessage` for the model and the invocation remains pending
+at the interrupt. Model-correctable stage and argument failures must therefore
+use native tool errors before interruption. Unexpected criteria-service,
+persistence, or renderer failures remain fatal because another model attempt
+cannot repair them.
+
+The middleware package mirrors these ownership boundaries:
+`pipeline.py` assembles ordering, `correction.py` implements generic correction,
+`planning_stage.py` enforces formal stages, and the execute prompt, tool
+visibility, and response normalization each live in a responsibility-named
+module. Correction events are durable transcript events and are projected as
+correction context, not user context, when a saved session is resumed.
+
+**Where to check:** `agent/middleware/`, `agent/planning/next_action.py`,
+`runtime/correction_events.py`, `runtime/runner.py`, `session/context.py`.
+
+**Update this when:** A new correction rule is added, correction visibility or
+persistence changes, a control tool gains a stage precondition, or recoverable
+and fatal control-surface errors are reclassified.
 
 ## Textual TUI And One-Shot Output
 
@@ -618,7 +664,7 @@ diagnostics instead of synthesizing another iteration. QuickJS runs with
 explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
 not receive ambient filesystem, network, process, or clock access.
 
-**Where to check:** `agent/factory.py`, `agent/middleware.py`,
+**Where to check:** `agent/factory.py`, `agent/middleware/`,
 `agent/subagent_compilation.py`, `agent/tools/specs.py`, `runtime/runner.py`,
 `runtime/rubric_events.py`, `config/settings.py`.
 
@@ -666,7 +712,7 @@ events back into chat transcript blocks rather than reconstructing the old live
 panel. Eval-created subagent rows are not stored separately; their durable
 history is the surrounding eval tool call/result plus the assistant's summary.
 
-**Where to check:** `agent/compaction.py`, `agent/middleware.py`, `session/store.py`,
+**Where to check:** `agent/compaction.py`, `agent/middleware/`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
 `runtime/context_usage.py`, `runtime/message_metadata.py`.
 

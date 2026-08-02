@@ -9,7 +9,13 @@ from deepagents import FilesystemPermission, HarnessProfile, RubricMiddleware, c
 from langchain.agents.middleware.types import AgentMiddleware
 
 from agent.llm import get_llm
-from agent.middleware import ModelToolVisibilityMiddleware, PlanningStageMiddleware, build_agent_middleware
+from agent.middleware import (
+    CorrectionMiddleware,
+    ModelToolVisibilityMiddleware,
+    PlanningStageMiddleware,
+    build_agent_middleware,
+)
+from agent.planning.next_action import PlanningNextActionRule
 from agent.planning.policy import (
     PLAN_DENIED_FS_OPERATIONS,
     PLAN_DISABLED_TOOLS,
@@ -97,7 +103,14 @@ def build_plan_agent(
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
         extra_middleware=[
-            PlanningStageMiddleware(max_retries=planning_next_action_max_retries(config))
+            PlanningStageMiddleware(),
+            CorrectionMiddleware(
+                rules=(
+                    PlanningNextActionRule(workflow="plan"),
+                    PlanningNextActionRule(workflow="goal"),
+                ),
+                max_retries=planning_next_action_max_retries(config),
+            ),
         ],
         omitted_tools=(),
     )

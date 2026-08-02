@@ -18,6 +18,7 @@ from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
 from runtime.rubric_events import rubric_result_text
+from runtime.correction_events import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
 from ui.names import generate_slug
@@ -36,7 +37,6 @@ class ChatLog(VerticalScroll):
         self.tool_output_chars = int(tool_output_chars)
         self._assistant_text = ""
         self._assistant_block: Static | None = None
-        self._last_assistant_block: Static | None = None
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
@@ -109,20 +109,18 @@ class ChatLog(VerticalScroll):
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
         self._reset_delegation_group()
-        self._last_assistant_block = None
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
     def timestamped_user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
         """Append a persisted user message with its session timestamp."""
         self._reset_delegation_group()
-        self._last_assistant_block = None
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user", created_at=created_at)
 
     def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
-        self._last_assistant_block = self._add_block(
+        self._add_block(
             "mira", Text(text), "message assistant", created_at=created_at
         )
 
@@ -224,6 +222,8 @@ class ChatLog(VerticalScroll):
                     int(event.get("max_iterations") or 1),
                     created_at=created_at,
                 )
+            elif event_type == "correction":
+                self.correction(event, created_at=created_at)
             elif event_type in {"info", "system_error", "interrupted"}:
                 kind = {"info": "info", "system_error": "error", "interrupted": "warning"}[event_type]
                 self.system_message(event["text"], kind=kind, created_at=created_at)
@@ -259,35 +259,23 @@ class ChatLog(VerticalScroll):
         if self._assistant_block is None:
             self._assistant_text = ""
             self._assistant_block = self._add_block("mira", Text(""), "message assistant", created_at=created_at)
-            self._last_assistant_block = self._assistant_block
 
         self._assistant_text += delta
         self._assistant_block.update(Text(self._assistant_text))
         self._scroll_to_end()
 
-    def discard_last_assistant(self) -> None:
-        """Remove the latest provisional assistant block."""
-        block = self._last_assistant_block
-        if block is None:
-            return
-        block.remove()
-        if self._assistant_block is block:
-            self._assistant_block = None
-            self._assistant_text = ""
-        self._last_assistant_block = None
-        self._scroll_to_end()
-
-    def replace_last_assistant(self, text: str) -> None:
-        """Replace the latest provisional assistant block in place."""
-        block = self._last_assistant_block
-        if block is None:
-            self.assistant_message(text)
-            self._scroll_to_end()
-            return
-        block.update(Text(text))
-        if self._assistant_block is block:
-            self._assistant_text = text
-        self._scroll_to_end()
+    def correction(self, event: dict[str, Any], *, created_at: str = "") -> None:
+        """Append a technical correction bubble after rejected assistant prose."""
+        self.hide_waiting()
+        self.hide_model_activity()
+        self._close_assistant_phase()
+        self._close_reasoning_phase()
+        self._add_block(
+            correction_title(event),
+            Text(correction_text(event)),
+            "message correction",
+            created_at=created_at,
+        )
 
     def finish_main(self) -> None:
         """Close the current streamed blocks so the next turn starts fresh."""
@@ -821,7 +809,6 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         self._waiting_block = None
         self._activity_block = None
-        self._last_assistant_block = None
         self._reset_delegation_group()
         self._startup_block = None
         self._startup_state = "starting"

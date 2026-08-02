@@ -702,9 +702,9 @@ def get_tools(project_backend):
             agent = type("Agent", (), {})()
             with (
                 patch("agent.factory.get_llm", return_value="model"),
-                patch("agent.middleware.CodeInterpreterMiddleware", return_value="code") as code_middleware,
-                patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+                patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
                 built = factory.build_agent({}, Path(directory), "checkpointer")
@@ -742,9 +742,9 @@ def get_tools(project_backend):
             built_agents = [type("Agent", (), {})(), type("Agent", (), {})()]
             with (
                 patch("agent.factory.get_llm", return_value="model"),
-                patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
-                patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", side_effect=built_agents) as create,
             ):
                 factory.build_agent({}, workspace, "checkpointer")
@@ -770,9 +770,9 @@ def get_tools(project_backend):
             config = {"settings": {"hitl": {"tools": {"execute": {"enabled": True, "always_allow": False}}}}}
             with (
                 patch("agent.factory.get_llm", return_value="model"),
-                patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
-                patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
                 factory.build_agent(config, Path(directory), "checkpointer")

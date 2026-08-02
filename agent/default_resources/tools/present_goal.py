@@ -14,7 +14,8 @@ PRESENT_GOAL_INTERRUPT_TYPE = "present_goal"
         "Present the final Goal after MIRA has generated Success Criteria. This is the only tool "
         "available in Goal finalisation and a call is required. Supply only a concise user-facing "
         "title; MIRA builds the Goal from the staged authoritative Objective and Success Criteria. "
-        "Do not produce a Plan or return the Goal in prose."
+        "Use goal_show to display the retained Goal and prepare_goal to construct a new or "
+        "revised Goal. Do not produce a Plan or return the Goal in prose."
     ),
 )
 def present_goal(title: str) -> str:

@@ -820,38 +820,70 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
-    def test_protocol_retry_discards_provisional_assistant_from_session(self) -> None:
+    def test_correction_keeps_rejected_prose_and_retry_prompt_in_session(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
         recording = SessionRecordingRenderer(renderer, recorder)
 
         recording.text_delta("I'll inspect next.\n")
-        recording.discard_last_assistant()
+        recording.correction(
+            {
+                "type": "correction",
+                "protocol": "plan_next_action",
+                "workflow": "Plan",
+                "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                "retry_prompt": "Perform that research now.",
+                "attempt": 1,
+                "max_retries": 2,
+            }
+        )
         recording.text_delta("Inspection complete.")
 
         events = context.normalize_events(record["events"])
         self.assertEqual(
             [(event["type"], event.get("text")) for event in events],
-            [("assistant", "Inspection complete.")],
+            [
+                ("assistant", "I'll inspect next."),
+                ("correction", None),
+                ("assistant", "Inspection complete."),
+            ],
         )
-        self.assertIn(("discard_last_assistant",), renderer.events)
+        self.assertEqual(events[1]["retry_prompt"], "Perform that research now.")
+        self.assertEqual(
+            [message["role"] for message in context.normalize_messages(record["events"])],
+            ["assistant", "correction", "assistant"],
+        )
+        self.assertTrue(any(event[0] == "correction" for event in renderer.events))
 
-    def test_protocol_exhaustion_replaces_provisional_session_output(self) -> None:
+    def test_correction_exhaustion_keeps_last_candidate_and_appends_failure(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
         recording = SessionRecordingRenderer(renderer, recorder)
 
         recording.text_delta("Still researching.")
-        recording.replace_last_assistant("MIRA could not produce a valid response.")
+        recording.correction(
+            {
+                "type": "correction",
+                "protocol": "plan_next_action",
+                "workflow": "Plan",
+                "failed_check": "NEXT_ACTION: RESEARCH was declared without a tool call.",
+                "attempt": 2,
+                "max_retries": 2,
+                "exhausted": True,
+            }
+        )
+        recording.text_delta("MIRA could not produce a valid response.")
 
         events = context.normalize_events(record["events"])
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["text"], "MIRA could not produce a valid response.")
+        self.assertEqual([event["type"] for event in events], ["assistant", "correction", "assistant"])
+        self.assertEqual(events[0]["text"], "Still researching.")
+        self.assertTrue(events[1]["exhausted"])
+        self.assertEqual(events[2]["text"], "MIRA could not produce a valid response.")
         self.assertIn(
-            ("replace_last_assistant", "MIRA could not produce a valid response."),
-            renderer.events,
+            "correction (planning): Correction check failed",
+            context.build_resume_context({"events": events, "current_plan": None, "current_goal": None}),
         )
 
     def test_recovered_call_and_result_persist_before_final_assistant(self) -> None:

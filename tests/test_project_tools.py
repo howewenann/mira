@@ -181,9 +181,9 @@ class ResilientToolLoadingTests(unittest.TestCase):
             agent = type("Agent", (), {})()
             with (
                 patch("agent.factory.get_llm", return_value="model"),
-                patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
-                patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.middleware.pipeline.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.middleware.pipeline.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.pipeline.create_mira_summarization_tool_middleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create,
             ):
                 factory.build_agent({}, workspace, "checkpointer")

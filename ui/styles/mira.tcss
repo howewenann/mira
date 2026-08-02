@@ -431,6 +431,11 @@ Button.plan-action:focus {
     color: #F1DCF5;
 }
 
+.message.correction {
+    border: solid #E0A84F;
+    color: #F2DFB8;
+}
+
 .message.rubric {
     border: solid #C58FD6;
     color: #F1DCF5;

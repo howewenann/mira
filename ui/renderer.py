@@ -48,14 +48,6 @@ class Renderer:
         """Discard pending reasoning that has not been printed yet."""
         self.transcript.discard_reasoning()
 
-    def discard_last_assistant(self) -> None:
-        """Finish provisional terminal output before an internal retry."""
-        self.transcript.finish_main()
-
-    def replace_last_assistant(self, text: str) -> None:
-        """Print an authoritative replacement after provisional terminal output."""
-        self.transcript.block("mira", text)
-
     def text_delta(self, delta: str) -> None:
         """Print streamed assistant text."""
         self.transcript.text_delta(delta)
@@ -87,6 +79,10 @@ class Renderer:
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Print one system-style block."""
         self.transcript.system_message(text, kind=kind)
+
+    def correction(self, event: dict[str, Any], *, created_at: str = "") -> None:  # noqa: ARG002
+        """Print a deterministic correction after its rejected response."""
+        self.transcript.correction(event)
 
     def compaction_started(self) -> None:
         """Print a context compaction status."""

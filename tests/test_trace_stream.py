@@ -163,6 +163,26 @@ class TraceStreamTests(unittest.TestCase):
         self.assertIn("maximum rubric iterations reached", joined)
         self.assertNotIn("tool", joined)
 
+    def test_correction_is_a_technical_non_tool_block(self) -> None:
+        trace, handler = self.make_stream()
+
+        trace.assistant_delta("I'll inspect later.")
+        trace.correction(
+            {
+                "workflow": "Plan",
+                "failed_check": "NEXT_ACTION: RESEARCH had no tool call.",
+                "retry_prompt": "Perform the research now.",
+                "attempt": 1,
+                "max_retries": 2,
+            }
+        )
+
+        joined = "\n".join(handler.messages)
+        self.assertIn("mira:\nI'll inspect later.", joined)
+        self.assertIn("Plan check:\nCheck failed: NEXT_ACTION: RESEARCH had no tool call.", joined)
+        self.assertIn("Retry prompt: Perform the research now.", joined)
+        self.assertIn("Retry 1 of 2", joined)
+
     def test_disabled_stream_is_no_op(self) -> None:
         trace = TraceStream.disabled()
 

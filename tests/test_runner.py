@@ -17,11 +17,8 @@ from agent.compaction import (
     prepare_summarization_engine,
     sanitize_messages_for_archive,
 )
-from agent.planning.policy import (
-    PLANNING_NEXT_ACTION_EVENT,
-    PLANNING_NEXT_ACTION_FAILURE,
-    PLANNING_NEXT_ACTION_SOURCE,
-)
+from agent.middleware import CORRECTION_EVENT, CORRECTION_SOURCE
+from agent.planning.next_action import PLANNING_NEXT_ACTION_FAILURE
 from runtime.context_usage import context_usage_scope
 from runtime import runner
 from runtime.message_events import consume_messages
@@ -468,11 +465,8 @@ class RecordingRenderer:
     def system_message(self, text: str, *, kind: str = "system") -> None:
         self.events.append(("system_message", kind, text))
 
-    def discard_last_assistant(self) -> None:
-        self.events.append(("discard_last_assistant",))
-
-    def replace_last_assistant(self, text: str) -> None:
-        self.events.append(("replace_last_assistant", text))
+    def correction(self, event: dict[str, Any], *, created_at: str = "") -> None:
+        self.events.append(("correction", event, created_at))
 
 
 class RunTurnRenderer(RecordingRenderer):
@@ -810,7 +804,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(agent.payloads), 1)
         self.assertEqual(result.final_text, "Since it")
         self.assertEqual(result.context_tokens, 0)
-        self.assertNotIn(("discard_last_assistant",), renderer.events)
 
     async def test_run_turn_fills_blank_subagent_request_from_task_description(self) -> None:
         stream = FakeStream(output={"messages": []})
@@ -2472,7 +2465,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 Message(
                     reasoning=AsyncItems(["hidden reasoning"]),
                     text=AsyncItems(["hidden feedback"]),
-                    additional_kwargs={"lc_source": PLANNING_NEXT_ACTION_SOURCE},
+                    additional_kwargs={"lc_source": CORRECTION_SOURCE},
                 )
             ]
         )
@@ -2481,15 +2474,18 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [])
 
-    async def test_protocol_custom_events_discard_and_replace_provisional_output(self) -> None:
+    async def test_correction_custom_events_preserve_prose_and_render_details(self) -> None:
         stream = FakeStream(
             output={"messages": [OutputMessage(PLANNING_NEXT_ACTION_FAILURE)]},
             custom_events=[
-                {"type": PLANNING_NEXT_ACTION_EVENT, "action": "discard"},
                 {
-                    "type": PLANNING_NEXT_ACTION_EVENT,
-                    "action": "replace",
-                    "text": PLANNING_NEXT_ACTION_FAILURE,
+                    "type": CORRECTION_EVENT,
+                    "protocol": "plan_next_action",
+                    "workflow": "Plan",
+                    "failed_check": "NEXT_ACTION: RESEARCH had no tool call.",
+                    "retry_prompt": "Perform the research now.",
+                    "attempt": 1,
+                    "max_retries": 2,
                 },
             ],
         )
@@ -2503,11 +2499,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             planning_stage="plan_research",
         )
 
-        self.assertIn(("discard_last_assistant",), renderer.events)
-        self.assertIn(
-            ("replace_last_assistant", PLANNING_NEXT_ACTION_FAILURE),
-            renderer.events,
-        )
+        corrections = [event for event in renderer.events if event[0] == "correction"]
+        self.assertEqual(len(corrections), 1)
+        self.assertEqual(corrections[0][1]["workflow"], "Plan")
+        self.assertEqual(corrections[0][1]["retry_prompt"], "Perform the research now.")
         self.assertEqual(result.final_text, PLANNING_NEXT_ACTION_FAILURE)
 
     async def test_message_finalized_task_calls_are_hidden_in_runner_mode(self) -> None:

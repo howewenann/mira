@@ -13,14 +13,15 @@ from typing import Any
 from langgraph.types import Command
 from langgraph.stream.transformers import CustomTransformer
 
+from agent.middleware.correction import CORRECTION_EVENT
 from agent.planning.policy import (
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
     PLANNING_STAGES,
-    PLANNING_NEXT_ACTION_EVENT,
 )
+from runtime.correction_events import normalize_correction_event
 from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import (
@@ -326,8 +327,8 @@ async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventR
     """Dispatch custom events without competing stream consumers."""
     eval_renderer = EvalSubagentRenderer(renderer)
     async for event in stream:
-        if isinstance(event, dict) and event.get("type") == PLANNING_NEXT_ACTION_EVENT:
-            render_planning_next_action_event(event, renderer)
+        if isinstance(event, dict) and event.get("type") == CORRECTION_EVENT:
+            render_correction_event(event, renderer)
             continue
         if isinstance(event, dict) and rubric.handle(event):
             continue
@@ -335,26 +336,15 @@ async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventR
             eval_renderer.handle(event)
 
 
-def render_planning_next_action_event(event: dict[str, Any], renderer: Any) -> None:
-    """Remove or replace one rejected provisional planning response."""
-    action = str(event.get("action") or "")
-    if action == "discard":
-        callback = getattr(renderer, "discard_last_assistant", None)
-        if callable(callback):
-            callback()
-        return
-    if action != "replace":
-        return
-    text = str(event.get("text") or "").strip()
-    callback = getattr(renderer, "replace_last_assistant", None)
+def render_correction_event(event: dict[str, Any], renderer: Any) -> None:
+    """Render one durable correction after its rejected assistant prose."""
+    value = normalize_correction_event(event)
+    callback = getattr(renderer, "correction", None)
     if callable(callback):
-        callback(text)
-        return
-    discard = getattr(renderer, "discard_last_assistant", None)
-    if callable(discard):
-        discard()
-    if text:
-        renderer.text_delta(text)
+        callback(value)
+    terminal_text = value["terminal_text"]
+    if terminal_text:
+        renderer.text_delta(terminal_text)
 
 
 def custom_event_data(event: Any) -> dict[str, Any] | None:

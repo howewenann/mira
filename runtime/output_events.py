@@ -6,7 +6,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from agent.planning.policy import PLANNING_NEXT_ACTION_SOURCE
+from agent.middleware.correction import CORRECTION_SOURCE
 from runtime.usage import field
 
 LEADING_REPLY_GAP_RE = re.compile(r"^\s*\n+\s*")
@@ -54,15 +54,15 @@ def visible_message_text(message: Any) -> str:
         return ""
     if is_summarization_metadata_message(message):
         return ""
-    if is_planning_next_action_metadata_message(message):
+    if is_correction_metadata_message(message):
         return ""
     return normalize_response_delta("", message_text(message))
 
 
-def is_planning_next_action_metadata_message(message: Any) -> bool:
-    """Return whether a synthetic message belongs to the planning protocol."""
+def is_correction_metadata_message(message: Any) -> bool:
+    """Return whether a synthetic message belongs to correction feedback."""
     kwargs = field(message, "additional_kwargs")
-    return isinstance(kwargs, dict) and kwargs.get("lc_source") == PLANNING_NEXT_ACTION_SOURCE
+    return isinstance(kwargs, dict) and kwargs.get("lc_source") == CORRECTION_SOURCE
 
 
 def normalize_response_delta(existing_text: str, delta: Any) -> str:

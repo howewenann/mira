@@ -9,6 +9,7 @@ from typing import Any
 from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
+from runtime.correction_events import correction_context_text, normalize_correction_event
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -104,6 +105,8 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
                 continue
             event["evaluation"] = evaluation
             event["max_iterations"] = bounded_positive_int(item.get("max_iterations"), default=1, maximum=20)
+        elif event_type == "correction":
+            event.update(normalize_correction_event(item))
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
             event["args"] = item.get("args", {})
@@ -160,6 +163,15 @@ def normalize_messages(value: Any) -> list[dict[str, Any]]:
                 "mode": str(item.get("mode") or "action"),
                 "created_at": item["created_at"],
                 "content": item["text"],
+            })
+            continue
+        if item["type"] == "correction":
+            messages.append({
+                "id": item["id"],
+                "role": "correction",
+                "mode": str(item.get("mode") or "planning"),
+                "created_at": item["created_at"],
+                "content": correction_context_text(item),
             })
             continue
         if item["type"] == "subagent" and item.get("status") in {"DONE", "CANCELLED"}:

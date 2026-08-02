@@ -10,8 +10,21 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from agent.middleware import PlanningStageMiddleware
-from agent.planning.policy import PLANNING_NEXT_ACTION_FAILURE, PLANNING_NEXT_ACTION_SOURCE
+from agent.middleware import CORRECTION_SOURCE, CorrectionMiddleware, PlanningStageMiddleware
+from agent.planning.next_action import PLANNING_NEXT_ACTION_FAILURE, PlanningNextActionRule
+
+
+def correction_middleware(max_retries: int = 2) -> list[Any]:
+    return [
+        PlanningStageMiddleware(),
+        CorrectionMiddleware(
+            rules=(
+                PlanningNextActionRule(workflow="plan"),
+                PlanningNextActionRule(workflow="goal"),
+            ),
+            max_retries=max_retries,
+        ),
+    ]
 
 
 class BindableFakeModel(FakeMessagesListChatModel):
@@ -31,6 +44,36 @@ def inspect_workspace(path: str) -> str:
 def prepare_goal(objective: str) -> str:
     """Prepare one fake Goal."""
     return f"prepared:{objective}"
+
+
+@tool
+def prepare_plan(objective: str) -> str:
+    """Prepare one fake Plan."""
+    return f"prepared:{objective}"
+
+
+@tool("present_plan")
+def present_plan_stub(title: str) -> str:
+    """Fake finalization control that must not run during research."""
+    raise AssertionError(f"present_plan executed unexpectedly: {title}")
+
+
+@tool("plan_show")
+def plan_show_stub() -> str:
+    """Fake retained Plan display control."""
+    return "current Plan shown"
+
+
+@tool("present_goal")
+def present_goal_stub(title: str) -> str:
+    """Fake finalization control that must not run during research."""
+    raise AssertionError(f"present_goal executed unexpectedly: {title}")
+
+
+@tool("goal_show")
+def goal_show_stub() -> str:
+    """Fake retained Goal display control."""
+    return "current Goal shown"
 
 
 class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -56,7 +99,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         graph = create_agent(
             model=model,
             tools=[inspect_workspace],
-            middleware=[PlanningStageMiddleware(max_retries=2)],
+            middleware=correction_middleware(),
         )
 
         result = await graph.ainvoke(
@@ -69,15 +112,15 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         messages = result["messages"]
         self.assertEqual(
             [type(message) for message in messages],
-            [HumanMessage, AIMessage, ToolMessage, AIMessage],
+            [HumanMessage, AIMessage, HumanMessage, AIMessage, ToolMessage, AIMessage],
         )
-        self.assertEqual(messages[1].tool_calls[0]["id"], "call-read")
-        self.assertEqual(messages[2].content, "contents:session/store.py")
-        self.assertEqual(messages[3].content, "Investigation complete.\n")
-        self.assertFalse(
+        self.assertEqual(messages[3].tool_calls[0]["id"], "call-read")
+        self.assertEqual(messages[4].content, "contents:session/store.py")
+        self.assertEqual(messages[5].content, "Investigation complete.\n")
+        self.assertTrue(
             any(
                 getattr(message, "additional_kwargs", {}).get("lc_source")
-                == PLANNING_NEXT_ACTION_SOURCE
+                == CORRECTION_SOURCE
                 for message in messages
             )
         )
@@ -102,7 +145,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         graph = create_agent(
             model=model,
             tools=[prepare_goal],
-            middleware=[PlanningStageMiddleware(max_retries=2)],
+            middleware=correction_middleware(),
         )
 
         result = await graph.ainvoke(
@@ -120,7 +163,13 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for message in result["messages"]
             )
         )
-        self.assertFalse(any("PREPARE_PLAN" in str(message.content) for message in result["messages"]))
+        self.assertTrue(any("PREPARE_PLAN" in str(message.content) for message in result["messages"]))
+        self.assertTrue(
+            any(
+                getattr(message, "additional_kwargs", {}).get("lc_source") == CORRECTION_SOURCE
+                for message in result["messages"]
+            )
+        )
 
     async def test_configured_retry_cap_finishes_with_explicit_incomplete_message(self) -> None:
         model = BindableFakeModel(
@@ -132,7 +181,7 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         graph = create_agent(
             model=model,
             tools=[],
-            middleware=[PlanningStageMiddleware(max_retries=1)],
+            middleware=correction_middleware(max_retries=1),
         )
 
         result = await graph.ainvoke(
@@ -142,8 +191,160 @@ class PlanningNextActionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertEqual(len(result["messages"]), 2)
+        self.assertEqual(len(result["messages"]), 6)
         self.assertEqual(result["messages"][-1].content, PLANNING_NEXT_ACTION_FAILURE)
+
+    async def test_wrong_stage_present_plan_returns_tool_error_then_model_uses_plan_show(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "present_plan",
+                            "args": {"title": "Existing Plan"},
+                            "id": "call-wrong-present",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "plan_show", "args": {}, "id": "call-show"}
+                    ],
+                ),
+                AIMessage(content="The retained Plan is shown.\nNEXT_ACTION: ANSWER"),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[present_plan_stub, plan_show_stub],
+            middleware=correction_middleware(),
+        )
+
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="show me the plan again")],
+                "planning_stage": "plan_research",
+            }
+        )
+
+        wrong = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-wrong-present"
+        )
+        shown = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-show"
+        )
+        self.assertEqual(wrong.status, "error")
+        self.assertIn("plan_show", str(wrong.content))
+        self.assertEqual(shown.status, "success")
+        self.assertEqual(shown.content, "current Plan shown")
+        self.assertEqual(result["messages"][-1].content, "The retained Plan is shown.\n")
+
+    async def test_wrong_stage_present_goal_returns_tool_error_then_model_uses_goal_show(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "present_goal",
+                            "args": {"title": "Existing Goal"},
+                            "id": "call-wrong-goal",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "goal_show", "args": {}, "id": "call-goal-show"}
+                    ],
+                ),
+                AIMessage(content="The retained Goal is shown.\nNEXT_ACTION: ANSWER"),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[present_goal_stub, goal_show_stub],
+            middleware=correction_middleware(),
+        )
+
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="show me the goal again")],
+                "planning_stage": "goal_research",
+            }
+        )
+
+        wrong = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-wrong-goal"
+        )
+        shown = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-goal-show"
+        )
+        self.assertEqual(wrong.status, "error")
+        self.assertIn("goal_show", str(wrong.content))
+        self.assertEqual(shown.content, "current Goal shown")
+        self.assertEqual(result["messages"][-1].content, "The retained Goal is shown.\n")
+
+    async def test_valid_stage_missing_arguments_use_native_toolnode_retry(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "prepare_plan", "args": {}, "id": "call-missing-arg"}
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "prepare_plan",
+                            "args": {"objective": "Ship it"},
+                            "id": "call-valid-arg",
+                        }
+                    ],
+                ),
+                AIMessage(content="Plan prepared.\nNEXT_ACTION: ANSWER"),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[prepare_plan],
+            middleware=correction_middleware(),
+        )
+
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="prepare a plan")],
+                "planning_stage": "plan_research",
+            }
+        )
+
+        invalid = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-missing-arg"
+        )
+        valid = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-valid-arg"
+        )
+        self.assertEqual(invalid.status, "error")
+        self.assertIn("objective", str(invalid.content))
+        self.assertEqual(valid.status, "success")
+        self.assertEqual(valid.content, "prepared:Ship it")
+        self.assertEqual(result["messages"][-1].content, "Plan prepared.\n")
 
 
 if __name__ == "__main__":

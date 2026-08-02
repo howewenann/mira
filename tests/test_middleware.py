@@ -9,22 +9,26 @@ from typing import Any
 
 from langchain.agents.middleware.summarization import SummarizationMiddleware
 from langchain.agents.middleware.types import ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.middleware import (
+    CORRECTION_SOURCE,
+    CorrectionDecision,
+    CorrectionMiddleware,
     ExecuteToolPromptMiddleware,
     MIRA_EXECUTE_TOOL_DESCRIPTION,
     ModelResponseNormalizationMiddleware,
     PlanningStageMiddleware,
-    planning_next_action,
-    strip_planning_next_action,
 )
-from agent.planning.policy import (
+from agent.planning.next_action import (
     PLANNING_NEXT_ACTION_ANSWER,
+    PLANNING_NEXT_ACTION_FAILURE,
     PLANNING_NEXT_ACTION_PREPARE_GOAL,
     PLANNING_NEXT_ACTION_PREPARE_PLAN,
     PLANNING_NEXT_ACTION_RESEARCH,
-    PLANNING_NEXT_ACTION_SOURCE,
+    PlanningNextActionRule,
+    planning_next_action,
+    strip_planning_next_action,
 )
 
 
@@ -53,11 +57,42 @@ class FakeModelRequest:
         )
 
 
+class FakeToolRequest:
+    """Small tool request double carrying graph state."""
+
+    def __init__(self, name: str, stage: str, *, call_id: str = "call-control") -> None:
+        self.tool_call = {"name": name, "args": {}, "id": call_id}
+        self.state = {"planning_stage": stage}
+
+
 class AnyLLMMetadataModel:
     """Minimal model identity used by LangChain's reported-token check."""
 
     def _get_ls_params(self) -> dict[str, str]:
         return {"ls_provider": "anyllm"}
+
+
+class ReviewCompletionRule:
+    """Non-planning rule proving that correction owns no workflow vocabulary."""
+
+    protocol_id = "review_completion"
+    workflow_label = "Review"
+    failure_text = "Review could not be completed."
+
+    def applies(self, state: dict[str, Any]) -> bool:
+        return state.get("review_active") is True
+
+    def reminder(self, state: dict[str, Any]) -> str:  # noqa: ARG002
+        return "End a completed review with REVIEW_COMPLETE."
+
+    def inspect(self, message: AIMessage, state: dict[str, Any]) -> CorrectionDecision:  # noqa: ARG002
+        if str(message.text).endswith("REVIEW_COMPLETE"):
+            return CorrectionDecision(accepted=True)
+        return CorrectionDecision(
+            accepted=False,
+            failed_check="The review was not classified as complete.",
+            retry_prompt="Finish the review and append REVIEW_COMPLETE.",
+        )
 
 
 class MiddlewareTests(unittest.TestCase):
@@ -130,10 +165,9 @@ class MiddlewareTests(unittest.TestCase):
             ["read_file", "ask_user", "prepare_plan"],
         )
         self.assertIsNone(updated.tool_choice)
-        self.assertIn(PLANNING_NEXT_ACTION_PREPARE_PLAN, str(updated.system_message.text))
-        self.assertNotIn(PLANNING_NEXT_ACTION_PREPARE_GOAL, str(updated.system_message.text))
+        self.assertIsNone(updated.system_message)
 
-    def test_goal_research_stage_injects_only_goal_prepare_contract(self) -> None:
+    def test_goal_research_stage_exposes_only_goal_prepare_control(self) -> None:
         middleware = PlanningStageMiddleware()
         request = FakeModelRequest(
             [{"name": "prepare_goal"}, {"name": "prepare_plan"}],
@@ -145,13 +179,14 @@ class MiddlewareTests(unittest.TestCase):
 
         self.assertEqual([tool["name"] for tool in updated.tools], ["prepare_goal"])
         self.assertIsNone(updated.tool_choice)
-        self.assertTrue(str(updated.system_message.text).startswith("base"))
-        self.assertIn(PLANNING_NEXT_ACTION_PREPARE_GOAL, str(updated.system_message.text))
-        self.assertNotIn(PLANNING_NEXT_ACTION_PREPARE_PLAN, str(updated.system_message.text))
+        self.assertEqual(updated.system_message.text, "base")
         self.assertEqual(request.system_message.text, "base")
 
-    def test_async_research_injection_matches_sync(self) -> None:
-        middleware = PlanningStageMiddleware()
+    def test_async_correction_reminder_injection_matches_sync(self) -> None:
+        middleware = CorrectionMiddleware(
+            rules=(PlanningNextActionRule(workflow="plan"),),
+            max_retries=2,
+        )
         request = FakeModelRequest(
             [{"name": "read_file"}, {"name": "prepare_plan"}],
             state={"planning_stage": "plan_research"},
@@ -169,6 +204,61 @@ class MiddlewareTests(unittest.TestCase):
             PLANNING_NEXT_ACTION_PREPARE_PLAN,
             str(captured["request"].system_message.text),
         )
+
+    def test_generic_correction_selects_a_non_planning_rule(self) -> None:
+        events: list[dict[str, Any]] = []
+        runtime = type("Runtime", (), {"stream_writer": events.append})()
+        middleware = CorrectionMiddleware(rules=(ReviewCompletionRule(),), max_retries=2)
+        request = FakeModelRequest([], state={"review_active": True})
+        captured: dict[str, Any] = {}
+
+        def handler(updated: FakeModelRequest) -> str:
+            captured["request"] = updated
+            return "ok"
+
+        self.assertEqual(middleware.wrap_model_call(request, handler), "ok")
+        self.assertIn("REVIEW_COMPLETE", str(captured["request"].system_message.text))
+
+        retry = middleware.after_agent(
+            {"review_active": True, "messages": [AIMessage(content="Still reviewing.")]},
+            runtime,
+        )
+
+        self.assertEqual(retry["_correction_retries"], {"review_completion": 1})
+        self.assertEqual(events[-1]["workflow"], "Review")
+        self.assertEqual(retry["messages"][-1].name, CORRECTION_SOURCE)
+
+    def test_correction_reminders_are_stage_specific_transient_and_skip_finalization(self) -> None:
+        middleware = CorrectionMiddleware(
+            rules=(
+                PlanningNextActionRule(workflow="plan"),
+                PlanningNextActionRule(workflow="goal"),
+            ),
+            max_retries=2,
+        )
+        base = SystemMessage(content="base")
+
+        plan = middleware._request_with_reminders(
+            FakeModelRequest([], state={"planning_stage": "plan_research"}, system_message=base)
+        )
+        goal = middleware._request_with_reminders(
+            FakeModelRequest([], state={"planning_stage": "goal_research"}, system_message=base)
+        )
+        final = middleware._request_with_reminders(
+            FakeModelRequest([], state={"planning_stage": "plan_finalize"}, system_message=base)
+        )
+        plan_again = middleware._request_with_reminders(
+            FakeModelRequest([], state={"planning_stage": "plan_research"}, system_message=base)
+        )
+
+        self.assertIn("plan_show", str(plan.system_message.text))
+        self.assertNotIn("goal_show", str(plan.system_message.text))
+        self.assertIn("goal_show", str(goal.system_message.text))
+        self.assertNotIn("plan_show", str(goal.system_message.text))
+        self.assertEqual(final.system_message.text, "base")
+        self.assertEqual(base.text, "base")
+        self.assertEqual(plan.system_message.text, plan_again.system_message.text)
+        self.assertEqual(str(plan.system_message.text).count(PLANNING_NEXT_ACTION_PREPARE_PLAN), 2)
 
     def test_plan_finalize_stage_forces_present_plan_only(self) -> None:
         middleware = PlanningStageMiddleware()
@@ -216,6 +306,64 @@ class MiddlewareTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "requires present_goal"):
             PlanningStageMiddleware()._stage_request(request)
+
+    def test_wrong_stage_formal_controls_return_native_tool_errors(self) -> None:
+        middleware = PlanningStageMiddleware()
+        cases = (
+            ("prepare_plan", "goal_research", "requires plan_research"),
+            ("present_plan", "plan_research", "plan_show"),
+            ("prepare_goal", "plan_research", "requires goal_research"),
+            ("present_goal", "goal_research", "goal_show"),
+        )
+
+        for name, stage, expected in cases:
+            with self.subTest(name=name, stage=stage):
+                called = False
+
+                def handler(_request: Any) -> str:
+                    nonlocal called
+                    called = True
+                    return "executed"
+
+                result = middleware.wrap_tool_call(FakeToolRequest(name, stage), handler)
+
+                self.assertIsInstance(result, ToolMessage)
+                self.assertEqual(result.status, "error")
+                self.assertEqual(result.name, name)
+                self.assertIn(expected, str(result.content))
+                self.assertFalse(called)
+
+    def test_valid_stage_formal_control_executes_handler_sync_and_async(self) -> None:
+        middleware = PlanningStageMiddleware()
+        request = FakeToolRequest("present_plan", "plan_finalize")
+
+        self.assertEqual(middleware.wrap_tool_call(request, lambda _request: "sync"), "sync")
+
+        async def handler(_request: Any) -> str:
+            return "async"
+
+        self.assertEqual(asyncio.run(middleware.awrap_tool_call(request, handler)), "async")
+
+    def test_async_wrong_stage_formal_control_returns_error_without_handler(self) -> None:
+        middleware = PlanningStageMiddleware()
+        called = False
+
+        async def handler(_request: Any) -> str:
+            nonlocal called
+            called = True
+            return "executed"
+
+        result = asyncio.run(
+            middleware.awrap_tool_call(
+                FakeToolRequest("present_goal", "goal_research"),
+                handler,
+            )
+        )
+
+        self.assertIsInstance(result, ToolMessage)
+        self.assertEqual(result.status, "error")
+        self.assertIn("goal_show", str(result.content))
+        self.assertFalse(called)
 
     def test_next_action_parser_requires_one_terminal_stage_valid_marker(self) -> None:
         plan = "plan_research"
@@ -266,7 +414,10 @@ class MiddlewareTests(unittest.TestCase):
     def test_natural_stop_routes_retry_acceptance_and_exhaustion(self) -> None:
         events: list[dict[str, Any]] = []
         runtime = type("Runtime", (), {"stream_writer": events.append})()
-        middleware = PlanningStageMiddleware(max_retries=1)
+        middleware = CorrectionMiddleware(
+            rules=(PlanningNextActionRule(workflow="plan"),),
+            max_retries=1,
+        )
         invalid = AIMessage(
             id="invalid-1",
             content="I'll inspect next.\nNEXT_ACTION: RESEARCH",
@@ -278,10 +429,10 @@ class MiddlewareTests(unittest.TestCase):
         )
 
         self.assertEqual(retry["jump_to"], "model")
-        self.assertEqual(retry["_planning_next_action_retries"], 1)
-        self.assertEqual(retry["messages"][-1].additional_kwargs["lc_source"], PLANNING_NEXT_ACTION_SOURCE)
+        self.assertEqual(retry["_correction_retries"], {"plan_next_action": 1})
+        self.assertEqual(retry["messages"][-1].additional_kwargs["lc_source"], CORRECTION_SOURCE)
         self.assertIn("Perform that research now", retry["messages"][-1].content)
-        self.assertEqual(events[-1]["action"], "discard")
+        self.assertEqual(events[-1]["failed_check"], "NEXT_ACTION: RESEARCH was declared, but no research tool was called.")
 
         correction = retry["messages"][-1].model_copy(update={"id": "correction-1"})
         accepted = AIMessage(id="answer-1", content="Done.\nNEXT_ACTION: ANSWER")
@@ -289,31 +440,31 @@ class MiddlewareTests(unittest.TestCase):
             {
                 "planning_stage": "plan_research",
                 "messages": [correction, accepted],
-                "_planning_next_action_retries": 1,
+                "_correction_retries": {"plan_next_action": 1},
             },
             runtime,
         )
-        self.assertEqual(success["_planning_next_action_retries"], 0)
+        self.assertEqual(success["_correction_retries"], {})
         self.assertEqual(success["messages"][-1].content, "Done.\n")
-        self.assertEqual(success["messages"][0].id, "correction-1")
 
         exhausted = middleware.after_agent(
             {
                 "planning_stage": "plan_research",
                 "messages": [invalid],
-                "_planning_next_action_retries": 1,
+                "_correction_retries": {"plan_next_action": 1},
             },
             runtime,
         )
         self.assertNotIn("jump_to", exhausted)
         self.assertIn("may be incomplete", exhausted["messages"][-1].content)
-        self.assertEqual(events[-1]["action"], "replace")
+        self.assertTrue(events[-1]["exhausted"])
+        self.assertEqual(exhausted["messages"][-1].content, PLANNING_NEXT_ACTION_FAILURE)
 
     def test_tool_call_bypasses_protocol_and_clears_feedback(self) -> None:
         correction = HumanMessage(
             id="correction-1",
             content="retry",
-            additional_kwargs={"lc_source": PLANNING_NEXT_ACTION_SOURCE},
+            additional_kwargs={"lc_source": CORRECTION_SOURCE},
         )
         tool_call = AIMessage(
             id="tool-1",
@@ -321,17 +472,20 @@ class MiddlewareTests(unittest.TestCase):
             tool_calls=[{"name": "read_file", "args": {}, "id": "call-1"}],
         )
 
-        update = PlanningStageMiddleware().after_model(
+        update = CorrectionMiddleware(
+            rules=(PlanningNextActionRule(workflow="goal"),),
+            max_retries=2,
+        ).after_model(
             {
                 "planning_stage": "goal_research",
                 "messages": [correction, tool_call],
-                "_planning_next_action_retries": 1,
+                "_correction_retries": {"goal_next_action": 1},
             },
             None,
         )
 
-        self.assertEqual(update["_planning_next_action_retries"], 0)
-        self.assertEqual([message.id for message in update["messages"]], ["correction-1"])
+        self.assertEqual(update["_correction_retries"], {})
+        self.assertNotIn("messages", update)
 
     def test_model_response_normalizer_adds_missing_anyllm_provider(self) -> None:
         """ChatAnyLLM messages should gain the provider identity DeepAgents expects."""
