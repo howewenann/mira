@@ -36,6 +36,7 @@ class ChatLog(VerticalScroll):
         self.tool_output_chars = int(tool_output_chars)
         self._assistant_text = ""
         self._assistant_block: Static | None = None
+        self._last_assistant_block: Static | None = None
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
@@ -108,18 +109,22 @@ class ChatLog(VerticalScroll):
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
         self._reset_delegation_group()
+        self._last_assistant_block = None
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
     def timestamped_user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
         """Append a persisted user message with its session timestamp."""
         self._reset_delegation_group()
+        self._last_assistant_block = None
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user", created_at=created_at)
 
     def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
-        self._add_block("mira", Text(text), "message assistant", created_at=created_at)
+        self._last_assistant_block = self._add_block(
+            "mira", Text(text), "message assistant", created_at=created_at
+        )
 
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""
@@ -254,9 +259,34 @@ class ChatLog(VerticalScroll):
         if self._assistant_block is None:
             self._assistant_text = ""
             self._assistant_block = self._add_block("mira", Text(""), "message assistant", created_at=created_at)
+            self._last_assistant_block = self._assistant_block
 
         self._assistant_text += delta
         self._assistant_block.update(Text(self._assistant_text))
+        self._scroll_to_end()
+
+    def discard_last_assistant(self) -> None:
+        """Remove the latest provisional assistant block."""
+        block = self._last_assistant_block
+        if block is None:
+            return
+        block.remove()
+        if self._assistant_block is block:
+            self._assistant_block = None
+            self._assistant_text = ""
+        self._last_assistant_block = None
+        self._scroll_to_end()
+
+    def replace_last_assistant(self, text: str) -> None:
+        """Replace the latest provisional assistant block in place."""
+        block = self._last_assistant_block
+        if block is None:
+            self.assistant_message(text)
+            self._scroll_to_end()
+            return
+        block.update(Text(text))
+        if self._assistant_block is block:
+            self._assistant_text = text
         self._scroll_to_end()
 
     def finish_main(self) -> None:
@@ -791,6 +821,7 @@ class ChatLog(VerticalScroll):
         self.finish_main()
         self._waiting_block = None
         self._activity_block = None
+        self._last_assistant_block = None
         self._reset_delegation_group()
         self._startup_block = None
         self._startup_state = "starting"

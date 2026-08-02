@@ -14,6 +14,9 @@ DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
 DYNAMIC_SUBAGENT_RESPONSE_SCHEMA = "response_schema"
 PLANNING_TODOS = "planning_todos"
+PLANNING_NEXT_ACTION = "planning_next_action"
+PLANNING_NEXT_ACTION_MAX_RETRIES = "max_retries"
+PLANNING_NEXT_ACTION_MAX_RETRIES_LIMIT = 20
 RUBRIC = "rubric"
 RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
@@ -27,6 +30,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
         PLANNING_TODOS: {
             "enabled": False,
+        },
+        PLANNING_NEXT_ACTION: {
+            PLANNING_NEXT_ACTION_MAX_RETRIES: 2,
         },
         RUBRIC: {
             "enabled": False,
@@ -102,6 +108,11 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         planning_todos = system.get(PLANNING_TODOS)
         if isinstance(planning_todos, dict) and isinstance(planning_todos.get("enabled"), bool):
             settings["system"][PLANNING_TODOS]["enabled"] = planning_todos["enabled"]
+        planning_next_action = system.get(PLANNING_NEXT_ACTION)
+        if isinstance(planning_next_action, dict):
+            retries = planning_next_action.get(PLANNING_NEXT_ACTION_MAX_RETRIES)
+            if valid_planning_next_action_max_retries(retries):
+                settings["system"][PLANNING_NEXT_ACTION][PLANNING_NEXT_ACTION_MAX_RETRIES] = retries
         rubric = system.get(RUBRIC)
         if isinstance(rubric, dict):
             if isinstance(rubric.get("enabled"), bool):
@@ -251,6 +262,39 @@ def set_planning_todos(settings: dict[str, Any], enabled: bool) -> dict[str, Any
     updated = normalize_settings(settings)
     updated["system"][PLANNING_TODOS]["enabled"] = bool(enabled)
     return updated
+
+
+def planning_next_action_max_retries(config_or_settings: dict[str, Any] | None) -> int:
+    """Return the configured Plan/Goal next-action retry cap."""
+    if not isinstance(config_or_settings, dict):
+        return 2
+    settings = config_or_settings.get("settings", config_or_settings)
+    normalized = normalize_settings(settings)
+    return int(
+        normalized.get("system", {})
+        .get(PLANNING_NEXT_ACTION, {})
+        .get(PLANNING_NEXT_ACTION_MAX_RETRIES, 2)
+    )
+
+
+def set_planning_next_action_max_retries(
+    settings: dict[str, Any],
+    value: Any,
+) -> dict[str, Any]:
+    """Return settings with a valid Plan/Goal next-action retry cap."""
+    updated = normalize_settings(settings)
+    if valid_planning_next_action_max_retries(value):
+        updated["system"][PLANNING_NEXT_ACTION][PLANNING_NEXT_ACTION_MAX_RETRIES] = value
+    return updated
+
+
+def valid_planning_next_action_max_retries(value: Any) -> bool:
+    """Return whether a Plan/Goal next-action retry cap is supported."""
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= PLANNING_NEXT_ACTION_MAX_RETRIES_LIMIT
+    )
 
 
 def rubric_enabled(config_or_settings: dict[str, Any] | None) -> bool:

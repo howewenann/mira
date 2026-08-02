@@ -1915,6 +1915,16 @@ class MiraApp(App[None]):
         self.trace.discard_reasoning()
         self.query_one(ChatLog).discard_reasoning()
 
+    def discard_last_assistant(self) -> None:
+        """Remove a provisional assistant response rejected by middleware."""
+        self.trace.discard_last_assistant()
+        self.query_one(ChatLog).discard_last_assistant()
+
+    def replace_last_assistant(self, text: str) -> None:
+        """Replace a provisional assistant response with authoritative text."""
+        self.trace.replace_last_assistant(text)
+        self.query_one(ChatLog).replace_last_assistant(text)
+
     def text_delta(self, delta: str, *, created_at: str = "") -> None:
         """Render streamed assistant text."""
         self.trace.assistant_delta(delta)

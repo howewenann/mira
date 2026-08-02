@@ -6,8 +6,13 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
+from agent.planning.policy import (
+    PLANNING_NEXT_ACTION_SOURCE,
+    strip_terminal_planning_next_action_text,
+)
 from runtime.message_metadata import MessageInvocationMetadata
 from runtime.output_events import (
+    is_planning_next_action_metadata_message,
     is_summarization_metadata_message,
     normalize_response_delta,
     visible_message_text,
@@ -26,6 +31,7 @@ async def consume_messages(
     *,
     render_normal_tools: bool = True,
     invocation_metadata: MessageInvocationMetadata | None = None,
+    filter_planning_next_action: bool = False,
 ) -> None:
     """Consume coordinator messages and fallback provider tool-call chunks.
 
@@ -49,14 +55,33 @@ async def consume_messages(
                     result.add_stream_usage(usage)
             continue
 
+        is_protocol_message = (
+            invocation_metadata is not None
+            and invocation_metadata.for_message(message).get("lc_source")
+            == PLANNING_NEXT_ACTION_SOURCE
+        ) or is_planning_next_action_metadata_message(message)
+        if is_protocol_message:
+            await _drain_message(message)
+            call_renderer(renderer, "model_stream_finished")
+            continue
+
         if is_raw_message_stream(message):
-            await _consume_ordered_message_stream(message, renderer, result)
+            await _consume_ordered_message_stream(
+                message,
+                renderer,
+                result,
+                filter_planning_next_action=filter_planning_next_action,
+            )
             call_renderer(renderer, "model_stream_finished")
             call_list = await _finalized_tool_calls(message, renderer, result)
         else:
             call_task = asyncio.create_task(_finalized_tool_calls(message, renderer, result))
             await _consume_reasoning(message, renderer)
-            await _consume_text(message, renderer)
+            await _consume_text(
+                message,
+                renderer,
+                filter_planning_next_action=filter_planning_next_action,
+            )
             call_renderer(renderer, "model_stream_finished")
             call_list = await call_task
 
@@ -82,10 +107,14 @@ async def _consume_ordered_message_stream(
     message: Any,
     renderer: Any,
     result: Any | None = None,
+    *,
+    filter_planning_next_action: bool = False,
 ) -> None:
     """Render raw ChatModelStream events in provider order."""
     tool_drafts = ToolCallDrafts(renderer, result)
     visible_text = ""
+    source_text = ""
+    text_filter = _PlanningNextActionTextFilter() if filter_planning_next_action else None
 
     async for event in message:
         delta = event_delta(event)
@@ -93,15 +122,27 @@ async def _consume_ordered_message_stream(
         if delta_type == "reasoning-delta":
             renderer.reasoning_delta(str(delta.get("reasoning") or delta.get("text") or ""))
         elif delta_type == "text-delta":
-            text = normalize_response_delta(visible_text, delta.get("text"))
+            text = normalize_response_delta(source_text, delta.get("text"))
             if text:
-                renderer.text_delta(text)
-                visible_text += text
+                source_text += text
+                rendered = text_filter.push(text) if text_filter is not None else text
+                if rendered:
+                    renderer.text_delta(rendered)
+                    visible_text += rendered
         elif is_tool_call_delta(delta_type):
             tool_drafts.push(event)
+    if text_filter is not None:
+        rendered = text_filter.finish()
+        if rendered:
+            renderer.text_delta(rendered)
 
 
-async def _consume_text(message: Any, renderer: Any) -> None:
+async def _consume_text(
+    message: Any,
+    renderer: Any,
+    *,
+    filter_planning_next_action: bool = False,
+) -> None:
     """Render assistant text deltas from a streamed message."""
     if is_summarization_metadata_message(message):
         return
@@ -109,28 +150,50 @@ async def _consume_text(message: Any, renderer: Any) -> None:
     msg_text = getattr(message, "text", None)
     if msg_text is None or callable(msg_text):
         text = visible_message_text(message)
+        if filter_planning_next_action:
+            text = strip_terminal_planning_next_action_text(text)
         if text:
             renderer.text_delta(text)
         return
 
     if hasattr(msg_text, "__aiter__"):
-        await _consume_streamed_text(msg_text, renderer)
+        await _consume_streamed_text(
+            msg_text,
+            renderer,
+            filter_planning_next_action=filter_planning_next_action,
+        )
         return
 
     text = await msg_text if hasattr(msg_text, "__await__") else msg_text
     text = normalize_response_delta("", text)
+    if filter_planning_next_action:
+        text = strip_terminal_planning_next_action_text(text)
     if text:
         renderer.text_delta(str(text))
 
 
-async def _consume_streamed_text(value: Any, renderer: Any) -> None:
+async def _consume_streamed_text(
+    value: Any,
+    renderer: Any,
+    *,
+    filter_planning_next_action: bool = False,
+) -> None:
     """Render streamed assistant text."""
     visible_text = ""
+    source_text = ""
+    text_filter = _PlanningNextActionTextFilter() if filter_planning_next_action else None
     async for delta in _text_deltas(value):
-        text = normalize_response_delta(visible_text, delta)
+        text = normalize_response_delta(source_text, delta)
         if text:
-            renderer.text_delta(text)
-            visible_text += text
+            source_text += text
+            rendered = text_filter.push(text) if text_filter is not None else text
+            if rendered:
+                renderer.text_delta(rendered)
+                visible_text += rendered
+    if text_filter is not None:
+        rendered = text_filter.finish()
+        if rendered:
+            renderer.text_delta(rendered)
 
 
 async def _consume_compaction_message(message: Any, renderer: Any) -> None:
@@ -157,6 +220,46 @@ async def _drain_message_text(message: Any) -> None:
         return
     async for _ in _text_deltas(msg_text):
         pass
+
+
+async def _drain_message(message: Any) -> None:
+    """Drain a hidden synthetic message without rendering its content."""
+    if is_raw_message_stream(message):
+        async for _ in message:
+            pass
+        return
+    reasoning = getattr(message, "reasoning", None)
+    if reasoning is not None:
+        async for _ in _text_deltas(reasoning):
+            pass
+    await _drain_message_text(message)
+
+
+class _PlanningNextActionTextFilter:
+    """Hold the latest non-empty line so terminal control text stays internal."""
+
+    def __init__(self) -> None:
+        self.pending = ""
+
+    def push(self, text: str) -> str:
+        self.pending += text
+        starts: list[int] = []
+        offset = 0
+        for line in self.pending.splitlines(keepends=True):
+            if line.rstrip("\r\n").strip():
+                starts.append(offset)
+            offset += len(line)
+        if len(starts) < 2:
+            return ""
+        boundary = starts[-1]
+        ready = self.pending[:boundary]
+        self.pending = self.pending[boundary:]
+        return ready
+
+    def finish(self) -> str:
+        value = strip_terminal_planning_next_action_text(self.pending)
+        self.pending = ""
+        return value
 
 
 async def _text_deltas(value: Any) -> AsyncIterator[str]:

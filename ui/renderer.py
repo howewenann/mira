@@ -48,6 +48,14 @@ class Renderer:
         """Discard pending reasoning that has not been printed yet."""
         self.transcript.discard_reasoning()
 
+    def discard_last_assistant(self) -> None:
+        """Finish provisional terminal output before an internal retry."""
+        self.transcript.finish_main()
+
+    def replace_last_assistant(self, text: str) -> None:
+        """Print an authoritative replacement after provisional terminal output."""
+        self.transcript.block("mira", text)
+
     def text_delta(self, delta: str) -> None:
         """Print streamed assistant text."""
         self.transcript.text_delta(delta)

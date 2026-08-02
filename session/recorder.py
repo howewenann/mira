@@ -317,20 +317,46 @@ class SessionRecorder:
         self._assistant_id = None
         self._assistant_text = ""
 
-    def discard_last_assistant(self) -> None:
+    def discard_last_assistant(self) -> bool:
         """Remove the currently streamed assistant answer after a cutoff retry."""
         event_id = self._assistant_id or self._last_assistant_id
-        if event_id is not None:
-            self.record["events"] = [
-                event
-                for event in self.record.get("events", [])
-                if not (isinstance(event, dict) and int(event.get("id") or 0) == event_id)
-            ]
-            self.save()
+        if event_id is None:
+            return False
+        self.record["events"] = [
+            event
+            for event in self.record.get("events", [])
+            if not (isinstance(event, dict) and int(event.get("id") or 0) == event_id)
+        ]
+        self.save()
         self._assistant_id = None
         self._last_assistant_id = None
         self._assistant_text = ""
         self._assistant_seen = False
+        return True
+
+    def replace_last_assistant(self, text: str) -> dict[str, Any]:
+        """Replace a provisional assistant answer with authoritative text."""
+        value = str(text or "").strip()
+        event_id = self._assistant_id or self._last_assistant_id
+        if event_id is None:
+            event = append_event(
+                self.record,
+                {"type": "assistant", "mode": self.mode, "text": value},
+            )
+            event_id = int(event["id"])
+        else:
+            update_event_text(self.record, event_id, value)
+            event = next(
+                item
+                for item in self.record.get("events", [])
+                if isinstance(item, dict) and int(item.get("id") or 0) == event_id
+            )
+        self._assistant_id = event_id
+        self._last_assistant_id = event_id
+        self._assistant_text = value
+        self._assistant_seen = True
+        self.save()
+        return event
 
     def _move_event_before(self, event: dict[str, Any], before_id: int | None) -> None:
         if before_id is None:
@@ -753,10 +779,21 @@ class RecordingRenderer:
         self.recorder.finish_main()
 
     def discard_last_assistant(self) -> None:
+        removed = self.recorder.discard_last_assistant()
+        if not removed:
+            return
         callback = getattr(self.renderer, "discard_last_assistant", None)
         if callable(callback):
             callback()
-        self.recorder.discard_last_assistant()
+
+    def replace_last_assistant(self, text: str) -> None:
+        """Replace provisional output in persistence and the active renderer."""
+        self.recorder.replace_last_assistant(text)
+        callback = getattr(self.renderer, "replace_last_assistant", None)
+        if callable(callback):
+            callback(text)
+        else:
+            self.renderer.text_delta(text)
 
     def context_notice_rendered(self) -> bool:
         """Return whether this turn already rendered a context-pressure notice."""

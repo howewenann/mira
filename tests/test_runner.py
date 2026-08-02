@@ -17,6 +17,11 @@ from agent.compaction import (
     prepare_summarization_engine,
     sanitize_messages_for_archive,
 )
+from agent.planning.policy import (
+    PLANNING_NEXT_ACTION_EVENT,
+    PLANNING_NEXT_ACTION_FAILURE,
+    PLANNING_NEXT_ACTION_SOURCE,
+)
 from runtime.context_usage import context_usage_scope
 from runtime import runner
 from runtime.message_events import consume_messages
@@ -465,6 +470,9 @@ class RecordingRenderer:
 
     def discard_last_assistant(self) -> None:
         self.events.append(("discard_last_assistant",))
+
+    def replace_last_assistant(self, text: str) -> None:
+        self.events.append(("replace_last_assistant", text))
 
 
 class RunTurnRenderer(RecordingRenderer):
@@ -2419,6 +2427,88 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ("tool_call", "read_file", {"path": "README.md"}, ""),
             ],
         )
+
+    async def test_planning_next_action_marker_is_held_and_suppressed(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    text=AsyncItems(
+                        ["调查完成。\n", "NEXT_ACTION", ": ANSWER", "\n\n"]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, filter_planning_next_action=True)
+
+        visible = "".join(event[1] for event in renderer.events if event[0] == "text")
+        self.assertEqual(visible, "调查完成。\n\n")
+        self.assertNotIn("NEXT_ACTION", visible)
+
+    async def test_planning_filter_preserves_nonterminal_or_inexact_marker_text(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    text=AsyncItems(
+                        ["NEXT_ACTION: ANSWER \n", "This line remains visible."]
+                    )
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, filter_planning_next_action=True)
+
+        self.assertEqual(
+            "".join(event[1] for event in renderer.events if event[0] == "text"),
+            "NEXT_ACTION: ANSWER \nThis line remains visible.",
+        )
+
+    async def test_internal_planning_feedback_stream_is_hidden(self) -> None:
+        renderer = RecordingRenderer()
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(["hidden reasoning"]),
+                    text=AsyncItems(["hidden feedback"]),
+                    additional_kwargs={"lc_source": PLANNING_NEXT_ACTION_SOURCE},
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer)
+
+        self.assertEqual(renderer.events, [])
+
+    async def test_protocol_custom_events_discard_and_replace_provisional_output(self) -> None:
+        stream = FakeStream(
+            output={"messages": [OutputMessage(PLANNING_NEXT_ACTION_FAILURE)]},
+            custom_events=[
+                {"type": PLANNING_NEXT_ACTION_EVENT, "action": "discard"},
+                {
+                    "type": PLANNING_NEXT_ACTION_EVENT,
+                    "action": "replace",
+                    "text": PLANNING_NEXT_ACTION_FAILURE,
+                },
+            ],
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            FakeAgent([stream]),
+            "investigate",
+            renderer,
+            "thread-1",
+            planning_stage="plan_research",
+        )
+
+        self.assertIn(("discard_last_assistant",), renderer.events)
+        self.assertIn(
+            ("replace_last_assistant", PLANNING_NEXT_ACTION_FAILURE),
+            renderer.events,
+        )
+        self.assertEqual(result.final_text, PLANNING_NEXT_ACTION_FAILURE)
 
     async def test_message_finalized_task_calls_are_hidden_in_runner_mode(self) -> None:
         renderer = RecordingRenderer()

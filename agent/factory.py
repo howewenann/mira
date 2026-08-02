@@ -30,6 +30,7 @@ from config.settings import (
     dynamic_subagents_enabled,
     hitl_settings,
     planning_todos_enabled,
+    planning_next_action_max_retries,
     rubric_enabled,
     rubric_max_iterations,
     tool_always_allow,
@@ -95,7 +96,9 @@ def build_plan_agent(
         interrupt_on=None,
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
-        extra_middleware=[PlanningStageMiddleware()],
+        extra_middleware=[
+            PlanningStageMiddleware(max_retries=planning_next_action_max_retries(config))
+        ],
         omitted_tools=(),
     )
     return agent

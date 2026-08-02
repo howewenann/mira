@@ -19,6 +19,7 @@ from agent.planning.policy import (
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
     PLANNING_STAGES,
+    PLANNING_NEXT_ACTION_EVENT,
 )
 from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
@@ -325,10 +326,35 @@ async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventR
     """Dispatch custom events without competing stream consumers."""
     eval_renderer = EvalSubagentRenderer(renderer)
     async for event in stream:
+        if isinstance(event, dict) and event.get("type") == PLANNING_NEXT_ACTION_EVENT:
+            render_planning_next_action_event(event, renderer)
+            continue
         if isinstance(event, dict) and rubric.handle(event):
             continue
         if custom_event_data(event) is not None:
             eval_renderer.handle(event)
+
+
+def render_planning_next_action_event(event: dict[str, Any], renderer: Any) -> None:
+    """Remove or replace one rejected provisional planning response."""
+    action = str(event.get("action") or "")
+    if action == "discard":
+        callback = getattr(renderer, "discard_last_assistant", None)
+        if callable(callback):
+            callback()
+        return
+    if action != "replace":
+        return
+    text = str(event.get("text") or "").strip()
+    callback = getattr(renderer, "replace_last_assistant", None)
+    if callable(callback):
+        callback(text)
+        return
+    discard = getattr(renderer, "discard_last_assistant", None)
+    if callable(discard):
+        discard()
+    if text:
+        renderer.text_delta(text)
 
 
 def custom_event_data(event: Any) -> dict[str, Any] | None:
@@ -432,6 +458,8 @@ async def run_turn(
                 result,
                 render_normal_tools=False,
                 invocation_metadata=message_metadata,
+                filter_planning_next_action=planning_stage
+                in {PLANNING_STAGE_PLAN_RESEARCH, PLANNING_STAGE_GOAL_RESEARCH},
             ),
             consume_tool_calls(stream.tool_calls, event_renderer, result),
             consume_subagents(stream.subagents, event_renderer),
@@ -521,6 +549,7 @@ async def run_turn(
                 resume=finalization,
                 update={"planning_stage": PLANNING_STAGE_PLAN_FINALIZE},
             )
+            planning_stage = PLANNING_STAGE_PLAN_FINALIZE
         elif prepare_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "prepare_goal",
@@ -545,6 +574,7 @@ async def run_turn(
                 resume=finalization,
                 update={"planning_stage": PLANNING_STAGE_GOAL_FINALIZE},
             )
+            planning_stage = PLANNING_STAGE_GOAL_FINALIZE
         elif goal_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "present_goal",

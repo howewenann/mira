@@ -19,6 +19,7 @@ from config.settings import (
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
+    PLANNING_NEXT_ACTION_MAX_RETRIES_LIMIT,
     PLANNING_TODOS,
     RUBRIC,
     RUBRIC_MAX_ITERATIONS_LIMIT,
@@ -27,6 +28,7 @@ from config.settings import (
     execute_env_settings,
     git_protection_enabled,
     planning_todos_enabled,
+    planning_next_action_max_retries,
     rubric_enabled,
     rubric_max_iterations,
     set_dynamic_subagent_response_schema,
@@ -36,6 +38,7 @@ from config.settings import (
     set_execute_env_value,
     set_git_protection,
     set_planning_todos,
+    set_planning_next_action_max_retries,
     set_rubric_enabled,
     set_rubric_max_iterations,
     set_tool_always_allow,
@@ -119,6 +122,13 @@ class SettingsPanel(Vertical):
                     yield self._toggle_button(
                         ToggleCell("todos", PLANNING_TODOS),
                         planning_todos_enabled(self.settings),
+                    )
+                with Horizontal(classes="settings-row settings-child-row planning-next-action-retries-row"):
+                    yield Static("Next-action retries", classes="settings-label settings-child-label")
+                    yield Input(
+                        value=str(planning_next_action_max_retries(self.settings)),
+                        id="settings-planning-next-action-max-retries",
+                        classes="settings-input planning-next-action-retries-input",
                     )
                 with Horizontal(classes="settings-row"):
                     yield Static("Rubric Middleware", classes="settings-label")
@@ -242,6 +252,9 @@ class SettingsPanel(Vertical):
         """Save execute environment text fields on Enter."""
         event.stop()
         input_id = event.input.id or ""
+        if input_id == "settings-planning-next-action-max-retries":
+            await self._submit_planning_next_action_retries(event.input)
+            return
         if input_id == "settings-rubric-max-iterations":
             await self._submit_rubric_iterations(event.input)
             return
@@ -312,6 +325,25 @@ class SettingsPanel(Vertical):
         if ok:
             self.settings = updated
         input_widget.value = str(rubric_max_iterations(self.settings))
+
+    async def _submit_planning_next_action_retries(self, input_widget: Input) -> None:
+        """Persist a valid Plan/Goal next-action retry cap."""
+        try:
+            value = int(input_widget.value.strip())
+        except ValueError:
+            value = 0
+        updated = set_planning_next_action_max_retries(self.settings, value)
+        if planning_next_action_max_retries(updated) != value:
+            input_widget.value = str(planning_next_action_max_retries(self.settings))
+            self._set_status(
+                f"next-action retries must be from 1 to {PLANNING_NEXT_ACTION_MAX_RETRIES_LIMIT}"
+            )
+            return
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+        input_widget.value = str(planning_next_action_max_retries(self.settings))
 
     def _toggle_button(self, cell: ToggleCell, value: bool) -> Button:
         button_id = button_id_for(cell)

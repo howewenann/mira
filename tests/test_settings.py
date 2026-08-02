@@ -28,6 +28,7 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.dynamic_subagents_enabled(loaded))
         self.assertTrue(settings.dynamic_subagent_response_schema_enabled(loaded))
         self.assertFalse(settings.planning_todos_enabled(loaded))
+        self.assertEqual(settings.planning_next_action_max_retries(loaded), 2)
         self.assertFalse(settings.rubric_enabled(loaded))
         self.assertEqual(settings.rubric_max_iterations(loaded), 3)
         self.assertFalse(settings.tool_always_allow(loaded, "custom_search"))
@@ -150,6 +151,22 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.rubric_enabled(malformed))
         self.assertEqual(settings.rubric_max_iterations(malformed), 3)
 
+    def test_planning_next_action_retries_normalize_and_preserve_invalid_values(self) -> None:
+        """The shared Plan/Goal retry cap should follow rubric-style bounds."""
+        loaded = settings.normalize_settings(
+            {"system": {"planning_next_action": {"max_retries": 5}}}
+        )
+        self.assertEqual(settings.planning_next_action_max_retries(loaded), 5)
+
+        for value in (0, -1, 21, True, "4"):
+            updated = settings.set_planning_next_action_max_retries(loaded, value)
+            self.assertEqual(settings.planning_next_action_max_retries(updated), 5)
+
+        malformed = settings.normalize_settings(
+            {"system": {"planning_next_action": {"max_retries": 0}}}
+        )
+        self.assertEqual(settings.planning_next_action_max_retries(malformed), 2)
+
     def test_partial_and_malformed_yaml_falls_back_safely(self) -> None:
         """Partial settings should merge with defaults; malformed YAML should not crash."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -199,6 +216,7 @@ class SettingsTests(unittest.TestCase):
             workspace = Path(directory)
             updated = settings.set_git_protection(settings.load_settings(workspace), False)
             updated = settings.set_planning_todos(updated, True)
+            updated = settings.set_planning_next_action_max_retries(updated, 4)
             updated = settings.set_tool_always_allow(updated, "delete", True)
             updated = settings.set_tool_always_allow(updated, "web_search", False)
             updated = settings.set_tool_enabled(updated, "web_search", False)
@@ -216,6 +234,7 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("llm_direct", loaded)
         self.assertFalse(settings.git_protection_enabled(loaded))
         self.assertTrue(settings.planning_todos_enabled(loaded))
+        self.assertEqual(settings.planning_next_action_max_retries(loaded), 4)
         self.assertTrue(settings.tool_always_allow(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))

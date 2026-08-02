@@ -1025,6 +1025,73 @@ Use one disposable Git-protected workspace.
 11. Run `/plan-clear`. Expected: `current_plan` is removed while historical
     Plan and rubric bubbles remain in the transcript.
 
+## Unified Plan/Goal Next-Action Protocol
+
+Use current-checkout MIRA with LM Studio model `google/gemma-4-12b` and a
+disposable workspace. Enter continuous Plan mode with `/plan`; use `/goal
+<prompt>` only for the Goal scenarios. Inspect the saved session and trace when
+the scenario requests persistence evidence.
+
+1. With retry cap `2`, ask for a high-level explanation of session storage
+   without code changes. Expected: complete prose, no visible `NEXT_ACTION`, no
+   forced Plan.
+2. Ask Plan mode to inspect session loading, normalization, updates, and saving
+   before explaining them. Expected: read-only calls occur, the later answer is
+   marker-free, and research does not loop.
+3. Ask Plan mode to investigate session architecture and propose the smallest
+   coherent session-duplication change. Repeat several times. Expected:
+   false-progress prose is discarded, actual research follows, and the outcome
+   is `ask_user`, `prepare_plan`, or a complete grounded answer.
+4. Use a deterministic fake response ending in `NEXT_ACTION: RESEARCH` without
+   a call, then one with no marker. Expected: specific then general correction,
+   no committed provisional prose.
+5. Ask for a session-duplication design while explicitly leaving full-transcript
+   versus metadata-only behavior undecided. Expected: `ask_user`; after choosing,
+   request an implementation-ready Plan and verify `prepare_plan` followed by
+   the unchanged forced `present_plan` bubble.
+6. Run `/goal Prepare a durable criteria-only Goal for the same duplication
+   outcome.` Expected: Goal research can use only `PREPARE_GOAL`/`prepare_goal`;
+   finalization forces only `present_goal`. A Plan marker from a fake response
+   is rejected as malformed.
+7. Disable rubrics and repeat scenario 3, then enable them and run an existing
+   Goal rubric scenario. Expected: protocol behavior is unchanged, no grader is
+   called during research recovery, and rubric state/history is unchanged.
+8. Ask in Chinese to inspect and explain session loading and saving. Expected:
+   Chinese prose remains intact and the exact ASCII marker is hidden.
+9. After success, inspect session JSON, run `/reload`, and reopen the transcript.
+   Expected: accepted answer once; no marker, rejected prose, or internal
+   correction in session, reload, final output, or trace.
+10. Test caps `1` and `2` with a fake model that always ends with
+    `NEXT_ACTION: RESEARCH` and no call. Expected: respectively two and three
+    total model attempts, followed by the explicit incomplete response. Enter
+    `0` or `21` in Settings. Expected: the previous normalized value is restored
+    and the UI displays the `1`-`20` range.
+
+Record actual Gemma behavior here after each real run: model/provider, cap,
+scenario, tool sequence, retry count, final outcome, and whether any marker or
+provisional text appeared or persisted.
+
+Observed 2026-08-02 with `lmstudio:google/gemma-4-12b` through the real planning
+agent (direct graph smoke in a disposable workspace):
+
+- Plan forced-false-progress, cap `1`: two model calls; only the explicit
+  incomplete response remained in authoritative messages.
+- Plan forced-false-progress, cap `2`: three model calls; only the explicit
+  incomplete response remained in authoritative messages.
+- Goal cross-stage `NEXT_ACTION: PREPARE_PLAN`, cap `1`: two model calls; the
+  marker was rejected and only the explicit incomplete response remained.
+- Plan discussion, cap `2`: `ls` then a complete prose answer; no marker or
+  correction remained in the result.
+- Goal discussion, cap `2`: one complete prose answer; no marker or correction
+  remained in the result.
+- Invalid values `0` and `21` against previous cap `5`: normalization restored
+  `5` in both cases. The focused Textual test verified the same restore/range
+  message through Settings and one agent rebuild after a valid submission.
+
+These runs verify model and graph behavior but do not replace the interactive
+terminal checks for transient bubble visibility, `/reload`, or user-driven
+`ask_user`/formal Plan and Goal controls.
+
 ## DeepAgents 0.7 Upgrade
 
 Use a disposable Git-protected workspace and current-checkout invocation:

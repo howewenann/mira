@@ -354,6 +354,29 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
         self.assertTrue(any(isinstance(item, PlanningStageMiddleware) for item in plan_kwargs["middleware"]))
 
+    def test_planning_next_action_cap_is_passed_to_planning_middleware(self) -> None:
+        """The workspace recovery cap should configure the shared Plan/Goal middleware."""
+        config = {
+            "settings": {
+                "system": {"planning_next_action": {"max_retries": 7}}
+            }
+        }
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+        ):
+            factory.build_plan_agent(config, ".", "checkpointer")
+
+        planning = next(
+            item
+            for item in create.call_args.kwargs["middleware"]
+            if isinstance(item, PlanningStageMiddleware)
+        )
+        self.assertEqual(planning.max_retries, 7)
+
     def test_disabled_plan_uses_the_same_criteria_first_tools(self) -> None:
         """Rubric settings must not change Plan construction."""
         with (

@@ -132,6 +132,11 @@ auto-added raw one by name. DeepAgents therefore rejects a dynamic
 `responseSchema` before starting the child while ordinary text delegation and
 static response formats continue to work. Keeping these choices in workspace
 settings makes them inspectable without changing QuickJS or installed packages.
+The always-on Plan/Goal next-action protocol has one workspace System Setting,
+`system.planning_next_action.max_retries` (default `2`, range `1`-`20`). It
+counts recovery calls after the first rejected response. Changing it follows
+the normal settings application path and rebuilds both agents; it is a bound,
+not a feature toggle.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
 `agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
@@ -299,8 +304,8 @@ settings-panel tool behavior changes.
 Plan message path. Imperative language never enables execution. The Plan prompt
 uses three non-persisted outcomes: `DISCUSSION` returns ordinary read-only prose,
 `NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls `prepare_plan`. There
-is no classifier model, structured response format, prose regex, or compliance
-retry.
+is no classifier model, structured response format, prose regex, or semantic
+grader.
 
 Both Plan and Act compose one shared question policy: discover facts from
 available context first and use `ask_user` whenever user input is required.
@@ -322,6 +327,31 @@ Success Criteria are binding context. The model supplies Title, Key Changes,
 Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
+
+Plan research also uses a deterministic terminal next-action contract. The
+middleware appends the contract transiently to every model request, including
+requests after tool results, because a reminder stored only on the initial user
+message becomes stale as the tool loop grows. Research keeps optional tool
+choice. A response with any tool call bypasses this check. At a natural no-tool
+stop, the final non-empty textual line must be exactly one stage-valid marker;
+only `NEXT_ACTION: ANSWER` may terminate. `RESEARCH`, `ASK_USER`, and
+`PREPARE_PLAN` remove the provisional response, add hidden corrective feedback,
+and use LangGraph's native jump to the model node without replaying completed
+tools. Missing, duplicated, malformed, non-terminal, empty, reasoning-only, or
+Goal-only markers take the same bounded recovery path with general feedback.
+Finalisation is isolated from this contract and remains a forced single
+`present_plan` call.
+
+The retry cap counts retries after the initial rejected candidate. Exhaustion
+replaces that candidate with an explicit incomplete response. Exact terminal
+markers are held out of streaming and stripped from accepted message content;
+retry events remove provisional UI/session/trace prose, and hidden corrections
+are removed from checkpoint state. This reliability check is always active and
+does not call or mutate user rubrics. It deliberately trusts an exact `ANSWER`
+classification: a dishonest model can still label unfinished prose as complete.
+Provider-specific channels, English false-progress heuristics, and always-on
+semantic grading were rejected because they are less portable or would add a
+second model judgment.
 
 When a Plan is current, `current_plan` stores its stable id, Plan fields,
 separate Success Criteria, status, rubric policy and cap, latest overall rubric
@@ -386,6 +416,13 @@ choice. The visible command objective remains authoritative; bounded evidence
 may clarify but not enlarge it. Staging is transient, so failed or cancelled
 generation leaves current formal work unchanged. Goal construction never calls
 `present_plan` and never produces a hidden implementation Plan.
+
+Goal research uses the same transient natural-stop protocol and bounded retry
+state as Plan research, but its only preparation marker and tool are
+`NEXT_ACTION: PREPARE_GOAL` and `prepare_goal`. Plan preparation is not exposed
+and a Plan-only marker is malformed. Conversely, Goal preparation is absent
+from Plan research. Goal finalisation remains outside validation and retains
+the single required `present_goal` call.
 
 `SuccessCriteriaService` treats the objective as authoritative and receives
 only the effective objective, optional research context, and previous criteria

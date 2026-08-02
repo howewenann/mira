@@ -32,6 +32,7 @@ from config.settings import (
     dynamic_subagents_enabled,
     execute_env_settings,
     load_settings,
+    planning_next_action_max_retries,
     planning_todos_enabled,
     rubric_enabled,
     rubric_max_iterations,
@@ -1794,6 +1795,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             copy.assert_called_once_with("clicked assistant text")
 
+    async def test_protocol_exhaustion_without_provisional_text_keeps_prior_assistant(self) -> None:
+        """A held marker-only candidate must create, not overwrite, the next reply."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.assistant_message("prior answer")
+            chat.user_message("next request", planning=True)
+            chat.replace_last_assistant("MIRA could not produce a valid response.")
+            await pilot.pause()
+
+            assistants = list(chat.query(".message.assistant"))
+            self.assertEqual(len(assistants), 2)
+            self.assertEqual(renderable_plain(assistants[0]), "prior answer")
+            self.assertEqual(
+                renderable_plain(assistants[1]),
+                "MIRA could not produce a valid response.",
+            )
+
     async def test_ctrl_c_copies_chat_selection_with_container_or_no_focus(self) -> None:
         app = make_app()
 
@@ -3399,6 +3420,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Dynamic subagents", rendered)
                 self.assertIn("Response schemas", rendered)
                 self.assertIn("Planning todos", rendered)
+                self.assertIn("Next-action retries", rendered)
                 self.assertIn("Rubric Middleware", rendered)
                 self.assertIn("Maximum iterations", rendered)
                 self.assertIn("write_file", rendered)
@@ -3433,6 +3455,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-todos-planning_todos"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-rubric-rubric"].label), "no")
                 rubric_input = panel.query_one("#settings-rubric-max-iterations", Input)
+                next_action_input = panel.query_one(
+                    "#settings-planning-next-action-max-retries", Input
+                )
                 rubric_toggle = buttons["settings-toggle-rubric-rubric"]
                 self.assertEqual(rubric_input.value, "3")
                 self.assertTrue(rubric_input.disabled)
@@ -3441,6 +3466,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rubric_input.styles.height, rubric_toggle.styles.height)
                 self.assertEqual(rubric_input.styles.border_top[0], "")
                 self.assertEqual(rubric_input.styles.background, Color.parse("#151a1d"))
+                self.assertEqual(next_action_input.value, "2")
+                self.assertFalse(next_action_input.disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -3495,6 +3522,42 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(control.value, "5")
                 self.assertEqual(rubric_max_iterations(load_settings(workspace)), 5)
                 self.assertEqual(len(rebuilds), 2)
+
+    async def test_settings_panel_validates_and_persists_next_action_retries(self) -> None:
+        """The always-on recovery cap should restore invalid values and rebuild agents."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            rebuilds = []
+
+            async def rebuild() -> None:
+                rebuilds.append(True)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(
+                    lambda: len(panel.query("#settings-planning-next-action-max-retries")) == 1
+                )
+                control = panel.query_one(
+                    "#settings-planning-next-action-max-retries", Input
+                )
+
+                self.assertFalse(control.disabled)
+                control.value = "0"
+                await panel.submit_execute_env_input(Input.Submitted(control, "0"))
+                self.assertEqual(control.value, "2")
+                self.assertEqual(planning_next_action_max_retries(load_settings(workspace)), 2)
+                self.assertIn("1 to 20", str(panel.query_one("#settings-status", Static).render()))
+
+                control.value = "5"
+                await panel.submit_execute_env_input(Input.Submitted(control, "5"))
+                self.assertEqual(control.value, "5")
+                self.assertEqual(planning_next_action_max_retries(load_settings(workspace)), 5)
+                self.assertEqual(len(rebuilds), 1)
 
     async def test_rubric_setting_change_keeps_goal_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

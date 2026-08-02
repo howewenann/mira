@@ -13,6 +13,7 @@ class TraceStream:
 
     def __init__(self, logger: Logger | None = None, *, output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS) -> None:
         self.logger = logger
+        self._output_chars = output_chars
         self._buffer: list[str] = []
         self.transcript = TerminalTranscript(self._write, tool_output_chars=output_chars)
 
@@ -53,6 +54,19 @@ class TraceStream:
     def discard_reasoning(self) -> None:
         """Drop buffered reasoning later classified as internal."""
         self.transcript.discard_reasoning()
+
+    def discard_last_assistant(self) -> None:
+        """Drop buffered provisional assistant output before it reaches the trace."""
+        self._buffer = []
+        self.transcript = TerminalTranscript(
+            self._write,
+            tool_output_chars=self._output_chars,
+        )
+
+    def replace_last_assistant(self, text: str) -> None:
+        """Replace buffered provisional assistant output with authoritative text."""
+        self.discard_last_assistant()
+        self.assistant_delta(text)
 
     def flush_all(self) -> None:
         """Write any buffered transcript output."""
