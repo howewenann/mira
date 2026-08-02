@@ -9,10 +9,14 @@ from langchain_core.messages import AIMessage
 
 from agent.middleware.correction import CorrectionDecision
 from agent.planning.policy import (
+    FINALIZE_GOAL_TOOL,
+    FINALIZE_PLAN_TOOL,
     PLANNING_STAGE_GOAL_RESEARCH,
     PLANNING_STAGE_PLAN_RESEARCH,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
+    SHOW_GOAL_TOOL,
+    SHOW_PLAN_TOOL,
 )
 
 PLANNING_RESPONSE_STATUS_COMPLETE = "RESPONSE_STATUS: COMPLETE"
@@ -59,7 +63,9 @@ Use {prepare_status} when the {artifact_name} is decision-complete. Call
 {prepare_tool} instead of ending the response.
 
 To display the retained {artifact_name}, call {show_tool}. To construct a new or
-revised {artifact_name}, call {prepare_tool}. {present_tool} is finalization-only.
+revised {artifact_name}, call {prepare_tool}. {finalize_tool} is finalization-only.
+Requests to show, reopen, review, or return to retained work require an immediate
+{show_tool} call without research, prose reproduction, preparation, or finalization.
 
 This is a post-draft classification of the response's current state, not a
 prediction of a future next step. Responses containing a tool call omit the
@@ -74,6 +80,7 @@ class PlanningResponseStatusRule:
 
     workflow: Literal["plan", "goal"]
     failure_text: str = PLANNING_RESPONSE_STATUS_FAILURE
+    check_name: str = "Response"
 
     def __post_init__(self) -> None:
         if self.workflow not in {"plan", "goal"}:
@@ -109,11 +116,11 @@ class PlanningResponseStatusRule:
 
     @property
     def show_tool(self) -> str:
-        return "goal_show" if self.workflow == "goal" else "plan_show"
+        return SHOW_GOAL_TOOL if self.workflow == "goal" else SHOW_PLAN_TOOL
 
     @property
-    def present_tool(self) -> str:
-        return "present_goal" if self.workflow == "goal" else "present_plan"
+    def finalize_tool(self) -> str:
+        return FINALIZE_GOAL_TOOL if self.workflow == "goal" else FINALIZE_PLAN_TOOL
 
     def applies(self, state: dict[str, Any]) -> bool:
         return str(state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH) == self.active_stage
@@ -180,20 +187,20 @@ def planning_response_status_contract(workflow: Literal["plan", "goal"]) -> str:
         status = PLANNING_RESPONSE_STATUS_READY_TO_PREPARE_GOAL
         tool = PREPARE_GOAL_TOOL
         artifact = "Goal"
-        show_tool = "goal_show"
-        present_tool = "present_goal"
+        show_tool = SHOW_GOAL_TOOL
+        finalize_tool = FINALIZE_GOAL_TOOL
     else:
         status = PLANNING_RESPONSE_STATUS_READY_TO_PREPARE_PLAN
         tool = PREPARE_PLAN_TOOL
         artifact = "Plan"
-        show_tool = "plan_show"
-        present_tool = "present_plan"
+        show_tool = SHOW_PLAN_TOOL
+        finalize_tool = FINALIZE_PLAN_TOOL
     return PLANNING_RESPONSE_STATUS_CONTRACT.format(
         prepare_status=status,
         prepare_tool=tool,
         artifact_name=artifact,
         show_tool=show_tool,
-        present_tool=present_tool,
+        finalize_tool=finalize_tool,
     )
 
 

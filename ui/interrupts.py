@@ -7,7 +7,6 @@ import re
 from typing import Any
 
 ASK_USER_OPEN_OPTION = "Tell MIRA what to do differently"
-PRESENT_PLAN_TYPE = "present_plan"
 ACTION_TEXT_LIMIT = 220
 ACTION_PREVIEW_VALUE_LIMIT = 68
 ACTION_PREVIEW_KEY_WIDTH = 10
@@ -70,7 +69,7 @@ def prepare_goal_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]
 
 
 def goal_title_request(interrupt: Any) -> str:
-    """Extract the concise title supplied by present_goal."""
+    """Extract the concise title supplied by finalize_goal."""
     value = getattr(interrupt, "value", interrupt)
     if not isinstance(value, dict):
         return "Goal"

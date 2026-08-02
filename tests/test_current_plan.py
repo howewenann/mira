@@ -65,41 +65,43 @@ class Request:
 class CurrentPlanTests(unittest.TestCase):
     def test_plan_prompt_is_conversational_general_purpose_and_rubric_independent(self) -> None:
         prompt = plan_system_prompt()
-        for outcome in ("DISCUSSION", "NEEDS_DECISION", "PLAN_READY"):
+        for outcome in ("DISPLAY_RETAINED", "DISCUSSION", "NEEDS_DECISION", "PLAN_READY"):
             self.assertIn(outcome, prompt)
         self.assertIn("Imperative wording never authorizes execution", prompt)
+        self.assertIn("immediately call the applicable show_plan or show_goal tool", prompt)
+        self.assertIn("Do not research, reproduce the artifact in prose", prompt)
         self.assertIn("research, analysis, writing, communication, data work", prompt)
         self.assertIn(SHARED_QUESTION_POLICY, prompt)
         self.assertIn(SHARED_QUESTION_POLICY, ACT_SYSTEM_PROMPT)
         self.assertNotIn("SAFE_CONVERSATION", prompt)
 
-    def test_plan_stage_exposes_prepare_then_requires_present(self) -> None:
+    def test_plan_stage_prioritizes_show_then_requires_finalize(self) -> None:
         tools = [
             {"name": "read_file"},
             {"name": "ask_user"},
             {"name": "prepare_goal"},
             {"name": "prepare_plan"},
-            {"name": "present_plan"},
-            {"name": "present_goal"},
-            {"name": "goal_show"},
-            {"name": "plan_show"},
+            {"name": "finalize_plan"},
+            {"name": "finalize_goal"},
+            {"name": "show_goal"},
+            {"name": "show_plan"},
         ]
         middleware = PlanningStageEnforcementMiddleware()
         research = middleware._stage_request(Request(PLANNING_STAGE_PLAN_RESEARCH, tools))
         self.assertEqual(
             [tool["name"] for tool in research.tools],
-            ["read_file", "ask_user", "prepare_plan", "goal_show", "plan_show"],
+            ["show_plan", "read_file", "ask_user", "prepare_plan", "show_goal"],
         )
         final = middleware._stage_request(Request(PLANNING_STAGE_PLAN_FINALIZE, tools))
-        self.assertEqual([tool["name"] for tool in final.tools], ["present_plan"])
+        self.assertEqual([tool["name"] for tool in final.tools], ["finalize_plan"])
         self.assertEqual(final.tool_choice, "required")
         goal_research = middleware._stage_request(Request(PLANNING_STAGE_GOAL_RESEARCH, tools))
         self.assertEqual(
             [tool["name"] for tool in goal_research.tools],
-            ["read_file", "ask_user", "prepare_goal", "goal_show", "plan_show"],
+            ["show_goal", "read_file", "ask_user", "prepare_goal", "show_plan"],
         )
         goal_final = middleware._stage_request(Request(PLANNING_STAGE_GOAL_FINALIZE, tools))
-        self.assertEqual([tool["name"] for tool in goal_final.tools], ["present_goal"])
+        self.assertEqual([tool["name"] for tool in goal_final.tools], ["finalize_goal"])
         self.assertEqual(goal_final.tool_choice, "required")
 
     def test_current_plan_replaces_starts_completes_restarts_and_clears(self) -> None:

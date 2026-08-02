@@ -14,10 +14,10 @@ CONTROL_TOOLS = {
     "ask_user",
     "prepare_goal",
     "prepare_plan",
-    "present_goal",
-    "present_plan",
-    "goal_show",
-    "plan_show",
+    "finalize_goal",
+    "finalize_plan",
+    "show_goal",
+    "show_plan",
 }
 WATCHER_SHUTDOWN_SECONDS = 0.1
 

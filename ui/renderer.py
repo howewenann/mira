@@ -180,7 +180,7 @@ class Renderer:
         response = (await self._input(f"{ASK_USER_OPEN_OPTION}: ")).strip()
         return response or ASK_USER_OPEN_OPTION
 
-    async def present_plan(self, interrupt: Any) -> str:
+    async def finalize_plan(self, interrupt: Any) -> str:
         """Print a structured plan in one-shot terminal mode."""
         plan = plan_request(interrupt)
         lines = [str(plan.get("title") or "Plan"), ""]
@@ -199,7 +199,7 @@ class Renderer:
         return "Plan presented for user review."
 
     def render_current_plan(self, plan: dict[str, Any]) -> None:
-        """Render an exact retained Plan for the plan_show control tool."""
+        """Render an exact retained Plan for the show_plan control tool."""
         policy = (
             "Automatic evaluation enabled."
             if plan.get("rubric_enabled")
@@ -216,7 +216,7 @@ class Renderer:
         self.transcript.block("plan", body)
 
     def render_current_goal(self, goal: dict[str, Any]) -> None:
-        """Render an exact retained Goal for the goal_show control tool."""
+        """Render an exact retained Goal for the show_goal control tool."""
         policy = (
             "Automatic evaluation enabled."
             if goal.get("rubric_enabled")

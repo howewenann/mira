@@ -9,11 +9,11 @@ PLAN_BLOCKED_RESULT_MARKERS = ("permission denied for write",)
 
 ASK_USER_TOOL = "ask_user"
 PREPARE_PLAN_TOOL = "prepare_plan"
-PRESENT_PLAN_TOOL = "present_plan"
-PLAN_SHOW_TOOL = "plan_show"
+FINALIZE_PLAN_TOOL = "finalize_plan"
+SHOW_PLAN_TOOL = "show_plan"
 PREPARE_GOAL_TOOL = "prepare_goal"
-PRESENT_GOAL_TOOL = "present_goal"
-GOAL_SHOW_TOOL = "goal_show"
+FINALIZE_GOAL_TOOL = "finalize_goal"
+SHOW_GOAL_TOOL = "show_goal"
 
 PLANNING_STAGE_PLAN_RESEARCH = "plan_research"
 PLANNING_STAGE_PLAN_FINALIZE = "plan_finalize"
@@ -40,6 +40,10 @@ Imperative wording never authorizes execution while Plan mode is active.
 
 For each turn, choose the matching prompt-level outcome:
 
+DISPLAY_RETAINED
+- When the user asks to show, reopen, review, or return to the retained Plan or Goal, immediately call the applicable show_plan or show_goal tool.
+- Do not research, reproduce the artifact in prose, prepare a replacement, or enter finalization first.
+
 DISCUSSION
 - Investigate, explain current behavior, brainstorm, compare approaches, answer a read-only question, or discuss an existing Plan in ordinary prose.
 - Ground the response in the available environment and relevant context. Discover facts before requesting user input.
@@ -65,7 +69,7 @@ Use read-only tools only to resolve missing facts, referenced artifacts, current
 
 When calling prepare_plan, pass the authoritative objective and concise material context and constraints. Do not include a completed implementation Plan or unsupported scope."""
 
-PLAN_OUTPUT_TEMPLATE = """The final present_plan call supplies:
+PLAN_OUTPUT_TEMPLATE = """The final finalize_plan call supplies:
 Title
 
 Objective
@@ -87,12 +91,12 @@ Success Criteria are supplied separately by MIRA as binding context. Do not repe
 
 PLAN_FINALIZATION_POLICY = """MIRA has generated Success Criteria for a decision-complete proposal.
 Use the supplied Objective, Context and Constraints, and Success Criteria as binding context.
-present_plan is the only visible tool and a call is required.
+finalize_plan is the only visible tool and a call is required.
 Create the concise complete replacement Plan. Do not return the Plan in prose."""
 
 GOAL_FINALIZATION_POLICY = """MIRA has generated Success Criteria for a decision-complete Goal.
 Use the supplied authoritative Objective and Success Criteria as binding context.
-present_goal is the only visible tool and a call is required.
+finalize_goal is the only visible tool and a call is required.
 Supply a concise user-facing title. Do not create a Plan or return the Goal in prose."""
 
 APPROVED_PLAN_EXECUTION_INSTRUCTIONS = """Execute the exact approved Plan and Success Criteria as binding context:

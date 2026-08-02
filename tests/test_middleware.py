@@ -75,6 +75,7 @@ class ReviewCompletionRule:
     """Non-planning rule proving that correction owns no workflow vocabulary."""
 
     protocol_id = "review_completion"
+    check_name = "Review"
     workflow_label = "Review"
     failure_text = "Review could not be completed."
 
@@ -144,14 +145,14 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(updated_tools[1], grep_tool)
         self.assertEqual(execute_tool["description"], "old execute")
 
-    def test_plan_research_stage_hides_present_plan(self) -> None:
+    def test_plan_research_stage_hides_finalize_plan(self) -> None:
         middleware = PlanningStageEnforcementMiddleware()
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
                 {"name": "ask_user"},
                 {"name": "prepare_plan"},
-                {"name": "present_plan"},
+                {"name": "finalize_plan"},
             ],
             state={"planning_stage": "plan_research"},
             tool_choice="previous",
@@ -224,6 +225,7 @@ class MiddlewareTests(unittest.TestCase):
         )
 
         self.assertEqual(retry["_correction_retries"], {"review_completion": 1})
+        self.assertEqual(events[-1]["check_name"], "Review")
         self.assertEqual(events[-1]["workflow"], "Review")
         self.assertEqual(retry["messages"][-1].name, CORRECTION_SOURCE)
 
@@ -262,10 +264,12 @@ class MiddlewareTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("plan_show", str(plan.system_message.text))
-        self.assertNotIn("goal_show", str(plan.system_message.text))
-        self.assertIn("goal_show", str(goal.system_message.text))
-        self.assertNotIn("plan_show", str(goal.system_message.text))
+        self.assertIn("show_plan", str(plan.system_message.text))
+        self.assertNotIn("show_goal", str(plan.system_message.text))
+        self.assertIn("show_goal", str(goal.system_message.text))
+        self.assertNotIn("show_plan", str(goal.system_message.text))
+        self.assertIn("require an immediate\nshow_plan call", str(plan.system_message.text))
+        self.assertIn("without research, prose reproduction", str(plan.system_message.text))
         self.assertEqual(final.system_message.text, "base")
         self.assertEqual(base.text, "base")
         self.assertEqual(plan.system_message.text, plan_again.system_message.text)
@@ -276,60 +280,60 @@ class MiddlewareTests(unittest.TestCase):
             2,
         )
 
-    def test_plan_finalize_stage_forces_present_plan_only(self) -> None:
+    def test_plan_finalize_stage_forces_finalize_plan_only(self) -> None:
         middleware = PlanningStageEnforcementMiddleware()
         request = FakeModelRequest(
-            [{"name": "read_file"}, {"name": "prepare_plan"}, {"name": "present_plan"}],
+            [{"name": "read_file"}, {"name": "prepare_plan"}, {"name": "finalize_plan"}],
             state={"planning_stage": "plan_finalize"},
         )
 
         updated = middleware._stage_request(request)
 
-        self.assertEqual([tool["name"] for tool in updated.tools], ["present_plan"])
+        self.assertEqual([tool["name"] for tool in updated.tools], ["finalize_plan"])
         self.assertEqual(updated.tool_choice, "required")
 
-    def test_plan_finalize_requires_registered_present_plan(self) -> None:
+    def test_plan_finalize_requires_registered_finalize_plan(self) -> None:
         request = FakeModelRequest(
             [{"name": "prepare_plan"}],
             state={"planning_stage": "plan_finalize"},
         )
 
-        with self.assertRaisesRegex(RuntimeError, "requires present_plan"):
+        with self.assertRaisesRegex(RuntimeError, "requires finalize_plan"):
             PlanningStageEnforcementMiddleware()._stage_request(request)
 
-    def test_goal_finalize_stage_forces_present_goal_only(self) -> None:
+    def test_goal_finalize_stage_forces_finalize_goal_only(self) -> None:
         middleware = PlanningStageEnforcementMiddleware()
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
-                {"name": "present_goal"},
-                {"name": "present_plan"},
+                {"name": "finalize_goal"},
+                {"name": "finalize_plan"},
             ],
             state={"planning_stage": "goal_finalize"},
         )
 
         updated = middleware._stage_request(request)
 
-        self.assertEqual([tool["name"] for tool in updated.tools], ["present_goal"])
+        self.assertEqual([tool["name"] for tool in updated.tools], ["finalize_goal"])
         self.assertEqual(updated.tool_choice, "required")
         self.assertIsNone(updated.system_message)
 
-    def test_goal_finalize_requires_registered_present_goal(self) -> None:
+    def test_goal_finalize_requires_registered_finalize_goal(self) -> None:
         request = FakeModelRequest(
-            [{"name": "present_plan"}],
+            [{"name": "finalize_plan"}],
             state={"planning_stage": "goal_finalize"},
         )
 
-        with self.assertRaisesRegex(RuntimeError, "requires present_goal"):
+        with self.assertRaisesRegex(RuntimeError, "requires finalize_goal"):
             PlanningStageEnforcementMiddleware()._stage_request(request)
 
     def test_wrong_stage_formal_controls_return_native_tool_errors(self) -> None:
         middleware = PlanningStageEnforcementMiddleware()
         cases = (
             ("prepare_plan", "goal_research", "requires plan_research"),
-            ("present_plan", "plan_research", "plan_show"),
+            ("finalize_plan", "plan_research", "show_plan"),
             ("prepare_goal", "plan_research", "requires goal_research"),
-            ("present_goal", "goal_research", "goal_show"),
+            ("finalize_goal", "goal_research", "show_goal"),
         )
 
         for name, stage, expected in cases:
@@ -351,7 +355,7 @@ class MiddlewareTests(unittest.TestCase):
 
     def test_valid_stage_formal_control_executes_handler_sync_and_async(self) -> None:
         middleware = PlanningStageEnforcementMiddleware()
-        request = FakeToolRequest("present_plan", "plan_finalize")
+        request = FakeToolRequest("finalize_plan", "plan_finalize")
 
         self.assertEqual(middleware.wrap_tool_call(request, lambda _request: "sync"), "sync")
 
@@ -371,14 +375,14 @@ class MiddlewareTests(unittest.TestCase):
 
         result = asyncio.run(
             middleware.awrap_tool_call(
-                FakeToolRequest("present_goal", "goal_research"),
+                FakeToolRequest("finalize_goal", "goal_research"),
                 handler,
             )
         )
 
         self.assertIsInstance(result, ToolMessage)
         self.assertEqual(result.status, "error")
-        self.assertIn("goal_show", str(result.content))
+        self.assertIn("show_goal", str(result.content))
         self.assertFalse(called)
 
     def test_response_status_parser_requires_one_terminal_stage_valid_status(self) -> None:
@@ -493,6 +497,8 @@ class MiddlewareTests(unittest.TestCase):
             events[-1]["failed_check"],
             "RESPONSE_STATUS: NEEDS_RESEARCH was declared, but no research tool was called.",
         )
+        self.assertEqual(events[-1]["check_name"], "Response")
+        self.assertEqual(events[-1]["workflow"], "Plan")
 
         correction = retry["messages"][-1].model_copy(update={"id": "correction-1"})
         accepted = AIMessage(id="answer-1", content="Done.\nRESPONSE_STATUS: COMPLETE")

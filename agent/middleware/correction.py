@@ -25,6 +25,7 @@ class CorrectionRule(Protocol):
     """Workflow-owned policy consumed by the generic correction lifecycle."""
 
     protocol_id: str
+    check_name: str
     workflow_label: str
     failure_text: str
 
@@ -210,6 +211,7 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
         payload = {
             "type": CORRECTION_EVENT,
             "protocol": rule.protocol_id,
+            "check_name": rule.check_name,
             "workflow": rule.workflow_label,
             "failed_check": decision.failed_check,
             "retry_prompt": decision.retry_prompt if not exhausted else "",

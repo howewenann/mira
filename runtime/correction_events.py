@@ -12,6 +12,7 @@ def normalize_correction_event(event: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": CORRECTION_EVENT,
         "protocol": str(event.get("protocol") or "correction").strip(),
+        "check_name": str(event.get("check_name") or "Correction").strip(),
         "workflow": str(event.get("workflow") or "Correction").strip(),
         "failed_check": str(event.get("failed_check") or "The response check failed.").strip(),
         "retry_prompt": str(event.get("retry_prompt") or "").strip(),
@@ -24,14 +25,14 @@ def normalize_correction_event(event: dict[str, Any]) -> dict[str, Any]:
 
 def correction_title(event: dict[str, Any]) -> str:
     """Return the compact visible correction label."""
-    workflow = normalize_correction_event(event)["workflow"]
-    return f"{workflow} check"
+    check_name = normalize_correction_event(event)["check_name"]
+    return f"{check_name} check"
 
 
 def correction_text(event: dict[str, Any]) -> str:
     """Return simple technical details for one correction bubble."""
     value = normalize_correction_event(event)
-    lines = [f"Check failed: {value['failed_check']}"]
+    lines = [f"Workflow: {value['workflow']}", f"Check failed: {value['failed_check']}"]
     if value["exhausted"]:
         lines.append(f"Retry limit reached: {value['max_retries']} of {value['max_retries']}")
     else:
@@ -43,7 +44,10 @@ def correction_text(event: dict[str, Any]) -> str:
 def correction_context_text(event: dict[str, Any]) -> str:
     """Return correction context that is clearly not user-authored."""
     value = normalize_correction_event(event)
-    lines = [f"Correction check failed: {value['failed_check']}"]
+    lines = [
+        f"{value['check_name']} check ({value['workflow']}) failed: "
+        f"{value['failed_check']}"
+    ]
     if value["exhausted"]:
         lines.append(f"Retry limit reached after {value['max_retries']} retries.")
     elif value["retry_prompt"]:

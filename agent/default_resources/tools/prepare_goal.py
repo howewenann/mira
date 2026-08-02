@@ -14,7 +14,8 @@ GOAL_FIELD_MAX_CHARS = 4000
     description=(
         "Begin formal Goal construction when the Goal objective is sufficiently understood and every "
         "material user decision is resolved. Pass the authoritative objective plus concise relevant "
-        "context, constraints, and bounded research evidence. MIRA will generate Success Criteria next. "
+        "context, constraints, and bounded research evidence. MIRA will generate Success Criteria next "
+        "and then require finalize_goal. "
         "Do not produce or include an implementation Plan, return the Goal in prose, or add unsupported "
         "scope. Use ask_user first when user input is still required."
     ),

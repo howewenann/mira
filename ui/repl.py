@@ -15,6 +15,8 @@ from rich.text import Text
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.planning.policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
+    FINALIZE_GOAL_TOOL,
+    FINALIZE_PLAN_TOOL,
     PLAN_BEHAVIOR_POLICY,
     PLAN_BLOCKED_RESULT_MARKERS,
     PLAN_DISABLED_TOOLS,
@@ -26,8 +28,8 @@ from agent.planning.policy import (
     OPTIONAL_RESEARCH_POLICY,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
-    PRESENT_GOAL_TOOL,
-    PRESENT_PLAN_TOOL,
+    SHOW_GOAL_TOOL,
+    SHOW_PLAN_TOOL,
     plan_disabled_tools_text,
 )
 from agent.tools.specs import mira_environment_label
@@ -112,7 +114,7 @@ Do not call a disabled tool or attempt the requested change.
 Authoritative Goal objective:
 {text}
 
-Preserve that objective exactly unless this is an explicit Goal revision whose feedback changes the desired outcome. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require present_goal. Never create an implementation Plan."""
+Preserve that objective exactly unless this is an explicit Goal revision whose feedback changes the desired outcome. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require finalize_goal. Never create an implementation Plan."""
 
 PLAN_REQUEST_TEMPLATE = """You are in planning mode (Plan mode).
 The following tools are disabled: {disabled_tools}.
@@ -185,8 +187,8 @@ DEFAULT_TOOL_SPECS = [
         "description": "Ask the user to choose between concrete next steps when MIRA is blocked.",
     },
     {
-        "name": "present_plan",
-        "description": "Present a structured implementation plan for explicit user review.",
+        "name": "finalize_plan",
+        "description": "Finalize a structured implementation Plan for explicit user review.",
     },
     {
         "name": "prepare_plan",
@@ -197,15 +199,15 @@ DEFAULT_TOOL_SPECS = [
         "description": "Begin criteria-first construction of a decision-complete Goal.",
     },
     {
-        "name": "present_goal",
-        "description": "Present a Goal title after Success Criteria generation.",
+        "name": "finalize_goal",
+        "description": "Finalize a Goal title after Success Criteria generation.",
     },
     {
-        "name": "plan_show",
+        "name": "show_plan",
         "description": "Render the exact retained current Plan.",
     },
     {
-        "name": "goal_show",
+        "name": "show_goal",
         "description": "Render the exact retained current Goal.",
     },
     {"name": "write_todos", "description": ""},
@@ -652,15 +654,18 @@ def available_tools(mode: dict[str, Any], *, planning: bool) -> list[dict[str, s
         normalized = normalize_tool_specs(tools)
         if planning:
             if mode.get("planning_stage") in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
-                expected = PRESENT_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_FINALIZE else PRESENT_PLAN_TOOL
+                expected = FINALIZE_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_FINALIZE else FINALIZE_PLAN_TOOL
                 return [tool for tool in normalized if tool["name"] == expected]
             expected_prepare = PREPARE_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_RESEARCH else PREPARE_PLAN_TOOL
-            hidden = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL} - {expected_prepare}
-            return [tool for tool in normalized if tool["name"] not in hidden]
+            expected_show = SHOW_GOAL_TOOL if mode.get("planning_stage") == PLANNING_STAGE_GOAL_RESEARCH else SHOW_PLAN_TOOL
+            hidden = {PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, FINALIZE_PLAN_TOOL, FINALIZE_GOAL_TOOL} - {expected_prepare}
+            visible = [tool for tool in normalized if tool["name"] not in hidden]
+            visible.sort(key=lambda tool: tool["name"] != expected_show)
+            return visible
         return normalized
 
     if not planning:
-        blocked = {PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL, PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL}
+        blocked = {FINALIZE_PLAN_TOOL, FINALIZE_GOAL_TOOL, PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL}
         return [tool for tool in DEFAULT_TOOL_SPECS if tool["name"] not in blocked]
 
     blocked = set(PLAN_DISABLED_TOOLS)

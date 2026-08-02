@@ -325,12 +325,12 @@ description: Project-specific workflow.
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertTrue(any(tool.name == "ask_user" for tool in resources.tools))
-            self.assertTrue(any(tool.name == "plan_show" for tool in resources.tools))
-            self.assertTrue(any(tool.name == "goal_show" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "show_plan" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "show_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "prepare_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "prepare_plan" for tool in resources.tools))
-            self.assertTrue(any(tool.name == "present_plan" for tool in resources.tools))
-            self.assertTrue(any(tool.name == "present_goal" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "finalize_plan" for tool in resources.tools))
+            self.assertTrue(any(tool.name == "finalize_goal" for tool in resources.tools))
             self.assertTrue(any(tool.name == "grep" for tool in resources.tools))
             self.assertEqual(
                 resources.metadata["tools"],
@@ -342,14 +342,14 @@ description: Project-specific workflow.
                         "replaces": "",
                     },
                     {
-                        "name": "goal_show",
-                        "path": "/mira-defaults/tools/goal_show.py",
+                        "name": "finalize_goal",
+                        "path": "/mira-defaults/tools/finalize_goal.py",
                         "source": "default",
                         "replaces": "",
                     },
                     {
-                        "name": "plan_show",
-                        "path": "/mira-defaults/tools/plan_show.py",
+                        "name": "finalize_plan",
+                        "path": "/mira-defaults/tools/finalize_plan.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -366,22 +366,22 @@ description: Project-specific workflow.
                         "replaces": "",
                     },
                     {
-                        "name": "present_goal",
-                        "path": "/mira-defaults/tools/present_goal.py",
-                        "source": "default",
-                        "replaces": "",
-                    },
-                    {
-                        "name": "present_plan",
-                        "path": "/mira-defaults/tools/present_plan.py",
-                        "source": "default",
-                        "replaces": "",
-                    },
-                    {
                         "name": "grep",
                         "path": "/mira-defaults/tools/regex_grep.py",
                         "source": "default",
                         "replaces": "built-in",
+                    },
+                    {
+                        "name": "show_goal",
+                        "path": "/mira-defaults/tools/show_goal.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "show_plan",
+                        "path": "/mira-defaults/tools/show_plan.py",
+                        "source": "default",
+                        "replaces": "",
                     }
                 ],
             )
@@ -403,17 +403,32 @@ description: Project-specific workflow.
             self.assertIn("good options: ['test_checkpoint.py', 'test_config.py']", description)
             self.assertIn("bad options: ['1. test_checkpoint.py', '2. test_config.py']", description)
 
-    def test_present_plan_description_is_for_forced_finalisation(self) -> None:
-        """present_plan should be reserved for criteria-first finalisation."""
+    def test_finalize_plan_description_is_for_forced_finalisation(self) -> None:
+        """finalize_plan should be reserved for criteria-first finalisation."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
-            present_plan = next(tool for tool in resources.tools if tool.name == "present_plan")
+            finalize_plan = next(tool for tool in resources.tools if tool.name == "finalize_plan")
 
-            description = str(present_plan.description)
+            description = str(finalize_plan.description)
 
             self.assertIn("after MIRA has generated Success Criteria", description)
             self.assertIn("required in the formal finalisation stage", description)
             self.assertIn("Do not add a Summary section", description)
+
+    def test_show_controls_require_immediate_exact_retained_artifact_display(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+
+            for name, artifact in (("show_plan", "Plan"), ("show_goal", "Goal")):
+                with self.subTest(name=name):
+                    control = next(tool for tool in resources.tools if tool.name == name)
+                    description = str(control.description)
+                    self.assertIn("Immediately render the exact retained", description)
+                    self.assertIn("show, reopen, review, or return", description)
+                    self.assertIn("Do not research", description)
+                    self.assertIn(f"reproduce the {artifact} in prose", description)
+                    self.assertIn("prepare a replacement", description)
+                    self.assertIn("finalize it first", description)
 
     def test_regex_grep_matches_regex_patterns(self) -> None:
         """The default grep should treat the pattern as regex."""
@@ -471,17 +486,17 @@ def project_status() -> str:
                 names,
                 [
                     "ask_user",
-                    "goal_show",
-                    "plan_show",
+                    "finalize_goal",
+                    "finalize_plan",
                     "prepare_goal",
                     "prepare_plan",
-                    "present_goal",
-                    "present_plan",
                     "grep",
+                    "show_goal",
+                    "show_plan",
                     "project_status",
                 ],
             )
-            self.assertEqual(resources.tools[7].invoke({"pattern": "needle"}), "project grep: needle")
+            self.assertEqual(resources.tools[5].invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
@@ -492,14 +507,14 @@ def project_status() -> str:
                         "replaces": "",
                     },
                     {
-                        "name": "goal_show",
-                        "path": "/mira-defaults/tools/goal_show.py",
+                        "name": "finalize_goal",
+                        "path": "/mira-defaults/tools/finalize_goal.py",
                         "source": "default",
                         "replaces": "",
                     },
                     {
-                        "name": "plan_show",
-                        "path": "/mira-defaults/tools/plan_show.py",
+                        "name": "finalize_plan",
+                        "path": "/mira-defaults/tools/finalize_plan.py",
                         "source": "default",
                         "replaces": "",
                     },
@@ -516,22 +531,22 @@ def project_status() -> str:
                         "replaces": "",
                     },
                     {
-                        "name": "present_goal",
-                        "path": "/mira-defaults/tools/present_goal.py",
-                        "source": "default",
-                        "replaces": "",
-                    },
-                    {
-                        "name": "present_plan",
-                        "path": "/mira-defaults/tools/present_plan.py",
-                        "source": "default",
-                        "replaces": "",
-                    },
-                    {
                         "name": "grep",
                         "path": "/.mira/tools/custom_tools.py",
                         "source": "project",
                         "replaces": "default",
+                    },
+                    {
+                        "name": "show_goal",
+                        "path": "/mira-defaults/tools/show_goal.py",
+                        "source": "default",
+                        "replaces": "",
+                    },
+                    {
+                        "name": "show_plan",
+                        "path": "/mira-defaults/tools/show_plan.py",
+                        "source": "default",
+                        "replaces": "",
                     },
                     {
                         "name": "project_status",
@@ -734,7 +749,7 @@ def get_tools(project_backend):
         self.assertIn("memories", agent.mira_resources)
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
-        self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
+        self.assertNotIn("finalize_plan", [tool["name"] for tool in agent.mira_tool_specs])
 
     def test_action_and_plan_agents_share_ordered_opaque_memory_resources(self) -> None:
         """Memory filenames should only determine stable ordering, not agent roles."""
@@ -787,14 +802,14 @@ def get_tools(project_backend):
         self.assertIsInstance(kwargs["backend"].default, LocalShellBackend)
         self.assertIn("execute", kwargs["interrupt_on"])
         self.assertIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
-        self.assertNotIn("present_plan", [tool["name"] for tool in agent.mira_tool_specs])
+        self.assertNotIn("finalize_plan", [tool["name"] for tool in agent.mira_tool_specs])
 
     def test_quickjs_ptc_tools_include_only_safe_project_exploration(self) -> None:
         """QuickJS PTC should expose read-only exploration tools, not writes or interrupts."""
         ptc_tools = set(QUICKJS_PTC_TOOLS)
 
         self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep"})
-        self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "present_plan"} & ptc_tools)
+        self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
 
     def test_factory_registers_specific_and_provider_summarization_exclusions(self) -> None:
         """DeepAgents should exclude its hidden default summarization for resolved models."""

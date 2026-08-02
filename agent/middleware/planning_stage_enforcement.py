@@ -8,22 +8,24 @@ from langchain.agents.middleware.types import AgentMiddleware, AgentState
 from langchain_core.messages import ToolMessage
 
 from agent.planning.policy import (
+    FINALIZE_GOAL_TOOL,
+    FINALIZE_PLAN_TOOL,
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
-    PRESENT_GOAL_TOOL,
-    PRESENT_PLAN_TOOL,
+    SHOW_GOAL_TOOL,
+    SHOW_PLAN_TOOL,
 )
 from agent.tools.specs import tool_name as resource_tool_name
 
 CONTROL_TOOL_STAGES = {
     PREPARE_PLAN_TOOL: PLANNING_STAGE_PLAN_RESEARCH,
-    PRESENT_PLAN_TOOL: PLANNING_STAGE_PLAN_FINALIZE,
+    FINALIZE_PLAN_TOOL: PLANNING_STAGE_PLAN_FINALIZE,
     PREPARE_GOAL_TOOL: PLANNING_STAGE_GOAL_RESEARCH,
-    PRESENT_GOAL_TOOL: PLANNING_STAGE_GOAL_FINALIZE,
+    FINALIZE_GOAL_TOOL: PLANNING_STAGE_GOAL_FINALIZE,
 }
 
 
@@ -61,12 +63,12 @@ class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any
     def _stage_request(self, request: Any) -> Any:
         stage = str(request.state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH)
         if stage in {PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_GOAL_FINALIZE}:
-            expected_present = (
-                PRESENT_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_FINALIZE else PRESENT_PLAN_TOOL
+            expected_finalize = (
+                FINALIZE_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_FINALIZE else FINALIZE_PLAN_TOOL
             )
-            tools = [tool for tool in request.tools if resource_tool_name(tool) == expected_present]
+            tools = [tool for tool in request.tools if resource_tool_name(tool) == expected_finalize]
             if not tools:
-                raise RuntimeError(f"formal finalization requires {expected_present}")
+                raise RuntimeError(f"formal finalization requires {expected_finalize}")
             # With one visible tool, ``required`` is deterministic and portable
             # across OpenAI-compatible providers that reject named-tool objects.
             return request.override(tools=tools, tool_choice="required")
@@ -77,12 +79,14 @@ class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any
         hidden_controls = {
             PREPARE_PLAN_TOOL,
             PREPARE_GOAL_TOOL,
-            PRESENT_PLAN_TOOL,
-            PRESENT_GOAL_TOOL,
+            FINALIZE_PLAN_TOOL,
+            FINALIZE_GOAL_TOOL,
         } - {expected_prepare}
         tools = [
             tool for tool in request.tools if resource_tool_name(tool) not in hidden_controls
         ]
+        expected_show = SHOW_GOAL_TOOL if stage == PLANNING_STAGE_GOAL_RESEARCH else SHOW_PLAN_TOOL
+        tools.sort(key=lambda tool: resource_tool_name(tool) != expected_show)
         return request.override(tools=tools, tool_choice=None)
 
     @staticmethod
@@ -108,18 +112,20 @@ def planning_control_tool_error(name: str, current_stage: str, expected_stage: s
     """Return actionable feedback for a wrong-stage formal control call."""
     if current_stage == PLANNING_STAGE_PLAN_RESEARCH:
         guidance = (
-            "Call plan_show to display the retained Plan, or prepare_plan to construct "
-            "a new or revised Plan. present_plan is finalization-only."
+            "Call show_plan immediately to show, reopen, or review the retained Plan. "
+            "Call prepare_plan only to construct a new or revised Plan. finalize_plan is "
+            "finalization-only."
         )
     elif current_stage == PLANNING_STAGE_GOAL_RESEARCH:
         guidance = (
-            "Call goal_show to display the retained Goal, or prepare_goal to construct "
-            "a new or revised Goal. present_goal is finalization-only."
+            "Call show_goal immediately to show, reopen, or review the retained Goal. "
+            "Call prepare_goal only to construct a new or revised Goal. finalize_goal is "
+            "finalization-only."
         )
     elif current_stage == PLANNING_STAGE_PLAN_FINALIZE:
-        guidance = "Plan finalization requires present_plan."
+        guidance = "Plan finalization requires finalize_plan."
     elif current_stage == PLANNING_STAGE_GOAL_FINALIZE:
-        guidance = "Goal finalization requires present_goal."
+        guidance = "Goal finalization requires finalize_goal."
     else:
         guidance = "Use only a control tool exposed for the current workflow stage."
     return (

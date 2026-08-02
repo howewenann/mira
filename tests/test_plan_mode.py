@@ -393,10 +393,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create.call_args.kwargs["system_prompt"], factory.PLAN_SYSTEM_PROMPT)
         names = [tool_name(tool) for tool in create.call_args.kwargs["tools"]]
         self.assertIn("prepare_plan", names)
-        self.assertIn("plan_show", names)
+        self.assertIn("show_plan", names)
         self.assertIn("prepare_goal", names)
-        self.assertIn("present_goal", names)
-        self.assertIn("goal_show", names)
+        self.assertIn("finalize_goal", names)
+        self.assertIn("show_goal", names)
         self.assertTrue(
             any(isinstance(item, PlanningStageEnforcementMiddleware) for item in create.call_args.kwargs["middleware"])
         )
@@ -489,11 +489,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("edit_file", names)
         self.assertIn("delete", names)
         self.assertIn("grep", names)
-        self.assertIn("goal_show", names)
-        self.assertIn("plan_show", names)
+        self.assertIn("show_goal", names)
+        self.assertIn("show_plan", names)
         self.assertNotIn("prepare_goal", names)
-        self.assertNotIn("present_goal", names)
-        self.assertNotIn("present_plan", names)
+        self.assertNotIn("finalize_goal", names)
+        self.assertNotIn("finalize_plan", names)
         grep = next(tool for tool in agent.mira_tool_specs if tool["name"] == "grep")
         self.assertEqual(grep["source"], "default")
         self.assertEqual(grep["replaces"], "built-in")
@@ -518,11 +518,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         names = [tool["name"] for tool in agent.mira_tool_specs]
         self.assertIn("ask_user", names)
         self.assertIn("prepare_plan", names)
-        self.assertIn("plan_show", names)
-        self.assertIn("goal_show", names)
-        self.assertIn("present_plan", names)
+        self.assertIn("show_plan", names)
+        self.assertIn("show_goal", names)
+        self.assertIn("finalize_plan", names)
         self.assertIn("prepare_goal", names)
-        self.assertIn("present_goal", names)
+        self.assertIn("finalize_goal", names)
         self.assertIn("read_file", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("edit_file", names)
@@ -568,13 +568,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         names = [tool_name(tool) for tool in filtered.tools]
         self.assertEqual(names, ["read_file", "grep"])
 
-    def test_action_tool_filter_hides_present_plan_from_model(self) -> None:
+    def test_action_tool_filter_hides_finalize_plan_from_model(self) -> None:
         """The action agent should not expose the structured planning tool."""
         middleware = ModelToolVisibilityMiddleware(factory.ACTION_EXCLUDED_TOOLS)
         request = FakeModelRequest(
             [
                 {"name": "read_file"},
-                {"name": "present_plan"},
+                {"name": "finalize_plan"},
                 {"name": "write_file"},
             ]
         )
@@ -584,13 +584,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         names = [tool_name(tool) for tool in filtered.tools]
         self.assertEqual(names, ["read_file", "write_file"])
 
-    def test_available_tools_are_mode_specific_for_present_plan_and_execute(self) -> None:
+    def test_available_tools_are_mode_specific_for_finalize_plan_and_execute(self) -> None:
         """Fallback tool display should keep plan-only and execute-only boundaries."""
         action_names = [tool["name"] for tool in repl.available_tools({}, planning=False)]
         planning_names = [tool["name"] for tool in repl.available_tools({}, planning=True)]
 
-        self.assertNotIn("present_plan", action_names)
-        self.assertIn("present_plan", planning_names)
+        self.assertNotIn("finalize_plan", action_names)
+        self.assertIn("finalize_plan", planning_names)
         for tool in PLAN_DISABLED_TOOLS:
             self.assertNotIn(tool, planning_names)
 
@@ -602,10 +602,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 {"name": "ask_user"},
                 {"name": "prepare_goal"},
                 {"name": "prepare_plan"},
-                {"name": "present_plan"},
-                {"name": "present_goal"},
-                {"name": "goal_show"},
-                {"name": "plan_show"},
+                {"name": "finalize_plan"},
+                {"name": "finalize_goal"},
+                {"name": "show_goal"},
+                {"name": "show_plan"},
             ],
             "planning_stage": "plan_research",
         }
@@ -614,8 +614,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         mode["planning_stage"] = "plan_finalize"
         finalize = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
 
-        self.assertEqual(research, ["read_file", "ask_user", "prepare_plan", "goal_show", "plan_show"])
-        self.assertEqual(finalize, ["present_plan"])
+        self.assertEqual(research, ["show_plan", "read_file", "ask_user", "prepare_plan", "show_goal"])
+        self.assertEqual(finalize, ["finalize_plan"])
 
     async def test_plan_and_act_commands_toggle_mode(self) -> None:
         """Slash commands should switch between planning and action modes."""

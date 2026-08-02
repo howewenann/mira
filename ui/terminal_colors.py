@@ -12,8 +12,10 @@ DIM = "\033[2m"
 THINKING_BODY = "\033[38;2;184;194;201m"
 RUBRIC_HEADER_COLOR = "#C58FD6"
 RUBRIC_BODY_COLOR = "#F1DCF5"
+WARNING_BODY_COLOR = "#F5C7A9"
 RUBRIC_HEADER = "\033[38;2;197;143;214m"
 RUBRIC_BODY = "\033[38;2;241;220;245m"
+WARNING_BODY = "\033[38;2;245;199;169m"
 ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 COLORS = {
@@ -24,7 +26,7 @@ COLORS = {
     "thinking": "\033[38;2;130;144;154m",
     "status": "\033[38;2;125;155;209m",
     "info": "\033[38;2;108;182;255m",
-    "warning": "\033[38;2;224;168;79m",
+    "warning": "\033[38;2;224;122;63m",
     "error": "\033[38;2;217;107;102m",
     "command": "\033[38;2;122;133;140m",
     "task": "\033[38;2;125;155;209m",
@@ -86,6 +88,8 @@ def color_for_label(label: str) -> str:
         return COLORS["task"]
     if normalized.endswith(" output"):
         return COLORS["command"]
+    if normalized.endswith(" check"):
+        return COLORS["system"]
     if is_tool_label(normalized):
         return COLORS["command"]
     return ""
@@ -97,6 +101,8 @@ def body_color_for_label(label: str, header_color: str) -> str:
         return THINKING_BODY
     if label.strip().lower() in {"rubric review", "goal"}:
         return RUBRIC_BODY
+    if label.strip().lower() == "warning":
+        return WARNING_BODY
     return header_color
 
 

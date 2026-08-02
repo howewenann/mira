@@ -59,26 +59,26 @@ def prepare_plan(objective: str) -> str:
     return f"prepared:{objective}"
 
 
-@tool("present_plan")
-def present_plan_stub(title: str) -> str:
+@tool("finalize_plan")
+def finalize_plan_stub(title: str) -> str:
     """Fake finalization control that must not run during research."""
-    raise AssertionError(f"present_plan executed unexpectedly: {title}")
+    raise AssertionError(f"finalize_plan executed unexpectedly: {title}")
 
 
-@tool("plan_show")
-def plan_show_stub() -> str:
+@tool("show_plan")
+def show_plan_stub() -> str:
     """Fake retained Plan display control."""
     return "current Plan shown"
 
 
-@tool("present_goal")
-def present_goal_stub(title: str) -> str:
+@tool("finalize_goal")
+def finalize_goal_stub(title: str) -> str:
     """Fake finalization control that must not run during research."""
-    raise AssertionError(f"present_goal executed unexpectedly: {title}")
+    raise AssertionError(f"finalize_goal executed unexpectedly: {title}")
 
 
-@tool("goal_show")
-def goal_show_stub() -> str:
+@tool("show_goal")
+def show_goal_stub() -> str:
     """Fake retained Goal display control."""
     return "current Goal shown"
 
@@ -216,14 +216,14 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     PLANNING_RESPONSE_STATUS_FAILURE,
                 )
 
-    async def test_wrong_stage_present_plan_returns_tool_error_then_model_uses_plan_show(self) -> None:
+    async def test_wrong_stage_finalize_plan_returns_tool_error_then_model_uses_show_plan(self) -> None:
         model = BindableFakeModel(
             responses=[
                 AIMessage(
                     content="",
                     tool_calls=[
                         {
-                            "name": "present_plan",
+                            "name": "finalize_plan",
                             "args": {"title": "Existing Plan"},
                             "id": "call-wrong-present",
                         }
@@ -232,7 +232,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(
                     content="",
                     tool_calls=[
-                        {"name": "plan_show", "args": {}, "id": "call-show"}
+                        {"name": "show_plan", "args": {}, "id": "call-show"}
                     ],
                 ),
                 AIMessage(content="The retained Plan is shown.\nRESPONSE_STATUS: COMPLETE"),
@@ -240,7 +240,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         graph = create_agent(
             model=model,
-            tools=[present_plan_stub, plan_show_stub],
+            tools=[finalize_plan_stub, show_plan_stub],
             middleware=correction_middleware(),
         )
 
@@ -262,7 +262,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, ToolMessage) and message.tool_call_id == "call-show"
         )
         self.assertEqual(wrong.status, "error")
-        self.assertIn("plan_show", str(wrong.content))
+        self.assertIn("show_plan", str(wrong.content))
         self.assertEqual(shown.status, "success")
         self.assertEqual(shown.content, "current Plan shown")
         self.assertEqual(
@@ -270,14 +270,14 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "The retained Plan is shown.\nRESPONSE_STATUS: COMPLETE",
         )
 
-    async def test_wrong_stage_present_goal_returns_tool_error_then_model_uses_goal_show(self) -> None:
+    async def test_wrong_stage_finalize_goal_returns_tool_error_then_model_uses_show_goal(self) -> None:
         model = BindableFakeModel(
             responses=[
                 AIMessage(
                     content="",
                     tool_calls=[
                         {
-                            "name": "present_goal",
+                            "name": "finalize_goal",
                             "args": {"title": "Existing Goal"},
                             "id": "call-wrong-goal",
                         }
@@ -286,7 +286,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(
                     content="",
                     tool_calls=[
-                        {"name": "goal_show", "args": {}, "id": "call-goal-show"}
+                        {"name": "show_goal", "args": {}, "id": "call-goal-show"}
                     ],
                 ),
                 AIMessage(content="The retained Goal is shown.\nRESPONSE_STATUS: COMPLETE"),
@@ -294,7 +294,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         graph = create_agent(
             model=model,
-            tools=[present_goal_stub, goal_show_stub],
+            tools=[finalize_goal_stub, show_goal_stub],
             middleware=correction_middleware(),
         )
 
@@ -316,7 +316,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(message, ToolMessage) and message.tool_call_id == "call-goal-show"
         )
         self.assertEqual(wrong.status, "error")
-        self.assertIn("goal_show", str(wrong.content))
+        self.assertIn("show_goal", str(wrong.content))
         self.assertEqual(shown.content, "current Goal shown")
         self.assertEqual(
             result["messages"][-1].content,

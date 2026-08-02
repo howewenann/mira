@@ -21,7 +21,16 @@ from runtime.diagnostics import (
 )
 from runtime.error_report import clear_error_reports, error_report_path, write_error_report
 from runtime.trace_tail import main as trace_tail_main
-from ui.terminal_colors import TerminalColorizer, color_for_label, colorize_line, enable_console_colors, strip_ansi
+from ui.terminal_colors import (
+    COLORS,
+    WARNING_BODY,
+    TerminalColorizer,
+    body_color_for_label,
+    color_for_label,
+    colorize_line,
+    enable_console_colors,
+    strip_ansi,
+)
 
 
 class ErrorReportTests(unittest.TestCase):
@@ -261,6 +270,11 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertTrue(color_for_label("subagent - worker"))
         self.assertTrue(color_for_label("read_file"))
         self.assertEqual(color_for_label("ordinary sentence"), "")
+
+    def test_response_checks_use_system_color_and_warnings_use_orange(self) -> None:
+        self.assertEqual(color_for_label("Response check"), COLORS["system"])
+        self.assertEqual(COLORS["warning"], "\033[38;2;224;122;63m")
+        self.assertEqual(body_color_for_label("warning", COLORS["warning"]), WARNING_BODY)
 
     def test_trace_tail_enable_console_colors_failure_is_non_fatal(self) -> None:
         real_import = builtins.__import__

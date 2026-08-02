@@ -169,6 +169,7 @@ class TraceStreamTests(unittest.TestCase):
         trace.assistant_delta("I'll inspect later.\nRESPONSE_STATUS: NEEDS_RESEARCH")
         trace.correction(
             {
+                "check_name": "Response",
                 "workflow": "Plan",
                 "failed_check": "RESPONSE_STATUS: NEEDS_RESEARCH had no tool call.",
                 "retry_prompt": "Perform the research now.",
@@ -183,7 +184,7 @@ class TraceStreamTests(unittest.TestCase):
             joined,
         )
         self.assertIn(
-            "Plan check:\nCheck failed: RESPONSE_STATUS: NEEDS_RESEARCH had no tool call.",
+            "Response check:\nWorkflow: Plan\nCheck failed: RESPONSE_STATUS: NEEDS_RESEARCH had no tool call.",
             joined,
         )
         self.assertIn("Retry prompt: Perform the research now.", joined)

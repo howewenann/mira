@@ -199,7 +199,7 @@ def make_app(
 
 
 def stage_plan(app: MiraApp) -> None:
-    """Provide the exact criteria-first state required by present_plan."""
+    """Provide the exact criteria-first state required by finalize_plan."""
     app.mode["plan_staging"] = {
         "objective": "Complete the requested Plan outcome.",
         "context_and_constraints": "Preserve unrelated behavior.",
@@ -234,12 +234,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         completions = {
             "ask_user": "Use A",
-            "prepare_goal": "Success Criteria are ready. Continue to present_goal.",
-            "prepare_plan": "Success Criteria are ready. Continue to present_plan.",
-            "present_goal": "Goal presented for user review.",
-            "present_plan": "Plan presented for user review.",
-            "goal_show": "Current Goal rendered.",
-            "plan_show": "Current Plan rendered.",
+            "prepare_goal": "Success Criteria are ready. Continue to finalize_goal.",
+            "prepare_plan": "Success Criteria are ready. Continue to finalize_plan.",
+            "finalize_goal": "Goal presented for user review.",
+            "finalize_plan": "Plan presented for user review.",
+            "show_goal": "Current Goal rendered.",
+            "show_plan": "Current Plan rendered.",
         }
 
         async with app.run_test() as pilot:
@@ -954,7 +954,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Structured plan bubbles should also separate thinking blocks."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Boundary Plan",
             "key_changes": ["Render a plan bubble."],
             "test_plan": ["Check reasoning block count."],
@@ -966,7 +966,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.reasoning_delta("first reasoning")
             stage_plan(app)
-            await app.present_plan(interrupt)
+            await app.finalize_plan(interrupt)
             app.reasoning_delta("second reasoning")
             await pilot.pause()
 
@@ -1051,7 +1051,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.generate.await_args.args[1], "Existing index is SQLite.")
         self.assertIn("<success_criteria>\n- Ranked search works.", resume)
 
-    async def test_prepare_goal_shows_definition_and_plan_spinners(self) -> None:
+    async def test_prepare_show_goals_definition_and_plan_spinners(self) -> None:
         app = make_app()
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1114,9 +1114,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.await_args.kwargs["plan_agent"], app.plan_agent)
         self.assertEqual(run.await_args.kwargs["display_text"], "/goal Write a professional announcement.")
 
-    async def test_present_goal_builds_criteria_only_current_goal(self) -> None:
+    async def test_finalize_goal_builds_criteria_only_current_goal(self) -> None:
         app = make_app()
-        interrupt = {"type": "present_goal", "title": "Announcement"}
+        interrupt = {"type": "finalize_goal", "title": "Announcement"}
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.mode.update(
@@ -1129,7 +1129,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             )
-            await app.present_goal(interrupt)
+            await app.finalize_goal(interrupt)
             await pilot.pause()
 
         value = app.session["current_goal"]
@@ -1197,7 +1197,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.session["current_plan"]["id"], "plan-1")
         self.assertIsNone(app.session.get("current_goal"))
 
-    async def test_goal_show_mismatch_directs_to_current_plan(self) -> None:
+    async def test_show_goal_mismatch_directs_to_current_plan(self) -> None:
         app = make_app()
         plan = plan_artifact(
             plan_id="plan-1",
@@ -1804,6 +1804,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             chat.text_delta("I'll research that next.\nRESPONSE_STATUS: NEEDS_RESEARCH")
             chat.correction(
                 {
+                    "check_name": "Response",
                     "workflow": "Plan",
                     "failed_check": (
                         "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
@@ -1827,9 +1828,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(corrections), 1)
             correction = renderable_plain(corrections[0])
+            self.assertIn("Workflow: Plan", correction)
             self.assertIn("Check failed: RESPONSE_STATUS: NEEDS_RESEARCH", correction)
             self.assertIn("Retry prompt: Perform that research now.", correction)
             self.assertIn("Retry 1 of 2", correction)
+            self.assertEqual(corrections[0].styles.border_top[1], Color.parse("#7D9BD1"))
+            self.assertEqual(corrections[0].styles.color, Color.parse("#DCE6FA"))
+
+            chat.system_message("Proceed carefully.", kind="warning")
+            await pilot.pause()
+            warning = list(chat.query(".message.warning"))[-1]
+            self.assertEqual(warning.styles.border_top[1], Color.parse("#E07A3F"))
+            self.assertEqual(warning.styles.color, Color.parse("#F5C7A9"))
 
     async def test_ctrl_c_copies_chat_selection_with_container_or_no_focus(self) -> None:
         app = make_app()
@@ -5474,13 +5484,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(task, timeout=2), "c")
 
-    async def test_present_plan_bubble_closes_but_retains_current_plan(self) -> None:
+    async def test_finalize_plan_bubble_closes_but_retains_current_plan(self) -> None:
         """Close should hide controls without clearing the authoritative Plan."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Ephemeral Structured Planning",
-            "key_changes": ["Add present_plan.", "Remove /plans."],
+            "key_changes": ["Add finalize_plan.", "Remove /plans."],
             "test_plan": ["Verify the plan bubble controls."],
             "assumptions": ["Plans are temporary UI artifacts."],
         }
@@ -5490,7 +5500,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             stage_plan(app)
             self.assertEqual(
-                await app.present_plan(interrupt),
+                await app.finalize_plan(interrupt),
                 "Plan and Success Criteria presented for user review.",
             )
             await pilot.pause()
@@ -5533,11 +5543,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Status: proposed", rendered)
 
-    async def test_present_plan_shortcuts_match_visible_button_labels(self) -> None:
+    async def test_finalize_plan_shortcuts_match_visible_button_labels(self) -> None:
         """Presented plan controls should focus and honor visible keyboard controls."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Shortcut Plan",
             "key_changes": ["Handle i, r, and d."],
             "test_plan": ["Press each visible shortcut."],
@@ -5547,7 +5557,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             stage_plan(app)
-            await app.present_plan(interrupt)
+            await app.finalize_plan(interrupt)
             await pilot.pause()
 
             first_button = app.query_one("#plan-implement-plan-1", Button)
@@ -5589,10 +5599,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
 
-    async def test_plan_show_reopens_exact_plan_and_clear_keeps_history(self) -> None:
+    async def test_show_plan_reopens_exact_plan_and_clear_keeps_history(self) -> None:
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Recall Plan",
             "key_changes": ["Keep exact fields."],
             "test_plan": ["Check exact rendering."],
@@ -5602,7 +5612,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             stage_plan(app)
-            await app.present_plan(interrupt)
+            await app.finalize_plan(interrupt)
             await pilot.pause()
             expected = dict(app.session["current_plan"])
             event_count = len(app.session["events"])
@@ -5635,7 +5645,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Cancelling a later turn should not discard an active plan bubble."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Cancellation Plan",
             "key_changes": ["Cancel an unrelated turn."],
             "test_plan": ["Verify plan actions remain visible."],
@@ -5646,7 +5656,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             stage_plan(app)
-            await app.present_plan(interrupt)
+            await app.finalize_plan(interrupt)
             await pilot.pause()
             self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
 
@@ -5671,11 +5681,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
         self.assertEqual(plan["assumptions"], ["No additional assumptions."])
 
-    async def test_present_plan_revise_cancel_keeps_plan_active(self) -> None:
+    async def test_finalize_plan_revise_cancel_keeps_plan_active(self) -> None:
         """Cancelling a revision prompt should leave the current plan actionable."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Palindrome Plan",
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
@@ -5687,7 +5697,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 stage_plan(app)
-                await app.present_plan(interrupt)
+                await app.finalize_plan(interrupt)
                 await pilot.pause()
                 await app._handle_plan_action("revise", "plan-1")
                 await pilot.pause()
@@ -5697,12 +5707,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
                 self.assertNotIn("Status: revision requested", rendered)
 
-    async def test_present_plan_revise_runs_planning_turn_with_plan_context(self) -> None:
+    async def test_finalize_plan_revise_runs_planning_turn_with_plan_context(self) -> None:
         """Submitted revision feedback should become a visible planning turn with old-plan context."""
         app = make_app()
         calls: list[dict[str, Any]] = []
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Palindrome Plan",
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
@@ -5720,7 +5730,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 stage_plan(app)
-                await app.present_plan(interrupt)
+                await app.finalize_plan(interrupt)
                 await pilot.pause()
                 await app._handle_plan_action("revise", "plan-1")
                 await wait_until(lambda: len(calls) == 1)
@@ -5737,11 +5747,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
                 self.assertIn("Status: proposed", rendered)
 
-    async def test_present_plan_revise_button_opens_feedback_prompt(self) -> None:
+    async def test_finalize_plan_revise_button_opens_feedback_prompt(self) -> None:
         """The Revise button should ask for feedback before resolving the plan."""
         app = make_app()
         interrupt = {
-            "type": "present_plan",
+            "type": "finalize_plan",
             "title": "Palindrome Plan",
             "key_changes": ["Add palindrome.py."],
             "test_plan": ["Add unit tests for palindrome inputs."],
@@ -5752,7 +5762,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             stage_plan(app)
-            await app.present_plan(interrupt)
+            await app.finalize_plan(interrupt)
             await pilot.pause()
             app.query_one("#plan-revise-plan-1", Button).press()
             await wait_until(lambda: app.query_one(PromptPanel).display)

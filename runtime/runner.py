@@ -419,6 +419,7 @@ async def run_turn(
         payload["planning_stage"] = planning_stage
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
+    historical_tool_lifecycle = await checkpoint_tool_lifecycle(agent, config)
 
     while True:
         message_metadata = MessageInvocationMetadata()
@@ -454,7 +455,13 @@ async def run_turn(
             capture_output(stream.output(), output),
         )
 
-        render_output_tool_results(output.get("value"), event_renderer, result)
+        if historical_tool_lifecycle is not None:
+            render_output_tool_results(
+                output.get("value"),
+                event_renderer,
+                result,
+                historical=historical_tool_lifecycle,
+            )
         result.rubric_evaluations.extend(rubric_renderer.evaluations)
         result.final_text = final_text(output.get("value")) or result.final_text
         usage_delta = result.commit_loop_usage(output.get("value"))
@@ -508,10 +515,10 @@ async def run_turn(
         )
         prepare_plan_interrupt = first_typed_interrupt(interrupts, "prepare_plan")
         prepare_goal_interrupt = first_typed_interrupt(interrupts, "prepare_goal")
-        goal_interrupt = first_typed_interrupt(interrupts, "present_goal")
-        plan_interrupt = first_typed_interrupt(interrupts, "present_plan")
-        goal_show_interrupt = first_typed_interrupt(interrupts, "goal_show")
-        plan_show_interrupt = first_typed_interrupt(interrupts, "plan_show")
+        finalize_goal_interrupt = first_typed_interrupt(interrupts, "finalize_goal")
+        finalize_plan_interrupt = first_typed_interrupt(interrupts, "finalize_plan")
+        show_goal_interrupt = first_typed_interrupt(interrupts, "show_goal")
+        show_plan_interrupt = first_typed_interrupt(interrupts, "show_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
         if prepare_plan_interrupt is not None:
             call_id = ensure_control_tool_call(
@@ -563,10 +570,10 @@ async def run_turn(
                 update={"planning_stage": PLANNING_STAGE_GOAL_FINALIZE},
             )
             planning_stage = PLANNING_STAGE_GOAL_FINALIZE
-        elif goal_interrupt is not None:
+        elif finalize_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
-                "present_goal",
-                goal_interrupt,
+                "finalize_goal",
+                finalize_goal_interrupt,
                 output.get("value"),
                 event_renderer,
                 result,
@@ -574,18 +581,18 @@ async def run_turn(
                 tool_draft_start,
             )
             await resolve_control_surface(
-                "present_goal",
-                renderer.present_goal(goal_interrupt),
+                "finalize_goal",
+                renderer.finalize_goal(finalize_goal_interrupt),
                 event_renderer,
                 result,
                 call_id,
             )
             result.final_text = ""
             return result
-        elif plan_interrupt is not None:
+        elif finalize_plan_interrupt is not None:
             call_id = ensure_control_tool_call(
-                "present_plan",
-                plan_interrupt,
+                "finalize_plan",
+                finalize_plan_interrupt,
                 output.get("value"),
                 event_renderer,
                 result,
@@ -593,18 +600,18 @@ async def run_turn(
                 tool_draft_start,
             )
             await resolve_control_surface(
-                "present_plan",
-                renderer.present_plan(plan_interrupt),
+                "finalize_plan",
+                renderer.finalize_plan(finalize_plan_interrupt),
                 event_renderer,
                 result,
                 call_id,
             )
             result.final_text = ""
             return result
-        elif goal_show_interrupt is not None:
+        elif show_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
-                "goal_show",
-                goal_show_interrupt,
+                "show_goal",
+                show_goal_interrupt,
                 output.get("value"),
                 event_renderer,
                 result,
@@ -612,18 +619,18 @@ async def run_turn(
                 tool_draft_start,
             )
             await resolve_control_surface(
-                "goal_show",
-                renderer.show_goal(goal_show_interrupt),
+                "show_goal",
+                renderer.show_goal(show_goal_interrupt),
                 event_renderer,
                 result,
                 call_id,
             )
             result.final_text = ""
             return result
-        elif plan_show_interrupt is not None:
+        elif show_plan_interrupt is not None:
             call_id = ensure_control_tool_call(
-                "plan_show",
-                plan_show_interrupt,
+                "show_plan",
+                show_plan_interrupt,
                 output.get("value"),
                 event_renderer,
                 result,
@@ -631,8 +638,8 @@ async def run_turn(
                 tool_draft_start,
             )
             await resolve_control_surface(
-                "plan_show",
-                renderer.show_plan(plan_show_interrupt),
+                "show_plan",
+                renderer.show_plan(show_plan_interrupt),
                 event_renderer,
                 result,
                 call_id,
@@ -674,6 +681,29 @@ async def completed_agent_state(agent: Any, config: dict[str, Any]) -> dict[str,
         return {}
     values = getattr(snapshot, "values", None)
     return values if isinstance(values, dict) else {}
+
+
+async def checkpoint_tool_lifecycle(
+    agent: Any,
+    config: dict[str, Any],
+) -> Counter[tuple[str, ...]] | None:
+    """Return the executed lifecycle already present before a top-level turn.
+
+    Agents without checkpoint access are treated as fresh test/provider surfaces.
+    A checkpoint read failure disables final-output recovery for safety so historical
+    calls cannot be mistaken for current work.
+    """
+    getter = getattr(agent, "aget_state", None)
+    if not callable(getter):
+        return Counter()
+    try:
+        snapshot = await getter(config)
+    except Exception:
+        return None
+    values = getattr(snapshot, "values", None)
+    if not isinstance(values, dict):
+        return Counter()
+    return Counter(lifecycle_identity(item) for item in output_tool_lifecycle(values))
 
 
 def first_ask_user_interrupt(interrupts: list[Any]) -> Any | None:
@@ -882,24 +912,55 @@ def complete_control_tool(
         renderer.completed_tool_result(name, text, call_id=call_id)
 
 
-def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -> None:
+def render_output_tool_results(
+    output: Any,
+    renderer: Any,
+    result: TurnResult,
+    *,
+    historical: Counter[tuple[str, ...]] | None = None,
+) -> None:
     """Recover executed calls/results that only appear in final graph state."""
     recovered_tool_call = getattr(renderer, "recovered_tool_call", None)
     recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
     recovered_tool_error = getattr(renderer, "recovered_tool_error", None)
-    for item in output_tool_lifecycle(output):
+    lifecycle = current_tool_lifecycle(output, historical or Counter())
+    control_error_ids = {
+        str(item.get("call_id") or "")
+        for item in lifecycle
+        if item["type"] == "tool_result"
+        and item["name"] in CONTROL_TOOLS
+        and item.get("status") == "error"
+        and item.get("call_id")
+    }
+    control_error_names = Counter(
+        str(item["name"])
+        for item in lifecycle
+        if item["type"] == "tool_result"
+        and item["name"] in CONTROL_TOOLS
+        and item.get("status") == "error"
+        and not item.get("call_id")
+    )
+    for item in lifecycle:
         if item["type"] == "tool_call":
             call = normalized_call(item["call"])
             name = str(call["name"])
             call_id = str(call.get("id") or "")
-            if name in CONTROL_TOOLS or not result.record_tool_call(name, call_id):
+            if name in CONTROL_TOOLS:
+                if call_id and call_id not in control_error_ids:
+                    continue
+                if not call_id:
+                    if control_error_names[name] < 1:
+                        continue
+                    control_error_names[name] -= 1
+            if not result.record_tool_call(name, call_id):
                 continue
             callback = recovered_tool_call if callable(recovered_tool_call) else renderer.tool_call
             callback(name, call.get("args", {}), call_id=call_id)
             continue
 
         if item["name"] in CONTROL_TOOLS:
-            continue
+            if item.get("status") != "error":
+                continue
         text = item["output"]
         call_id = item["call_id"]
         if not result.record_tool_result(text, call_id, item["name"]):
@@ -910,6 +971,44 @@ def render_output_tool_results(output: Any, renderer: Any, result: TurnResult) -
             recovered_tool_result(item["name"], text, call_id=call_id)
         else:
             renderer.tool_result(item["name"], text, call_id=call_id)
+
+
+def current_tool_lifecycle(
+    output: Any,
+    historical: Counter[tuple[str, ...]],
+) -> list[dict[str, Any]]:
+    """Remove the pre-turn lifecycle from a completed graph-state projection."""
+    remaining = historical.copy()
+    current = []
+    for item in output_tool_lifecycle(output):
+        identity = lifecycle_identity(item)
+        if remaining[identity] > 0:
+            remaining[identity] -= 1
+            continue
+        current.append(item)
+    return current
+
+
+def lifecycle_identity(item: dict[str, Any]) -> tuple[str, ...]:
+    """Return a stable identity for occurrence-aware lifecycle subtraction."""
+    if item.get("type") == "tool_call":
+        call = normalized_call(item.get("call") or {})
+        call_id = str(call.get("id") or "")
+        if call_id:
+            return ("tool_call", "id", call_id)
+        args = json.dumps(call.get("args", {}), sort_keys=True, default=str, ensure_ascii=False)
+        return ("tool_call", "value", str(call.get("name") or "tool"), args)
+
+    call_id = str(item.get("call_id") or "")
+    if call_id:
+        return ("tool_result", "id", call_id)
+    return (
+        "tool_result",
+        "value",
+        str(item.get("name") or "tool"),
+        str(item.get("status") or "success"),
+        str(item.get("output") or ""),
+    )
 
 
 async def unexecuted_tool_call_error(

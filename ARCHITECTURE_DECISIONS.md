@@ -305,8 +305,11 @@ settings-panel tool behavior changes.
 **Decision:** `/plan` enters one persistent read-only Plan conversation;
 `/plan <prompt>` enters that same mode and submits the suffix through the normal
 Plan message path. Imperative language never enables execution. The Plan prompt
-uses three non-persisted outcomes: `DISCUSSION` returns ordinary read-only prose,
-`NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls `prepare_plan`. There
+uses four non-persisted outcomes: `DISPLAY_RETAINED` immediately calls the
+applicable `show_plan` or `show_goal` control, `DISCUSSION` returns ordinary
+read-only prose, `NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls
+`prepare_plan`. Display requests do not research, reproduce retained work in
+prose, prepare a replacement, or enter finalisation first. There
 is no classifier model, structured response format, prose regex, or semantic
 grader.
 
@@ -320,12 +323,12 @@ Formal construction is always criteria-first:
 ```text
 prepare_plan
 -> SuccessCriteriaService
--> forced present_plan
+-> forced finalize_plan
 -> Plan bubble
 ```
 
 The staging middleware exposes `prepare_plan` during conversation and only
-`present_plan` during finalisation, with required tool choice. The generated
+`finalize_plan` during finalisation, with required tool choice. The generated
 Success Criteria are binding context. The model supplies Title, Key Changes,
 Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
@@ -344,12 +347,14 @@ response, append a named correction prompt, and use LangGraph's native jump to
 the model node without replaying completed tools. Missing, duplicated,
 malformed, non-terminal, empty, reasoning-only, or Goal-only statuses take the
 same bounded recovery path with general feedback. Finalisation is isolated from
-this contract and remains a forced single `present_plan` call.
+this contract and remains a forced single `finalize_plan` call.
 
 The retry cap counts retries after the initial rejected candidate. Rejected
 prose and its correction prompt remain paired in checkpoint and durable visible
 history so neither the user nor the model sees a hanging correction. A generic
-correction bubble shows the failed check, exact retry prompt, and retry count.
+`Response check` bubble shows the workflow, failed check, exact retry prompt,
+and retry count. Its rule-owned display name keeps the middleware free of
+Plan/Goal vocabulary.
 Exhaustion retains the last candidate, shows the failed check and exhausted
 limit, then appends an explicit incomplete response. The exact status line is
 ordinary assistant text: it remains visible and byte-identical in model state,
@@ -381,7 +386,7 @@ replacement, and calls `SuccessCriteriaService.revise()` for both rubric
 settings; approach-only feedback preserves criteria. Close hides controls
 without changing or deleting `current_plan`.
 
-`/plan-show` and the read-only `plan_show` control tool call the same renderer
+`/plan-show` and the read-only `show_plan` control tool call the same renderer
 and make no Plan-generating model call. `/plan-clear` removes only
 `current_plan`. `/plan-resume` accepts every incomplete state, including a
 never-run `proposed` Plan, switches to Act, and continues immediately; completed
@@ -416,22 +421,22 @@ a record when both are populated; timestamps never pick a winner.
 
 `/goal <prompt>` uses a dedicated read-only planning thread without changing
 the current Plan/Act mode: optional investigation and `ask_user`, then
-`prepare_goal` -> `SuccessCriteriaService` -> forced `present_goal` ->
+`prepare_goal` -> `SuccessCriteriaService` -> forced `finalize_goal` ->
 `GoalBubble`.
 
-Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `plan_show`,
-and `goal_show`. Finalization exposes only `present_goal` with required tool
+Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `show_plan`,
+and `show_goal`. Finalization exposes only `finalize_goal` with required tool
 choice. The visible command objective remains authoritative; bounded evidence
 may clarify but not enlarge it. Staging is transient, so failed or cancelled
 generation leaves current formal work unchanged. Goal construction never calls
-`present_plan` and never produces a hidden implementation Plan.
+`finalize_plan` and never produces a hidden implementation Plan.
 
 Goal research uses the same transient natural-stop protocol and bounded retry
 state as Plan research, but its only preparation marker and tool are
 `RESPONSE_STATUS: READY_TO_PREPARE_GOAL` and `prepare_goal`. Plan preparation is
 not exposed and a Plan-only status is malformed. Conversely, Goal preparation
 is absent from Plan research. Goal finalisation remains outside validation and
-retains the single required `present_goal` call.
+retains the single required `finalize_goal` call.
 
 `SuccessCriteriaService` treats the objective as authoritative and receives
 only the effective objective, optional research context, and previous criteria
@@ -450,7 +455,7 @@ Goal events.
 Close actions. Implement starts or restarts one explicit Act attempt. Revise
 uses the read-only Goal pipeline and `SuccessCriteriaService.revise()` to create
 a complete replacement. Close hides controls without changing `current_goal`.
-`/goal-show` and `goal_show` share the exact renderer, `/goal-resume` accepts
+`/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
 incomplete states, and `/goal-clear` removes only the current Goal.
 
 MIRA replaces current formal work only after the new Plan or Goal is presented
@@ -482,7 +487,7 @@ durability, review, recall, replacement, and evaluation guarantees as Plans.
 
 **Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
 `agent/middleware/`, `agent/default_resources/tools/prepare_goal.py`,
-`agent/default_resources/tools/present_goal.py`, `runtime/runner.py`,
+`agent/default_resources/tools/finalize_goal.py`, `runtime/runner.py`,
 `session/goals.py`, `session/context.py`, `ui/app.py`, `ui/repl.py`, and
 `ui/widgets/chat_log.py`.
 
@@ -503,10 +508,11 @@ correction.
 Planning stages have two matching enforcement layers. Request-time filtering
 shows only the formal controls valid for the current stage. A native
 `wrap_tool_call` guard then rejects remembered or hallucinated wrong-stage
-`prepare_plan`, `present_plan`, `prepare_goal`, or `present_goal` calls with an
+`prepare_plan`, `finalize_plan`, `prepare_goal`, or `finalize_goal` calls with an
 error `ToolMessage` before their handler can call `interrupt()`. The standard
 agent edge returns that result to the model, which may select the correct tool;
-these calls never consume natural-stop correction retries.
+the same error is rendered on the original control-tool bubble. These calls
+never consume natural-stop correction retries.
 
 **Why:** A weak model may call a registered control remembered from transcript
 history even when its schema is hidden from the current request. Tool visibility
@@ -528,6 +534,13 @@ behavior they own. Correction events are durable transcript events and are
 projected as correction context, not user context, when a saved session is
 resumed. Accepted response statuses need no special projection because they are
 preserved as ordinary assistant prose.
+
+The authoritative retained artifacts are the session's `current_plan` and
+`current_goal`; LangGraph checkpoints instead retain model messages, planning
+stage, and interrupt/resume state. Natural-language recall enters the graph so
+the model can choose `show_plan` or `show_goal`, after which the control surface
+reads the artifact directly from the session. `/plan-show` and `/goal-show`
+bypass model interpretation and read the same fields.
 
 **Where to check:** `agent/middleware/`, `agent/planning/response_status.py`,
 `runtime/correction_events.py`, `runtime/runner.py`, `session/context.py`.
@@ -552,23 +565,32 @@ stays simpler for scripts and quick prompts.
 
 All tools share one underlying lifecycle for call identity, visible start,
 completion or error, persistence, and replay. This includes the control
-tools `ask_user`, `prepare_goal`, `prepare_plan`, `present_goal`, `present_plan`,
-`goal_show`, and `plan_show`: their dedicated surfaces remain, but
+tools `ask_user`, `prepare_goal`, `prepare_plan`, `finalize_goal`, `finalize_plan`,
+`show_goal`, and `show_plan`: their dedicated surfaces remain, but
 no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
 
 Completed tool results update their original tool blocks before the overall turn
 ends when the provider exposes a live terminal event. Final graph-state recovery
-remains the fallback for providers that do not and uses the same identity-based
-deduplication, recorder, and renderer path rather than a control-specific event
-bus. Reopened sessions replay call and result events in their saved order.
+remains the fallback for providers that do not. Before each top-level turn MIRA
+snapshots the checkpoint's existing lifecycle, then subtracts that occurrence-
+aware baseline from the final graph state. Only lifecycle entries introduced by
+the current turn are eligible for recovery, so complete checkpoint history
+cannot recreate already-saved tool bubbles. Stable call ids are preferred;
+idless entries use normalized call/result fingerprints and counts. If an
+established checkpoint cannot be read, recovery is skipped rather than risking
+historical duplication. Reopened sessions replay saved events in their order.
 Native tool failures use the same path with explicit error status: terminal
 watchers get a bounded chance to publish an already-observed error before an
 overall stream failure propagates, and saved sessions replay the result with an
 inline error label. Provider drafts without their final call id are promoted
 FIFO by tool name when the stable id arrives, while distinct stable ids remain
 separate retry attempts.
+
+Harness response checks use the system/status blue palette in both Textual and
+terminal traces. Warnings use a distinct orange palette rather than the user's
+gold, while errors remain red and formal artifacts retain their own colors.
 
 On Windows, MIRA pins Textual 8.2.7 and selects a narrow Windows driver adapter.
 Textual's Win32 event monitor normally reduces each `KEY_EVENT_RECORD` to its

@@ -17,12 +17,12 @@ from agent.middleware import (
 )
 from agent.planning.response_status import PlanningResponseStatusRule
 from agent.planning.policy import (
+    FINALIZE_GOAL_TOOL,
+    FINALIZE_PLAN_TOOL,
     PLAN_DENIED_FS_OPERATIONS,
     PLAN_DISABLED_TOOLS,
     PREPARE_GOAL_TOOL,
     PREPARE_PLAN_TOOL,
-    PRESENT_GOAL_TOOL,
-    PRESENT_PLAN_TOOL,
     SHARED_QUESTION_POLICY,
     plan_system_prompt,
 )
@@ -44,7 +44,12 @@ from config.settings import (
 )
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
-ACTION_EXCLUDED_TOOLS = (PREPARE_PLAN_TOOL, PREPARE_GOAL_TOOL, PRESENT_PLAN_TOOL, PRESENT_GOAL_TOOL)
+ACTION_EXCLUDED_TOOLS = (
+    PREPARE_PLAN_TOOL,
+    PREPARE_GOAL_TOOL,
+    FINALIZE_PLAN_TOOL,
+    FINALIZE_GOAL_TOOL,
+)
 PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
 _REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 

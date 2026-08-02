@@ -1269,13 +1269,13 @@ class MiraApp(App[None]):
             f"{revision_context}"
         )
 
-    async def present_plan(self, interrupt: Any) -> str:
+    async def finalize_plan(self, interrupt: Any) -> str:
         """Persist and render one criteria-first PlanArtifact."""
         self.waiting_finished()
         payload = plan_request(interrupt)
         staging = self.mode.get("plan_staging")
         if not isinstance(staging, dict):
-            raise RuntimeError("present_plan requires staged Plan context and Success Criteria")
+            raise RuntimeError("finalize_plan requires staged Plan context and Success Criteria")
         plan_id = self._next_plan_id()
         artifact = plan_artifact(
             plan_id=plan_id,
@@ -1424,12 +1424,12 @@ class MiraApp(App[None]):
             f"<success_criteria>\n{criteria}\n</success_criteria>"
         )
 
-    async def present_goal(self, interrupt: Any) -> str:
+    async def finalize_goal(self, interrupt: Any) -> str:
         """Persist and render one criteria-only GoalArtifact."""
         self.waiting_finished()
         staging = self.mode.get("goal_staging")
         if not isinstance(staging, dict) or not staging.get("success_criteria"):
-            raise RuntimeError("present_goal requires staged Objective and Success Criteria")
+            raise RuntimeError("finalize_goal requires staged Objective and Success Criteria")
         artifact = goal_artifact(
             goal_id=self._next_goal_id(),
             title=goal_title_request(interrupt),

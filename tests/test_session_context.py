@@ -831,6 +831,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             {
                 "type": "correction",
                 "protocol": "plan_response_status",
+                "check_name": "Response",
                 "workflow": "Plan",
                 "failed_check": (
                     "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
@@ -885,6 +886,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             {
                 "type": "correction",
                 "protocol": "plan_response_status",
+                "check_name": "Response",
                 "workflow": "Plan",
                 "failed_check": (
                     "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
@@ -905,7 +907,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(events[1]["exhausted"])
         self.assertEqual(events[2]["text"], "MIRA could not produce a valid response.")
         self.assertIn(
-            "correction (planning): Correction check failed",
+            "correction (planning): Response check (Plan) failed",
             context.build_resume_context({"events": events, "current_plan": None, "current_goal": None}),
         )
 
@@ -1002,12 +1004,12 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recording = SessionRecordingRenderer(renderer, recorder)
         completions = {
             "ask_user": "Use A",
-            "prepare_goal": "Success Criteria are ready. Continue to present_goal.",
-            "prepare_plan": "Success Criteria are ready. Continue to present_plan.",
-            "present_goal": "Goal presented for user review.",
-            "present_plan": "Plan presented for user review.",
-            "goal_show": "Current Goal rendered.",
-            "plan_show": "Current Plan rendered.",
+            "prepare_goal": "Success Criteria are ready. Continue to finalize_goal.",
+            "prepare_plan": "Success Criteria are ready. Continue to finalize_plan.",
+            "finalize_goal": "Goal presented for user review.",
+            "finalize_plan": "Plan presented for user review.",
+            "show_goal": "Current Goal rendered.",
+            "show_plan": "Current Plan rendered.",
         }
 
         for name in CONTROL_TOOLS:
@@ -1036,7 +1038,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             CONTROL_TOOLS,
         )
 
-    async def test_recording_renderer_plan_show_uses_exact_terminal_fallback(self) -> None:
+    async def test_recording_renderer_show_plan_uses_exact_terminal_fallback(self) -> None:
         class TerminalFallback:
             def __init__(self) -> None:
                 self.plans: list[dict[str, Any]] = []
@@ -1063,7 +1065,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             SessionRecorder(record, Store(), "action"),
         )
 
-        result = await recording.show_plan({"type": "plan_show"})
+        result = await recording.show_plan({"type": "show_plan"})
 
         self.assertEqual(result, "Current Plan rendered.")
         self.assertEqual(renderer.plans, [retained])

@@ -1,26 +1,26 @@
-"""Default structured planning tool for MIRA."""
+"""Required finalization tool for durable MIRA Plans."""
 
 from __future__ import annotations
 
 from langchain.tools import tool
 from langgraph.types import interrupt
 
-PRESENT_PLAN_INTERRUPT_TYPE = "present_plan"
+FINALIZE_PLAN_INTERRUPT_TYPE = "finalize_plan"
 
 
 @tool(
-    "present_plan",
+    "finalize_plan",
     description=(
-        "Present the final concise Plan after MIRA has generated Success Criteria. "
+        "Finalize the concise Plan after MIRA has generated Success Criteria. "
         "This tool is required in the formal finalisation stage and is unavailable during "
         "ordinary Plan discussion and research. Supply title, key_changes, test_plan, and "
         "assumptions as the complete Plan around the binding Objective, Context and "
-        "Constraints, and Success Criteria supplied by MIRA. Use plan_show to display the "
-        "retained Plan and prepare_plan to construct a new or revised Plan. Do not add a "
-        "Summary section."
+        "Constraints, and Success Criteria supplied by MIRA. Call show_plan immediately "
+        "to display the retained Plan and prepare_plan only to construct a new or revised "
+        "Plan. Do not add a Summary section."
     ),
 )
-def present_plan(
+def finalize_plan(
     title: str,
     key_changes: list[str],
     test_plan: list[str],
@@ -30,7 +30,7 @@ def present_plan(
     return str(
         interrupt(
             {
-                "type": PRESENT_PLAN_INTERRUPT_TYPE,
+                "type": FINALIZE_PLAN_INTERRUPT_TYPE,
                 "title": clean_text(title) or "Plan",
                 "key_changes": clean_items(key_changes, fallback="List the key implementation changes."),
                 "test_plan": clean_items(test_plan, fallback="Describe the tests or checks to create."),

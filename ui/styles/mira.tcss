@@ -374,8 +374,8 @@ Button.prompt-panel-button:focus {
 }
 
 .message.warning {
-    border: solid #E0A84F;
-    color: #F2DFB8;
+    border: solid #E07A3F;
+    color: #F5C7A9;
 }
 
 .message.error {
@@ -432,8 +432,8 @@ Button.plan-action:focus {
 }
 
 .message.correction {
-    border: solid #E0A84F;
-    color: #F2DFB8;
+    border: solid #7D9BD1;
+    color: #DCE6FA;
 }
 
 .message.rubric {

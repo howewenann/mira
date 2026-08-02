@@ -311,7 +311,7 @@ Expected:
 
 - The existing actionable Plan bubble appears with Implement, Revise, and
   Close.
-- `prepare_plan` and `present_plan` use the same stable call/result lifecycle
+- `prepare_plan` and `finalize_plan` use the same stable call/result lifecycle
   as other control tools while retaining the dedicated Plan surface.
 - No partial plan content or new plan status block appears.
 
@@ -328,7 +328,7 @@ Expected:
 
 - The Success Criteria indicator is followed by one actionable Goal bubble
   containing Objective and Success Criteria but no Plan.
-- `prepare_goal` and forced `present_goal` retain stable call/result identity
+- `prepare_goal` and forced `finalize_goal` retain stable call/result identity
   without duplicating the dedicated Goal surface.
 - No partial criteria, partial goal, or additional goal status block appears.
 
@@ -347,8 +347,8 @@ Expected:
 
 - The normal Plan flow remains approach + Success Criteria, with its existing
   finalized Plan controls, ordering, and revision behavior.
-- Formal Plan construction uses `prepare_plan` and `present_plan`, never
-  `prepare_goal` or `present_goal`.
+- Formal Plan construction uses `prepare_plan` and `finalize_plan`, never
+  `prepare_goal` or `finalize_goal`.
 
 Delete `.tmp_tool_results_manual` after completing the checks. Do not copy its
 `.mira/_sessions` or timing tool into the repository.
@@ -440,7 +440,7 @@ Expected:
 - If a required scope decision cannot be discovered, MIRA calls `ask_user` with concise
   choices instead of asking an open-ended chat question.
 - When decision-complete, the visible tool sequence is `prepare_plan`, Success
-  Criteria generation, forced `present_plan`.
+  Criteria generation, forced `finalize_plan`.
 - MIRA shows a Plan bubble with Implement, Revise, and Close.
 - Implement, Revise, and Close are compact, borderless one-row buttons that
   match the prompt-panel button treatment.
@@ -489,7 +489,7 @@ Expected:
 
 - MIRA renders the exact retained Plan bubble without a model call.
 - The current status and concise automatic-evaluation result are muted.
-- Asking `Show me the previous plan.` causes `plan_show` to render that same
+- Asking `Show me the previous plan.` causes `show_plan` to render that same
   exact bubble rather than paraphrasing it.
 
 ## Structured Plan Recall
@@ -537,7 +537,7 @@ Expected:
 Run each prompt in the persistent `/plan` conversation. MIRA should call
 `ask_user` before showing required choices in prose. Select the recommended or
 first option; the resumed turn should call `prepare_plan`, generate Success
-Criteria, and finish through forced `present_plan`.
+Criteria, and finish through forced `finalize_plan`.
 
 1. `Plan making the codebase neater. The work can focus on runtime architecture, code-quality standardization, or UI cleanup; none has been selected.`
 2. `Plan replacing session storage. JSON Lines and SQLite are both acceptable, and the persistence tradeoff has not been decided.`
@@ -554,7 +554,7 @@ Criteria, and finish through forced `present_plan`.
 
 For every case verify that the initial tool call is `ask_user`, its question
 does not enumerate its 1-3 concise choices, the selected answer remains in the
-same planning thread, the resumed outcome is `present_plan`, and no disabled
+same planning thread, the resumed outcome is `finalize_plan`, and no disabled
 planning tool is called.
 
 Final broad-goal regression (this exact wording is intentionally test-only):
@@ -565,7 +565,7 @@ find a way to make the code base neater
 
 Expected: MIRA recognizes that the intended outcome is subjective, calls
 `ask_user` before research to choose among distinct directions, then calls
-`present_plan` after the choice is selected.
+`finalize_plan` after the choice is selected.
 
 ```text
 Use the ask_user tool to ask me which implementation path to take. Use exactly these options: minimal change (Recommended), focused refactor, planning only. Put only the question in the question field and only the answers in options.
@@ -729,7 +729,7 @@ Use a disposable workspace and retain its session file for replay checks.
 
 1. With Rubric Middleware disabled, run `/goal Write a short professional event
    announcement.` from Act, then again from Plan mode. Expected: both use
-   `prepare_goal` -> Success Criteria -> forced `present_goal`, keep the original
+   `prepare_goal` -> Success Criteria -> forced `finalize_goal`, keep the original
    mode, and show the same criteria-only GoalBubble with no Plan.
 2. Enable rubrics and create the same Goal. Expected: construction is unchanged;
    only the snapshotted automatic-evaluation policy differs.
@@ -741,7 +741,7 @@ Use a disposable workspace and retain its session file for replay checks.
    the Objective, and a complete replacement Goal becomes current.
 5. Select Close, then run `/goal-show`. Expected: Close retains lifecycle state;
    `/goal-show` renders the exact Goal again with Implement, Revise, and Close.
-6. Ask `Show me the current Goal.` Expected: `goal_show` uses the same bubble,
+6. Ask `Show me the current Goal.` Expected: `show_goal` uses the same bubble,
    preserves its tool-call id, produces no duplicate output, and changes no state.
 7. Implement a rubric-disabled Goal. Expected: only this explicit attempt gets
    Goal context, no Plan fields are injected, and success completes as
@@ -1001,14 +1001,14 @@ Use one disposable Git-protected workspace.
 3. In Plan and Act modes, submit a request with one genuine preference choice.
    Expected: `ask_user`, never a prose question.
 4. Request a final implementation-ready Plan with automatic evaluation disabled.
-   Expected: `prepare_plan` -> Success Criteria -> forced `present_plan`; the
+   Expected: `prepare_plan` -> Success Criteria -> forced `finalize_plan`; the
    bubble shows Plan, Success Criteria, muted disabled policy, and Implement,
    Revise, Close.
 5. Repeat an equivalent request with automatic evaluation enabled. Expected:
    the same Plan construction and comparable Plan/criteria content; only muted
    policy text adds the configured iteration cap.
 6. Close the Plan, run `/plan-show`, then ask `Show me the previous plan.`
-   Expected: both display the exact retained Plan; the latter calls `plan_show`.
+   Expected: both display the exact retained Plan; the latter calls `show_plan`.
 7. Revise only the implementation approach. Expected: a complete replacement
    Plan with byte-identical Success Criteria. Revise the required outcome next;
    expected criteria are regenerated to reflect that change.
@@ -1044,7 +1044,7 @@ the scenario requests persistence evidence.
    calls occur, and the later answer visibly ends with `RESPONSE_STATUS: COMPLETE`.
 3. Ask Plan mode to investigate session architecture and propose the smallest
    coherent session-duplication change. Repeat several times. Expected:
-   false-progress prose remains immediately before a `Plan check` bubble that
+   false-progress prose remains immediately before a `Response check` bubble that
    shows the failed check and exact retry prompt; actual research follows, and
    the outcome is `ask_user`, `prepare_plan`, or a complete grounded answer with
    its terminal response status visible.
@@ -1055,10 +1055,10 @@ the scenario requests persistence evidence.
 5. Ask for a session-duplication design while explicitly leaving full-transcript
    versus metadata-only behavior undecided. Expected: `ask_user`; after choosing,
    request an implementation-ready Plan and verify `prepare_plan` followed by
-   the unchanged forced `present_plan` bubble.
+   the unchanged forced `finalize_plan` bubble.
 6. Run `/goal Prepare a durable criteria-only Goal for the same duplication
    outcome.` Expected: Goal research can use only `PREPARE_GOAL`/`prepare_goal`;
-   finalization forces only `present_goal`. A Plan-only status from a fake response
+   finalization forces only `finalize_goal`. A Plan-only status from a fake response
    is rejected as malformed.
 7. Disable rubrics and repeat scenario 3, then enable them and run an existing
    Goal rubric scenario. Expected: protocol behavior is unchanged, no grader is
@@ -1077,10 +1077,23 @@ the scenario requests persistence evidence.
     `0` or `21` in Settings. Expected: the previous normalized value is restored
     and the UI displays the `1`-`20` range.
 11. Create a Plan, then ask `show me the plan again` while forcing the model to
-    call `present_plan`. Expected: `present_plan` returns a visible native tool
-    error before any interrupt, the error directs the model to `plan_show`, and
-    the model can call `plan_show` in the same turn without a MIRA exception or
-    pending interrupt. Repeat symmetrically for `present_goal`/`goal_show`.
+    call `finalize_plan`. Expected: `finalize_plan` returns a visible native tool
+    error before any interrupt, the error directs the model to `show_plan`, and
+    the model can call `show_plan` in the same turn without a MIRA exception or
+    pending interrupt. Repeat symmetrically for `finalize_goal`/`show_goal`.
+12. Create a Plan after several `ls` and `read_file` calls, then submit `Show,
+    reopen, and review the retained Plan.` Expected: Gemma immediately calls
+    `show_plan` without new research, prose reproduction, preparation, or
+    finalization. The exact Plan bubble returns and no earlier tool call/result
+    bubble is recorded again. Repeat with a retained Goal and `show_goal`.
+13. Trigger one response-status correction and one ordinary warning. Expected:
+    the bubble is titled `Response check`, includes `Workflow: Plan` or
+    `Workflow: Goal`, and uses the exact system/status blue palette. The warning
+    uses the distinct orange palette; neither resembles the user's gold bubble.
+14. Inspect `/tools` during Plan research, Goal research, and both finalization
+    stages. Expected: the applicable `show_plan` or `show_goal` is listed first
+    during research; finalization exposes only `finalize_plan` or
+    `finalize_goal`; retired model-facing names are absent.
 
 Record actual Gemma behavior here after each real run: model/provider, cap,
 scenario, tool sequence, retry count, final outcome, and whether any status or
@@ -1106,8 +1119,19 @@ agent:
   one agent rebuild after a valid submission.
 - Deterministic graph tests cover paths Gemma did not naturally exercise here:
   caps `1` and `2` exhaustion, specific and general correction prompts,
-  cross-workflow statuses, and recoverable `present_plan`/`present_goal` stage
-  errors followed by `plan_show`/`goal_show`.
+  cross-workflow statuses, and recoverable `finalize_plan`/`finalize_goal` stage
+  errors followed by `show_plan`/`show_goal`.
+
+Observed 2026-08-03 with `lmstudio:google/gemma-4-12b` through the real planning
+graph in a disposable workspace:
+
+- Plan recall prompt `Show, reopen, and review the retained Plan` selected
+  `show_plan` immediately with `{}` arguments and reached its normal interrupt.
+- The symmetric Goal recall prompt selected `show_goal` immediately with `{}`
+  arguments and reached its normal interrupt.
+- Neither probe called research, preparation, or finalization tools. Both
+  expected results printed before the bounded smoke process timed out during
+  runtime cleanup; no repository or session artifact was written.
 
 ## DeepAgents 0.7 Upgrade
 

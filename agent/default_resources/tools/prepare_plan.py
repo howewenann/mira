@@ -15,7 +15,7 @@ PLAN_FIELD_MAX_CHARS = 4000
         "Begin formal Plan construction only when the proposal is decision-complete. "
         "Pass the authoritative user objective and concise relevant context, constraints, "
         "and bounded research findings. MIRA will generate Success Criteria before the "
-        "final Plan and then require present_plan. Do not include a completed Plan, draft "
+        "final Plan and then require finalize_plan. Do not include a completed Plan, draft "
         "the final Plan in prose, or call this for ordinary discussion or read-only answers."
     ),
 )
