@@ -137,12 +137,9 @@ The always-on Plan/Goal next-action protocol has one workspace System Setting,
 counts recovery calls after the first rejected response. Changing it follows
 the normal settings application path and rebuilds both agents; it is a bound,
 not a feature toggle.
-Workspace settings use one explicit current schema version. A missing
-`.mira/settings.yml` starts from the complete defaults, but an existing file
-must contain that version and the complete normalized schema. MIRA rejects
-partial, malformed, extra, or retired settings instead of filling fields or
-migrating them. Saving from the Settings panel always writes the complete
-current document.
+A missing `.mira/settings.yml` starts from complete defaults. An existing file
+must equal the complete normalized settings shape, so partial, malformed,
+unknown, or invalid settings are rejected instead of silently defaulted.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
 `agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
@@ -636,13 +633,8 @@ DeepAgents handles runtime context counting and compaction.
 **Why:** Session files should be stable user-facing history after restart.
 Starting a new chat is therefore non-destructive: MIRA creates another session
 record and makes it active instead of clearing the previous one.
-Every session record carries one explicit current schema version and must have
-the exact current top-level fields. MIRA does not fill missing session fields,
-migrate retired `active_goal` or artifact shapes, or repair a record containing
-both a current Plan and current Goal. Such a file is rejected so the persisted
-source of truth cannot be silently reinterpreted. The in-memory
-`resume_context_pending` flag is the sole transient exception and is removed
-before persistence.
+Session records require the current fields; missing or conflicting formal
+artifacts are rejected rather than repaired. Transient fields are not saved.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result

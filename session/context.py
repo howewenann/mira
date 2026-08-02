@@ -9,7 +9,6 @@ from typing import Any
 from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
-from session.values import SESSION_SCHEMA_VERSION
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
@@ -19,7 +18,6 @@ RESUME_GOAL_LIMIT = 3
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 SESSION_FIELDS = {
-    "schema_version",
     "id",
     "title",
     "workspace",
@@ -31,20 +29,13 @@ SESSION_FIELDS = {
     "current_goal",
     "events",
 }
-SESSION_TRANSIENT_FIELDS = {"resume_context_pending"}
 
 
 def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError("session does not match the current schema")
-    fields = set(record)
-    allowed_fields = SESSION_FIELDS | SESSION_TRANSIENT_FIELDS
-    if not SESSION_FIELDS.issubset(fields) or not fields <= allowed_fields:
+    if not SESSION_FIELDS.issubset(record):
         raise ValueError("session does not match the current schema")
-    if record.get("schema_version") != SESSION_SCHEMA_VERSION:
-        raise ValueError(
-            f"session does not match schema version {SESSION_SCHEMA_VERSION}"
-        )
     raw_plan = record["current_plan"]
     raw_goal = record["current_goal"]
     plan = normalize_current_plan(raw_plan)
@@ -56,7 +47,6 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
     if plan is not None and goal is not None:
         raise ValueError("session cannot contain both current_plan and current_goal")
     return {
-        "schema_version": SESSION_SCHEMA_VERSION,
         "id": str(record.get("id", "")),
         "title": safe_title(record.get("title")),
         "workspace": str(record.get("workspace", "")),

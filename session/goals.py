@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
-from session.values import strict_text, valid_attempts, valid_iterations
+from session.values import valid_artifact
 
 GOAL_STATUSES = {
     "proposed",
@@ -13,20 +13,6 @@ GOAL_STATUSES = {
     "paused",
     "max_iterations_reached",
     "completed",
-}
-GOAL_ARTIFACT_FIELDS = {
-    "id",
-    "title",
-    "objective",
-    "success_criteria",
-    "status",
-    "rubric_enabled",
-    "rubric_iterations",
-    "last_rubric_status",
-    "completion_source",
-    "attempts",
-    "created_at",
-    "updated_at",
 }
 RESUMABLE_GOAL_STATUSES = {
     "proposed",
@@ -60,50 +46,14 @@ class GoalArtifact(Goal):
 
 def normalize_current_goal(value: Any) -> dict[str, Any] | None:
     """Return an exact current GoalArtifact without legacy coercion."""
-    if not isinstance(value, dict):
-        return None
-    if set(value) != GOAL_ARTIFACT_FIELDS:
-        return None
-    goal_id = strict_text(value["id"], compact=True)
-    title = strict_text(value["title"], compact=True)
-    objective = strict_text(value["objective"])
-    criteria = strict_text(value["success_criteria"])
-    if not all((goal_id, title, objective, criteria)):
-        return None
-    status = strict_text(value["status"], compact=True)
-    if status not in GOAL_STATUSES:
-        return None
-    rubric_enabled = value["rubric_enabled"]
-    rubric_iterations = value["rubric_iterations"]
-    attempts = value["attempts"]
-    if not isinstance(rubric_enabled, bool):
-        return None
-    if not valid_iterations(rubric_iterations) or not valid_attempts(attempts):
-        return None
-    last_rubric_status = strict_text(
-        value["last_rubric_status"], compact=True, allow_empty=True
-    )
-    completion_source = strict_text(
-        value["completion_source"], compact=True, allow_empty=True
-    )
-    created_at = strict_text(value["created_at"])
-    updated_at = strict_text(value["updated_at"])
-    if created_at is None or updated_at is None:
-        return None
-    return {
-        "id": goal_id,
-        "title": title,
-        "objective": objective,
-        "success_criteria": criteria,
-        "status": status,
-        "rubric_enabled": rubric_enabled,
-        "rubric_iterations": rubric_iterations,
-        "last_rubric_status": last_rubric_status,
-        "completion_source": completion_source,
-        "attempts": attempts,
-        "created_at": created_at,
-        "updated_at": updated_at,
-    }
+    if valid_artifact(
+        value,
+        fields=GoalArtifact.__required_keys__,
+        list_fields=(),
+        statuses=GOAL_STATUSES,
+    ):
+        return dict(value)
+    return None
 
 
 def goal_artifact(

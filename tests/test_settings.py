@@ -188,7 +188,7 @@ class SettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "schema version"):
+            with self.assertRaisesRegex(ValueError, "current schema"):
                 settings.load_settings(workspace)
 
             path.write_text("hitl: [", encoding="utf-8")
@@ -198,11 +198,11 @@ class SettingsTests(unittest.TestCase):
             self.assertTrue(settings.save_settings(workspace, settings.DEFAULT_SETTINGS))
             exact = path.read_text(encoding="utf-8")
             path.write_text(f"{exact}unknown: true\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "schema version"):
+            with self.assertRaisesRegex(ValueError, "current schema"):
                 settings.load_settings(workspace)
 
             path.write_text(exact.replace("max_retries: 2", "max_retries: 0"), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "schema version"):
+            with self.assertRaisesRegex(ValueError, "current schema"):
                 settings.load_settings(workspace)
 
     def test_save_settings_writes_expected_yaml(self) -> None:
@@ -221,7 +221,6 @@ class SettingsTests(unittest.TestCase):
             loaded = settings.load_settings(workspace)
 
         self.assertIn("settings.yml", str(settings.settings_path(workspace)))
-        self.assertIn("schema_version: 1", text)
         self.assertIn("git_protection", text)
         self.assertIn("response_schema: true", text)
         self.assertIn("web_search", text)

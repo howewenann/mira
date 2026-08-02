@@ -224,7 +224,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             list(record.keys()),
             [
-                "schema_version",
                 "id",
                 "title",
                 "workspace",
@@ -251,13 +250,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         normalized = context.normalize_session(record)
 
         self.assertNotIn("resume_context_pending", normalized)
-
-    def test_unknown_session_field_is_rejected(self) -> None:
-        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
-        record["legacy_field"] = True
-
-        with self.assertRaisesRegex(ValueError, "current schema"):
-            context.normalize_session(record)
 
     def test_current_goal_survives_save_load_and_old_events_are_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

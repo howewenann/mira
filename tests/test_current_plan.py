@@ -174,25 +174,14 @@ class CurrentPlanTests(unittest.TestCase):
             normalize_session(record)
 
     def test_current_plan_values_are_not_coerced(self) -> None:
-        invalid_values = []
-        string_list = artifact()
-        string_list["key_changes"] = "Add the feature."
-        invalid_values.append(string_list)
-        string_attempts = artifact()
-        string_attempts["attempts"] = "0"
-        invalid_values.append(string_attempts)
-        boolean_iterations = artifact()
-        boolean_iterations["rubric_iterations"] = True
-        invalid_values.append(boolean_iterations)
-
-        for value in invalid_values:
-            with self.subTest(value=value):
-                record = SessionStore(Path(".")).new(
-                    session_id="strict-plan", workspace=Path("workspace")
-                )
-                record["current_plan"] = value
-                with self.assertRaisesRegex(ValueError, "current_plan"):
-                    normalize_session(record)
+        invalid = (("key_changes", "Add it."), ("attempts", "0"), ("rubric_iterations", True))
+        for field, bad_value in invalid:
+            value = artifact()
+            value[field] = bad_value
+            record = SessionStore(Path(".")).new("strict-plan", Path("workspace"))
+            record["current_plan"] = value
+            with self.assertRaisesRegex(ValueError, "current_plan"):
+                normalize_session(record)
 
     def test_plan_command_suffix_is_a_normal_message_on_the_persistent_thread(self) -> None:
         session = {"id": "session-1"}

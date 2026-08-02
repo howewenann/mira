@@ -86,51 +86,28 @@ class CurrentGoalTests(unittest.TestCase):
 
     def test_active_goal_is_not_migrated(self) -> None:
         with self.assertRaisesRegex(ValueError, "current schema"):
-            normalize_session({
-                "id": "old-session",
-                "events": [],
-                "active_goal": {
-                    "proposal_id": "proposal-1",
-                    "objective": "Build search.",
-                    "criteria": "- Search works.",
-                    "plan": {"title": "Hidden legacy plan", "summary": ["Do not retain."]},
-                    "status": "complete",
-                    "last_rubric_status": "satisfied",
-                    "rubric_iterations": 5,
-                },
-            })
+            normalize_session({"id": "old-session", "events": [], "active_goal": {}})
 
-    def test_old_goal_field_names_are_not_accepted(self) -> None:
-        value = artifact()
-        value["criteria"] = value.pop("success_criteria")
-        value["status"] = "complete"
-
-        record = SessionStore(Path(".")).new(session_id="old", workspace=Path("workspace"))
-        record["current_goal"] = value
-        with self.assertRaisesRegex(ValueError, "current_goal"):
-            normalize_session(record)
-
-    def test_current_goal_values_are_not_coerced(self) -> None:
-        value = artifact()
-        value["rubric_enabled"] = 1
-        record = SessionStore(Path(".")).new(
-            session_id="strict-goal", workspace=Path("workspace")
-        )
-        record["current_goal"] = value
-
-        with self.assertRaisesRegex(ValueError, "current_goal"):
-            normalize_session(record)
+    def test_old_goal_fields_and_values_are_not_coerced(self) -> None:
+        for field, invalid in (("success_criteria", None), ("rubric_enabled", 1)):
+            value = artifact()
+            if invalid is None:
+                value["criteria"] = value.pop(field)
+            else:
+                value[field] = invalid
+            record = SessionStore(Path(".")).new("old", Path("workspace"))
+            record["current_goal"] = value
+            with self.assertRaisesRegex(ValueError, "current_goal"):
+                normalize_session(record)
 
     def test_session_with_both_current_artifacts_is_rejected(self) -> None:
         goal = artifact()
-        goal["updated_at"] = "2026-02-01T00:00:00+00:00"
         plan = plan_artifact(
             plan_id="plan-1", title="Plan", objective="Do it.",
             context_and_constraints="No constraints.", key_changes=["Do it."],
             test_plan=["Verify it."], assumptions=["None."], success_criteria="- Done.",
             rubric_enabled=False, rubric_iterations=3,
         )
-        plan["updated_at"] = "2026-01-01T00:00:00+00:00"
         record = SessionStore(Path(".")).new(session_id="s", workspace=Path("workspace"))
         record["current_plan"] = plan
         record["current_goal"] = goal

@@ -756,9 +756,9 @@ Use a disposable workspace and retain its session file for replay checks.
 11. Attempt both replacement directions with incomplete formal work. Expected:
     the structured Replace/Keep choice appears; Keep preserves the old artifact,
     and accepting replacement still preserves it if generation later fails.
-12. Reload a versioned session with an exact `current_goal`, then try an
-    unversioned retired `active_goal` session. Expected: the exact current Goal
-    replays and the retired session is rejected rather than migrated.
+12. Reload a session with an exact `current_goal`, then try a retired
+    `active_goal` session. Expected: the exact current Goal replays and the
+    retired session is not migrated.
 13. Check `/plan-show` while a Goal is current and `/goal-show` while a Plan is
     current. Expected: deterministic guidance to the matching command.
 
@@ -1024,26 +1024,10 @@ Use one disposable Git-protected workspace.
 11. Run `/plan-clear`. Expected: `current_plan` is removed while historical
     Plan and rubric bubbles remain in the transcript.
 
-## Current Persistence Schema Rejection
+## Current Persistence Rejection
 
-Use a disposable workspace and keep a copy of every file before editing it.
-
-1. Start without `.mira/settings.yml`. Expected: MIRA uses complete default
-   settings, including Plan/Goal next-action retries `2`.
-2. Save settings through `/settings`, then remove one field, add an unknown
-   field, or remove `schema_version`. Restart once for each case. Expected: MIRA
-   rejects the existing settings file instead of merging defaults.
-3. Corrupt the settings YAML. Expected: MIRA reports invalid YAML rather than
-   starting with defaults.
-4. Save and resume a current session. Expected: its versioned exact Plan or Goal
-   reloads unchanged.
-5. From a copied session file, remove a top-level field, use a retired artifact
-   field name, or populate both `current_plan` and `current_goal`. Expected: MIRA
-   rejects each file; it does not fill fields, discard the artifact, or choose
-   one by timestamp.
-6. Feed a synthetic DeepAgents summarization event using raw `summary` or
-   `summary_text` instead of `summary_message`. Expected: alias prose is not
-   persisted as the compaction summary.
+In a disposable workspace, confirm invalid settings and malformed or conflicting
+Plan/Goal sessions are rejected. Raw compaction summary aliases must not persist.
 
 ## Unified Plan/Goal Next-Action Protocol
 
