@@ -1611,6 +1611,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["agent"], "plan-agent")
         self.assertIn("Do not classify it as SAFE_CONVERSATION", captured["text"])
         self.assertIn("call prepare_goal as soon as", captured["text"])
+        self.assertIn("may improve wording", captured["text"])
+        self.assertIn("must not add, remove, or materially change", captured["text"])
 
     async def test_goal_executes_only_in_explicit_attempt_scope(self) -> None:
         renderer = RecordingRenderer()
@@ -1697,6 +1699,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("make this neater", prompt.lower())
         self.assertIn("Call ask_user", prompt)
         self.assertIn("Call prepare_plan", prompt)
+        self.assertIn("rewrite for clarity", prompt)
+        self.assertIn("must not add, remove, or materially change", prompt)
         self.assertIn("Test Plan", prompt)
         self.assertIn("Success Criteria", prompt)
         self.assertNotIn("SAFE_CONVERSATION", prompt)

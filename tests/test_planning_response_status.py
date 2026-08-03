@@ -19,6 +19,8 @@ from agent.planning.response_status import (
     PLANNING_RESPONSE_STATUS_FAILURE,
     PlanningResponseStatusRule,
 )
+from runtime import runner
+from tests.test_runner import RunTurnRenderer
 
 
 def correction_middleware(max_retries: int = 2) -> list[Any]:
@@ -81,6 +83,24 @@ def finalize_goal_stub(title: str) -> str:
 def show_goal_stub() -> str:
     """Fake retained Goal display control."""
     return "current Goal shown"
+
+
+@tool("ask_user")
+def forbidden_finalize_ask_user(question: str) -> str:
+    """Fail if finalization enforcement lets a hidden prompt execute."""
+    raise AssertionError(f"ask_user executed during finalization: {question}")
+
+
+@tool("finalize_plan")
+def successful_finalize_plan(title: str) -> str:
+    """Return a visible result after finalization enforcement accepts the call."""
+    return f"finalized Plan:{title}"
+
+
+@tool("finalize_goal")
+def successful_finalize_goal(title: str) -> str:
+    """Return a visible result after finalization enforcement accepts the call."""
+    return f"finalized Goal:{title}"
 
 
 class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -376,6 +396,156 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
             result["messages"][-1].content,
             "Plan prepared.\nRESPONSE_STATUS: COMPLETE",
         )
+
+    async def test_finalization_rejects_hidden_ask_user_then_accepts_plan_finalizer(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ask_user",
+                            "args": {"question": "Should I continue?"},
+                            "id": "call-hidden-ask",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "finalize_plan",
+                            "args": {"title": "Safe Plan"},
+                            "id": "call-finalize-plan",
+                        }
+                    ],
+                ),
+                AIMessage(content="Plan finalized."),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[forbidden_finalize_ask_user, successful_finalize_plan],
+            middleware=correction_middleware(),
+        )
+
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="finish the plan")],
+                "planning_stage": "plan_finalize",
+            }
+        )
+
+        hidden = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-hidden-ask"
+        )
+        finalized = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-finalize-plan"
+        )
+        self.assertEqual(hidden.status, "error")
+        self.assertIn("Only finalize_plan can be called now.", str(hidden.content))
+        self.assertEqual(finalized.status, "success")
+        self.assertEqual(finalized.content, "finalized Plan:Safe Plan")
+        self.assertNotIn("_correction_retries", result)
+
+    async def test_goal_finalizer_schema_error_retries_natively_without_correction(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "finalize_goal", "args": {}, "id": "call-invalid-goal"}
+                    ],
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "finalize_goal",
+                            "args": {"title": "Safe Goal"},
+                            "id": "call-finalize-goal",
+                        }
+                    ],
+                ),
+                AIMessage(content="Goal finalized."),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[successful_finalize_goal],
+            middleware=correction_middleware(),
+        )
+
+        result = await graph.ainvoke(
+            {
+                "messages": [HumanMessage(content="finish the goal")],
+                "planning_stage": "goal_finalize",
+            }
+        )
+
+        invalid = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-invalid-goal"
+        )
+        finalized = next(
+            message
+            for message in result["messages"]
+            if isinstance(message, ToolMessage) and message.tool_call_id == "call-finalize-goal"
+        )
+        self.assertEqual(invalid.status, "error")
+        self.assertIn("title", str(invalid.content))
+        self.assertEqual(finalized.content, "finalized Goal:Safe Goal")
+        self.assertNotIn("_correction_retries", result)
+
+    async def test_real_v3_stream_renders_finalization_rejection_live(self) -> None:
+        model = BindableFakeModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "ask_user",
+                            "args": {"question": "Should I continue?"},
+                            "id": "call-live-hidden",
+                        }
+                    ],
+                ),
+                AIMessage(content="Finalization repaired."),
+            ]
+        )
+        graph = create_agent(
+            model=model,
+            tools=[forbidden_finalize_ask_user, successful_finalize_plan],
+            middleware=correction_middleware(),
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            graph,
+            "finish the plan",
+            renderer,
+            "real-v3-plan-finalize",
+            planning_stage="plan_finalize",
+        )
+
+        self.assertEqual(result.final_text, "Finalization repaired.")
+        self.assertEqual(result.tool_calls, ["ask_user"])
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertIn("Only finalize_plan can be called now.", result.tool_results[0])
+        self.assertEqual(
+            [event[0] for event in renderer.events if event[0] in {"tool_call", "tool_error"}],
+            ["tool_call", "tool_error"],
+        )
+        self.assertEqual(
+            [event[3] for event in renderer.events if event[0] in {"tool_call", "tool_error"}],
+            ["call-live-hidden", "call-live-hidden"],
+        )
+        self.assertEqual(renderer.ask_user_prompts, [])
 
 
 if __name__ == "__main__":

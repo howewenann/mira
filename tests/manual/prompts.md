@@ -1086,6 +1086,9 @@ the scenario requests persistence evidence.
     `show_plan` without new research, prose reproduction, preparation, or
     finalization. The exact Plan bubble returns and no earlier tool call/result
     bubble is recorded again. Repeat with a retained Goal and `show_goal`.
+    Test paused, `max_iterations_reached`, and completed Goals; natural-language
+    recall and `/goal-show` must both leave Implement, Revise, and Close visible
+    and enabled.
 13. Trigger one response-status correction and one ordinary warning. Expected:
     the bubble is titled `Response check`, includes `Workflow: Plan` or
     `Workflow: Goal`, and uses the exact system/status blue palette. The warning
@@ -1094,6 +1097,45 @@ the scenario requests persistence evidence.
     stages. Expected: the applicable `show_plan` or `show_goal` is listed first
     during research; finalization exposes only `finalize_plan` or
     `finalize_goal`; retired model-facing names are absent.
+15. During `plan_finalize`, force malformed `finalize_plan` arguments. Pause the
+    graph after its native error is produced. Expected: the original
+    `finalize_plan` call bubble already shows the schema error and the session
+    JSON already contains its `tool_result` with `status: error`; resuming with a
+    corrected call creates a second, separately ordered call. Repeat with
+    `goal_finalize` and `finalize_goal`.
+16. During `plan_finalize`, force calls to `ask_user`, `read_file`,
+    `finalize_goal`, and an unregistered stale name. Expected: every call returns
+    a visible native error on its original call bubble, none reaches its handler
+    or opens an interrupt, and every error says that only `finalize_plan` is
+    permitted. Repeat symmetrically for `goal_finalize`/`finalize_goal`.
+17. Replay cumulative root `values` snapshots containing an old error, two new
+    errors with distinct call ids, and repeated copies of the final snapshot.
+    Expected: the old error is ignored, each new call/error pair appears once in
+    graph order before the stream finishes, and final-output fallback adds no
+    duplicate. Reload the session and inspect a trace for the same order.
+18. Complete a valid Plan and Goal through their finalizers. Expected: each
+    retains its dedicated artifact surface and no raw `Interrupt(...)`,
+    `Command`, empty completion, or ordinary success result leaks into the
+    transcript. Response-status retry counters remain unchanged throughout
+    tool-error repair.
+19. Run `/goal write me a story of about 20 words. save it to story.md in the
+    root directory`. Expected: the Goal Objective is concise and polished while
+    retaining the approximate length, filename, Markdown format, and root
+    location. The newly proposed Goal immediately shows enabled Implement,
+    Revise, and Close actions; `/reload` preserves the polished Objective and
+    the same current Goal schema.
+20. Create each incomplete source artifact, then request each destination kind:
+    Plan -> Plan, Plan -> Goal, Goal -> Plan, and Goal -> Goal. Expected: the
+    title and both buttons name the current source kind, while the body names
+    both the new and current kinds. Decline preserves the current artifact.
+    Accept, then cancel or fail before finalization; expected: the current
+    artifact is still preserved. Complete finalization; expected: only then is
+    the old artifact superseded.
+21. Revise the story Goal first with wording-only feedback, then with `Change
+    the deliverable to poem.md and make it 40 words.` Expected: wording-only
+    feedback preserves the original outcome and constraints; the explicit
+    scope-changing feedback permits the revised Objective and Success Criteria
+    to adopt the new filename and length.
 
 Record actual Gemma behavior here after each real run: model/provider, cap,
 scenario, tool sequence, retry count, final outcome, and whether any status or
@@ -1132,6 +1174,26 @@ graph in a disposable workspace:
 - Neither probe called research, preparation, or finalization tools. Both
   expected results printed before the bounded smoke process timed out during
   runtime cleanup; no repository or session artifact was written.
+
+Observed 2026-08-03 with the deterministic live-stream and real LangGraph test
+harnesses after completing the unified lifecycle:
+
+- A gated root-values stream paused after a malformed `finalize_plan`, a hidden
+  `ask_user`, and a second malformed finalizer with a distinct call id. Each
+  matching error was rendered before its gate was released, stayed in arrival
+  order, persisted through the live recorder, and was not duplicated by the
+  repeated values snapshot or final-output fallback. Its historical baseline
+  error was not replayed.
+- The finalization integration graph rejected a valid hidden `ask_user` before
+  its raising handler could run, returned the original call id and exact
+  `finalize_plan` guidance, then accepted the model's corrected finalizer. A
+  malformed `finalize_goal` used ToolNode's native schema error and a distinct
+  corrected Goal call succeeded. Neither route incremented correction retries.
+- Dedicated Plan and Goal control tests completed `prepare_plan`,
+  `finalize_plan`, and `finalize_goal` through their normal interrupt surfaces;
+  no raw control-stream result replaced those surfaces.
+- The separate real-runtime cleanup hang was not changed or retested as part of
+  these deterministic lifecycle scenarios.
 
 ## DeepAgents 0.7 Upgrade
 

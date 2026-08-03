@@ -25,7 +25,7 @@ from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from runtime.output_events import final_text
 from runtime.subagent_events import consume_subagent, consume_subagents
-from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
+from runtime.tool_events import CONTROL_TOOLS, consume_live_tool_errors, consume_tool_calls
 from runtime.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from agent.default_resources.tools.ask_user import normalize_options
@@ -56,6 +56,42 @@ class DelayedAsyncItems(AsyncItems):
         await asyncio.sleep(self.delay)
         async for item in super().__aiter__():
             yield item
+
+
+class GatedAsyncItems(AsyncItems):
+    """Async iterable that pauses after an initial group of events."""
+
+    def __init__(self, before: list[Any], after: list[Any]) -> None:
+        super().__init__(before + after)
+        self.before = before
+        self.after = after
+        self.reached_gate = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __aiter__(self) -> Any:
+        for item in self.before:
+            yield item
+        self.reached_gate.set()
+        await self.release.wait()
+        for item in self.after:
+            yield item
+
+
+class StepwiseAsyncItems(AsyncItems):
+    """Async iterable whose consumer must release each non-final item."""
+
+    def __init__(self, items: list[Any]) -> None:
+        super().__init__(items)
+        self.reached: asyncio.Queue[int] = asyncio.Queue()
+        self.releases = [asyncio.Event() for _ in items]
+
+    async def __aiter__(self) -> Any:
+        for index, item in enumerate(self.items):
+            yield item
+            if index == len(self.items) - 1:
+                continue
+            self.reached.put_nowait(index)
+            await self.releases[index].wait()
 
 
 COMPACTION_SUMMARY = """## SESSION INTENT
@@ -543,6 +579,7 @@ class FakeStream:
         interrupts: list[Any] | None = None,
         tool_calls: list[Any] | None = None,
         custom_events: list[Any] | None = None,
+        raw_events: Any | None = None,
     ) -> None:
         self.messages = AsyncItems([])
         self.tool_calls = AsyncItems(tool_calls or [])
@@ -550,6 +587,10 @@ class FakeStream:
         self.custom = AsyncItems(custom_events or [])
         self.output_value = output or {}
         self.interrupt_values = interrupts or []
+        self.raw_events = raw_events or AsyncItems([])
+
+    def __aiter__(self) -> Any:
+        return self.raw_events.__aiter__()
 
     async def output(self) -> Any:
         return self.output_value
@@ -568,6 +609,14 @@ class FakeAgent:
     async def astream_events(self, payload: Any, config: dict[str, Any], version: str, **kwargs: Any) -> FakeStream:
         self.payloads.append(payload)
         return self.streams.pop(0)
+
+
+def values_event(messages: list[Any], *, namespace: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Build one root v3 values event for live lifecycle tests."""
+    return {
+        "method": "values",
+        "params": {"namespace": namespace, "data": {"messages": messages}},
+    }
 
 
 class FakeRubricAgent(FakeAgent):
@@ -745,6 +794,191 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(("tool_call", "finalize_plan", {"title": "Plan"}, "call-plan"), renderer.events)
         self.assertNotIn(("tool_result", "finalize_plan", "interrupt", "call-plan"), renderer.events)
+
+    async def test_control_tool_output_toolmessage_is_rendered_as_error(self) -> None:
+        error = ToolMessage(
+            content="invalid finalizer arguments",
+            name="finalize_plan",
+            tool_call_id="call-plan",
+            status="error",
+        )
+        call = DocumentedToolCall(
+            "finalize_plan",
+            {"title": "Plan"},
+            output=error,
+            call_id="call-plan",
+        )
+        renderer = RecordingRenderer()
+
+        await consume_tool_calls(AsyncItems([call]), renderer)
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "finalize_plan", {"title": "Plan"}, "call-plan"),
+                ("tool_error", "finalize_plan", "invalid finalizer arguments", "call-plan"),
+            ],
+        )
+
+    async def test_live_values_errors_are_incremental_ordered_and_fallback_deduplicated(self) -> None:
+        historical_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "finalize_plan", "args": {}, "id": "old-call"}],
+        )
+        historical_error = ToolMessage(
+            content="old error",
+            name="finalize_plan",
+            tool_call_id="old-call",
+            status="error",
+        )
+        first_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "finalize_plan", "args": {}, "id": "call-one"}],
+        )
+        first_error = ToolMessage(
+            content="title is required",
+            name="finalize_plan",
+            tool_call_id="call-one",
+            status="error",
+        )
+        second_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "ask_user", "args": {"question": "Continue?"}, "id": "call-two"}],
+        )
+        second_error = ToolMessage(
+            content="ask_user is unavailable during plan_finalize",
+            name="ask_user",
+            tool_call_id="call-two",
+            status="error",
+        )
+        third_call = AIMessage(
+            content="",
+            tool_calls=[{"name": "finalize_plan", "args": {"title": 3}, "id": "call-three"}],
+        )
+        third_error = ToolMessage(
+            content="title must be a string",
+            name="finalize_plan",
+            tool_call_id="call-three",
+            status="error",
+        )
+        baseline = [historical_call, historical_error]
+        first = [*baseline, first_call, first_error]
+        second = [*first, second_call, second_error]
+        complete = [*second, third_call, third_error]
+        raw_events = StepwiseAsyncItems(
+            [
+                values_event(baseline),
+                values_event(first),
+                values_event(second),
+                values_event(complete),
+                values_event(complete),
+            ]
+        )
+        stream = FakeStream(
+            output={"messages": complete},
+            raw_events=raw_events,
+        )
+        renderer = RunTurnRenderer()
+        turn = asyncio.create_task(
+            runner.run_turn(FakeAgent([stream]), "finish the plan", renderer, "thread-1")
+        )
+
+        self.assertEqual(await asyncio.wait_for(raw_events.reached.get(), timeout=1), 0)
+        raw_events.releases[0].set()
+        self.assertEqual(await asyncio.wait_for(raw_events.reached.get(), timeout=1), 1)
+        self.assertIn(
+            ("tool_error", "finalize_plan", "title is required", "call-one"),
+            renderer.events,
+        )
+        self.assertNotIn(
+            ("tool_error", "finalize_plan", "old error", "old-call"),
+            renderer.events,
+        )
+        self.assertFalse(turn.done())
+
+        raw_events.releases[1].set()
+        self.assertEqual(await asyncio.wait_for(raw_events.reached.get(), timeout=1), 2)
+        self.assertIn(
+            (
+                "tool_error",
+                "ask_user",
+                "ask_user is unavailable during plan_finalize",
+                "call-two",
+            ),
+            renderer.events,
+        )
+        self.assertFalse(turn.done())
+
+        raw_events.releases[2].set()
+        self.assertEqual(await asyncio.wait_for(raw_events.reached.get(), timeout=1), 3)
+        self.assertIn(
+            ("tool_error", "finalize_plan", "title must be a string", "call-three"),
+            renderer.events,
+        )
+        self.assertFalse(turn.done())
+
+        raw_events.releases[3].set()
+        result = await turn
+
+        lifecycle = [event for event in renderer.events if event[0] in {"tool_call", "tool_error"}]
+        self.assertEqual(
+            lifecycle,
+            [
+                ("tool_call", "finalize_plan", {}, "call-one"),
+                ("tool_error", "finalize_plan", "title is required", "call-one"),
+                ("tool_call", "ask_user", {"question": "Continue?"}, "call-two"),
+                (
+                    "tool_error",
+                    "ask_user",
+                    "ask_user is unavailable during plan_finalize",
+                    "call-two",
+                ),
+                ("tool_call", "finalize_plan", {"title": 3}, "call-three"),
+                ("tool_error", "finalize_plan", "title must be a string", "call-three"),
+            ],
+        )
+        self.assertEqual(result.tool_calls, ["finalize_plan", "ask_user", "finalize_plan"])
+        self.assertEqual(
+            result.tool_results,
+            [
+                "title is required",
+                "ask_user is unavailable during plan_finalize",
+                "title must be a string",
+            ],
+        )
+
+    async def test_live_values_ignores_nested_namespaces_and_counts_idless_occurrences(self) -> None:
+        error = {
+            "type": "tool",
+            "content": "same failure",
+            "name": "finalize_goal",
+            "tool_call_id": "",
+            "status": "error",
+        }
+        messages = [error]
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+
+        await consume_live_tool_errors(
+            AsyncItems(
+                [
+                    values_event([]),
+                    values_event(messages, namespace=("child",)),
+                    values_event(messages),
+                    values_event([error, error]),
+                ]
+            ),
+            renderer,
+            result,
+        )
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_error", "finalize_goal", "same failure", ""),
+                ("tool_error", "finalize_goal", "same failure", ""),
+            ],
+        )
 
     async def test_message_fallback_renders_every_v1_control_call(self) -> None:
         renderer = RecordingRenderer()

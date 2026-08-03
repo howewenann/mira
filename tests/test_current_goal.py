@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -46,6 +47,29 @@ class CurrentGoalTests(unittest.TestCase):
         self.assertNotIn("plan", value)
         self.assertNotIn("proposal_id", value)
         self.assertNotIn("original_objective", value)
+
+    def test_polished_objective_round_trips_without_authoritative_request_field(self) -> None:
+        polished = "Create an approximately 20-word story and save it as story.md."
+        value = goal_artifact(
+            goal_id="goal-polished",
+            title="Short Story",
+            objective=polished,
+            success_criteria="- story.md contains the requested story.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root / "sessions")
+            record = store.new(session_id="polished-goal", workspace=root)
+            record["current_goal"] = value
+            store.save(record)
+
+            loaded = store.load("polished-goal", resume=False, workspace=root)
+
+        self.assertEqual(loaded["current_goal"]["objective"], polished)
+        self.assertNotIn("authoritative_request", loaded["current_goal"])
+        self.assertNotIn("authoritative_objective", loaded["current_goal"])
 
     def test_agent_declared_and_rubric_verified_completion(self) -> None:
         plain = {"events": [], "current_goal": artifact()}

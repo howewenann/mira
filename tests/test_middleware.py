@@ -385,6 +385,57 @@ class MiddlewareTests(unittest.TestCase):
         self.assertIn("show_goal", str(result.content))
         self.assertFalse(called)
 
+    def test_finalization_rejects_every_name_except_matching_finalizer(self) -> None:
+        middleware = PlanningStageEnforcementMiddleware()
+        cases = (
+            ("plan_finalize", "finalize_plan", ("ask_user", "read_file", "finalize_goal", "stale_tool")),
+            ("goal_finalize", "finalize_goal", ("ask_user", "read_file", "finalize_plan", "stale_tool")),
+        )
+
+        for stage, required, forbidden in cases:
+            for name in forbidden:
+                with self.subTest(stage=stage, name=name):
+                    called = False
+
+                    def handler(_request: Any) -> str:
+                        nonlocal called
+                        called = True
+                        return "executed"
+
+                    result = middleware.wrap_tool_call(
+                        FakeToolRequest(name, stage, call_id=f"call-{stage}-{name}"),
+                        handler,
+                    )
+
+                    self.assertIsInstance(result, ToolMessage)
+                    self.assertEqual(result.status, "error")
+                    self.assertEqual(result.name, name)
+                    self.assertEqual(result.tool_call_id, f"call-{stage}-{name}")
+                    self.assertIn(f"Only {required} can be called now.", str(result.content))
+                    self.assertIn(f"Call {required}", str(result.content))
+                    self.assertFalse(called)
+
+    def test_async_finalization_backstop_rejects_hidden_tool_before_handler(self) -> None:
+        middleware = PlanningStageEnforcementMiddleware()
+        called = False
+
+        async def handler(_request: Any) -> str:
+            nonlocal called
+            called = True
+            return "executed"
+
+        result = asyncio.run(
+            middleware.awrap_tool_call(
+                FakeToolRequest("ask_user", "plan_finalize", call_id="call-hidden"),
+                handler,
+            )
+        )
+
+        self.assertIsInstance(result, ToolMessage)
+        self.assertEqual(result.tool_call_id, "call-hidden")
+        self.assertIn("Only finalize_plan can be called now.", str(result.content))
+        self.assertFalse(called)
+
     def test_response_status_parser_requires_one_terminal_stage_valid_status(self) -> None:
         plan = "plan_research"
         goal = "goal_research"

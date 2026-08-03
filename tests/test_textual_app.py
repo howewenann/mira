@@ -1036,20 +1036,102 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "planning": True,
                         "rubric_enabled": True,
                         "goal_staging": {
-                            "authoritative_objective": "Add ranked search.",
+                            "authoritative_objective": "add ranked search to the results page",
                             "stage": "goal_research",
                             "success_criteria": "",
                         },
                         "planning_stage": "goal_research",
                     }
                 )
-                resume = await app.prepare_goal({"type": "prepare_goal", "objective": "Changed", "research_evidence": "Existing index is SQLite."})
+                resume = await app.prepare_goal(
+                    {
+                        "type": "prepare_goal",
+                        "objective": "Add ranked search to the results page.",
+                        "research_evidence": "Existing index is SQLite.",
+                    }
+                )
 
         self.assertEqual(app.mode["planning_stage"], "goal_finalize")
         self.assertEqual(app.mode["goal_staging"]["success_criteria"], "- Ranked search works.")
-        self.assertEqual(service.generate.await_args.args[0], "Add ranked search.")
+        self.assertEqual(service.generate.await_args.args[0], "Add ranked search to the results page.")
         self.assertEqual(service.generate.await_args.args[1], "Existing index is SQLite.")
+        self.assertEqual(
+            service.generate.await_args.kwargs["authoritative_request"],
+            "add ranked search to the results page",
+        )
+        self.assertIn(
+            "<authoritative_request>\nadd ranked search to the results page\n</authoritative_request>",
+            resume,
+        )
+        self.assertIn(
+            "<objective>\nAdd ranked search to the results page.\n</objective>",
+            resume,
+        )
         self.assertIn("<success_criteria>\n- Ranked search works.", resume)
+
+    async def test_prepare_goal_blank_objective_falls_back_to_authoritative_request(self) -> None:
+        app = make_app()
+        service = type("CriteriaService", (), {})()
+        service.generate = AsyncMock(return_value="- The report exists.")
+        with patch("ui.app.SuccessCriteriaService", return_value=service):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.mode.update(
+                    {
+                        "goal_staging": {
+                            "authoritative_objective": "Write the weekly report.",
+                            "stage": "goal_research",
+                            "success_criteria": "",
+                        },
+                        "planning_stage": "goal_research",
+                    }
+                )
+                await app.prepare_goal({"type": "prepare_goal", "objective": "   "})
+
+        self.assertEqual(app.mode["goal_staging"]["objective"], "Write the weekly report.")
+        self.assertEqual(service.generate.await_args.args[0], "Write the weekly report.")
+        self.assertEqual(
+            service.generate.await_args.kwargs["authoritative_request"],
+            "Write the weekly report.",
+        )
+
+    async def test_prepare_goal_revision_passes_scope_changing_feedback_to_finalization(self) -> None:
+        app = make_app()
+        previous = goal_artifact(
+            goal_id="goal-1",
+            title="Short Story",
+            objective="Create an approximately 20-word story and save it as story.md.",
+            success_criteria="- story.md contains an approximately 20-word story.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        feedback = "Change the deliverable to poem.md and make it 40 words."
+        service = type("CriteriaService", (), {})()
+        service.revise = AsyncMock(return_value="- poem.md contains an approximately 40-word poem.")
+        with patch("ui.app.SuccessCriteriaService", return_value=service):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.mode.update(
+                    {
+                        "goal_revision": {"previous_goal": previous, "feedback": feedback},
+                        "goal_staging": {
+                            "authoritative_objective": previous["objective"],
+                            "stage": "goal_research",
+                            "success_criteria": "",
+                        },
+                        "planning_stage": "goal_research",
+                    }
+                )
+                resume = await app.prepare_goal(
+                    {
+                        "type": "prepare_goal",
+                        "objective": "Create an approximately 40-word poem and save it as poem.md.",
+                    }
+                )
+
+        self.assertEqual(service.revise.await_args.args[2], feedback)
+        self.assertIn(f"<user_feedback>\n{feedback}\n</user_feedback>", resume)
+        self.assertIn("explicit user feedback may change that meaning", resume)
 
     async def test_prepare_show_goals_definition_and_plan_spinners(self) -> None:
         app = make_app()
@@ -1057,7 +1139,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         service = type("CriteriaService", (), {})()
 
-        async def generate(_objective: str, _research_context: str = "") -> str:
+        async def generate(
+            _objective: str,
+            _research_context: str = "",
+            *,
+            authoritative_request: str = "",  # noqa: ARG001
+        ) -> str:
             started.set()
             await release.wait()
             return "- Ranked search works."
@@ -1114,6 +1201,47 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.await_args.kwargs["plan_agent"], app.plan_agent)
         self.assertEqual(run.await_args.kwargs["display_text"], "/goal Write a professional announcement.")
 
+    async def test_goal_command_keeps_new_proposed_goal_actions_after_refresh(self) -> None:
+        app = make_app()
+        raw_request = "write me a story of about 20 words. save it to story.md in the root directory"
+        polished_objective = (
+            "Create an approximately 20-word story and save it as story.md in the project root."
+        )
+
+        async def construct_goal(**_kwargs: Any) -> None:
+            await app.prepare_goal(
+                {
+                    "type": "prepare_goal",
+                    "objective": polished_objective,
+                    "context_and_constraints": "Use the project root.",
+                }
+            )
+            await app.finalize_goal({"type": "finalize_goal", "title": "Short Story"})
+
+        service = type("CriteriaService", (), {})()
+        service.generate = AsyncMock(return_value="- story.md contains an approximately 20-word story.")
+        with (
+            patch("ui.app.SuccessCriteriaService", return_value=service),
+            patch("ui.app.run_user_turn", side_effect=construct_goal),
+        ):
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                await app._run_goal_command(raw_request)
+                await pilot.pause()
+
+                goal = app.session["current_goal"]
+                self.assertEqual(goal["status"], "proposed")
+                self.assertEqual(goal["objective"], polished_objective)
+                goal_bubble = list(app.query_one(ChatLog).query(".goal"))[-1]
+                actions = list(goal_bubble.query(".goal-action"))
+                self.assertEqual(len(actions), 3)
+                self.assertTrue(all(not button.disabled and button.display for button in actions))
+
+        self.assertEqual(
+            service.generate.await_args.kwargs["authoritative_request"],
+            raw_request,
+        )
+
     async def test_finalize_goal_builds_criteria_only_current_goal(self) -> None:
         app = make_app()
         interrupt = {"type": "finalize_goal", "title": "Announcement"}
@@ -1135,6 +1263,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         value = app.session["current_goal"]
         self.assertEqual(value["objective"], "Rewrite this announcement.")
         self.assertEqual(value["success_criteria"], "- The announcement is professional.")
+        self.assertNotIn("authoritative_objective", value)
+        self.assertNotIn("authoritative_request", value)
         self.assertNotIn("plan", value)
 
     async def test_current_goal_clear_preserves_event(self) -> None:
@@ -1171,6 +1301,91 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action")), 3)
 
+    async def test_natural_language_goal_recall_matches_direct_show_for_retained_statuses(self) -> None:
+        for status in ("paused", "max_iterations_reached", "completed"):
+            with self.subTest(status=status):
+                app = make_app()
+                value = goal_artifact(
+                    goal_id=f"goal-{status}",
+                    title="Retained Goal",
+                    objective="Complete the retained work.",
+                    success_criteria="- The retained work is complete.",
+                    rubric_enabled=status == "max_iterations_reached",
+                    rubric_iterations=3,
+                )
+                value["status"] = status
+
+                async def show_retained_goal(**_kwargs: Any) -> None:
+                    await app.show_goal()
+
+                with (
+                    patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
+                    patch("ui.app.run_user_turn", side_effect=show_retained_goal),
+                ):
+                    async with app.run_test(size=(100, 35)) as pilot:
+                        await pilot.pause()
+                        app.session["current_goal"] = value
+                        app.mode["current_goal"] = value
+                        await app.show_goal()
+                        await pilot.pause()
+                        direct = list(app.query_one(ChatLog).query(".goal"))[-1]
+                        direct_actions = list(direct.query(".goal-action"))
+
+                        await app._run_turn("Show, reopen, and review the retained Goal.")
+                        await pilot.pause()
+                        natural = list(app.query_one(ChatLog).query(".goal"))[-1]
+                        natural_actions = list(natural.query(".goal-action"))
+
+                        self.assertEqual(len(direct_actions), 3)
+                        self.assertEqual(len(natural_actions), 3)
+                        self.assertTrue(
+                            all(not button.disabled and button.display for button in direct_actions)
+                        )
+                        self.assertTrue(
+                            all(not button.disabled and button.display for button in natural_actions)
+                        )
+                        self.assertEqual(str(natural.border_title), f"goal - {status}")
+
+    async def test_finished_goal_attempt_resolves_only_its_execution_bubble(self) -> None:
+        app = make_app()
+        value = goal_artifact(
+            goal_id="goal-1",
+            title="Retained Goal",
+            objective="Complete the retained work.",
+            success_criteria="- The retained work is complete.",
+            rubric_enabled=True,
+            rubric_iterations=3,
+        )
+        value["status"] = "active"
+
+        async def finish_paused(**_kwargs: Any) -> None:
+            paused = dict(app.session["current_goal"])
+            paused["status"] = "paused"
+            app.session["current_goal"] = paused
+            app.mode["current_goal"] = paused
+            app.mode["executing_goal"] = False
+
+        with (
+            patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
+            patch("ui.app.run_user_turn", side_effect=finish_paused),
+        ):
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                app.session["current_goal"] = value
+                app.mode["current_goal"] = value
+                app.mode["executing_goal"] = True
+                chat = app.query_one(ChatLog)
+                chat.present_goal(value, active=True, status="active")
+                await pilot.pause()
+
+                await app._run_turn_for_goal(value)
+                await pilot.pause()
+
+                execution = list(chat.query(".goal"))[-1]
+                actions = list(execution.query(".goal-action"))
+                self.assertEqual(str(execution.border_title), "goal - paused")
+                self.assertTrue(all(button.disabled and not button.display for button in actions))
+
     async def test_goal_command_declining_incomplete_plan_replacement_preserves_plan(self) -> None:
         app = make_app()
         plan = plan_artifact(
@@ -1196,6 +1411,57 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         run.assert_not_awaited()
         self.assertEqual(app.session["current_plan"]["id"], "plan-1")
         self.assertIsNone(app.session.get("current_goal"))
+
+    async def test_formal_replacement_dialog_uses_current_artifact_for_all_combinations(self) -> None:
+        plan = plan_artifact(
+            plan_id="plan-1",
+            title="Existing Plan",
+            objective="Keep the Plan.",
+            context_and_constraints="None.",
+            key_changes=["Keep it."],
+            test_plan=["Verify it."],
+            assumptions=["None."],
+            success_criteria="- The Plan remains current.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        goal = goal_artifact(
+            goal_id="goal-1",
+            title="Existing Goal",
+            objective="Keep the Goal.",
+            success_criteria="- The Goal remains current.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+
+        for current_kind, current_value in (("Plan", plan), ("Goal", goal)):
+            for new_kind in ("Plan", "Goal"):
+                for answer, expected in (("replace", True), ("keep", False)):
+                    with self.subTest(current=current_kind, new=new_kind, answer=answer):
+                        app = make_app()
+                        app.session["current_plan"] = current_value if current_kind == "Plan" else None
+                        app.session["current_goal"] = current_value if current_kind == "Goal" else None
+                        app._prompt_choice = AsyncMock(return_value=answer)
+
+                        accepted = await app._confirm_formal_replacement(new_kind)
+
+                        self.assertIs(accepted, expected)
+                        app._prompt_choice.assert_awaited_once_with(
+                            f"Replace Current {current_kind}?",
+                            (
+                                f"A current {current_kind} is still incomplete.\n\n"
+                                f"If the new {new_kind} is successfully created, it will replace "
+                                f"the current {current_kind}."
+                            ),
+                            [
+                                ("replace", f"Replace Current {current_kind}"),
+                                ("keep", f"Keep Current {current_kind}"),
+                            ],
+                            vertical=True,
+                        )
+                        self.assertIs(app.session[f"current_{current_kind.lower()}"], current_value)
+                        other_kind = "goal" if current_kind == "Plan" else "plan"
+                        self.assertIsNone(app.session[f"current_{other_kind}"])
 
     async def test_show_goal_mismatch_directs_to_current_plan(self) -> None:
         app = make_app()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from typing import Any
 from unittest.mock import patch
 
 from agent.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from session import context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
@@ -35,8 +36,10 @@ from tests.test_runner import (
     COMPACTION_SUMMARY,
     FakeAgent,
     FakeStream,
+    GatedAsyncItems,
     Message as StreamMessage,
     RunTurnRenderer,
+    values_event,
 )
 from ui.repl import run_user_turn
 
@@ -976,6 +979,48 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[1]["status"], "error")
         self.assertEqual(events[1]["call_id"], "call-read")
         self.assertIn(("tool_error", "read_file", "file not found", "call-read"), renderer.events)
+
+    async def test_live_values_control_error_is_saved_before_graph_stream_finishes(self) -> None:
+        record = {"events": []}
+        store = Store()
+        recorder = SessionRecorder(record, store, "plan")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+        call = AIMessage(
+            content="",
+            tool_calls=[{"name": "finalize_plan", "args": {}, "id": "call-invalid"}],
+        )
+        error = ToolMessage(
+            content="title is required",
+            name="finalize_plan",
+            tool_call_id="call-invalid",
+            status="error",
+        )
+        raw_events = GatedAsyncItems(
+            [values_event([]), values_event([call, error])],
+            [values_event([call, error])],
+        )
+        stream = FakeStream(
+            output={"messages": [call, error]},
+            raw_events=raw_events,
+        )
+        turn = asyncio.create_task(
+            runner.run_turn(FakeAgent([stream]), "finish", recording, "thread-1")
+        )
+
+        await asyncio.wait_for(raw_events.reached_gate.wait(), timeout=1)
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result"])
+        self.assertEqual(events[1]["status"], "error")
+        self.assertEqual(events[1]["call_id"], "call-invalid")
+        self.assertGreaterEqual(len(store.saved), 2)
+        self.assertFalse(turn.done())
+
+        raw_events.release.set()
+        await turn
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result"])
 
     def test_completed_idless_results_group_by_original_call_order(self) -> None:
         record = {"events": []}

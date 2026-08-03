@@ -486,7 +486,6 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -495,6 +494,7 @@ class MiraApp(App[None]):
                 self.mode["current_goal"] = current_goal(self.session)
                 self.store.save(self.session)
                 self.mode["executing_goal"] = False
+                self._resolve_goal_attempt_status()
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -513,6 +513,7 @@ class MiraApp(App[None]):
                 self.mode["current_goal"] = current_goal(self.session)
                 self.store.save(self.session)
                 self.mode["executing_goal"] = False
+                self._resolve_goal_attempt_status()
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -531,6 +532,7 @@ class MiraApp(App[None]):
                 self.mode["current_goal"] = current_goal(self.session)
                 self.store.save(self.session)
                 self.mode["executing_goal"] = False
+                self._resolve_goal_attempt_status()
             if self.mode.get("executing_plan"):
                 pause_current_plan(self.session)
                 self.mode["current_plan"] = current_plan(self.session)
@@ -804,7 +806,6 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -901,7 +902,7 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_goal_status()
+            self._resolve_goal_attempt_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -909,6 +910,7 @@ class MiraApp(App[None]):
             self.mode["current_goal"] = current_goal(self.session)
             self.mode["executing_goal"] = False
             self.store.save(self.session)
+            self._resolve_goal_attempt_status()
             self.finish_turn(cancelled=True)
             self.system_message("turn cancelled", kind="warning")
             raise
@@ -917,6 +919,7 @@ class MiraApp(App[None]):
             self.mode["current_goal"] = current_goal(self.session)
             self.mode["executing_goal"] = False
             self.store.save(self.session)
+            self._resolve_goal_attempt_status()
             self.finish_turn(cancelled=True)
             error_path = self._write_error_report(exc, source="tui.goal_turn", context={"goal": goal_title(value)})
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
@@ -959,7 +962,6 @@ class MiraApp(App[None]):
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
             )
-            self._refresh_goal_status()
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -1108,10 +1110,10 @@ class MiraApp(App[None]):
                 self.mode["plan_counter"] = counter
                 return plan_id
 
-    def _refresh_goal_status(self) -> None:
-        """Reflect a terminal durable Goal status in its visible bubble."""
+    def _resolve_goal_attempt_status(self) -> None:
+        """Reflect a finished Goal attempt in its execution bubble."""
         value = current_goal(self.session)
-        if value is None or value.get("status") == "active":
+        if value is None or value.get("status") in {"proposed", "active"}:
             return
         self.query_one(ChatLog).resolve_goal(
             str(value.get("id") or ""),
@@ -1386,10 +1388,8 @@ class MiraApp(App[None]):
             raise RuntimeError("Goal staging context is unavailable")
         request = prepare_goal_request(interrupt)
         revision = self.mode.get("goal_revision")
-        if isinstance(revision, dict):
-            objective = request["objective"] or str(staging.get("authoritative_objective") or "")
-        else:
-            objective = str(staging.get("authoritative_objective") or "")
+        authoritative_request = str(staging.get("authoritative_objective") or "")
+        objective = request["objective"] or authoritative_request
         if not objective:
             raise RuntimeError("prepare_goal requires the authoritative user objective")
         context = request["context_and_constraints"]
@@ -1406,7 +1406,11 @@ class MiraApp(App[None]):
                 research_context,
             )
         else:
-            criteria = await service.generate(objective, research_context)
+            criteria = await service.generate(
+                objective,
+                research_context,
+                authoritative_request=authoritative_request,
+            )
         staging.update(
             {
                 "objective": objective,
@@ -1418,10 +1422,17 @@ class MiraApp(App[None]):
         )
         self.mode["planning_stage"] = PLANNING_STAGE_GOAL_FINALIZE
         self.waiting_started("finalizing Goal...", immediate=True)
+        revision_context = ""
+        if isinstance(revision, dict):
+            revision_context = (
+                f"\n\n<user_feedback>\n{str(revision.get('feedback') or '')}\n</user_feedback>"
+            )
         return (
             f"{GOAL_FINALIZATION_POLICY}\n\n"
+            f"<authoritative_request>\n{authoritative_request}\n</authoritative_request>\n\n"
             f"<objective>\n{objective}\n</objective>\n\n"
             f"<success_criteria>\n{criteria}\n</success_criteria>"
+            f"{revision_context}"
         )
 
     async def finalize_goal(self, interrupt: Any) -> str:
@@ -1537,10 +1548,11 @@ class MiraApp(App[None]):
         if current is None or current.get("status") == "completed":
             return True
         answer = await self._prompt_choice(
-            "Replace Current Formal Work?",
+            f"Replace Current {current_kind}?",
             (
                 f"A current {current_kind} is still incomplete.\n\n"
-                f"Creating this {new_kind} will replace it as the current formal work."
+                f"If the new {new_kind} is successfully created, it will replace "
+                f"the current {current_kind}."
             ),
             [
                 ("replace", f"Replace Current {current_kind}"),

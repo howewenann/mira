@@ -334,6 +334,13 @@ Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
 
+The user's request is authoritative for meaning, while `prepare_plan` may
+rewrite the visible Objective for clarity. That rewrite is wording-only: it
+must not add, remove, or materially change the intended outcome, scope,
+deliverables, or constraints. The preparation handoff is trusted without a
+second semantic grader or model call; the original request remains in the Plan
+conversation as binding context.
+
 Plan research also uses a deterministic terminal response-status contract. The
 generic `CorrectionMiddleware` appends the Plan-owned rule's contract
 transiently to every model request, including requests after tool results,
@@ -426,10 +433,15 @@ the current Plan/Act mode: optional investigation and `ask_user`, then
 
 Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `show_plan`,
 and `show_goal`. Finalization exposes only `finalize_goal` with required tool
-choice. The visible command objective remains authoritative; bounded evidence
-may clarify but not enlarge it. Staging is transient, so failed or cancelled
-generation leaves current formal work unchanged. Goal construction never calls
-`finalize_plan` and never produces a hidden implementation Plan.
+choice. The raw `/goal` request remains authoritative for meaning in transient
+staging. `prepare_goal` may provide a concise, user-facing Objective rewrite,
+but may not add, remove, or materially change the request's intended outcome,
+scope, deliverables, or constraints; a blank Objective falls back to the raw
+request. Both texts are passed as binding context to criteria generation and
+finalization, while only the polished Objective is persisted in the existing
+Goal artifact. Bounded evidence may clarify but not enlarge either. Failed or
+cancelled generation leaves current formal work unchanged. Goal construction
+never calls `finalize_plan` and never produces a hidden implementation Plan.
 
 Goal research uses the same transient natural-stop protocol and bounded retry
 state as Plan research, but its only preparation marker and tool are
@@ -438,9 +450,13 @@ not exposed and a Plan-only status is malformed. Conversely, Goal preparation
 is absent from Plan research. Goal finalisation remains outside validation and
 retains the single required `finalize_goal` call.
 
-`SuccessCriteriaService` treats the objective as authoritative and receives
-only the effective objective, optional research context, and previous criteria
-plus feedback during revision, never a previous Plan.
+`SuccessCriteriaService` receives the raw authoritative request alongside the
+polished Objective for initial Goal construction, plus optional research
+context. It receives the effective Objective, previous criteria, feedback, and
+optional research context during revision, never a previous Plan. There is no
+semantic grading call between preparation and finalization; a material
+Objective change during revision is permitted only when explicit feedback
+changes the desired outcome.
 
 The durable `GoalArtifact` stores id, title, objective, Success Criteria,
 status, snapshotted rubric policy and cap, latest overall rubric result,
@@ -452,17 +468,27 @@ artifact rejects the session. Retired proposal events are not projected as
 Goal events.
 
 `GoalBubble` shows Objective and Success Criteria with Implement, Revise, and
-Close actions. Implement starts or restarts one explicit Act attempt. Revise
-uses the read-only Goal pipeline and `SuccessCriteriaService.revise()` to create
-a complete replacement. Close hides controls without changing `current_goal`.
+Close actions. A newly finalized `proposed` Goal remains active through the
+post-command refresh so all three review actions stay available. Implement
+starts or restarts one explicit Act attempt. Revise uses the read-only Goal
+pipeline and `SuccessCriteriaService.revise()` to create a complete replacement.
+Close hides controls without changing `current_goal`.
 `/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
 incomplete states, and `/goal-clear` removes only the current Goal.
+Explicit Goal recall always reopens the retained artifact for review, including
+`paused`, `max_iterations_reached`, and `completed` Goals. Ordinary model-turn
+cleanup must not resolve that newly rendered bubble. Only the dedicated Goal
+execution path resolves its execution bubble after completion, pausing,
+cancellation, failure, or rubric exhaustion.
 
 MIRA replaces current formal work only after the new Plan or Goal is presented
 successfully. Completed work may be replaced automatically. Incomplete work
-requires structured confirmation; acceptance is transient and does not clear
-the old artifact early. Successful replacement marks the old transcript event
-`superseded`, clears the opposite current field, and stores the new artifact.
+requires structured confirmation named for the current artifact, for every
+Plan-to-Plan, Plan-to-Goal, Goal-to-Plan, and Goal-to-Goal combination. The
+dialog explains which new kind will replace which current kind. Acceptance is
+transient and does not clear the old artifact early. Successful replacement
+marks the old transcript event `superseded`, clears the opposite current field,
+and stores the new artifact.
 
 Goal construction is identical with rubrics on or off. A non-rubric successful
 attempt completes as `agent-declared`. A rubric-enabled attempt passes exact
@@ -507,12 +533,16 @@ correction.
 
 Planning stages have two matching enforcement layers. Request-time filtering
 shows only the formal controls valid for the current stage. A native
-`wrap_tool_call` guard then rejects remembered or hallucinated wrong-stage
-`prepare_plan`, `finalize_plan`, `prepare_goal`, or `finalize_goal` calls with an
-error `ToolMessage` before their handler can call `interrupt()`. The standard
-agent edge returns that result to the model, which may select the correct tool;
-the same error is rendered on the original control-tool bubble. These calls
-never consume natural-stop correction retries.
+`wrap_tool_call` guard rejects remembered or hallucinated wrong-stage formal
+controls before their handlers can call `interrupt()`. Finalization is stricter:
+`plan_finalize` permits only `finalize_plan`, and `goal_finalize` permits only
+`finalize_goal`. That execution boundary covers registered controls, ordinary
+tools, cross-workflow controls, and stale or unregistered names. The standard
+agent edge returns an error `ToolMessage` with the original call id and exact
+repair guidance, so the model may select the finalizer. These calls never
+consume natural-stop correction retries. A valid finalizer still reaches
+ToolNode, whose schema validation can return its own repairable error before
+the finalizer's interrupt body runs.
 
 **Why:** A weak model may call a registered control remembered from transcript
 history even when its schema is hidden from the current request. Tool visibility
@@ -572,8 +602,27 @@ with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
 
 Completed tool results update their original tool blocks before the overall turn
-ends when the provider exposes a live terminal event. Final graph-state recovery
-remains the fallback for providers that do not. Before each top-level turn MIRA
+ends when the provider exposes a live terminal event. MIRA also consumes root
+v3 `values` snapshots during every invocation and resume. The first snapshot is
+the invocation baseline; later snapshots are compared by call id, with counted
+name/output identities for idless error messages. A newly appended native
+`ToolMessage(status="error")` is authoritative: MIRA recovers its matching AI
+tool call from graph state when necessary, then sends both through the same
+live recording and rendering path. This covers middleware-short-circuited and
+unregistered calls that never create a tool-call completion handle. Repeated
+full-state snapshots do not duplicate either event.
+
+Successful Plan/Goal and `ask_user` controls retain dedicated interrupt-driven
+surfaces. Pinned LangGraph exposes successful `interrupt()` control flow through
+the raw `ToolCallStream.error` field as an `Interrupt(...)`, which cannot be
+distinguished there from failure. MIRA therefore suppresses raw control-stream
+errors, `Command` values, interrupt payloads, and empty interrupted completions;
+only the native error `ToolMessage` drives an ordinary visible error. Argument
+validation and middleware rejection produce that native message. Unexpected
+service, persistence, and UI failures remain fatal.
+
+Final graph-state recovery remains the fallback for providers that omit a live
+terminal projection. Before each top-level turn MIRA
 snapshots the checkpoint's existing lifecycle, then subtracts that occurrence-
 aware baseline from the final graph state. Only lifecycle entries introduced by
 the current turn are eligible for recovery, so complete checkpoint history

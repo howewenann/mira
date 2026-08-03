@@ -114,7 +114,7 @@ Do not call a disabled tool or attempt the requested change.
 Authoritative Goal objective:
 {text}
 
-Preserve that objective exactly unless this is an explicit Goal revision whose feedback changes the desired outcome. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require finalize_goal. Never create an implementation Plan."""
+Treat that request as authoritative for meaning. For prepare_goal, write a concise user-facing Objective that may improve wording but must not add, remove, or materially change the intended outcome, scope, deliverables, or constraints. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require finalize_goal. Never create an implementation Plan."""
 
 PLAN_REQUEST_TEMPLATE = """You are in planning mode (Plan mode).
 The following tools are disabled: {disabled_tools}.

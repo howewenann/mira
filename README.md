@@ -137,7 +137,7 @@ Revise, and Close actions. `/goal-show` reopens the exact Goal, `/goal-resume`
 continues incomplete work, and `/goal-clear` removes it without deleting
 history. Successful non-rubric attempts are agent-declared; rubric-enabled
 attempts complete only when rubric-verified. A Goal never contains a hidden
-implementation Plan; agents reopen it through `goal_show`.
+implementation Plan; agents reopen it through `show_goal`.
 
 ## Project Resources
 

@@ -35,7 +35,12 @@ from runtime.output_events import (
 from runtime.rubric_events import RubricEventRenderer
 from runtime.subagent_events import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
 from runtime.tool_call_args import normalized_call, tool_call_args
-from runtime.tool_events import CONTROL_TOOLS, consume_tool_calls
+from runtime.tool_events import (
+    CONTROL_TOOLS,
+    consume_live_tool_errors,
+    consume_tool_calls,
+    render_tool_completion,
+)
 
 FORMAL_CONSTRUCTION_CANCELLED = "Formal construction cancelled; current formal work retained."
 from runtime.usage import (
@@ -72,6 +77,10 @@ class TurnResult:
     _seen_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _seen_tool_result_ids: set[str] = field(default_factory=set, repr=False)
     _seen_tool_result_values: set[tuple[str, str]] = field(default_factory=set, repr=False)
+    _seen_tool_result_occurrences: Counter[tuple[str, str]] = field(
+        default_factory=Counter,
+        repr=False,
+    )
 
     @property
     def usage(self) -> dict[str, Any]:
@@ -134,6 +143,11 @@ class TurnResult:
         self._tool_call_ids.append(call_id)
         return True
 
+    def observe_tool_call(self, call_id: str = "") -> None:
+        """Mark a baseline call as historical without adding it to this turn."""
+        if call_id:
+            self._seen_tool_call_ids.add(call_id)
+
     def record_tool_call_draft(self, name: str, call_id: str) -> None:
         """Remember a provider draft so fallback promotion keeps its identifier."""
         self._tool_call_drafts.append((name, call_id))
@@ -152,18 +166,53 @@ class TurnResult:
                 return call_id
         return ""
 
-    def record_tool_result(self, text: str, call_id: str = "", name: str = "") -> bool:
+    def record_tool_result(
+        self,
+        text: str,
+        call_id: str = "",
+        name: str = "",
+        *,
+        occurrence: int | None = None,
+    ) -> bool:
         """Record one tool result while avoiding duplicate id-based reports."""
         value_key = (name, text)
         if call_id:
             if call_id in self._seen_tool_result_ids:
                 return False
             self._seen_tool_result_ids.add(call_id)
+        elif occurrence is not None:
+            if occurrence <= self._seen_tool_result_occurrences[value_key]:
+                return False
+            self._seen_tool_result_occurrences[value_key] = occurrence
         elif value_key in self._seen_tool_result_values:
             return False
+        else:
+            self._seen_tool_result_occurrences[value_key] = max(
+                self._seen_tool_result_occurrences[value_key],
+                1,
+            )
         self._seen_tool_result_values.add(value_key)
         self.tool_results.append(text)
         return True
+
+    def observe_tool_result(
+        self,
+        text: str,
+        call_id: str = "",
+        name: str = "",
+        *,
+        occurrence: int = 1,
+    ) -> None:
+        """Mark a baseline result as historical without adding it to this turn."""
+        value_key = (name, text)
+        if call_id:
+            self._seen_tool_result_ids.add(call_id)
+        else:
+            self._seen_tool_result_values.add(value_key)
+            self._seen_tool_result_occurrences[value_key] = max(
+                self._seen_tool_result_occurrences[value_key],
+                occurrence,
+            )
 
 
 class SubagentRequestRenderer:
@@ -442,6 +491,7 @@ async def run_turn(
             waiting_started()
 
         await asyncio.gather(
+            consume_live_tool_errors(stream, event_renderer, result),
             consume_custom_events(stream.custom, event_renderer, rubric_renderer),
             consume_messages(
                 stream.messages,
@@ -921,8 +971,6 @@ def render_output_tool_results(
 ) -> None:
     """Recover executed calls/results that only appear in final graph state."""
     recovered_tool_call = getattr(renderer, "recovered_tool_call", None)
-    recovered_tool_result = getattr(renderer, "recovered_tool_result", None)
-    recovered_tool_error = getattr(renderer, "recovered_tool_error", None)
     lifecycle = current_tool_lifecycle(output, historical or Counter())
     control_error_ids = {
         str(item.get("call_id") or "")
@@ -940,6 +988,7 @@ def render_output_tool_results(
         and item.get("status") == "error"
         and not item.get("call_id")
     )
+    result_occurrences: Counter[tuple[str, str]] = Counter()
     for item in lifecycle:
         if item["type"] == "tool_call":
             call = normalized_call(item["call"])
@@ -963,14 +1012,21 @@ def render_output_tool_results(
                 continue
         text = item["output"]
         call_id = item["call_id"]
-        if not result.record_tool_result(text, call_id, item["name"]):
-            continue
-        if item.get("status") == "error" and callable(recovered_tool_error):
-            recovered_tool_error(item["name"], text, call_id=call_id)
-        elif callable(recovered_tool_result):
-            recovered_tool_result(item["name"], text, call_id=call_id)
-        else:
-            renderer.tool_result(item["name"], text, call_id=call_id)
+        occurrence = None
+        if not call_id:
+            value_key = (str(item["name"]), str(text))
+            result_occurrences[value_key] += 1
+            occurrence = result_occurrences[value_key]
+        render_tool_completion(
+            renderer,
+            result,
+            name=item["name"],
+            text=text,
+            call_id=call_id,
+            is_error=item.get("status") == "error",
+            recovered=True,
+            occurrence=occurrence,
+        )
 
 
 def current_tool_lifecycle(

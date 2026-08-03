@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter, defaultdict, deque
 from typing import Any
 
+from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from runtime.output_events import output_tool_lifecycle
 from runtime.tool_call_args import normalized_call
 from runtime.usage import field
 
@@ -42,8 +45,6 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
             if is_new_call:
                 renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
 
-            if name in CONTROL_TOOLS:
-                continue
             if not supports_completion_watch(call):
                 continue
             watchers.add(
@@ -76,28 +77,188 @@ async def watch_tool_result(
     renderer: Any,
     result: Any | None,
 ) -> None:
-    """Follow one ordinary call to completion and deliver its final result."""
-    output, is_error = await tool_call_completion(call)
+    """Follow one call to completion and deliver a visible non-control result."""
+    output, is_error, native_error = await tool_call_completion(call)
     if isinstance(output, Command):
+        return
+    if name in CONTROL_TOOLS and not native_error:
+        # Pinned LangGraph projects successful control-flow interrupts through
+        # ToolCallStream.error, while some projections expose interrupt-shaped
+        # success payloads. A native error ToolMessage is the only ordinary
+        # completion a control tool renders through this path.
         return
 
     text = tool_output_text(output) or ("tool failed" if is_error else "")
     if not text:
         return
-    recorded = True
-    if result is not None:
-        recorded = result.record_tool_result(text, call_id, name)
-    if not recorded:
+    render_tool_completion(
+        renderer,
+        result,
+        name=name,
+        text=text,
+        call_id=call_id,
+        is_error=is_error,
+    )
+
+
+async def consume_live_tool_errors(events: Any, renderer: Any, result: Any | None = None) -> None:
+    """Render newly added native error ToolMessages from root graph values."""
+    if not hasattr(events, "__aiter__"):
         return
 
-    method = "completed_tool_error" if is_error else "completed_tool_result"
+    seen: Counter[tuple[str, ...]] | None = None
+    async for event in events:
+        if not isinstance(event, dict) or event.get("method") != "values":
+            continue
+        params = event.get("params")
+        if not isinstance(params, dict) or tuple(params.get("namespace") or ()):
+            continue
+        values = params.get("data")
+        pairs = error_lifecycle_pairs(values)
+        current = Counter(error_message_identity(error) for _, error in pairs)
+        if seen is None:
+            seen = current
+            observe_baseline_errors(pairs, result)
+            continue
+
+        observed: Counter[tuple[str, ...]] = Counter()
+        for call, error in pairs:
+            identity = error_message_identity(error)
+            observed[identity] += 1
+            if observed[identity] <= seen[identity]:
+                continue
+            render_live_error_pair(
+                call,
+                error,
+                renderer,
+                result,
+                occurrence=observed[identity],
+            )
+
+        for identity, count in current.items():
+            seen[identity] = max(seen[identity], count)
+
+
+def observe_baseline_errors(
+    pairs: list[tuple[Any | None, dict[str, Any]]],
+    result: Any | None,
+) -> None:
+    """Keep invocation-baseline errors out of both live and fallback rendering."""
+    if result is None:
+        return
+    occurrences: Counter[tuple[str, ...]] = Counter()
+    for call, error in pairs:
+        identity = error_message_identity(error)
+        occurrences[identity] += 1
+        call_id = str(error.get("call_id") or "")
+        observe_call = getattr(result, "observe_tool_call", None)
+        if call is not None and callable(observe_call):
+            observe_call(call_id)
+        observe_result = getattr(result, "observe_tool_result", None)
+        if callable(observe_result):
+            observe_result(
+                str(error.get("output") or "tool failed"),
+                call_id,
+                str(error.get("name") or "tool"),
+                occurrence=occurrences[identity],
+            )
+
+
+def error_lifecycle_pairs(values: Any) -> list[tuple[Any | None, dict[str, Any]]]:
+    """Pair error results with their preceding calls in one graph-state snapshot."""
+    calls_by_id: dict[str, Any] = {}
+    idless_calls: dict[str, deque[Any]] = defaultdict(deque)
+    pairs: list[tuple[Any | None, dict[str, Any]]] = []
+    for item in output_tool_lifecycle(values):
+        if item.get("type") == "tool_call":
+            call = item.get("call")
+            normalized = normalized_call(call or {})
+            call_id = str(normalized.get("id") or "")
+            if call_id:
+                calls_by_id[call_id] = call
+            else:
+                idless_calls[str(normalized.get("name") or "tool")].append(call)
+            continue
+
+        if item.get("status") != "error":
+            continue
+        call_id = str(item.get("call_id") or "")
+        name = str(item.get("name") or "tool")
+        call = calls_by_id.get(call_id) if call_id else None
+        if call is None and not call_id and idless_calls[name]:
+            call = idless_calls[name].popleft()
+        pairs.append((call, item))
+    return pairs
+
+
+def error_message_identity(error: dict[str, Any]) -> tuple[str, ...]:
+    """Return an occurrence-aware identity for one native error ToolMessage."""
+    call_id = str(error.get("call_id") or "")
+    if call_id:
+        return ("id", call_id)
+    return (
+        "value",
+        str(error.get("name") or "tool"),
+        str(error.get("output") or ""),
+    )
+
+
+def render_live_error_pair(
+    call: Any | None,
+    error: dict[str, Any],
+    renderer: Any,
+    result: Any | None,
+    *,
+    occurrence: int,
+) -> None:
+    """Render a missing call start followed by its native live error."""
+    name = str(error.get("name") or "tool")
+    call_id = str(error.get("call_id") or "")
+    if call is not None:
+        normalized = normalized_call(call)
+        if result is None or result.record_tool_call(name, call_id):
+            renderer.tool_call(name, normalized.get("args", {}), call_id=call_id)
+    render_tool_completion(
+        renderer,
+        result,
+        name=name,
+        text=str(error.get("output") or "tool failed"),
+        call_id=call_id,
+        is_error=True,
+        occurrence=occurrence if not call_id else None,
+    )
+
+
+def render_tool_completion(
+    renderer: Any,
+    result: Any | None,
+    *,
+    name: str,
+    text: str,
+    call_id: str = "",
+    is_error: bool = False,
+    recovered: bool = False,
+    occurrence: int | None = None,
+) -> bool:
+    """Record and render one deduplicated live or recovered tool completion."""
+    if result is not None and not result.record_tool_result(
+        text,
+        call_id,
+        name,
+        occurrence=occurrence,
+    ):
+        return False
+
+    prefix = "recovered_" if recovered else "completed_"
+    method = f"{prefix}tool_error" if is_error else f"{prefix}tool_result"
     callback = getattr(renderer, method, None)
     if not callable(callback) and is_error:
-        callback = getattr(renderer, "completed_tool_result", None)
+        callback = getattr(renderer, f"{prefix}tool_result", None)
     if callable(callback):
         callback(name, text, call_id=call_id)
     else:
         renderer.tool_result(name, text, call_id=call_id)
+    return True
 
 
 async def finish_watchers(watchers: set[asyncio.Task[None]]) -> None:
@@ -119,38 +280,53 @@ async def cancel_watchers(watchers: set[asyncio.Task[None]]) -> None:
     await asyncio.gather(*watchers, return_exceptions=True)
 
 
-async def tool_call_completion(call: Any) -> tuple[Any, bool]:
+async def tool_call_completion(call: Any) -> tuple[Any, bool, bool]:
     """Return a tool call's final payload and whether it represents an error."""
     deltas: list[str] = []
+    delta_error = False
 
     output_deltas = field(call, "output_deltas")
     if output_deltas is not None:
         async for delta in async_items(output_deltas):
+            delta_error = delta_error or is_error_tool_message(delta)
             text = tool_output_text(delta)
             if text:
                 deltas.append(text)
     elif hasattr(call, "__aiter__"):
         async for delta in call:
+            delta_error = delta_error or is_error_tool_message(delta)
             text = tool_output_text(delta)
             if text:
                 deltas.append(text)
 
     if isinstance(call, dict):
         if call.get("error") is not None:
-            return await maybe_await(call["error"]), True
+            error = await maybe_await(call["error"])
+            return error, True, is_error_tool_message(error)
         if call.get("output") is not None:
-            return await maybe_await(call["output"]), False
-        return "".join(deltas), False
+            output = await maybe_await(call["output"])
+            native_error = is_error_tool_message(output)
+            return output, native_error, native_error
+        return "".join(deltas), delta_error, delta_error
 
     error = field(call, "error")
     if error is not None:
-        return await maybe_await(error), True
+        error = await maybe_await(error)
+        return error, True, is_error_tool_message(error)
 
     output = field(call, "output")
     if output is not None:
-        return await maybe_await(output), False
+        output = await maybe_await(output)
+        native_error = is_error_tool_message(output)
+        return output, native_error, native_error
 
-    return "".join(deltas), False
+    return "".join(deltas), delta_error, delta_error
+
+
+def is_error_tool_message(value: Any) -> bool:
+    """Return whether a native ToolMessage carries error status."""
+    is_tool = isinstance(value, ToolMessage) or field(value, "type") == "tool"
+    return is_tool and str(field(value, "status") or "") == "error"
 
 
 async def async_items(value: Any) -> Any:
@@ -185,7 +361,7 @@ def tool_output_text(output: Any) -> str:
     if output is None:
         return ""
 
-    content = getattr(output, "content", None)
+    content = field(output, "content")
     if content is not None:
         return str(content)
 

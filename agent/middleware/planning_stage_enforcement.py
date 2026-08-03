@@ -28,6 +28,11 @@ CONTROL_TOOL_STAGES = {
     FINALIZE_GOAL_TOOL: PLANNING_STAGE_GOAL_FINALIZE,
 }
 
+FINALIZATION_TOOLS = {
+    PLANNING_STAGE_PLAN_FINALIZE: FINALIZE_PLAN_TOOL,
+    PLANNING_STAGE_GOAL_FINALIZE: FINALIZE_GOAL_TOOL,
+}
+
 
 class PlanningStageState(AgentState):
     """Checkpointed stage for Plan/Goal construction tool visibility."""
@@ -38,7 +43,7 @@ class PlanningStageState(AgentState):
 
 
 class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
-    """Expose and execute only the formal controls valid for the current stage."""
+    """Expose stage tools and enforce the finalization execution boundary."""
 
     state_schema = PlanningStageState
 
@@ -51,7 +56,7 @@ class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any
         return await handler(self._stage_request(request))
 
     def wrap_tool_call(self, request: Any, handler: Any) -> Any:
-        """Return a native tool error before a wrong-stage control can interrupt."""
+        """Return a native tool error before a forbidden stage call can execute."""
         error = self._control_tool_error(request)
         return error if error is not None else handler(request)
 
@@ -93,10 +98,19 @@ class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any
     def _control_tool_error(request: Any) -> ToolMessage | None:
         call = request.tool_call
         name = str(call.get("name") or "")
+        current_stage = str(request.state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH)
+        required_finalizer = FINALIZATION_TOOLS.get(current_stage)
+        if required_finalizer is not None and name != required_finalizer:
+            return ToolMessage(
+                content=finalization_tool_error(name, current_stage, required_finalizer),
+                name=name or "tool",
+                tool_call_id=str(call.get("id") or ""),
+                status="error",
+            )
+
         expected_stage = CONTROL_TOOL_STAGES.get(name)
         if expected_stage is None:
             return None
-        current_stage = str(request.state.get("planning_stage") or PLANNING_STAGE_PLAN_RESEARCH)
         if current_stage == expected_stage:
             return None
 
@@ -106,6 +120,17 @@ class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any
             tool_call_id=str(call.get("id") or ""),
             status="error",
         )
+
+
+def finalization_tool_error(name: str, current_stage: str, required_finalizer: str) -> str:
+    """Return exact repair guidance when any other tool is attempted in finalization."""
+    attempted = name or "an unnamed tool"
+    workflow = "Plan" if current_stage == PLANNING_STAGE_PLAN_FINALIZE else "Goal"
+    return (
+        f"{attempted} cannot be called during {current_stage}. "
+        f"{workflow} finalization is active. Only {required_finalizer} can be called now. "
+        f"Call {required_finalizer} with the completed {workflow} payload."
+    )
 
 
 def planning_control_tool_error(name: str, current_stage: str, expected_stage: str) -> str:
@@ -136,7 +161,9 @@ def planning_control_tool_error(name: str, current_stage: str, expected_stage: s
 
 __all__ = [
     "CONTROL_TOOL_STAGES",
+    "FINALIZATION_TOOLS",
     "PlanningStageEnforcementMiddleware",
     "PlanningStageState",
+    "finalization_tool_error",
     "planning_control_tool_error",
 ]

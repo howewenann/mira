@@ -100,14 +100,14 @@
 - Planning todos are opt-in. When enabled, keep their middleware and tool
   metadata aligned across action, planning, and compiled dynamic subagents.
 - Plan mode is one persistent read-only conversation. Formal Plans always use
-  `prepare_plan` -> `SuccessCriteriaService` -> forced `present_plan`, regardless
+  `prepare_plan` -> `SuccessCriteriaService` -> forced `finalize_plan`, regardless
   of rubric settings. Keep exactly one durable session `current_plan`; do not
   route Plan construction through `prepare_goal` or activate a Goal.
-- `plan_show` and `/plan-show` must reuse the exact Plan bubble renderer.
+- `show_plan` and `/plan-show` must reuse the exact Plan bubble renderer.
   Implement and `/plan-resume` execute the retained Plan in Act; Revise replaces
   it; Close only hides controls; `/plan-clear` alone removes it.
 - Formal Goals always use `prepare_goal` -> `SuccessCriteriaService` -> forced
-  `present_goal`, regardless of rubric settings. A Goal contains only its exact
+  `finalize_goal`, regardless of rubric settings. A Goal contains only its exact
   Objective and Success Criteria; never generate or persist a hidden Plan.
 - Keep exactly one current formal artifact: `current_plan` or `current_goal`,
   never both. Confirm replacement of incomplete formal work and do not replace
@@ -115,7 +115,7 @@
 - Persist only the current Plan and Goal schemas. Do not migrate retired
   `active_goal`, proposal-event, generic stage, pre-staging payload, or
   nested-message checkpoint shapes.
-- `goal_show` and `/goal-show` must reuse the exact Goal bubble renderer.
+- `show_goal` and `/goal-show` must reuse the exact Goal bubble renderer.
   Implement and `/goal-resume` execute the retained Goal only for that explicit
   attempt; Revise replaces it; Close only hides controls; `/goal-clear` removes it.
 - When fixing execute or HITL issues, compare real behavior in both modes and
