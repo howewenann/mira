@@ -449,6 +449,7 @@ async def run_turn(
     usage_callback: Callable[[dict[str, Any]], None] | None = None,
     rubric: str | None | object = None,
     rubric_max_iterations: int = 3,
+    rubric_model_name: str = "",
     include_rubric_state: bool = False,
     planning_stage: str | None = None,
 ) -> TurnResult:
@@ -462,6 +463,7 @@ async def run_turn(
     with a ``Command`` payload.
     """
     payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
+    rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
     if include_rubric_state:
         payload["rubric"] = rubric
     if planning_stage in PLANNING_STAGES:
@@ -482,7 +484,11 @@ async def run_turn(
             ],
         )
         event_renderer = SubagentRequestRenderer(renderer)
-        rubric_renderer = RubricEventRenderer(event_renderer, rubric_max_iterations)
+        rubric_renderer = RubricEventRenderer(
+            event_renderer,
+            rubric_max_iterations,
+            grader_model=rubric_model_name,
+        )
         output: dict[str, Any] = {}
         tool_call_start = len(result.tool_calls)
         tool_draft_start = len(result._tool_call_drafts)
@@ -490,20 +496,24 @@ async def run_turn(
         if callable(waiting_started):
             waiting_started()
 
-        await asyncio.gather(
-            consume_live_tool_errors(stream, event_renderer, result),
-            consume_custom_events(stream.custom, event_renderer, rubric_renderer),
-            consume_messages(
-                stream.messages,
-                event_renderer,
-                result,
-                render_normal_tools=False,
-                invocation_metadata=message_metadata,
-            ),
-            consume_tool_calls(stream.tool_calls, event_renderer, result),
-            consume_subagents(stream.subagents, event_renderer),
-            capture_output(stream.output(), output),
-        )
+        try:
+            await asyncio.gather(
+                consume_live_tool_errors(stream, event_renderer, result),
+                consume_custom_events(stream.custom, event_renderer, rubric_renderer),
+                consume_messages(
+                    stream.messages,
+                    event_renderer,
+                    result,
+                    render_normal_tools=False,
+                    invocation_metadata=message_metadata,
+                ),
+                consume_tool_calls(stream.tool_calls, event_renderer, result),
+                consume_subagents(stream.subagents, event_renderer),
+                capture_output(stream.output(), output),
+            )
+        except BaseException:
+            rubric_renderer.cancel()
+            raise
 
         if historical_tool_lifecycle is not None:
             render_output_tool_results(
@@ -521,6 +531,7 @@ async def run_turn(
         if callable(waiting_finished):
             waiting_finished()
         renderer.finish_main()
+        rubric_renderer.cancel()
         interrupts = await collect_interrupts(stream, output.get("value"))
 
         if not interrupts:

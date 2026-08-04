@@ -123,12 +123,14 @@ class TerminalTranscriptTests(unittest.TestCase):
 
     def test_rubric_activity_and_result_are_concise(self) -> None:
         transcript, chunks = self.make_transcript()
-        transcript.rubric_evaluation_started(1, 3)
+        transcript.rubric_evaluation_started(1, 3, grader_model="lmstudio:bonsai")
         transcript.rubric_evaluation_finished(
             {
                 "grading_run_id": "run-1",
                 "iteration": 0,
                 "result": "needs_revision",
+                "grader_model": "lmstudio:bonsai",
+                "duration_ms": 65_000,
                 "explanation": "Verification is missing.",
                 "criteria": [
                     {"name": "Files updated", "passed": True, "gap": ""},
@@ -139,9 +141,12 @@ class TerminalTranscriptTests(unittest.TestCase):
         )
 
         rendered = "".join(chunks)
-        self.assertIn("Reviewing completion criteria · pass 1 of 3", rendered)
+        self.assertIn("Rubric review · pass 1 of 3", rendered)
+        self.assertIn("Grader: lmstudio:bonsai", rendered)
+        self.assertIn("Completed in 01:05", rendered)
         self.assertIn("1 of 2 criteria satisfied", rendered)
-        self.assertIn("- Tests run: No test output", rendered)
+        self.assertIn("✓ Files updated", rendered)
+        self.assertIn("✗ Tests run: No test output", rendered)
         self.assertNotIn("grading_run_id", rendered)
 
 

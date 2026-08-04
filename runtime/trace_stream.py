@@ -113,9 +113,21 @@ class TraceStream:
         """Trace subagent cancellation."""
         self._emit("subagent_cancelled", subagent, result)
 
-    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:  # noqa: ARG002
+    def rubric_evaluation_started(
+        self,
+        run_id: str,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:  # noqa: ARG002
         """Trace rubric evaluation activity."""
-        self._emit("rubric_evaluation_started", pass_number, max_iterations)
+        self._emit(
+            "rubric_evaluation_started",
+            pass_number,
+            max_iterations,
+            grader_model=grader_model,
+        )
 
     def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
         """Trace a completed rubric evaluation."""

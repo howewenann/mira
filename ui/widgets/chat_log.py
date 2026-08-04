@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import defaultdict, deque
 from datetime import datetime
 from itertools import count
@@ -17,7 +18,7 @@ from textual.events import Click, DescendantFocus, Key
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
-from runtime.rubric_events import rubric_result_text
+from runtime.rubric_events import format_elapsed, rubric_result_text
 from runtime.correction_events import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
@@ -27,6 +28,7 @@ from ui.splash import loading_splash_text, splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 SPINNER_FRAMES = ["-", "\\", "|", "/"]
+RUBRIC_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 class ChatLog(VerticalScroll):
@@ -60,6 +62,7 @@ class ChatLog(VerticalScroll):
         self._goal_widgets: dict[str, GoalBubble] = {}
         self._rubric_widgets: dict[tuple[str, int], Static] = {}
         self._rubric_evaluations: dict[tuple[str, int], dict[str, Any]] = {}
+        self._rubric_activity: dict[tuple[str, int], dict[str, Any]] = {}
         self._fallback_suffixes = count(1)
         self._waiting_spinner_index = 0
         self._waiting_label = "working..."
@@ -738,16 +741,62 @@ class ChatLog(VerticalScroll):
             bubble.resolve(status)
             self._scroll_to_end()
 
-    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+    def rubric_evaluation_started(
+        self,
+        run_id: str,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:
         """Show immediate rubric grading activity."""
         self.finish_main()
         key = (run_id, pass_number)
-        body = Text(
-            f"Reviewing completion criteria · pass {pass_number} of {max_iterations}…",
-            style=RUBRIC_BODY_COLOR,
-        )
+        self._rubric_activity[key] = {
+            "started_at": time.monotonic(),
+            "grader_model": grader_model,
+            "max_iterations": max_iterations,
+            "frame": 0,
+            "last_second": 0,
+        }
+        body = self._render_rubric_activity(key)
         widget = self._add_block("rubric review", body, "message rubric")
         self._rubric_widgets[key] = widget
+
+    def tick_rubrics(self) -> None:
+        """Advance live rubric spinners and elapsed clocks."""
+        for key, activity in list(self._rubric_activity.items()):
+            elapsed = max(0, int(time.monotonic() - float(activity["started_at"])))
+            if elapsed == int(activity.get("last_second") or 0):
+                continue
+            activity["last_second"] = elapsed
+            activity["frame"] = int(activity.get("frame") or 0) + 1
+            widget = self._rubric_widgets.get(key)
+            if widget is not None:
+                widget.update(self._render_rubric_activity(key))
+
+    def rubric_evaluations_cancelled(self) -> None:
+        """Stop any rubric animations left active by an interrupted invocation."""
+        for key in list(self._rubric_activity):
+            widget = self._rubric_widgets.get(key)
+            if widget is not None:
+                widget.update(Text("Review interrupted.", style=RUBRIC_BODY_COLOR))
+        self._rubric_activity.clear()
+
+    def _render_rubric_activity(self, key: tuple[str, int]) -> Text:
+        """Return the current in-place rubric progress block."""
+        activity = self._rubric_activity[key]
+        pass_number = key[1]
+        max_iterations = int(activity.get("max_iterations") or 1)
+        elapsed_ms = (time.monotonic() - float(activity["started_at"])) * 1000
+        frame = RUBRIC_SPINNER_FRAMES[int(activity.get("frame") or 0) % len(RUBRIC_SPINNER_FRAMES)]
+        text = Text()
+        text.append(f"Rubric review · pass {pass_number} of {max_iterations}", style=f"bold {RUBRIC_HEADER_COLOR}")
+        grader_model = str(activity.get("grader_model") or "").strip()
+        if grader_model:
+            text.append(f"\n\nGrader: {grader_model}", style=RUBRIC_BODY_COLOR)
+        text.append(f"\n{frame} Reviewing · {format_elapsed(elapsed_ms)} elapsed", style=RUBRIC_BODY_COLOR)
+        return text
 
     def rubric_evaluation_finished(
         self,
@@ -759,6 +808,7 @@ class ChatLog(VerticalScroll):
         """Replace live rubric activity with a concise evaluation result."""
         pass_number = int(evaluation.get("iteration") or 0) + 1
         key = (str(evaluation.get("grading_run_id") or ""), pass_number)
+        self._rubric_activity.pop(key, None)
         self._rubric_evaluations[key] = dict(evaluation)
         widget = self._rubric_widgets.get(key)
         body = self._render_rubric(evaluation, max_iterations)
@@ -795,7 +845,10 @@ class ChatLog(VerticalScroll):
         for index, line in enumerate(lines):
             if index:
                 text.append("\n")
-            if line.startswith("- "):
+            if line.startswith("✓ "):
+                text.append("✓ ", style="bold green")
+                text.append(line[2:], style=RUBRIC_BODY_COLOR)
+            elif line.startswith("✗ "):
                 text.append("✗ ", style="bold red")
                 text.append(line[2:], style=RUBRIC_BODY_COLOR)
             elif index == 0:
@@ -825,6 +878,7 @@ class ChatLog(VerticalScroll):
         self._goal_widgets = {}
         self._rubric_widgets = {}
         self._rubric_evaluations = {}
+        self._rubric_activity = {}
         self._tool_blocks = {}
         self._tool_name_queues = defaultdict(deque)
         self._pending_tool_results_by_id = {}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import ssl
 import tempfile
@@ -16,7 +17,13 @@ import typer
 from langchain_anyllm import ChatAnyLLM
 from typer.testing import CliRunner
 
-from agent.llm import chat_anyllm_transport_kwargs, get_llm, get_model_name
+from agent.llm import (
+    chat_anyllm_transport_kwargs,
+    get_llm,
+    get_model_name,
+    get_rubric_model_name,
+    rubric_llm_config,
+)
 from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError, DEFAULT_CONTEXT_TOKENS, load_llm_config
@@ -80,6 +87,129 @@ class LLMConfigTests(unittest.TestCase):
                     "MIRA_LLM_TEMPERATURE": "warm",
                 }
             )
+
+    def test_default_rubric_profile_reuses_main_profile(self) -> None:
+        """No rubric overrides should normalize to the main model unchanged."""
+        config = load_llm_config({})
+
+        self.assertFalse(config["rubric_llm_overridden"])
+        for suffix in (
+            "provider",
+            "model",
+            "api_key",
+            "base_url",
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "context_tokens",
+            "model_kwargs",
+        ):
+            self.assertEqual(config[f"rubric_llm_{suffix}"], config[f"llm_{suffix}"])
+
+    def test_model_kwargs_are_strict_json_objects_with_nested_values(self) -> None:
+        """Arbitrary completion parameters may contain JSON-compatible nesting."""
+        config = load_llm_config(
+            {"MIRA_LLM_MODEL_KWARGS": '{"reasoning_effort":"none","extra":{"seed":7}}'}
+        )
+
+        self.assertEqual(
+            config["llm_model_kwargs"],
+            {"reasoning_effort": "none", "extra": {"seed": 7}},
+        )
+
+    def test_model_kwargs_reject_invalid_nonobject_and_reserved_values(self) -> None:
+        """Unsafe or malformed AnyLLM kwargs should identify their environment variable."""
+        for value in ("{bad", '["low"]'):
+            with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "MIRA_LLM_MODEL_KWARGS"):
+                load_llm_config({"MIRA_LLM_MODEL_KWARGS": value})
+        with self.assertRaisesRegex(ConfigError, "tool_choice"):
+            load_llm_config({"MIRA_LLM_MODEL_KWARGS": '{"tool_choice":"required"}'})
+
+    def test_same_provider_rubric_inherits_scalars_and_merges_kwargs(self) -> None:
+        """A same-provider grader should inherit blanks and shallow-merge arbitrary kwargs."""
+        config = load_llm_config(
+            {
+                "MIRA_LLM_PROVIDER": "lmstudio",
+                "MIRA_LLM_MODEL": "gemma",
+                "MIRA_LLM_TEMPERATURE": "0.4",
+                "MIRA_LLM_MODEL_KWARGS": '{"reasoning_effort":"low","seed":1}',
+                "MIRA_RUBRIC_LLM_MODEL": "bonsai",
+                "MIRA_RUBRIC_LLM_MODEL_KWARGS": '{"reasoning_effort":"none"}',
+            }
+        )
+
+        self.assertTrue(config["rubric_llm_overridden"])
+        self.assertEqual(config["rubric_llm_model"], "bonsai")
+        self.assertEqual(config["rubric_llm_temperature"], 0.4)
+        self.assertEqual(
+            config["rubric_llm_model_kwargs"],
+            {"reasoning_effort": "none", "seed": 1},
+        )
+        self.assertEqual(get_rubric_model_name(config), "lmstudio:bonsai")
+
+    def test_cross_provider_rubric_does_not_inherit_main_profile(self) -> None:
+        """Changing provider should isolate credentials, transport, sampling, and kwargs."""
+        config = load_llm_config(
+            {
+                "MIRA_LLM_PROVIDER": "openai",
+                "MIRA_LLM_MODEL": "main",
+                "MIRA_LLM_API_KEY": "main-key",
+                "MIRA_LLM_BASE_URL": "https://main.test",
+                "MIRA_LLM_TEMPERATURE": "0.4",
+                "MIRA_LLM_MODEL_KWARGS": '{"seed":1}',
+                "MIRA_RUBRIC_LLM_PROVIDER": "anthropic",
+                "MIRA_RUBRIC_LLM_MODEL": "grader",
+            }
+        )
+
+        self.assertIsNone(config["rubric_llm_api_key"])
+        self.assertIsNone(config["rubric_llm_base_url"])
+        self.assertIsNone(config["rubric_llm_temperature"])
+        self.assertEqual(config["rubric_llm_model_kwargs"], {})
+        self.assertEqual(rubric_llm_config(config)["llm_provider"], "anthropic")
+
+    def test_cross_provider_rubric_requires_its_own_model(self) -> None:
+        """A fresh provider profile cannot inherit the main model identifier."""
+        with self.assertRaisesRegex(ConfigError, "MIRA_RUBRIC_LLM_MODEL"):
+            load_llm_config(
+                {
+                    "MIRA_LLM_PROVIDER": "openai",
+                    "MIRA_LLM_MODEL": "main",
+                    "MIRA_RUBRIC_LLM_PROVIDER": "anthropic",
+                }
+            )
+
+    def test_documented_provider_profiles_normalize_without_network(self) -> None:
+        """Every example provider should accept its documented model and kwargs shape."""
+        profiles = {
+            "lmstudio": ("local-model", {"reasoning_effort": "none"}),
+            "ollama": ("qwen3.5:9b", {"reasoning_effort": "low"}),
+            "openai": ("gpt-5.6-terra", {"reasoning_effort": "low"}),
+            "anthropic": ("claude-sonnet-5", {"reasoning_effort": "low"}),
+            "gemini": ("gemini-2.5-flash", {"reasoning_effort": "low"}),
+            "groq": (
+                "openai/gpt-oss-120b",
+                {"reasoning_effort": "low", "reasoning_format": "hidden"},
+            ),
+            "openrouter": ("openai/gpt-5.6-terra", {"reasoning_effort": "low"}),
+        }
+        for provider, (model, model_kwargs) in profiles.items():
+            with self.subTest(provider=provider):
+                config = load_llm_config(
+                    {
+                        "MIRA_LLM_PROVIDER": provider,
+                        "MIRA_LLM_MODEL": model,
+                        "MIRA_LLM_MODEL_KWARGS": json.dumps(model_kwargs),
+                    }
+                )
+                self.assertEqual(config["llm_model"], model)
+                self.assertEqual(config["llm_model_kwargs"], model_kwargs)
+
+    def test_env_example_names_optional_provider_adapters(self) -> None:
+        """Providers omitted from the base install should have actionable install guidance."""
+        example = (Path(__file__).parents[1] / ".env.example").read_text(encoding="utf-8")
+        self.assertIn('pip install "any-llm-sdk[ollama]"', example)
+        self.assertIn('pip install "any-llm-sdk[groq]"', example)
 
     def test_load_config_reads_workspace_dotenv(self) -> None:
         """Workspace .env values should be loaded by the main config loader."""
@@ -231,6 +361,29 @@ class LLMConfigTests(unittest.TestCase):
             temperature=0.2,
             max_tokens=1024,
             top_p=0.9,
+        )
+
+    def test_get_llm_passes_model_kwargs_and_first_class_values_win(self) -> None:
+        """AnyLLM kwargs should pass through while direct scalar fields take precedence."""
+        config = {
+            "llm_provider": "openai",
+            "llm_model": "gpt",
+            "llm_temperature": 0.2,
+            "llm_model_kwargs": {
+                "temperature": 0.9,
+                "reasoning_effort": "low",
+                "nested": {"value": True},
+            },
+        }
+
+        with patch("agent.llm.ChatAnyLLM", return_value="llm") as chat:
+            get_llm(config)
+
+        chat.assert_called_once_with(
+            model="gpt",
+            provider="openai",
+            temperature=0.2,
+            model_kwargs={"reasoning_effort": "low", "nested": {"value": True}},
         )
 
     def test_get_llm_requests_lmstudio_stream_usage(self) -> None:

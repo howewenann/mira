@@ -1153,6 +1153,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             "grading_run_id": "grade-1",
             "iteration": 0,
             "result": "needs_revision",
+            "grader_model": "lmstudio:bonsai",
+            "duration_ms": 65_000,
             "explanation": "Missing a test.",
             "criteria": [{"name": "Tested", "passed": False, "gap": "No test."}],
         }
@@ -1163,6 +1165,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["rubric"])
         self.assertEqual(events[0]["evaluation"]["result"], "max_iterations_reached")
+        self.assertEqual(events[0]["evaluation"]["grader_model"], "lmstudio:bonsai")
+        self.assertEqual(events[0]["evaluation"]["duration_ms"], 65_000)
         self.assertEqual(events[0]["max_iterations"], 1)
 
     def test_proposal_events_are_discarded(self) -> None:

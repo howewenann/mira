@@ -46,7 +46,9 @@ MIRA_TOOL_OUTPUT_CHARS=240
 
 Common providers include `lmstudio`, `ollama`, `openai`, `anthropic`, `gemini`,
 `groq`, and `openrouter`. Provider examples and optional generation settings
-are documented in `.env.example`.
+are documented in `.env.example`. Strict JSON `MIRA_LLM_MODEL_KWARGS` values
+pass provider-specific generation controls to AnyLLM; optional
+`MIRA_RUBRIC_LLM_*` values can select a separate rubric grader.
 
 Workspace settings live in `.mira/settings.yml`. Use `/settings` in the TUI to
 manage Git protection, tools and approvals, execution environments, dynamic

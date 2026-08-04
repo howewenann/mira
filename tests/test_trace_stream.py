@@ -144,7 +144,7 @@ class TraceStreamTests(unittest.TestCase):
     def test_rubric_events_are_concise_non_tool_blocks(self) -> None:
         trace, handler = self.make_stream()
 
-        trace.rubric_evaluation_started("grade-1", 1, 2)
+        trace.rubric_evaluation_started("grade-1", 1, 2, grader_model="lmstudio:bonsai")
         trace.rubric_evaluation_finished(
             {
                 "grading_run_id": "grade-1",
@@ -158,7 +158,8 @@ class TraceStreamTests(unittest.TestCase):
         trace.rubric_evaluation_status("grade-1", 1, "max_iterations_reached", 1)
 
         joined = "\n".join(handler.messages)
-        self.assertIn("rubric review:\nReviewing completion criteria · pass 1 of 2", joined)
+        self.assertIn("rubric review:\nRubric review · pass 1 of 2", joined)
+        self.assertIn("Grader: lmstudio:bonsai", joined)
         self.assertIn("Needs revision: A test is missing.", joined)
         self.assertIn("maximum rubric iterations reached", joined)
         self.assertNotIn("tool", joined)

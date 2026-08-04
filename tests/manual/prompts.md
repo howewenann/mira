@@ -1240,3 +1240,54 @@ conda run -n ai_agents python -m cli.main --workspace <workspace>
     readable, and ambient host/network APIs are unavailable. Separately run a
     bounded infinite-loop probe and cancel an active eval; both must return
     control without terminating MIRA.
+
+## Rubric Model Profiles And Live Progress
+
+Use a disposable Git-protected workspace and enable rubric grading. Keep the
+native Goal Success Criteria visible for comparison with the grader-authored
+criterion names.
+
+1. Configure the main LM Studio model as `google/gemma-4-12b`, set
+   `MIRA_LLM_MODEL_KWARGS={"reasoning_effort":"none"}`, and run a small Goal
+   whose result can be verified from the transcript. Expected: the native
+   DeepAgents grader completes within the configured generation limit; the TUI
+   remains responsive and shows its spinner, `lmstudio:google/gemma-4-12b`, and
+   a once-per-second elapsed clock.
+2. Leave `MIRA_RUBRIC_LLM_PROVIDER` blank and set
+   `MIRA_RUBRIC_LLM_MODEL=prism-ml/bonsai-27b`,
+   `MIRA_RUBRIC_LLM_MAX_TOKENS=4096`, and
+   `MIRA_RUBRIC_LLM_MODEL_KWARGS={"reasoning_effort":"none"}`. Restart MIRA and
+   repeat the Goal. Expected: the action agent remains Gemma, the progress block
+   identifies `lmstudio:prism-ml/bonsai-27b`, and grading completes through the
+   same DeepAgents middleware.
+3. Inspect the completed bubble. Expected: it replaces live activity with the
+   grader identity, duration, `N of N criteria satisfied`, every native
+   model-generated criterion name marked `✓` or `✗`, each failed criterion's
+   exact gap, and the final explanation/verdict. Names may differ from the Goal
+   Success Criteria because the grader authors them.
+4. Reload the session and inspect the trace. Expected: the same completed
+   identity, duration, criteria, gaps, and verdict reappear. No animation ticks
+   are saved; the trace contains only rubric start and completion records.
+5. Redirect a one-shot rubric run to a file. Expected: one start block and one
+   completion block with no per-second output. Repeat in an interactive terminal;
+   the elapsed line updates in place.
+6. Stop or provoke a safe provider failure during grading. Expected: no spinner
+   continues after interruption, and native grader errors/revision/max-iteration
+   behavior remains visible and unchanged.
+7. Configure a complete cross-provider rubric profile (provider, model, key, and
+   any endpoint/parameters it needs), then repeat. Expected: no main-provider
+   credential, endpoint, sampling value, or JSON kwarg leaks into the grader.
+
+Observed 2026-08-04 against LM Studio in a disposable workspace:
+
+- `google/gemma-4-12b` acting and grading with
+  `reasoning_effort:"none"` and a 2,048-token generation cap returned `READY`,
+  completed grading in 8 seconds, and rendered a clean 1-of-1 native checklist.
+  The process took 114 seconds overall because the already-known runtime cleanup
+  delay occurred after the visible result.
+- `google/gemma-4-12b` acting with `prism-ml/bonsai-27b` grading under the same
+  bounded settings selected the dedicated grader correctly and completed in 14
+  seconds (28 seconds overall). Bonsai returned a satisfied verdict, but its
+  native structured response was malformed: DeepAgents supplied no normalized
+  criteria and its explanation retained model tool-syntax fragments. MIRA did
+  not reinterpret that provider output or add a custom rubric parser.

@@ -1000,14 +1000,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(goal_blocks[0].query(".goal-action")), 3)
 
             initial_children = len(chat.children)
-            app.rubric_evaluation_started("grade-1", 1, 3)
+            app.rubric_evaluation_started(
+                "grade-1",
+                1,
+                3,
+                grader_model="lmstudio:bonsai",
+            )
             await pilot.pause()
             self.assertEqual(len(chat.children), initial_children + 1)
+            activity_text = renderable_plain(chat.children[-1])
+            self.assertIn("Grader: lmstudio:bonsai", activity_text)
+            self.assertIn("Reviewing", activity_text)
             app.rubric_evaluation_finished(
                 {
                     "grading_run_id": "grade-1",
                     "iteration": 0,
                     "result": "needs_revision",
+                    "grader_model": "lmstudio:bonsai",
+                    "duration_ms": 5_000,
                     "explanation": "A test is missing.",
                     "criteria": [
                         {"name": "Ranked", "passed": True, "gap": ""},
@@ -1022,7 +1032,34 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rubric_text = renderable_plain(chat.children[-1])
             self.assertIn("pass 1 of 3", rubric_text)
             self.assertIn("1 of 2 criteria satisfied", rubric_text)
+            self.assertIn("✓ Ranked", rubric_text)
+            self.assertIn("✗ Tested", rubric_text)
             self.assertIn("No focused test.", rubric_text)
+
+    async def test_rubric_progress_uses_elapsed_clock_and_stops_on_cancel(self) -> None:
+        """Live grading should update in place without leaving an active timer behind."""
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+                app.rubric_evaluation_started(
+                    "grade-clock",
+                    1,
+                    3,
+                    grader_model="lmstudio:bonsai",
+                )
+            await pilot.pause()
+
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=72.0):
+                chat.tick_rubrics()
+            progress = renderable_plain(chat.children[-1])
+            self.assertIn("01:02 elapsed", progress)
+
+            app.rubric_evaluations_cancelled()
+            await pilot.pause()
+            self.assertIn("Review interrupted.", renderable_plain(chat.children[-1]))
+            self.assertEqual(chat._rubric_activity, {})
 
     async def test_prepare_goal_advances_live_mode_to_finalize(self) -> None:
         app = make_app()

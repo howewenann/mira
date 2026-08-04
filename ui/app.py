@@ -2201,12 +2201,29 @@ class MiraApp(App[None]):
             status="ERROR" if result else "CANCELLED",
         )
 
-    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+    def rubric_evaluation_started(
+        self,
+        run_id: str,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:
         """Show live rubric activity in the TUI and trace sidecar."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.trace.rubric_evaluation_started(run_id, pass_number, max_iterations)
-        self.query_one(ChatLog).rubric_evaluation_started(run_id, pass_number, max_iterations)
+        self.trace.rubric_evaluation_started(
+            run_id,
+            pass_number,
+            max_iterations,
+            grader_model=grader_model,
+        )
+        self.query_one(ChatLog).rubric_evaluation_started(
+            run_id,
+            pass_number,
+            max_iterations,
+            grader_model=grader_model,
+        )
 
     def rubric_evaluation_finished(
         self,
@@ -2222,6 +2239,10 @@ class MiraApp(App[None]):
             max_iterations,
             created_at=created_at,
         )
+
+    def rubric_evaluations_cancelled(self) -> None:
+        """Stop transient rubric activity after an interrupted invocation."""
+        self.query_one(ChatLog).rubric_evaluations_cancelled()
 
     def rubric_evaluation_status(
         self,
@@ -2693,6 +2714,7 @@ class MiraApp(App[None]):
         chat.tick_startup()
         chat.tick_subagents()
         chat.tick_compaction()
+        chat.tick_rubrics()
         try:
             self.query_one(SubagentsPanel).tick()
         except NoMatches:

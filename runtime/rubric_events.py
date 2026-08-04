@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 from runtime.renderer_calls import call_renderer
@@ -20,11 +22,21 @@ RUBRIC_RESULTS = {
 class RubricEventRenderer:
     """Project rubric custom events onto dedicated renderer callbacks."""
 
-    def __init__(self, renderer: Any, max_iterations: int) -> None:
+    def __init__(
+        self,
+        renderer: Any,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.renderer = renderer
         self.max_iterations = max(1, int(max_iterations or 1))
+        self.grader_model = str(grader_model or "").strip()
+        self.clock = clock
         self.evaluations: list[dict[str, Any]] = []
         self._latest: dict[str, dict[str, Any]] = {}
+        self._started_at: dict[tuple[str, int], float] = {}
 
     def handle(self, event: dict[str, Any]) -> bool:
         """Render a supported event and return whether it was consumed."""
@@ -32,18 +44,28 @@ class RubricEventRenderer:
         if event_type == RUBRIC_START:
             run_id = str(event.get("grading_run_id") or "")
             iteration = nonnegative_int(event.get("iteration"))
+            self._started_at[(run_id, iteration)] = self.clock()
             call_renderer(
                 self.renderer,
                 "rubric_evaluation_started",
                 run_id,
                 iteration + 1,
                 self.max_iterations,
+                grader_model=self.grader_model,
             )
             return True
         if event_type != RUBRIC_END:
             return False
 
         evaluation = normalize_evaluation(event)
+        if self.grader_model:
+            evaluation["grader_model"] = self.grader_model
+        started_at = self._started_at.pop(
+            (evaluation["grading_run_id"], evaluation["iteration"]),
+            None,
+        )
+        if started_at is not None:
+            evaluation["duration_ms"] = max(0, round((self.clock() - started_at) * 1000))
         self.evaluations.append(evaluation)
         self._latest[evaluation["grading_run_id"]] = evaluation
         call_renderer(
@@ -70,6 +92,13 @@ class RubricEventRenderer:
             status,
             self.max_iterations,
         )
+
+    def cancel(self) -> None:
+        """Stop transient activity when an invocation ends without grader output."""
+        if not self._started_at:
+            return
+        self._started_at.clear()
+        call_renderer(self.renderer, "rubric_evaluations_cancelled")
 
 
 def normalize_evaluation(event: dict[str, Any]) -> dict[str, Any]:
@@ -130,8 +159,25 @@ def rubric_result_text(evaluation: dict[str, Any], max_iterations: int) -> str:
     criteria = evaluation.get("criteria") if isinstance(evaluation.get("criteria"), list) else []
     passed = sum(1 for item in criteria if isinstance(item, dict) and item.get("passed"))
     lines = [f"Rubric review · pass {iteration} of {max_iterations}"]
+    grader_model = str(evaluation.get("grader_model") or "").strip()
+    if grader_model:
+        lines.append(f"Grader: {grader_model}")
+    duration_ms = evaluation.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+        lines.append(f"Completed in {format_elapsed(duration_ms)}")
+    if grader_model or isinstance(duration_ms, (int, float)):
+        lines.append("")
     if criteria:
         lines.append(f"{passed} of {len(criteria)} criteria satisfied")
+        for item in criteria:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "Criterion").strip()
+            if item.get("passed"):
+                lines.append(f"✓ {name}")
+                continue
+            gap = str(item.get("gap") or "").strip()
+            lines.append(f"✗ {name}: {gap}" if gap else f"✗ {name}")
 
     explanation = str(evaluation.get("explanation") or "").strip()
     labels = {
@@ -142,6 +188,8 @@ def rubric_result_text(evaluation: dict[str, Any], max_iterations: int) -> str:
         "max_iterations_reached": "Incomplete: maximum rubric iterations reached",
     }
     detail = labels.get(result, "Review failed")
+    if criteria:
+        lines.append("")
     lines.append(f"{detail}: {explanation}" if explanation else detail)
     diagnostics = evaluation.get("diagnostics")
     if isinstance(diagnostics, dict) and diagnostics:
@@ -154,10 +202,14 @@ def rubric_result_text(evaluation: dict[str, Any], max_iterations: int) -> str:
             values.append(f"HTTP {diagnostics['http_status']}")
         if values:
             lines.append(f"Grader diagnostics: {', '.join(values)}")
-    for item in criteria:
-        if not isinstance(item, dict) or item.get("passed"):
-            continue
-        name = str(item.get("name") or "Criterion").strip()
-        gap = str(item.get("gap") or "").strip()
-        lines.append(f"- {name}: {gap}" if gap else f"- {name}")
     return "\n".join(lines)
+
+
+def format_elapsed(duration_ms: int | float) -> str:
+    """Format a monotonic duration for stable terminal and session replay."""
+    total_seconds = max(0, int(float(duration_ms) / 1000))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"

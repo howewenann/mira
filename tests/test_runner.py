@@ -1236,12 +1236,15 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "thread-1",
             rubric="- Works\n- Tested",
             rubric_max_iterations=1,
+            rubric_model_name="lmstudio:bonsai",
             include_rubric_state=True,
         )
 
         self.assertEqual(agent.payloads[0]["rubric"], "- Works\n- Tested")
         self.assertEqual(result.rubric_status, "max_iterations_reached")
         self.assertEqual(result.rubric_evaluations[0]["result"], "max_iterations_reached")
+        self.assertEqual(result.rubric_evaluations[0]["grader_model"], "lmstudio:bonsai")
+        self.assertIn("duration_ms", result.rubric_evaluations[0])
         self.assertEqual(
             result.rubric_evaluations[0]["diagnostics"],
             {

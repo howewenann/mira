@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+import time
 from itertools import count
 from typing import Any
 
@@ -21,6 +23,7 @@ from ui.interrupts import (
     plan_request,
 )
 from session.goals import goal_artifact_text
+from runtime.rubric_events import format_elapsed
 from ui.terminal_transcript import DEFAULT_TOOL_OUTPUT_CHARS, TerminalTranscript
 
 __all__ = ["DEFAULT_TOOL_OUTPUT_CHARS", "Renderer"]
@@ -34,6 +37,8 @@ class Renderer:
         self._subagent_ids = count(1)
         enable_console_colors()
         self._colorizer = TerminalColorizer()
+        self._rubric_tasks: dict[tuple[str, int], asyncio.Task[None]] = {}
+        self._rubric_started_at: dict[tuple[str, int], float] = {}
         self.transcript = TerminalTranscript(
             self._write,
             tool_output_chars=tool_output_chars,
@@ -119,9 +124,30 @@ class Renderer:
         """No-op for non-live terminal output."""
         return None
 
-    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:  # noqa: ARG002
+    def rubric_evaluation_started(
+        self,
+        run_id: str,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:
         """Print rubric review activity in one-shot mode."""
-        self.transcript.rubric_evaluation_started(pass_number, max_iterations)
+        self.transcript.rubric_evaluation_started(
+            pass_number,
+            max_iterations,
+            grader_model=grader_model,
+        )
+        if not sys.stdout.isatty():
+            return
+        key = (run_id, pass_number)
+        self._rubric_started_at[key] = time.monotonic()
+        try:
+            self._rubric_tasks[key] = asyncio.get_running_loop().create_task(
+                self._animate_rubric(key)
+            )
+        except RuntimeError:
+            self._rubric_started_at.pop(key, None)
 
     def rubric_evaluation_finished(
         self,
@@ -129,7 +155,41 @@ class Renderer:
         max_iterations: int,
     ) -> None:
         """Print a completed rubric evaluation."""
+        key = (
+            str(evaluation.get("grading_run_id") or ""),
+            int(evaluation.get("iteration") or 0) + 1,
+        )
+        self._stop_rubric_activity(key)
         self.transcript.rubric_evaluation_finished(evaluation, max_iterations)
+
+    async def _animate_rubric(self, key: tuple[str, int]) -> None:
+        """Refresh one interactive one-shot elapsed line once per second."""
+        frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+        frame = 0
+        try:
+            while True:
+                await asyncio.sleep(1)
+                frame += 1
+                elapsed = (time.monotonic() - self._rubric_started_at[key]) * 1000
+                self._write(
+                    f"\033[1A\r\033[2K{frames[frame % len(frames)]} "
+                    f"Reviewing · {format_elapsed(elapsed)} elapsed\n"
+                )
+        except (asyncio.CancelledError, KeyError):
+            return
+
+    def _stop_rubric_activity(self, key: tuple[str, int]) -> None:
+        """Stop and clear an interactive rubric progress line."""
+        task = self._rubric_tasks.pop(key, None)
+        self._rubric_started_at.pop(key, None)
+        if task is not None:
+            task.cancel()
+            self._write("\033[1A\r\033[2K\n")
+
+    def rubric_evaluations_cancelled(self) -> None:
+        """Cancel all interactive progress tasks after an interrupted grader."""
+        for key in list(self._rubric_tasks):
+            self._stop_rubric_activity(key)
 
     def rubric_evaluation_status(
         self,

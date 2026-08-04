@@ -8,7 +8,7 @@ from typing import Any
 from deepagents import FilesystemPermission, HarnessProfile, RubricMiddleware, create_deep_agent, register_harness_profile
 from langchain.agents.middleware.types import AgentMiddleware
 
-from agent.llm import get_llm
+from agent.llm import get_llm, get_rubric_model_name, rubric_llm_config
 from agent.middleware import (
     CorrectionMiddleware,
     ModelToolVisibilityMiddleware,
@@ -153,8 +153,11 @@ def _build_agent(
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
     if not backend_supports_delete(backend):
         excluded_tools = (*excluded_tools, "delete")
+    rubric_model = model
+    if enable_rubric and config.get("rubric_llm_overridden"):
+        rubric_model = get_llm(rubric_llm_config(config))
     rubric_middleware = (
-        [RubricMiddleware(model=model, tools=None, max_iterations=rubric_max_iterations(config))]
+        [RubricMiddleware(model=rubric_model, tools=None, max_iterations=rubric_max_iterations(config))]
         if enable_rubric
         else []
     )
@@ -223,6 +226,8 @@ def _build_agent(
     _attach_tool_failures(agent, resources.tool_failures)
     _attach_backend(agent, backend)
     _attach_summarization(agent, middleware_stack.summarization)
+    if enable_rubric:
+        _attach_rubric_model_name(agent, get_rubric_model_name(config))
     return agent
 
 
@@ -411,5 +416,13 @@ def _attach_summarization(agent: Any, summarization: Any) -> None:
     """Attach DeepAgents summarization for post-turn compaction."""
     try:
         agent.mira_summarization = summarization
+    except AttributeError:
+        return
+
+
+def _attach_rubric_model_name(agent: Any, model_name: str) -> None:
+    """Attach the effective grader identity for progress and durable results."""
+    try:
+        agent.mira_rubric_model_name = model_name
     except AttributeError:
         return

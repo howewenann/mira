@@ -684,12 +684,25 @@ class RecordingRenderer:
         if callable(callback):
             callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
 
-    def rubric_evaluation_started(self, run_id: str, pass_number: int, max_iterations: int) -> None:
+    def rubric_evaluation_started(
+        self,
+        run_id: str,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:
         """Forward transient rubric activity without persisting a start event."""
         self.recorder.finish_main()
         callback = getattr(self.renderer, "rubric_evaluation_started", None)
         if callable(callback):
-            callback(run_id, pass_number, max_iterations)
+            call_renderer(
+                callback,
+                run_id,
+                pass_number,
+                max_iterations,
+                grader_model=grader_model,
+            )
 
     def correction(self, value: dict[str, Any]) -> None:
         """Persist and render one correction bubble in transcript order."""
@@ -709,6 +722,12 @@ class RecordingRenderer:
                 max_iterations,
                 created_at=event_created_at(event),
             )
+
+    def rubric_evaluations_cancelled(self) -> None:
+        """Forward transient grader cleanup without recording an event."""
+        callback = getattr(self.renderer, "rubric_evaluations_cancelled", None)
+        if callable(callback):
+            callback()
 
     def rubric_evaluation_status(
         self,

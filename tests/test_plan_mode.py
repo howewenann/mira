@@ -354,6 +354,40 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
         self.assertTrue(any(isinstance(item, PlanningStageEnforcementMiddleware) for item in plan_kwargs["middleware"]))
 
+    def test_rubric_override_builds_a_dedicated_grader_without_tools(self) -> None:
+        """A configured grader profile should not replace the action model or gain tools."""
+        config = {
+            "llm_provider": "lmstudio",
+            "llm_model": "gemma",
+            "rubric_llm_provider": "lmstudio",
+            "rubric_llm_model": "bonsai",
+            "rubric_llm_api_key": "lm-studio",
+            "rubric_llm_base_url": "http://localhost:1234/v1",
+            "rubric_llm_temperature": None,
+            "rubric_llm_max_tokens": 2048,
+            "rubric_llm_top_p": None,
+            "rubric_llm_context_tokens": 32768,
+            "rubric_llm_model_kwargs": {"reasoning_effort": "none"},
+            "rubric_llm_overridden": True,
+            "settings": {"system": {"rubric": {"enabled": True, "max_iterations": 2}}},
+        }
+        built_agent = type("Agent", (), {})()
+        with (
+            patch("agent.factory.get_llm", side_effect=("main-model", "grader-model")) as get_llm,
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.RubricMiddleware", return_value="rubric") as rubric,
+            patch("agent.factory.create_deep_agent", return_value=built_agent) as create,
+        ):
+            agent = factory.build_agent(config, ".", "checkpointer")
+
+        self.assertEqual(get_llm.call_count, 2)
+        self.assertEqual(get_llm.call_args_list[1].args[0]["llm_model"], "bonsai")
+        rubric.assert_called_once_with(model="grader-model", tools=None, max_iterations=2)
+        self.assertEqual(create.call_args.kwargs["model"], "main-model")
+        self.assertEqual(agent.mira_rubric_model_name, "lmstudio:bonsai")
+
     def test_planning_response_status_cap_is_passed_to_correction_middleware(self) -> None:
         """The workspace recovery cap should configure the shared Plan/Goal middleware."""
         config = {

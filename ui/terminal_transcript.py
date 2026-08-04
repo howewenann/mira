@@ -135,11 +135,21 @@ class TerminalTranscript:
             detail += f"\noutput: {self.truncate(result)}"
         self.block(subagent_title(subagent), detail)
 
-    def rubric_evaluation_started(self, pass_number: int, max_iterations: int) -> None:
+    def rubric_evaluation_started(
+        self,
+        pass_number: int,
+        max_iterations: int,
+        *,
+        grader_model: str = "",
+    ) -> None:
         """Write immediate rubric review activity."""
+        lines = [f"Rubric review · pass {pass_number} of {max_iterations}"]
+        if grader_model:
+            lines.extend(("", f"Grader: {grader_model}"))
+        lines.append("⠋ Reviewing · 00:00 elapsed")
         self.block(
             "rubric review",
-            f"Reviewing completion criteria · pass {pass_number} of {max_iterations}…",
+            "\n".join(lines),
         )
 
     def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:

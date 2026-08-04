@@ -137,6 +137,15 @@ The always-on Plan/Goal response-status protocol has one workspace System Settin
 counts recovery calls after the first rejected response. Changing it follows
 the normal settings application path and rebuilds both agents; it is a bound,
 not a feature toggle.
+Main and rubric LLM profiles are environment configuration. Both accept strict
+JSON-object `MODEL_KWARGS`, which `ChatAnyLLM.model_kwargs` passes to AnyLLM as
+completion parameters after MIRA rejects runtime-owned call fields. Explicit
+temperature, maximum-token, and top-p variables take precedence over duplicate
+JSON keys. With no rubric overrides, `RubricMiddleware` receives the exact main
+model object as before. A rubric profile on the same provider inherits blank
+main fields and shallow-merges JSON kwargs; changing the rubric provider starts
+a clean profile, requires its own model, and inherits no credentials, endpoint,
+sampling configuration, or arbitrary kwargs.
 A missing `.mira/settings.yml` starts from complete defaults. An existing file
 must equal the complete normalized settings shape, so partial, malformed,
 unknown, or invalid settings are rejected instead of silently defaulted.
@@ -498,13 +507,18 @@ Runtime, grader, or cancellation failures pause the Goal.
 
 **Streaming and persistence:** One custom-event dispatcher independently
 routes QuickJS Eval subagent events and DeepAgents rubric start/end events.
-Rubric passes are displayed one-based and include pass counts, failed criteria,
-gaps, and terminal verdicts. MIRA reads completed checkpoint `_rubric_status`
-because the final streamed event can still say
-`needs_revision` when the cap was reached; newer terminal statuses are accepted
-directly. Starts are transient. Completed evaluations are durable rubric
-events, never tools. TUI results update in place, while one-shot and trace
-surfaces emit concise blocks. Rubric colors are centralized as `#C58FD6` for
+Rubric passes are displayed one-based. While DeepAgents grades, the TUI shows an
+animated spinner plus grader identity and monotonic elapsed time; an interactive
+one-shot terminal refreshes its elapsed line once per second, while redirected
+output and traces record only start and completion. The completed event includes
+the grader identity, duration, summary, every native model-generated criterion
+name, passed/failed marks, failure gaps, and terminal verdict. MIRA does not
+rename criteria to match Goal Success Criteria or introduce a second grading
+call. MIRA reads completed checkpoint `_rubric_status` because the final
+streamed event can still say `needs_revision` when the cap was reached; newer
+terminal statuses are accepted directly. Starts and animation ticks are
+transient. Completed evaluations, including identity and duration, are durable
+rubric events, never tools. Rubric colors are centralized as `#C58FD6` for
 headers/borders and `#F1DCF5` for body text and are isolated to rubric UI.
 
 **Why:** Outcome-focused work should not force users to approve an approach.
