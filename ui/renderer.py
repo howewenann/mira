@@ -24,6 +24,7 @@ from ui.interrupts import (
 )
 from session.goals import goal_artifact_text
 from runtime.rubric_events import format_elapsed
+from ui.spinners import SPINNER_FRAMES
 from ui.terminal_transcript import DEFAULT_TOOL_OUTPUT_CHARS, TerminalTranscript
 
 __all__ = ["DEFAULT_TOOL_OUTPUT_CHARS", "Renderer"]
@@ -164,7 +165,6 @@ class Renderer:
 
     async def _animate_rubric(self, key: tuple[str, int]) -> None:
         """Refresh one interactive one-shot elapsed line once per second."""
-        frames = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
         frame = 0
         try:
             while True:
@@ -172,7 +172,7 @@ class Renderer:
                 frame += 1
                 elapsed = (time.monotonic() - self._rubric_started_at[key]) * 1000
                 self._write(
-                    f"\033[1A\r\033[2K{frames[frame % len(frames)]} "
+                    f"\033[1A\r\033[2K{SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]} "
                     f"Reviewing · {format_elapsed(elapsed)} elapsed\n"
                 )
         except (asyncio.CancelledError, KeyError):

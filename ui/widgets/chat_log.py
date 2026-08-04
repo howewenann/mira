@@ -23,12 +23,11 @@ from runtime.correction_events import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
 from ui.names import generate_slug
+from ui.spinners import SPINNER_FRAMES
 from ui.terminal_colors import RUBRIC_BODY_COLOR, RUBRIC_HEADER_COLOR
 from ui.splash import loading_splash_text, splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
-SPINNER_FRAMES = ["-", "\\", "|", "/"]
-RUBRIC_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 class ChatLog(VerticalScroll):
@@ -789,7 +788,7 @@ class ChatLog(VerticalScroll):
         pass_number = key[1]
         max_iterations = int(activity.get("max_iterations") or 1)
         elapsed_ms = (time.monotonic() - float(activity["started_at"])) * 1000
-        frame = RUBRIC_SPINNER_FRAMES[int(activity.get("frame") or 0) % len(RUBRIC_SPINNER_FRAMES)]
+        frame = SPINNER_FRAMES[int(activity.get("frame") or 0) % len(SPINNER_FRAMES)]
         text = Text()
         text.append(f"Rubric review · pass {pass_number} of {max_iterations}", style=f"bold {RUBRIC_HEADER_COLOR}")
         grader_model = str(activity.get("grader_model") or "").strip()

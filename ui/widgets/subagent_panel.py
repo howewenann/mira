@@ -17,7 +17,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Static
 
 from ui.names import generate_slug
-from ui.widgets.chat_log import SPINNER_FRAMES
+from ui.spinners import SPINNER_FRAMES
 
 STATUS_RUNNING = "RUNNING"
 STATUS_DONE = "DONE"

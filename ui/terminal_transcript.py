@@ -9,6 +9,7 @@ from typing import Any, Callable
 from runtime.rubric_events import rubric_result_text
 from runtime.correction_events import correction_text, correction_title
 from ui.names import generate_slug
+from ui.spinners import SPINNER_FRAMES
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -146,7 +147,7 @@ class TerminalTranscript:
         lines = [f"Rubric review · pass {pass_number} of {max_iterations}"]
         if grader_model:
             lines.extend(("", f"Grader: {grader_model}"))
-        lines.append("⠋ Reviewing · 00:00 elapsed")
+        lines.append(f"{SPINNER_FRAMES[0]} Reviewing · 00:00 elapsed")
         self.block(
             "rubric review",
             "\n".join(lines),
