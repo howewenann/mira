@@ -12,7 +12,7 @@ For implementation rationale, see
 ## Install
 
 MIRA requires Python 3.11 or newer. Its agent runtime is pinned to
-DeepAgents 0.7.0 and `langchain-quickjs` 0.3.5.
+DeepAgents 0.7.3 and `langchain-quickjs` 0.3.5.
 
 With Conda:
 

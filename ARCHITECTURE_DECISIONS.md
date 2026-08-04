@@ -725,7 +725,7 @@ differently.
 
 ## DeepAgents Runtime Ownership
 
-**Decision:** MIRA pins DeepAgents 0.7.0 and `langchain-quickjs` 0.3.5. MIRA
+**Decision:** MIRA pins DeepAgents 0.7.3 and `langchain-quickjs` 0.3.5. MIRA
 owns a small general-purpose action prompt and its existing planning prompt;
 DeepAgents owns the filesystem, delegation, streaming, and middleware
 execution. Project and bundled memory files remain opaque Markdown resources,
