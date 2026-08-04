@@ -2,4 +2,4 @@
 
 from __future__ import annotations
 
-SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+SPINNER_FRAMES = ("|", "/", "-", "\\")
