@@ -48,6 +48,11 @@ class ToolIssuesScreen(ModalScreen[None]):
             yield Static("CUSTOM TOOLS UNAVAILABLE", id="tool-issues-title")
             with VerticalScroll(id="tool-issues-scroll"):
                 yield Static(self.summary_text(), id="tool-issues-summary")
+            yield Static(
+                f"Install target (MIRA Python):\n{sys.executable}",
+                id="tool-issues-install-target",
+                markup=False,
+            )
             yield Static("Packages to install:", id="tool-issues-package-label")
             yield Input(" ".join(missing_requirements(self.failures)), id="tool-issues-packages")
             yield LoadingIndicator(id="tool-issues-loading")
@@ -120,7 +125,7 @@ class ToolIssuesScreen(ModalScreen[None]):
             self.query_one("#tool-issues-summary", Static).update(self.summary_text())
             return
         self.installing = True
-        self.install_details = "Installing packages into MIRA's environment..."
+        self.install_details = f"Installing packages into MIRA's environment:\n{sys.executable}"
         self.query_one("#tool-issues-summary", Static).update(self.summary_text())
         self._sync_controls()
         self.install_requirements(requirements)

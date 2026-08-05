@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +114,9 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 screen.install_requirements.assert_called_once_with(["ica"])
                 self.assertTrue(screen.installing)
                 self.assertIs(app.screen, screen)
+                progress = renderable_plain(screen.query_one("#tool-issues-summary", Static))
+                self.assertIn("Installing packages into MIRA's environment:", progress)
+                self.assertIn(sys.executable, progress)
 
     async def test_enter_submits_packages_and_c_closes_while_idle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -189,6 +193,9 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("1 file has another error", summary)
                 self.assertEqual(summary.count("@tool runs inside MIRA."), 1)
                 self.assertIn(".mira/examples/tools/project_runtime_tool.py", summary)
+                install_target = renderable_plain(screen.query_one("#tool-issues-install-target", Static))
+                self.assertIn("Install target (MIRA Python):", install_target)
+                self.assertIn(sys.executable, install_target)
                 self.assertEqual(screen.query_one("#tool-issues-packages", Input).value, "shared_dep")
                 actions = screen.query_one("#tool-issues-actions", Horizontal)
                 self.assertEqual(len(actions.query(Button)), 2)
@@ -201,6 +208,9 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 prompt = app.query_one(PromptBox)
                 prompt.value = "/issues"
                 prompt.focus()
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
                 await pilot.press("enter")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, ToolIssuesScreen)

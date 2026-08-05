@@ -144,6 +144,12 @@ ToolIssuesScreen {
     padding: 0 1 1 0;
 }
 
+#tool-issues-install-target {
+    height: auto;
+    padding-bottom: 1;
+    color: #b8c1c7;
+}
+
 #tool-issues-package-label {
     height: 1;
     color: #b8c1c7;

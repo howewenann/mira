@@ -697,7 +697,8 @@ Unavailable project tool files use one narrow TUI-only issue flow rather than a
 general notification system. `App.notify()` announces a new failure fingerprint
 once per session, a compact `Issues N` button and `/issues` open one scrollable
 `ModalScreen`, and a Textual thread worker runs one explicit
-`sys.executable -m pip install ...` argument list. The input and both bottom-row
+`sys.executable -m pip install ...` argument list. The modal shows that exact
+MIRA interpreter path beside the package input. The input and both bottom-row
 buttons are disabled while pip runs. Success reuses `_reload_runtime()` and
 refreshes the open modal; failure retains captured output and re-enables retry.
 Closing never changes settings, session history, or unresolved failures.

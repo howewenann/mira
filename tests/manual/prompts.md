@@ -910,9 +910,10 @@ Create two analogous local packages, `mira_manual_alpha` and
 invalid return statement.
 
 Expected: one screen lists all three files and shows project-runtime guidance
-once. Its input contains both modules, not the syntax error. Replace them with
-both local package paths and install once. Both tools recover and appear in
-`/tools`; only the syntax file remains and contributes no agent tool.
+once. The install target names MIRA Python and shows its exact interpreter path.
+Its input contains both modules, not the syntax error. Replace them with both
+local package paths and install once. Both tools recover and appear in `/tools`;
+only the syntax file remains and contributes no agent tool.
 
 ### 3. Shared dependency is deduplicated
 
