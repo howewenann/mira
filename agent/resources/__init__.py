@@ -222,7 +222,7 @@ def project_python_command(settings: dict[str, Any] | None, workspace: Path) -> 
     selected = execute_env_settings(settings)
     prefix = conda_command_prefix(settings)
     if prefix:
-        return [*prefix, "python"]
+        return [*prefix[:2], "--no-capture-output", *prefix[2:], "python"]
     mode = selected.get("mode")
     if mode == "venv" and selected.get("path"):
         root, bin_dir = resolve_venv_paths(workspace, str(selected["path"]))

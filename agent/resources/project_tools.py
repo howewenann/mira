@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import json
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -99,29 +98,25 @@ def invoke_project_tool(
         "bridge_path": str(bridge_path),
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="mira-project-tool-") as directory:
-            request_path = Path(directory) / "request.json"
-            response_path = Path(directory) / "response.json"
-            request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-            command = [
-                *project_python_command(settings, workspace),
-                str(runner_path),
-                str(request_path),
-                str(response_path),
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=workspace,
-                env=execute_env(settings=settings, workspace=workspace),
-                capture_output=True,
-                text=True,
-                shell=False,
-                check=False,
-            )
-            if not response_path.exists():
-                details = (completed.stderr or completed.stdout or "child runner produced no response").strip()
-                raise RuntimeError(details)
-            response = json.loads(response_path.read_text(encoding="utf-8"))
+        command = [*project_python_command(settings, workspace), str(runner_path)]
+        child_env = execute_env(settings=settings, workspace=workspace)
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        completed = subprocess.run(
+            command,
+            cwd=workspace,
+            env=child_env,
+            input=json.dumps(request, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            check=False,
+        )
+        if not completed.stdout.strip():
+            details = (completed.stderr or "child runner produced no response").strip()
+            raise RuntimeError(details)
+        response = json.loads(completed.stdout)
     except ToolException:
         raise
     except BaseException as error:

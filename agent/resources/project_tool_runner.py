@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
 import importlib.util
 import inspect
 import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 def load_file(module_name: str, path: Path) -> Any:
@@ -34,17 +35,18 @@ def json_result(value: Any) -> Any:
     return value
 
 
-def run(request_path: Path, response_path: Path) -> int:
-    request = json.loads(request_path.read_text(encoding="utf-8"))
+def run(request_stream: TextIO, response_stream: TextIO) -> int:
+    request = json.load(request_stream)
     workspace = Path(request["workspace"]).resolve()
     sys.path.insert(0, str(workspace))
     try:
-        load_file("mira_tool_api", Path(request["bridge_path"]).resolve())
-        module = load_file("_mira_project_tool_source", Path(request["source_path"]).resolve())
-        function = getattr(module, request["function_name"])
-        value = function(**request.get("arguments", {}))
-        if inspect.isawaitable(value):
-            value = asyncio.run(value)
+        with redirect_stdout(sys.stderr):
+            load_file("mira_tool_api", Path(request["bridge_path"]).resolve())
+            module = load_file("_mira_project_tool_source", Path(request["source_path"]).resolve())
+            function = getattr(module, request["function_name"])
+            value = function(**request.get("arguments", {}))
+            if inspect.isawaitable(value):
+                value = asyncio.run(value)
         response = {"ok": True, "result": json_result(value)}
         status = 0
     except BaseException as error:
@@ -55,9 +57,11 @@ def run(request_path: Path, response_path: Path) -> int:
             "traceback": "".join(traceback.format_exception(error)),
         }
         status = 1
-    response_path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+    json.dump(response, response_stream, ensure_ascii=False)
+    response_stream.write("\n")
+    response_stream.flush()
     return status
 
 
 if __name__ == "__main__":
-    raise SystemExit(run(Path(sys.argv[1]), Path(sys.argv[2])))
+    raise SystemExit(run(sys.stdin, sys.stdout))

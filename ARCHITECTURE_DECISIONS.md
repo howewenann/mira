@@ -249,13 +249,15 @@ to inspect.
   ignored, and project-only imports must stay inside the marked function
   because discovery still imports the containing file in MIRA.
 - A project proxy launches one standard-library child runner per call using the
-  existing Execute Environment selection. It exchanges JSON through temporary
-  request/response files, uses the workspace as cwd and import root, and loads
-  the exact standalone `mira_tool_api.py` bridge file as `mira_tool_api` before
-  importing the source. This exposes neither MIRA's site-packages nor a second
-  environment setting. JSON-compatible results are preserved; other values
-  fall back to `repr`, and child exceptions become normal project-runtime tool
-  errors. Before crossing the child boundary, conventional structured path
+  existing Execute Environment selection. It exchanges JSON through the child
+  process's stdin and stdout, redirects project-tool prints to stderr so they
+  cannot corrupt the response, and uses Conda's no-capture mode so stdin reaches
+  Conda-hosted runners. The runner uses the workspace as cwd and import root and
+  loads the exact standalone `mira_tool_api.py` bridge file as `mira_tool_api`
+  before importing the source. This exposes neither MIRA's site-packages nor a
+  second environment setting. JSON-compatible results are preserved; other
+  values fall back to `repr`, and child exceptions become normal project-runtime
+  tool errors. Before crossing the child boundary, conventional structured path
   arguments (`path`, `*_path`, `paths`, and `*_paths`) reuse the project
   backend's virtual-path resolver so `/file` refers to the workspace rather
   than the host filesystem root.

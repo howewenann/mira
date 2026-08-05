@@ -202,7 +202,7 @@ class ProjectToolProxyTests(unittest.TestCase):
             project_python_command(
                 {"hitl": {"execute_env": {"mode": "conda_name", "name": "analytics"}}}, workspace
             ),
-            ["conda", "run", "-n", "analytics", "python"],
+            ["conda", "run", "--no-capture-output", "-n", "analytics", "python"],
         )
         venv = project_python_command(
             {"hitl": {"execute_env": {"mode": "venv", "path": ".venv"}}}, workspace
@@ -246,6 +246,7 @@ class ProjectToolProxyTests(unittest.TestCase):
                 '@project_tool(name="public_project", description="Run in project Python.")\n'
                 "def implementation(value: str, repeat: int = 1) -> str:\n"
                 "    from project_only_module import decorate\n"
+                "    print('project tool diagnostic')\n"
                 "    return decorate(value) * repeat\n",
                 encoding="utf-8",
             )
@@ -260,6 +261,7 @@ class ProjectToolProxyTests(unittest.TestCase):
             self.assertEqual(metadata["runtime"], "Project")
             self.assertEqual(metadata["environment"], "System")
             self.assertEqual(tool.invoke({"value": "x", "repeat": 2}), "project:xproject:x")
+            self.assertEqual(tool.invoke({"value": "東京"}), "project:東京")
 
     def test_virtual_workspace_path_is_resolved_before_child_execution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
