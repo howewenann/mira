@@ -49,6 +49,10 @@ class PromptBox(TextArea):
 
     def on_key(self, event: Key) -> None:
         """Submit prompts and navigate history."""
+        completion_handler = getattr(self.parent, "handle_prompt_key", None)
+        if callable(completion_handler) and completion_handler(event):
+            return
+
         if event.key == "enter":
             event.stop()
             event.prevent_default()
@@ -104,3 +108,10 @@ class PromptBox(TextArea):
 
     def _move_cursor_to_end(self) -> None:
         self.cursor_location = self.document.end
+
+    def watch_disabled(self, disabled: bool) -> None:
+        """Dismiss descendant autocomplete when the prompt becomes unavailable."""
+        if disabled:
+            callback = getattr(self.parent, "prompt_disabled", None)
+            if callable(callback):
+                callback()

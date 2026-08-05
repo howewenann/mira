@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -20,7 +21,7 @@ from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.selection import SELECT_ALL
-from textual.widgets import Button, Input, Static, TextArea
+from textual.widgets import Button, Input, OptionList, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -56,7 +57,7 @@ from ui.renderer import Renderer
 from ui.runtime_snapshot import runtime_report
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import strip_ansi
-from ui.widgets import ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets import AutocompletePrompt, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
 from ui.widgets.session_history import session_label
@@ -126,6 +127,65 @@ class PromptBoxTestApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield PromptBox()
+
+    def on_prompt_box_submitted(self, message: PromptBox.Submitted) -> None:
+        self.submissions.append(message.value)
+
+
+class FakeAutocompleteBackend:
+    """Async project-backend double with observable broad glob calls."""
+
+    def __init__(self, paths: list[str]) -> None:
+        self.paths = paths
+        self.calls = 0
+
+    async def aglob(self, pattern: str) -> Any:
+        self.calls += 1
+        if pattern != "**/*":
+            raise AssertionError(f"unexpected glob pattern: {pattern}")
+        return SimpleNamespace(
+            matches=[{"path": f"/{path}", "is_dir": False} for path in self.paths]
+        )
+
+
+class DelayedAutocompleteBackend(FakeAutocompleteBackend):
+    """Backend double whose result can arrive after an interaction ends."""
+
+    def __init__(self, paths: list[str]) -> None:
+        super().__init__(paths)
+        self.release = asyncio.Event()
+
+    async def aglob(self, pattern: str) -> Any:
+        self.calls += 1
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            # Simulate a backend operation that still returns after cancellation.
+            await self.release.wait()
+        return SimpleNamespace(
+            matches=[{"path": f"/{path}", "is_dir": False} for path in self.paths]
+        )
+
+
+class AutocompleteTestApp(App[None]):
+    """Small autocomplete shell that records PromptBox submissions."""
+
+    CSS = """
+    AutocompletePrompt { width: 100%; height: auto; }
+    #autocomplete-options { width: 100%; height: 10; }
+    #prompt { width: 100%; height: 5; }
+    """
+
+    def __init__(self, backend: Any = None) -> None:
+        super().__init__()
+        self.backend = backend
+        self.submissions: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield AutocompletePrompt(project_backend=self.backend)
+
+    def on_mount(self) -> None:
+        self.query_one(PromptBox).focus()
 
     def on_prompt_box_submitted(self, message: PromptBox.Submitted) -> None:
         self.submissions.append(message.value)
@@ -327,6 +387,206 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prompt.value, "first\nsec\nond")
             self.assertEqual(prompt.cursor_location, (2, 0))
             self.assertEqual(app.submissions, [])
+
+    async def test_slash_completion_enter_inserts_without_submitting_and_space_dismisses(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            options = app.query_one(OptionList)
+            prompt.value = "/he"
+            await pilot.pause()
+
+            self.assertTrue(completion.active)
+            help_index = next(
+                index for index, item in enumerate(completion.items) if item.display == "/help"
+            )
+            options.highlighted = help_index
+            await pilot.press("enter")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "/help")
+            self.assertEqual(app.submissions, [])
+            self.assertFalse(completion.active)
+
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.submissions, ["/help"])
+
+            prompt.value = "/help "
+            await pilot.pause()
+            self.assertFalse(completion.active)
+
+    async def test_completion_navigation_keeps_prompt_focus_and_escape_dismisses(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            options = app.query_one(OptionList)
+            prompt.value = "/"
+            await pilot.pause()
+
+            self.assertTrue(completion.active)
+            self.assertTrue(prompt.has_focus)
+            self.assertEqual(options.highlighted, 0)
+            await pilot.press("down")
+            self.assertEqual(options.highlighted, 1)
+            self.assertTrue(prompt.has_focus)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(completion.active)
+            self.assertTrue(prompt.has_focus)
+
+    async def test_escape_keeps_normal_app_focus_behavior_without_completion(self) -> None:
+        app = make_app()
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            app.query_one("#new-chat", Button).focus()
+            await pilot.pause()
+            self.assertFalse(prompt.has_focus)
+            await pilot.press("escape")
+            await pilot.pause()
+
+            self.assertTrue(prompt.has_focus)
+            self.assertFalse(app.query_one(AutocompletePrompt).active)
+
+    async def test_closed_completion_preserves_submit_newline_and_history(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.set_history(["older", "newer"])
+            prompt.value = "draft"
+            await pilot.press("up")
+            self.assertEqual(prompt.value, "newer")
+            await pilot.press("down")
+            self.assertEqual(prompt.value, "draft")
+            await pilot.press("shift+enter")
+            self.assertEqual(prompt.value, "draft\n")
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.submissions, ["draft\n"])
+
+    async def test_file_interaction_globs_once_while_query_changes_and_again_after_dismissal(self) -> None:
+        backend = FakeAutocompleteBackend(["agent/resources/items.py", "runtime/recorder.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            prompt.value = "Compare @lang"
+            await wait_until(lambda: backend.calls == 1 and completion._file_paths is not None)
+            prompt.value = "Compare @rec"
+            await pilot.pause()
+
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual([item.display for item in completion.items], ["runtime/recorder.py"])
+
+            await pilot.press("escape")
+            prompt.value = "Compare "
+            await pilot.pause()
+            prompt.value = "Compare @rec"
+            await wait_until(lambda: backend.calls == 2)
+
+    async def test_file_enter_quotes_spaces_and_multiple_mentions_replace_at_cursor(self) -> None:
+        backend = FakeAutocompleteBackend(
+            ["docs/design notes.md", "src/auth.py", "tests/test_auth.py"]
+        )
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            prompt.value = "Review @notes"
+            await wait_until(lambda: bool(completion.items))
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.value, 'Review @"docs/design notes.md"')
+            self.assertEqual(app.submissions, [])
+
+            prompt.value = "Compare @auth with @test"
+            prompt.cursor_location = (0, len("Compare @auth"))
+            await wait_until(
+                lambda: any(item.display == "src/auth.py" for item in completion.items)
+            )
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "Compare @src/auth.py with @test")
+
+            prompt.value = "Compare @src/auth.py with @tests/test_auth.py"
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.press("enter")
+            await pilot.pause()
+            prompt.value = "Inspect @does/not/exist.py"
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(
+                app.submissions,
+                [
+                    "Compare @src/auth.py with @tests/test_auth.py",
+                    "Inspect @does/not/exist.py",
+                ],
+            )
+
+    async def test_mouse_selection_accepts_and_restores_prompt_focus(self) -> None:
+        backend = FakeAutocompleteBackend(["src/auth.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            prompt.value = "Review @auth"
+            await wait_until(lambda: completion.active)
+            await pilot.click("#autocomplete-options", offset=(2, 0))
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "Review @src/auth.py")
+            self.assertEqual(app.submissions, [])
+            self.assertTrue(prompt.has_focus)
+
+    async def test_stale_file_result_cannot_reopen_dismissed_completion(self) -> None:
+        backend = DelayedAutocompleteBackend(["src/auth.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            prompt.value = "Review @auth"
+            await wait_until(lambda: backend.calls == 1)
+            await pilot.press("escape")
+            backend.release.set()
+            await pilot.pause()
+
+            self.assertFalse(completion.active)
+            self.assertEqual(completion.items, ())
+
+    async def test_rebuilt_project_backend_dismisses_and_replaces_completion_state(self) -> None:
+        old_backend = FakeAutocompleteBackend(["old.py"])
+        new_backend = FakeAutocompleteBackend(["new.py"])
+        app = AutocompleteTestApp(old_backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            prompt.value = "Review @old"
+            await wait_until(lambda: completion.active)
+
+            completion.set_project_backend(new_backend)
+            self.assertFalse(completion.active)
+            self.assertIs(completion.project_backend, new_backend)
+            prompt.value = "Review "
+            await pilot.pause()
+            prompt.value = "Review @new"
+            await wait_until(lambda: completion.active)
+
+            self.assertEqual(old_backend.calls, 1)
+            self.assertEqual(new_backend.calls, 1)
+            self.assertEqual([item.display for item in completion.items], ["new.py"])
 
     def test_runtime_report_uses_sanitized_snapshot(self) -> None:
         """Runtime inspection should expose only the allowlisted fields."""

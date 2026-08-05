@@ -224,7 +224,7 @@ def _build_agent(
     )
     _attach_resources(agent, resources.metadata)
     _attach_tool_failures(agent, resources.tool_failures)
-    _attach_backend(agent, backend)
+    _attach_backend(agent, backend, resources.project_backend)
     _attach_summarization(agent, middleware_stack.summarization)
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))
@@ -404,10 +404,11 @@ def _attach_tool_failures(agent: Any, failures: list[Any]) -> None:
         return
 
 
-def _attach_backend(agent: Any, backend: Any) -> None:
+def _attach_backend(agent: Any, backend: Any, project_backend: Any) -> None:
     """Attach the workspace backend for approved filesystem fallback execution."""
     try:
         agent.mira_backend = backend
+        agent.mira_project_backend = project_backend
     except AttributeError:
         return
 

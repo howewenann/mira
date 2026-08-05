@@ -18,6 +18,7 @@ from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware.execute_tool_description_rewrite import (
     ExecuteToolDescriptionRewriteMiddleware,
 )
+from agent.middleware.file_references import FileReferenceMiddleware
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from config.settings import dynamic_subagents_enabled, planning_todos_enabled
 
@@ -49,6 +50,7 @@ def build_agent_middleware(
     middleware: list[Any] = [
         *([TodoListMiddleware()] if planning_todos_enabled(settings) else []),
         summarization_middleware,
+        FileReferenceMiddleware(),
         ModelResponseNormalizationMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
         CodeInterpreterMiddleware(

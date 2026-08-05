@@ -177,6 +177,29 @@ ToolIssuesScreen {
     scrollbar-background: #122023;
 }
 
+#autocomplete-prompt {
+    width: 100%;
+    height: auto;
+}
+
+#autocomplete-options {
+    display: none;
+    width: 100%;
+    height: auto;
+    max-height: 10;
+    border: solid #5bb8b1;
+    background: #101516;
+    color: #e8edef;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#autocomplete-options > .option-list--option-highlighted {
+    background: #1b3036;
+    color: #eef7f8;
+    text-style: bold;
+}
+
 #prompt {
     height: 5;
     border: heavy #5bb8b1;

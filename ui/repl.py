@@ -12,6 +12,8 @@ from langchain_core.exceptions import ContextOverflowError
 from rich.table import Table
 from rich.text import Text
 
+from ui.command_help import COMMAND_HELP_SECTIONS
+
 from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.planning.policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
@@ -126,60 +128,6 @@ User request:
 """
 
 HELP_SECTION_STYLE = "bold #7aa2f7"
-COMMAND_HELP_SECTIONS = (
-    (
-        "General",
-        (
-            ("/help", "show commands and what they do"),
-            ("/session", "show conversation identity, mode, goals, plans, workspace, and turns"),
-            ("/exit", "quit MIRA"),
-        ),
-    ),
-    (
-        "Inspect",
-        (
-            ("/runtime", "inspect the active model, connection, and launch options"),
-            ("/tools", "list tools available in the current mode"),
-            ("/memories", "list loaded memory files and replacements"),
-            ("/skills", "list loaded skills and replacements"),
-            ("/subagents", "list loaded subagents and replacements"),
-            ("/issues", "repair unavailable project tool files in the TUI"),
-        ),
-    ),
-    (
-        "Workflow",
-        (
-            ("/plan [prompt]", "enter conversational read-only Plan mode, optionally sending a prompt"),
-            ("/plan-show", "show the exact retained current Plan"),
-            ("/plan-resume", "resume an incomplete retained Plan in Act mode"),
-            ("/plan-clear", "remove the retained current Plan without deleting history"),
-            ("/goal <prompt>", "create a durable Objective + Success Criteria Goal"),
-            ("/goal-show", "show the exact retained current Goal"),
-            ("/goal-resume", "resume an incomplete retained Goal in Act mode"),
-            ("/goal-clear", "remove the retained current Goal without deleting history"),
-            ("/act", "return to action mode"),
-        ),
-    ),
-    (
-        "Configuration",
-        (
-            ("/settings", "configure tool approvals in the TUI"),
-            ("/reload", "reload .env/project resources and rebuild agents in the TUI"),
-        ),
-    ),
-    (
-        "Chat & history",
-        (
-            ("/compact", "summarize older context now"),
-            ("/new-chat", "start a fresh saved chat session in the TUI"),
-            ("/clear", "clear the log"),
-            ("/clear-chat", "clear the current saved chat transcript in the TUI"),
-            ("/clear-all-chats", "delete all saved chat sessions in the TUI"),
-            ("/clear-errors", "delete saved error reports in the TUI"),
-            ("/clear-prompts", "clear prompt input history in the TUI"),
-        ),
-    ),
-)
 
 DEFAULT_TOOL_SPECS = [
     {

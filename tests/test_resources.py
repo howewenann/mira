@@ -14,6 +14,7 @@ from agent import factory
 from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware import (
     ExecuteToolDescriptionRewriteMiddleware,
+    FileReferenceMiddleware,
     QUICKJS_MEMORY_LIMIT,
     QUICKJS_PERSISTENCE_MODE,
     QUICKJS_PTC_TOOLS,
@@ -88,6 +89,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
 
             self.assertIsInstance(resources.backend.default, FilesystemBackend)
             self.assertNotIsInstance(resources.backend.default, LocalShellBackend)
+            self.assertIs(resources.project_backend, resources.backend.default)
 
     def test_execute_enabled_uses_local_shell_backend(self) -> None:
         """Enabled execute should switch the project backend to LocalShellBackend."""
@@ -741,6 +743,7 @@ def get_tools(project_backend):
                 for middleware in kwargs["middleware"]
             )
         )
+        self.assertTrue(any(isinstance(middleware, FileReferenceMiddleware) for middleware in kwargs["middleware"]))
         self.assertIn("/.mira/skills", kwargs["skills"])
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")
         self.assertTrue(any(subagent["name"] == "example-project-guide" for subagent in kwargs["subagents"]))
@@ -750,6 +753,7 @@ def get_tools(project_backend):
         self.assertIn("tools", agent.mira_resources)
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertNotIn("finalize_plan", [tool["name"] for tool in agent.mira_tool_specs])
+        self.assertIs(agent.mira_project_backend, kwargs["backend"].default)
 
     def test_action_and_plan_agents_share_ordered_opaque_memory_resources(self) -> None:
         """Memory filenames should only determine stable ordering, not agent roles."""
@@ -772,6 +776,10 @@ def get_tools(project_backend):
 
         action_memory = create.call_args_list[0].kwargs["memory"]
         plan_memory = create.call_args_list[1].kwargs["memory"]
+        for call in create.call_args_list:
+            self.assertTrue(
+                any(isinstance(item, FileReferenceMiddleware) for item in call.kwargs["middleware"])
+            )
         self.assertEqual(action_memory, plan_memory)
         self.assertEqual(
             action_memory,

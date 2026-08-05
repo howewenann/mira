@@ -13,6 +13,7 @@ from agent.middleware.execute_tool_description_rewrite import (
     ExecuteToolDescriptionRewriteMiddleware,
     execute_tool_with_mira_description,
 )
+from agent.middleware.file_references import FileReferenceMiddleware, file_reference_guidance
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
 from agent.middleware.builder import (
@@ -38,6 +39,7 @@ __all__ = [
     "CorrectionRule",
     "CorrectionState",
     "ExecuteToolDescriptionRewriteMiddleware",
+    "FileReferenceMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
     "ModelResponseNormalizationMiddleware",
     "ModelToolVisibilityMiddleware",
@@ -49,5 +51,6 @@ __all__ = [
     "QUICKJS_TIMEOUT_SECONDS",
     "build_agent_middleware",
     "execute_tool_with_mira_description",
+    "file_reference_guidance",
     "planning_control_tool_error",
 ]

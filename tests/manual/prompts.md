@@ -2,6 +2,30 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## TUI Autocomplete And File References
+
+Run the interactive TUI and verify `/he`, `/help`, and `Compare @auth`. Change
+`@lang` to `@rec` at the same mention, dismiss a pending file search with
+Escape, mouse-select a file, and select a path containing spaces.
+
+Submit multiple references, then a manually edited missing reference:
+
+```text
+Compare @README.md with @tests/test_textual_app.py
+Inspect @does/not/exist.py and report what happens
+```
+
+Expected:
+
+- Up/Down changes the highlighted completion; Enter or a mouse click inserts
+  it without submitting. Escape dismisses the popup.
+- Paths containing spaces are inserted as `@"path with spaces"`.
+- Changing the query at the same `@` reuses its candidate list; a new or
+  dismissed interaction performs fresh discovery and stale results stay hidden.
+- Multiple visible references guide normal `read_file` calls.
+- A missing path is submitted normally and fails only through the agent's
+  ordinary `read_file` result.
+
 ## HITL File Write
 
 ```powershell

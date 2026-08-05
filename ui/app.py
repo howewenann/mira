@@ -94,6 +94,7 @@ from ui.repl import (
 )
 from ui.runtime_snapshot import runtime_report
 from ui.widgets import (
+    AutocompletePrompt,
     ChatLog,
     PromptBox,
     PromptPanel,
@@ -237,7 +238,7 @@ class MiraApp(App[None]):
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
-                yield PromptBox()
+                yield AutocompletePrompt()
 
     def on_mount(self) -> None:
         """Start app initialization."""
@@ -315,6 +316,9 @@ class MiraApp(App[None]):
         prompt = self.query_one(PromptBox)
         prompt.disabled = False
         prompt.set_history(read_prompt_history(self.history_path))
+        self.query_one(AutocompletePrompt).set_project_backend(
+            getattr(self.agent, "mira_project_backend", None)
+        )
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -1739,6 +1743,9 @@ class MiraApp(App[None]):
         self.context_limit_source = metadata.context_source
         self.agent = agent
         self.plan_agent = plan_agent
+        self.query_one(AutocompletePrompt).set_project_backend(
+            getattr(agent, "mira_project_backend", None)
+        )
         self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
         self.mode.update(mode_updates)
         self.runtime_snapshot = snapshot

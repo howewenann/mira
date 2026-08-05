@@ -44,6 +44,7 @@ class ResourceBundle:
     """Everything DeepAgents needs, plus metadata for REPL inspection."""
 
     backend: Any
+    project_backend: Any
     skills: list[str]
     memory: list[str]
     subagents: list[Any]
@@ -82,6 +83,7 @@ def build_resources(
 
     return ResourceBundle(
         backend=backends.combined,
+        project_backend=backends.project,
         skills=skill_sources,
         memory=[item["path"] for item in memories],
         subagents=subagents,
