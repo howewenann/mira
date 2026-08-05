@@ -50,11 +50,11 @@ class _CompletionFragment:
     query: str
 
 
-class AutocompletePrompt(Vertical):
+class AutocompleteInput(Vertical):
     """PromptBox wrapper with one native popup for commands and files."""
 
     def __init__(self, *, project_backend: Any = None, **kwargs: Any) -> None:
-        super().__init__(id="autocomplete-prompt", **kwargs)
+        super().__init__(id="autocomplete-input", **kwargs)
         self.project_backend = project_backend
         self._items: list[CompletionItem] = []
         self._file_paths: list[str] | None = None
@@ -343,7 +343,7 @@ def _location_from_offset(text: str, offset: int) -> tuple[int, int]:
 
 
 __all__ = [
-    "AutocompletePrompt",
+    "AutocompleteInput",
     "CompletionItem",
     "command_items",
     "completion_fragment",

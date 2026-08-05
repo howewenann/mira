@@ -177,7 +177,7 @@ ToolIssuesScreen {
     scrollbar-background: #122023;
 }
 
-#autocomplete-prompt {
+#autocomplete-input {
     width: 100%;
     height: auto;
 }

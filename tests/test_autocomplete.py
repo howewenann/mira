@@ -9,7 +9,7 @@ from typing import Any
 
 from ui.command_help import COMMAND_HELP_SECTIONS, command_help_entries
 from ui.repl import COMMAND_HELP_SECTIONS as REPL_COMMAND_HELP_SECTIONS
-from ui.widgets.autocomplete_prompt import command_items, completion_fragment, discover_project_files, file_items
+from ui.widgets.autocomplete_input import command_items, completion_fragment, discover_project_files, file_items
 
 
 class TreeBackend:

@@ -57,7 +57,7 @@ from ui.renderer import Renderer
 from ui.runtime_snapshot import runtime_report
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import strip_ansi
-from ui.widgets import AutocompletePrompt, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
 from ui.widgets.session_history import session_label
@@ -186,7 +186,7 @@ class AutocompleteTestApp(App[None]):
     """Small autocomplete shell that records PromptBox submissions."""
 
     CSS = """
-    AutocompletePrompt { width: 100%; height: auto; }
+    AutocompleteInput { width: 100%; height: auto; }
     #autocomplete-options { width: 100%; height: auto; max-height: 12; border: solid cyan; }
     #prompt { width: 100%; height: 5; }
     """
@@ -197,7 +197,7 @@ class AutocompleteTestApp(App[None]):
         self.submissions: list[str] = []
 
     def compose(self) -> ComposeResult:
-        yield AutocompletePrompt(project_backend=self.backend)
+        yield AutocompleteInput(project_backend=self.backend)
 
     def on_mount(self) -> None:
         self.query_one(PromptBox).focus()
@@ -408,7 +408,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             options = app.query_one(OptionList)
             prompt.value = "/he"
             await pilot.pause()
@@ -438,7 +438,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             options = app.query_one(OptionList)
             prompt.value = "/tool"
             await pilot.pause()
@@ -452,7 +452,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             options = app.query_one(OptionList)
             prompt.value = "/plan"
             await pilot.pause()
@@ -476,7 +476,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             options = app.query_one(OptionList)
             prompt.value = "/"
             await pilot.pause()
@@ -505,7 +505,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertTrue(prompt.has_focus)
-            self.assertFalse(app.query_one(AutocompletePrompt).active)
+            self.assertFalse(app.query_one(AutocompleteInput).active)
 
     async def test_closed_completion_preserves_submit_newline_and_history(self) -> None:
         app = AutocompleteTestApp()
@@ -530,7 +530,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             prompt.value = "Compare @lang"
             await wait_until(lambda: backend.walks == 1 and completion._file_paths is not None)
             prompt.value = "Compare @rec"
@@ -553,7 +553,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             prompt.value = "Review @notes"
             await wait_until(lambda: bool(completion.items))
             await pilot.press("enter")
@@ -592,7 +592,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             prompt.value = "Review @auth"
             await wait_until(lambda: completion.active)
             await pilot.click("#autocomplete-options", offset=(2, 1))
@@ -608,7 +608,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             prompt.value = "Review @auth"
             await wait_until(lambda: backend.walks == 1)
             await pilot.press("escape")
@@ -625,7 +625,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test() as pilot:
             prompt = app.query_one(PromptBox)
-            completion = app.query_one(AutocompletePrompt)
+            completion = app.query_one(AutocompleteInput)
             prompt.value = "Review @old"
             await wait_until(lambda: completion.active)
 

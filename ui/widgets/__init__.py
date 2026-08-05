@@ -2,7 +2,7 @@
 
 from ui.widgets.chat_log import ChatLog
 from ui.widgets.prompt_box import PromptBox
-from ui.widgets.autocomplete_prompt import AutocompletePrompt, CompletionItem
+from ui.widgets.autocomplete_input import AutocompleteInput, CompletionItem
 from ui.widgets.prompt_panel import PromptPanel
 from ui.widgets.settings_panel import SettingsPanel
 from ui.widgets.session_history import SessionHistory
@@ -13,7 +13,7 @@ from ui.widgets.tool_issues import ToolIssuesScreen
 __all__ = [
     "ChatLog",
     "PromptBox",
-    "AutocompletePrompt",
+    "AutocompleteInput",
     "CompletionItem",
     "PromptPanel",
     "SessionHistory",
