@@ -720,7 +720,8 @@ Button.goal-action:focus {
     height: 2;
 }
 
-.settings-input.rubric-iterations-input {
+.settings-input.rubric-iterations-input,
+.settings-input.planning-response-status-retries-input {
     width: 12;
     min-width: 12;
     height: 1;
@@ -729,7 +730,9 @@ Button.goal-action:focus {
 }
 
 .settings-input.rubric-iterations-input:focus,
-.settings-input.rubric-iterations-input:disabled {
+.settings-input.rubric-iterations-input:disabled,
+.settings-input.planning-response-status-retries-input:focus,
+.settings-input.planning-response-status-retries-input:disabled {
     border: none;
 }
 
