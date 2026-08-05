@@ -18,7 +18,7 @@ from ui.command_help import command_help_entries, command_insertion
 from ui.widgets.prompt_box import PromptBox
 
 
-MAX_COMPLETIONS = 10
+MAX_COMPLETIONS = 5
 FILE_DISCOVERY_CONCURRENCY = 32
 POPUP_BORDER_HEIGHT = 2
 EXCLUDED_FILE_COMPONENTS = {

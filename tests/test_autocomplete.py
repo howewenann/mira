@@ -56,7 +56,7 @@ class AutocompleteModelTests(unittest.TestCase):
     def test_file_filtering_is_case_insensitive_alphabetical_and_capped(self) -> None:
         paths = [f"src/Auth{index:02}.py" for index in range(12)] + ["SRC/auth.py"]
         items = file_items(paths, "aUtH")
-        self.assertEqual(len(items), 10)
+        self.assertEqual(len(items), 5)
         self.assertEqual(
             [item.display for item in items],
             sorted((item.display for item in items), key=lambda value: (value.casefold(), value)),

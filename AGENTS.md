@@ -43,6 +43,22 @@
   prompts and expected results in `tests/manual/prompts.md` so the user can
   run the manual checks.
 
+## Commits
+
+- Use a concise, imperative, sentence-case subject that describes the complete
+  outcome. Conventional Commit prefixes such as `feat:`, `fix:`, and scoped
+  variants are allowed when they make the subject clearer.
+- Add a body for every non-trivial change. Use complete prose paragraphs to
+  explain the user-visible behavior, important implementation or architecture
+  decisions, documentation changes, and compatibility considerations. Derive
+  this detail from the actual staged diff; a good subject does not replace the
+  body.
+- End the body with the verification performed, including focused or full test
+  results and any known failures or limitations. Keep the detail proportional
+  to the change, but do not reduce a substantive commit to a one-line subject.
+- Review the staged diff and relevant recent commits before writing the message
+  so the commit accurately describes everything being committed.
+
 ## Documentation
 
 - Treat `README.md` as a concise user quick-start, not a changelog, behavioral

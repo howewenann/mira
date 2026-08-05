@@ -17,6 +17,7 @@ Inspect @does/not/exist.py and report what happens
 
 Expected:
 
+- The popup displays at most five matching commands or files.
 - Up/Down changes the highlighted completion; Enter or a mouse click inserts
   it without submitting. Escape dismisses the popup.
 - Paths containing spaces are inserted as `@"path with spaces"`.

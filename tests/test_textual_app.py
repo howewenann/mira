@@ -447,6 +447,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(options.region.height, 3)
             self.assertEqual(options.content_region.height, 1)
 
+    async def test_autocomplete_displays_at_most_five_options(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
+            prompt.value = "/"
+            await pilot.pause()
+
+            self.assertEqual(len(completion.items), 5)
+            self.assertEqual(options.region.height, 7)
+            self.assertEqual(options.content_region.height, 5)
+
     async def test_optional_prompt_command_inserts_without_a_trailing_space(self) -> None:
         app = AutocompleteTestApp()
 
