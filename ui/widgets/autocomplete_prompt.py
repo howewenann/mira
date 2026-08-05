@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -17,6 +19,8 @@ from ui.widgets.prompt_box import PromptBox
 
 
 MAX_COMPLETIONS = 10
+FILE_DISCOVERY_CONCURRENCY = 32
+POPUP_BORDER_HEIGHT = 2
 EXCLUDED_FILE_COMPONENTS = {
     ".git",
     ".venv",
@@ -188,13 +192,13 @@ class AutocompletePrompt(Vertical):
 
     async def _load_project_files(self, generation: int, interaction_start: int) -> None:
         try:
-            result = await self.project_backend.aglob("**/*")
+            paths = await discover_project_files(self.project_backend)
         except Exception:
             return
         if generation != self._generation or interaction_start != self._interaction_start:
             return
         self._file_worker = None
-        self._file_paths = project_file_paths(result)
+        self._file_paths = paths
         fragment = self._fragment
         if fragment is None or fragment.kind != "file" or fragment.start != interaction_start:
             return
@@ -207,7 +211,7 @@ class AutocompletePrompt(Vertical):
         options.display = bool(self._items)
         if self._items:
             options.highlighted = 0
-            options.styles.height = min(len(self._items), MAX_COMPLETIONS)
+            options.styles.height = min(len(self._items), MAX_COMPLETIONS) + POPUP_BORDER_HEIGHT
 
     def _hide_options(self) -> None:
         self._items = []
@@ -245,7 +249,7 @@ def command_items(query: str) -> list[CompletionItem]:
             description=description,
         )
         for usage, description in command_help_entries()
-        if folded in f"{usage} {description}".casefold()
+        if folded in usage.casefold()
     ]
     return sorted(items, key=lambda item: (item.display.casefold(), item.display))[:MAX_COMPLETIONS]
 
@@ -268,23 +272,41 @@ def file_items(paths: list[str], query: str) -> list[CompletionItem]:
     ]
 
 
-def project_file_paths(result: Any) -> list[str]:
-    """Convert a pinned DeepAgents GlobResult into quiet relative file paths."""
-    matches = getattr(result, "matches", None)
-    if matches is None and isinstance(result, dict):
-        matches = result.get("matches", [])
-    paths: list[str] = []
-    for match in matches or []:
-        if not isinstance(match, dict) or match.get("is_dir"):
+async def discover_project_files(backend: Any) -> list[str]:
+    """Enumerate project files through backend ls calls while pruning noisy trees."""
+    pending = deque(["/"])
+    visited: set[str] = set()
+    files: set[str] = set()
+    while pending:
+        directories: list[str] = []
+        while pending and len(directories) < FILE_DISCOVERY_CONCURRENCY:
+            directory = pending.popleft()
+            if directory in visited:
+                continue
+            visited.add(directory)
+            directories.append(directory)
+        if not directories:
             continue
-        path = str(match.get("path") or "").replace("\\", "/").lstrip("/")
-        if not path:
-            continue
-        components = {component.casefold() for component in path.split("/")}
-        if components & EXCLUDED_FILE_COMPONENTS:
-            continue
-        paths.append(path)
-    return sorted(set(paths), key=lambda path: (path.casefold(), path))
+
+        results = await asyncio.gather(*(backend.als(directory) for directory in directories))
+        for result in results:
+            for entry in getattr(result, "entries", None) or []:
+                if not isinstance(entry, dict):
+                    continue
+                path = str(entry.get("path") or "").replace("\\", "/")
+                relative = path.strip("/")
+                if not relative or _excluded_project_path(relative):
+                    continue
+                if entry.get("is_dir"):
+                    pending.append(f"/{relative}")
+                else:
+                    files.add(relative)
+    return sorted(files, key=lambda path: (path.casefold(), path))
+
+
+def _excluded_project_path(path: str) -> bool:
+    components = {component.casefold() for component in path.split("/")}
+    return bool(components & EXCLUDED_FILE_COMPONENTS)
 
 
 def completion_fragment(text: str, cursor: int) -> _CompletionFragment | None:
@@ -325,6 +347,6 @@ __all__ = [
     "CompletionItem",
     "command_items",
     "completion_fragment",
+    "discover_project_files",
     "file_items",
-    "project_file_paths",
 ]

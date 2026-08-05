@@ -68,9 +68,9 @@ def command_help_entries() -> Iterator[tuple[str, str]]:
 
 
 def command_insertion(usage: str) -> str:
-    """Return the executable token, with a space when arguments are declared."""
+    """Return the command token, spacing only for a required argument."""
     command, _, arguments = usage.partition(" ")
-    suffix = " " if "<" in arguments or "[" in arguments else ""
+    suffix = " " if "<" in arguments else ""
     return f"{command}{suffix}"
 
 

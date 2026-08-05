@@ -133,19 +133,34 @@ class PromptBoxTestApp(App[None]):
 
 
 class FakeAutocompleteBackend:
-    """Async project-backend double with observable broad glob calls."""
+    """Async project-backend double with observable enumeration starts."""
 
     def __init__(self, paths: list[str]) -> None:
         self.paths = paths
         self.calls = 0
+        self.walks = 0
 
-    async def aglob(self, pattern: str) -> Any:
+    async def als(self, path: str) -> Any:
         self.calls += 1
-        if pattern != "**/*":
-            raise AssertionError(f"unexpected glob pattern: {pattern}")
-        return SimpleNamespace(
-            matches=[{"path": f"/{path}", "is_dir": False} for path in self.paths]
-        )
+        if path == "/":
+            self.walks += 1
+        return SimpleNamespace(entries=self._entries(path))
+
+    def _entries(self, directory: str) -> list[dict[str, Any]]:
+        prefix = directory.strip("/")
+        prefix = f"{prefix}/" if prefix else ""
+        entries: dict[str, dict[str, Any]] = {}
+        for file_path in self.paths:
+            if not file_path.startswith(prefix):
+                continue
+            remaining = file_path[len(prefix) :]
+            name, separator, _rest = remaining.partition("/")
+            virtual_path = f"/{prefix}{name}"
+            entries[virtual_path] = {
+                "path": f"{virtual_path}/" if separator else virtual_path,
+                "is_dir": bool(separator),
+            }
+        return list(entries.values())
 
 
 class DelayedAutocompleteBackend(FakeAutocompleteBackend):
@@ -155,16 +170,16 @@ class DelayedAutocompleteBackend(FakeAutocompleteBackend):
         super().__init__(paths)
         self.release = asyncio.Event()
 
-    async def aglob(self, pattern: str) -> Any:
+    async def als(self, path: str) -> Any:
         self.calls += 1
-        try:
-            await self.release.wait()
-        except asyncio.CancelledError:
-            # Simulate a backend operation that still returns after cancellation.
-            await self.release.wait()
-        return SimpleNamespace(
-            matches=[{"path": f"/{path}", "is_dir": False} for path in self.paths]
-        )
+        if path == "/":
+            self.walks += 1
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                # Simulate a backend operation that still returns after cancellation.
+                await self.release.wait()
+        return SimpleNamespace(entries=self._entries(path))
 
 
 class AutocompleteTestApp(App[None]):
@@ -172,7 +187,7 @@ class AutocompleteTestApp(App[None]):
 
     CSS = """
     AutocompletePrompt { width: 100%; height: auto; }
-    #autocomplete-options { width: 100%; height: 10; }
+    #autocomplete-options { width: 100%; height: auto; max-height: 12; border: solid cyan; }
     #prompt { width: 100%; height: 5; }
     """
 
@@ -418,6 +433,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(completion.active)
 
+    async def test_single_completion_has_one_visible_content_row(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            options = app.query_one(OptionList)
+            prompt.value = "/tool"
+            await pilot.pause()
+
+            self.assertEqual([item.display for item in completion.items], ["/tools"])
+            self.assertEqual(options.region.height, 3)
+            self.assertEqual(options.content_region.height, 1)
+
+    async def test_optional_prompt_command_inserts_without_a_trailing_space(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompletePrompt)
+            options = app.query_one(OptionList)
+            prompt.value = "/plan"
+            await pilot.pause()
+            options.highlighted = next(
+                index
+                for index, item in enumerate(completion.items)
+                if item.display == "/plan [prompt]"
+            )
+
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "/plan")
+            self.assertEqual(app.submissions, [])
+
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.submissions, ["/plan"])
+
     async def test_completion_navigation_keeps_prompt_focus_and_escape_dismisses(self) -> None:
         app = AutocompleteTestApp()
 
@@ -471,7 +524,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.submissions, ["draft\n"])
 
-    async def test_file_interaction_globs_once_while_query_changes_and_again_after_dismissal(self) -> None:
+    async def test_file_interaction_enumerates_once_while_query_changes_and_again_after_dismissal(self) -> None:
         backend = FakeAutocompleteBackend(["agent/resources/items.py", "runtime/recorder.py"])
         app = AutocompleteTestApp(backend)
 
@@ -479,18 +532,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt = app.query_one(PromptBox)
             completion = app.query_one(AutocompletePrompt)
             prompt.value = "Compare @lang"
-            await wait_until(lambda: backend.calls == 1 and completion._file_paths is not None)
+            await wait_until(lambda: backend.walks == 1 and completion._file_paths is not None)
             prompt.value = "Compare @rec"
             await pilot.pause()
 
-            self.assertEqual(backend.calls, 1)
+            self.assertEqual(backend.walks, 1)
             self.assertEqual([item.display for item in completion.items], ["runtime/recorder.py"])
 
             await pilot.press("escape")
             prompt.value = "Compare "
             await pilot.pause()
             prompt.value = "Compare @rec"
-            await wait_until(lambda: backend.calls == 2)
+            await wait_until(lambda: backend.walks == 2)
 
     async def test_file_enter_quotes_spaces_and_multiple_mentions_replace_at_cursor(self) -> None:
         backend = FakeAutocompleteBackend(
@@ -542,7 +595,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             completion = app.query_one(AutocompletePrompt)
             prompt.value = "Review @auth"
             await wait_until(lambda: completion.active)
-            await pilot.click("#autocomplete-options", offset=(2, 0))
+            await pilot.click("#autocomplete-options", offset=(2, 1))
             await pilot.pause()
 
             self.assertEqual(prompt.value, "Review @src/auth.py")
@@ -557,7 +610,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt = app.query_one(PromptBox)
             completion = app.query_one(AutocompletePrompt)
             prompt.value = "Review @auth"
-            await wait_until(lambda: backend.calls == 1)
+            await wait_until(lambda: backend.walks == 1)
             await pilot.press("escape")
             backend.release.set()
             await pilot.pause()
@@ -584,8 +637,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "Review @new"
             await wait_until(lambda: completion.active)
 
-            self.assertEqual(old_backend.calls, 1)
-            self.assertEqual(new_backend.calls, 1)
+            self.assertEqual(old_backend.walks, 1)
+            self.assertEqual(new_backend.walks, 1)
             self.assertEqual([item.display for item in completion.items], ["new.py"])
 
     def test_runtime_report_uses_sanitized_snapshot(self) -> None:
