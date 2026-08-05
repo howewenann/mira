@@ -5462,6 +5462,105 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(group_status_icon(done=1, total=1, failed=0, cancelled=1), ("-", "bold yellow"))
         self.assertEqual(group_status_icon(done=0, total=1, failed=0, cancelled=0), ("*", "bold yellow"))
 
+    def test_subagent_group_time_spans_staggered_rows_and_freezes_on_completion(self) -> None:
+        """Group time should span the whole batch instead of using the longest row."""
+        panel = SubagentsPanel()
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            panel.start_subagent("general-purpose [one]", "first", eval_id="eval-a", row_id="row-a")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=25.0):
+            panel.finish_subagent(
+                "general-purpose [one]",
+                eval_id="eval-a",
+                row_id="row-a",
+                duration_ms=15_000,
+            )
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=26.0):
+            panel.start_subagent("general-purpose [two]", "second", eval_id="eval-a", row_id="row-b")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+            self.assertIn("Group 1 1/2  20.0s", panel._render_groups().plain)
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
+            panel.finish_subagent(
+                "general-purpose [two]",
+                eval_id="eval-a",
+                row_id="row-b",
+                duration_ms=14_000,
+            )
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+            self.assertIn("Group 1 2/2  30.0s", panel._render_groups().plain)
+
+        self.assertEqual(panel._records["row-a"].elapsed_seconds(), 15.0)
+        self.assertEqual(panel._records["row-b"].elapsed_seconds(), 14.0)
+
+    def test_subagent_group_time_does_not_sum_concurrent_row_durations(self) -> None:
+        """Concurrent row runtimes should collapse to their shared wall-clock span."""
+        panel = SubagentsPanel()
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            panel.start_subagent("general-purpose [one]", "first", eval_id="eval-a", row_id="row-a")
+            panel.start_subagent("general-purpose [two]", "second", eval_id="eval-a", row_id="row-b")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+            panel.finish_subagent("general-purpose [one]", eval_id="eval-a", row_id="row-a", duration_ms=10_000)
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=22.0):
+            panel.finish_subagent("general-purpose [two]", eval_id="eval-a", row_id="row-b", duration_ms=12_000)
+
+        self.assertIn("Group 1 2/2  12.0s", panel._render_groups().plain)
+
+    def test_subagent_group_time_freezes_for_error_and_cancel_and_resets_for_retry(self) -> None:
+        """Terminal groups should stop ticking, and a reused retry group should start fresh."""
+        error_panel = SubagentsPanel()
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            error_panel.start_subagent("general-purpose [error]", "fail", eval_id="eval-error", row_id="row-error")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+            error_panel.finish_subagent(
+                "general-purpose [error]",
+                "failed",
+                eval_id="eval-error",
+                row_id="row-error",
+                status="ERROR",
+            )
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+            self.assertIn("Group 1 1/1  5.0s", error_panel._render_groups().plain)
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+            error_panel.start_subagent("general-purpose [retry]", "retry", eval_id="eval-retry", row_id="row-retry")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=105.0):
+            retry_groups = error_panel._render_groups().plain
+        self.assertIn("Group 1 0/1  5.0s", retry_groups)
+        self.assertNotIn("Group 2", retry_groups)
+
+        cancelled_panel = SubagentsPanel()
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+            cancelled_panel.start_subagent(
+                "general-purpose [cancelled]",
+                "cancel",
+                eval_id="eval-cancelled",
+                row_id="row-cancelled",
+            )
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=37.0):
+            cancelled_panel.cancel_running()
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
+            self.assertIn("Group 1 1/1  7.0s", cancelled_panel._render_groups().plain)
+
+    def test_mixed_panel_tasks_group_uses_batch_wall_time(self) -> None:
+        """The regular Tasks aggregate should use the same first-start-to-last-finish clock."""
+        panel = SubagentsPanel()
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            panel.start_subagent("general-purpose [regular]", "regular")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+            panel.start_subagent("general-purpose [eval]", "eval", eval_id="eval-a", row_id="row-eval")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+            groups = panel._render_groups().plain
+        self.assertIn("Tasks 0/1  20.0s", groups)
+        self.assertIn("Group 1 0/1  10.0s", groups)
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
+            panel.finish_subagent("general-purpose [regular]", duration_ms=30_000)
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
+            self.assertIn("Tasks 1/1  30.0s", panel._render_groups().plain)
+
     def test_subagent_group_status_spans_colour_only_the_icon(self) -> None:
         """The left group list should colour v/x/- without tinting labels."""
         panel = SubagentsPanel()

@@ -41,14 +41,16 @@ class SubagentRecord:
     hint: str
     group_key: str = ""
     status: str = STATUS_RUNNING
-    started: float = field(default_factory=time.monotonic)
+    started: float = field(default_factory=lambda: time.monotonic())
     duration_ms: int | None = None
     output: str = ""
+    finished_at: float | None = None
 
     def elapsed_seconds(self) -> float:
         if self.duration_ms is not None:
             return max(0.0, self.duration_ms / 1000)
-        return max(0.0, time.monotonic() - self.started)
+        end = self.finished_at if self.finished_at is not None else time.monotonic()
+        return max(0.0, end - self.started)
 
 
 @dataclass
@@ -218,16 +220,22 @@ class SubagentsPanel(Vertical):
                 return
         record.status = status
         record.output = sanitize(result, max_chars=MAX_HINT_CHARS)
-        record.duration_ms = duration_ms if duration_ms is not None else int(record.elapsed_seconds() * 1000)
+        if record.finished_at is None:
+            record.finished_at = time.monotonic()
+        record.duration_ms = (
+            duration_ms if duration_ms is not None else int(max(0.0, record.finished_at - record.started) * 1000)
+        )
         self._refresh()
 
     def cancel_running(self) -> None:
         """Mark all running rows as cancelled."""
         changed = False
+        finished_at = time.monotonic()
         for record in self._records.values():
             if record.status == STATUS_RUNNING:
                 record.status = STATUS_CANCELLED
-                record.duration_ms = int(record.elapsed_seconds() * 1000)
+                record.finished_at = finished_at
+                record.duration_ms = int(max(0.0, finished_at - record.started) * 1000)
                 changed = True
         if changed:
             self._refresh()
@@ -414,7 +422,7 @@ class SubagentsPanel(Vertical):
             done, total, failed, cancelled = self._counts(records)
             marker = ">" if group_key == selected else " "
             status, style = group_status_icon(done=done, total=total, failed=failed, cancelled=cancelled)
-            elapsed = max((record.elapsed_seconds() for record in records), default=0.0)
+            elapsed = group_elapsed_seconds(records)
             label = "Tasks" if group_key == TASKS_GROUP else f"Group {self._groups[group_key].index}"
             text.append(f"{marker} ")
             text.append(status, style=style)
@@ -504,6 +512,19 @@ def group_status_icon(*, done: int, total: int, failed: int, cancelled: int) -> 
     if done == total and total:
         return "v", "bold green"
     return "*", "bold yellow"
+
+
+def group_elapsed_seconds(records: Any) -> float:
+    """Return wall time from the first row start through the final terminal row."""
+    items = list(records)
+    if not items:
+        return 0.0
+    started = min(record.started for record in items)
+    if any(record.status == STATUS_RUNNING for record in items):
+        finished = time.monotonic()
+    else:
+        finished = max(record.finished_at if record.finished_at is not None else record.started for record in items)
+    return max(0.0, finished - started)
 
 
 def task_text(record: SubagentRecord, width: int) -> str:

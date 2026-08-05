@@ -95,6 +95,9 @@ Expected:
 - A bottom `dynamic subagents` panel opens while eval-created subagents run.
 - The left list shows `Group 1`, `Group 2`, and so on for eval batches; raw
   eval ids are not displayed.
+- Each group clock starts with its first visible subagent, continues through
+  staggered launches, and freezes only after the final row finishes, fails, or
+  is cancelled. Concurrent row times are not summed.
 - The right task table follows the active group and shows generated subagent
   names, compact inline hints, status, and elapsed time.
 - The durable session history contains the eval tool call/result and assistant

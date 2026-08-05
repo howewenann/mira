@@ -704,6 +704,10 @@ Closing never changes settings, session history, or unresolved failures.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
+Each row keeps its own reported runtime. Group time is event-observed wall time
+from that group's first row start through its last terminal row, so staggered
+launches remain part of the batch clock while overlapping row runtimes are not
+summed.
 While work is active, `[-]`/`[+]` collapses the panel to an animated summary and
 the close control is hidden. New subagent activity reopens the panel. Once all
 rows are terminal, `x` becomes available; completed state collapses before the
