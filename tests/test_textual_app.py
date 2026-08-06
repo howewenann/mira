@@ -4261,13 +4261,43 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-close", buttons)
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 await wait_until(lambda: execute_env_select.value == "system")
+                execute_env_select_current = execute_env_select.query_one("SelectCurrent")
+                execute_env_allow = panel.query_one("#settings-execute-env-allow", Input)
                 self.assertEqual(execute_env_select.value, "system")
-                self.assertEqual(panel.query_one("#settings-execute-env-allow", Input).value, "")
+                self.assertEqual(execute_env_select.styles.width, execute_env_allow.styles.width)
+                self.assertEqual(execute_env_select.styles.height, execute_env_allow.styles.height)
+                self.assertEqual(execute_env_select_current.styles.background, execute_env_allow.styles.background)
+                self.assertEqual(execute_env_select_current.styles.border, execute_env_allow.styles.border)
+                self.assertEqual(execute_env_select_current.styles.color, Color.parse("#e8fffb"))
                 self.assertEqual(
-                    panel.query_one("#settings-execute-env-allow", Input).placeholder,
+                    execute_env_select_current.query_one("#label", Static).styles.color,
+                    Color.parse("#e8fffb"),
+                )
+                execute_env_select.focus()
+                await wait_until(lambda: execute_env_select.has_focus)
+                self.assertEqual(
+                    execute_env_select_current.styles.border_top,
+                    ("solid", Color.parse("#5bb8b1")),
+                )
+                execute_env_select.action_show_overlay()
+                await wait_until(lambda: execute_env_select.expanded)
+                execute_env_select_overlay = execute_env_select.query_one("SelectOverlay")
+                self.assertEqual(execute_env_select_overlay.styles.background, Color.parse("#151a1d"))
+                self.assertEqual(
+                    execute_env_select_overlay.styles.border_top,
+                    ("solid", Color.parse("#5bb8b1")),
+                )
+                highlighted_option = execute_env_select_overlay.get_component_styles(
+                    "option-list--option-highlighted"
+                )
+                self.assertEqual(highlighted_option.background, Color.parse("#14524f"))
+                self.assertEqual(highlighted_option.color, Color.parse("#e8fffb"))
+                self.assertEqual(execute_env_allow.value, "")
+                self.assertEqual(
+                    execute_env_allow.placeholder,
                     "<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
                 )
-                self.assertTrue(panel.query_one("#settings-execute-env-allow", Input).display)
+                self.assertTrue(execute_env_allow.display)
                 self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-response_schema-response_schema"].label), "yes")
@@ -4495,6 +4525,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(run_commands.region.y, execute_section.region.y + execute_section.region.height)
                 self.assertFalse(panel.query_one("#settings-custom-body").display)
                 self.assertTrue(panel.query_one("#settings-body").display)
+                settings_window = panel.query_one("#settings-window")
+                settings_body = panel.query_one("#settings-body")
+                settings_status = panel.query_one("#settings-status", Static)
+                self.assertEqual(settings_status.region.y, settings_body.region.bottom + 1)
+                self.assertEqual(settings_status.region.bottom, settings_window.content_region.bottom)
 
     async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
         """Inbuilt tool enable buttons should save disabled state and lock approvals."""

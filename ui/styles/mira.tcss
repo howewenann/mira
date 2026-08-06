@@ -660,7 +660,6 @@ Button.goal-action:focus {
 
 .settings-body {
     height: auto;
-    max-height: 34;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
@@ -811,6 +810,34 @@ Button.goal-action:focus {
     margin: 0 1 0 0;
 }
 
+.settings-select > SelectCurrent {
+    border: solid #56616a;
+    color: #e8fffb;
+    background: #151a1d;
+}
+
+.settings-select > SelectCurrent > Static#label {
+    color: #e8fffb;
+}
+
+.settings-select:focus > SelectCurrent {
+    border: solid #5bb8b1;
+}
+
+.settings-select > SelectOverlay,
+.settings-select > SelectOverlay:focus {
+    border: solid #5bb8b1;
+    color: #e8fffb;
+    background: #151a1d;
+}
+
+.settings-select > SelectOverlay > .option-list--option-highlighted,
+.settings-select > SelectOverlay:focus > .option-list--option-highlighted {
+    color: #e8fffb;
+    background: #14524f;
+    text-style: bold;
+}
+
 .settings-input {
     width: 56;
     min-width: 36;
@@ -862,6 +889,7 @@ Button.goal-action:focus {
 
 .settings-status {
     height: 1;
+    margin-top: 1;
 }
 
 .message.tool-call {
