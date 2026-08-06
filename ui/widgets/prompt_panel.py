@@ -7,7 +7,6 @@ from typing import Any
 
 from textual import events, on
 from textual.app import ComposeResult
-from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key
@@ -31,13 +30,6 @@ class PromptButton(Button):
 
 class PromptPanel(Vertical):
     """Focused prompt surface mounted in the main app layout."""
-
-    BINDINGS = [
-        Binding("left", "prompt_left", show=False, priority=True),
-        Binding("right", "prompt_right", show=False, priority=True),
-        Binding("up", "prompt_up", show=False, priority=True),
-        Binding("down", "prompt_down", show=False, priority=True),
-    ]
 
     MIN_BUTTON_WIDTH = 12
     MAX_BUTTON_WIDTH = 32
@@ -341,22 +333,6 @@ class PromptPanel(Vertical):
 
         target_id = target_row[target_column_index]
         self.query_one(f"#{target_id}", Button).focus()
-
-    def action_prompt_left(self) -> None:
-        if self._mode == "choice":
-            self._focus_button_grid(0, -1)
-
-    def action_prompt_right(self) -> None:
-        if self._mode == "choice":
-            self._focus_button_grid(0, 1)
-
-    def action_prompt_up(self) -> None:
-        if self._mode == "choice":
-            self._focus_button_grid(-1, 0)
-
-    def action_prompt_down(self) -> None:
-        if self._mode == "choice":
-            self._focus_button_grid(1, 0)
 
     def _focused_button_value(self) -> str | None:
         """Return the choice value for the focused footer button."""

@@ -5165,6 +5165,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#prompt-save", Button).press()
             self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject"})
 
+    async def test_json_edit_flow_preserves_text_area_arrow_navigation(self) -> None:
+        """Arrow keys should move the cursor while editing approval args."""
+        app = make_app()
+        action = {"name": "write_file", "args": {"file_path": "test.txt", "content": "hello"}}
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+
+            task = asyncio.create_task(app.edit_decision(action))
+            editor = app.query_one("#prompt-panel-editor", TextArea)
+            await wait_until(lambda: editor.has_focus)
+            editor.text = "abc\ndefgh\nijk"
+            editor.cursor_location = (1, 3)
+
+            await pilot.press("left")
+            self.assertEqual(editor.cursor_location, (1, 2))
+            await pilot.press("right")
+            self.assertEqual(editor.cursor_location, (1, 3))
+            await pilot.press("up")
+            self.assertEqual(editor.cursor_location, (0, 3))
+            await pilot.press("down")
+            self.assertEqual(editor.cursor_location, (1, 3))
+
+            app.query_one("#prompt-cancel", Button).press()
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), {"type": "reject"})
+
     async def test_tool_result_attaches_to_existing_tool_call(self) -> None:
         """Tool results should update the existing tool block instead of adding a new panel."""
         app = make_app()
