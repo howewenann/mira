@@ -21,7 +21,7 @@ from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.selection import SELECT_ALL
-from textual.widgets import Button, Input, OptionList, Static, TextArea
+from textual.widgets import Button, Input, OptionList, Select, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -4104,9 +4104,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
                 self.assertIn("settings-toggle-enabled-execute", buttons)
                 self.assertIn("settings-toggle-always_allow-execute", buttons)
-                self.assertIn("settings-execute-env-mode", buttons)
                 self.assertIn("settings-close", buttons)
-                self.assertEqual(str(buttons["settings-execute-env-mode"].label), "system shell >")
+                execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
+                await wait_until(lambda: execute_env_select.value == "system")
+                self.assertEqual(execute_env_select.value, "system")
                 self.assertEqual(panel.query_one("#settings-execute-env-allow", Input).value, "")
                 self.assertEqual(
                     panel.query_one("#settings-execute-env-allow", Input).placeholder,
@@ -4276,7 +4277,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     for widget in panel.query(Static)
                     if renderable_plain(widget).strip()
                 }
+                tabs = panel.query_one("#settings-tabs", Horizontal)
                 system_header, inbuilt_header, custom_header, mcp_header = list(panel.query(SettingsHeaderRow))
+                self.assertEqual(
+                    labels["System Settings"].region.y,
+                    tabs.region.y + tabs.region.height + 2,
+                )
 
                 for section_name, header, first_row in (
                     ("System Settings", system_header, labels["Git Protection"]),
@@ -4290,6 +4296,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 custom_section = labels["Custom Tools"]
                 custom_first_row = labels["project_status"]
+                self.assertEqual(
+                    custom_section.region.y,
+                    tabs.region.y + tabs.region.height + 2,
+                )
                 self.assertEqual(custom_header.region.y, custom_section.region.y + custom_section.region.height)
                 self.assertEqual(custom_first_row.region.y, custom_header.region.y + custom_header.region.height)
 
@@ -4301,6 +4311,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     renderable_plain(mcp_header.query_one(".settings-column-label.plan", Static)),
                     "plan access",
                 )
+                self.assertEqual(
+                    renderable_plain(mcp_header.query_one(".settings-column-label.name", Static)),
+                    "",
+                )
+
+                panel.query_one("#settings-tab-mcp", Button).press()
+                await pilot.pause()
+                mcp_section = labels["MCP"]
+                self.assertEqual(
+                    mcp_section.region.y,
+                    tabs.region.y + tabs.region.height + 2,
+                )
+                self.assertEqual(mcp_section.styles.color, Color.parse("#7D9BD1"))
 
                 panel.query_one("#settings-tab-general", Button).press()
                 await pilot.pause()
@@ -4431,7 +4454,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons[button_id].label), "no")
                 self.assertEqual(len(calls), 1)
 
-    async def test_settings_panel_execute_env_cycle_preserves_scroll(self) -> None:
+    async def test_settings_panel_execute_env_selection_preserves_scroll(self) -> None:
         """Changing execute env mode should not jump the settings body back to the top."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -4462,7 +4485,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 before = body.scroll_y
 
-                panel.query_one("#settings-execute-env-mode", Button).press()
+                execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
+                execute_env_select.focus(scroll_visible=False)
+                await pilot.press("enter", "down", "enter")
                 await wait_until(lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_name")
                 await pilot.pause()
 
@@ -4473,8 +4498,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(before, 0)
                 self.assertGreater(body.scroll_y, 0)
                 self.assertTrue(panel.query_one("#settings-execute-env-name-row").display)
-                self.assertEqual(str(panel.query_one("#settings-execute-env-mode", Button).label), "conda env name >")
-                self.assertTrue(panel.query_one("#settings-execute-env-mode", Button).has_focus)
+                self.assertEqual(panel.query_one("#settings-execute-env-mode", Select).value, "conda_name")
+                self.assertTrue(panel.query_one("#settings-execute-env-mode", Select).has_focus)
 
     async def test_settings_panel_saves_execute_env_fields_without_placeholders(self) -> None:
         """Execute env fields should save explicit values and leave examples inert."""
@@ -4494,8 +4519,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
 
-                panel.query_one("#settings-execute-env-mode", Button).press()
-                await wait_until(lambda: len(panel.query("#settings-execute-env-name")) > 0)
+                panel.query_one("#settings-execute-env-mode", Select).value = "conda_name"
+                await wait_until(
+                    lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_name"
+                )
                 name_input = panel.query_one("#settings-execute-env-name", Input)
                 self.assertEqual(name_input.value, "")
                 self.assertEqual(name_input.placeholder, "<my_project_env>")

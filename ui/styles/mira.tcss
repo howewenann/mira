@@ -642,12 +642,18 @@ Button.goal-action:focus {
     color: #7FBE72;
 }
 
+.settings-section.mcp {
+    color: #7D9BD1;
+}
+
 .settings-section.inbuilt,
 .settings-section.execute-env {
     margin-top: 1;
 }
 
-.settings-section.custom {
+.settings-section.system,
+.settings-section.custom,
+.settings-section.mcp {
     margin-top: 2;
 }
 
@@ -754,20 +760,11 @@ Button.goal-action:focus {
     color: #aeb8be;
 }
 
-.settings-value-button {
+.settings-select {
     width: 56;
-    min-width: 32;
+    min-width: 36;
     height: 3;
     margin: 0 1 0 0;
-    border: solid #56616a;
-    color: #e8fffb;
-    background: #20272b;
-}
-
-.settings-value-button:focus {
-    border: solid #56616a;
-    color: #e8fffb;
-    background: #20272b;
 }
 
 .settings-input {

@@ -11,7 +11,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Select, Static
 
 from config.settings import (
     DYNAMIC_SUBAGENTS,
@@ -181,10 +181,12 @@ class SettingsPanel(Vertical):
                 execute_env_mode = str(execute_env.get("mode") or "system")
                 with Horizontal(classes="settings-row settings-wide-row"):
                     yield Static("Run commands in", classes="settings-label")
-                    yield Button(
-                        execute_env_mode_label(execute_env_mode),
+                    yield Select(
+                        ((label, mode) for mode, label in EXECUTE_ENV_LABELS.items()),
+                        value=execute_env_mode,
+                        allow_blank=False,
                         id="settings-execute-env-mode",
-                        classes="settings-value-button",
+                        classes="settings-select",
                     )
 
                 for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
@@ -223,7 +225,7 @@ class SettingsPanel(Vertical):
 
             with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
                 yield Static("MCP", classes="settings-section mcp")
-                yield SettingsHeaderRow("name", show_plan=True)
+                yield SettingsHeaderRow("", show_plan=True)
                 states = list(getattr(self.mcp_manager, "servers", {}).values())
                 if not states:
                     yield Static("No MCP servers configured", classes="settings-empty")
@@ -288,19 +290,21 @@ class SettingsPanel(Vertical):
             return
         await self._set_cell(cell, not selected_value(self.settings, cell))
 
-    @on(Button.Pressed, "#settings-execute-env-mode")
-    async def press_execute_env_mode(self, event: Button.Pressed) -> None:
-        """Cycle the execute environment mode."""
+    @on(Select.Changed, "#settings-execute-env-mode")
+    async def change_execute_env_mode(self, event: Select.Changed) -> None:
+        """Save the selected execute environment mode."""
         event.stop()
-        current = execute_env_settings(self.settings).get("mode", "system")
-        modes = list(EXECUTE_ENV_MODES)
-        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else "system"
-        updated = set_execute_env_mode(self.settings, next_mode)
+        current = str(execute_env_settings(self.settings).get("mode") or "system")
+        if event.value not in EXECUTE_ENV_MODES or event.value == current:
+            return
+        updated = set_execute_env_mode(self.settings, event.value)
         ok, message = await self.apply_change(updated)
         self._set_status(message)
         if ok:
             self.settings = updated
             self._refresh_execute_env_section("settings-execute-env-mode")
+        else:
+            event.select.value = current
 
     @on(Input.Submitted, ".settings-input")
     async def submit_execute_env_input(self, event: Input.Submitted) -> None:
@@ -469,14 +473,16 @@ class SettingsPanel(Vertical):
     def _refresh_execute_env_section(self, focus_id: str | None = None) -> None:
         execute_env = execute_env_settings(self.settings)
         mode = str(execute_env.get("mode") or "system")
-        self.query_one("#settings-execute-env-mode", Button).label = execute_env_mode_label(mode)
+        select = self.query_one("#settings-execute-env-mode", Select)
+        if select.value != mode:
+            select.value = mode
         for field_mode, (key, _, _) in EXECUTE_ENV_FIELDS.items():
             self.query_one(f"#settings-execute-env-{key}-row", Horizontal).display = mode == field_mode
             self.query_one(f"#settings-execute-env-{key}", Input).value = str(execute_env.get(key) or "")
         self.query_one("#settings-execute-env-allow", Input).value = ", ".join(execute_env.get("allow") or [])
         if focus_id is not None:
             try:
-                self.query_one(f"#{focus_id}", Button).focus(scroll_visible=False)
+                self.query_one(f"#{focus_id}").focus(scroll_visible=False)
             except Exception:
                 pass
 
@@ -510,11 +516,6 @@ class SettingsPanel(Vertical):
 def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:
     """Return project tool names shown in the custom tools section."""
     return sorted({item["name"] for item in metadata if item.get("source") == "project" and item.get("name")})
-
-
-def execute_env_mode_label(mode: str) -> str:
-    """Return a discoverable label for the execute environment mode control."""
-    return f"{EXECUTE_ENV_LABELS.get(mode, 'system shell')} >"
 
 
 def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
