@@ -41,6 +41,8 @@ from config.settings import (
     rubric_max_iterations,
     tool_always_allow,
     tool_enabled,
+    tool_plan_access,
+    mcp_tool_policy,
 )
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
@@ -73,6 +75,7 @@ def build_agent(
     workspace: Path,
     checkpointer: Any,
     metadata: ModelMetadata | None = None,
+    mcp_manager: Any | None = None,
 ) -> Any:
     """Build the normal action agent with read/write filesystem access."""
     agent = _build_agent(
@@ -86,6 +89,8 @@ def build_agent(
         excluded_tools=ACTION_EXCLUDED_TOOLS,
         enable_execute_backend=tool_enabled(config, EXECUTE_TOOL),
         enable_rubric=rubric_enabled(config),
+        mcp_manager=mcp_manager,
+        planning=False,
     )
     return agent
 
@@ -95,6 +100,7 @@ def build_plan_agent(
     workspace: Path,
     checkpointer: Any,
     metadata: ModelMetadata | None = None,
+    mcp_manager: Any | None = None,
 ) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
     agent = _build_agent(
@@ -104,7 +110,7 @@ def build_plan_agent(
         metadata=metadata,
         permissions=_plan_permissions(),
         system_prompt=PLAN_SYSTEM_PROMPT,
-        interrupt_on=None,
+        interrupt_on=SETTINGS_INTERRUPTS,
         excluded_tools=PLAN_EXCLUDED_TOOLS,
         enable_execute_backend=False,
         extra_middleware=[
@@ -118,6 +124,8 @@ def build_plan_agent(
             ),
         ],
         omitted_tools=(),
+        mcp_manager=mcp_manager,
+        planning=True,
     )
     return agent
 
@@ -135,6 +143,8 @@ def _build_agent(
     enable_execute_backend: bool = False,
     enable_rubric: bool = False,
     omitted_tools: tuple[str, ...] = (PREPARE_GOAL_TOOL, PREPARE_PLAN_TOOL),
+    mcp_manager: Any | None = None,
+    planning: bool = False,
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
@@ -175,8 +185,16 @@ def _build_agent(
         settings=(config or {}).get("settings"),
         extra_middleware=extra_middleware,
     )
+    mcp_tools: list[Any] = []
+    mcp_metadata: list[dict[str, str]] = []
+    if mcp_manager is not None:
+        mcp_tools, mcp_metadata = mcp_manager.tools_for_mode(
+            (config or {}).get("settings"),
+            planning=planning,
+        )
+    local_metadata = resources.metadata["tools"]
     resolved_interrupt_on = (
-        _write_interrupts(config, resources.metadata["tools"])
+        _write_interrupts(config, [*local_metadata, *mcp_metadata], planning=planning)
         if interrupt_on == SETTINGS_INTERRUPTS
         else interrupt_on
     )
@@ -184,7 +202,13 @@ def _build_agent(
         resolved_interrupt_on = {
             name: rule for name, rule in resolved_interrupt_on.items() if name not in excluded_tools
         }
-    tools = [tool for tool in resources.tools if tool_name(tool) not in omitted_tools]
+    tools = [
+        tool
+        for tool in resources.tools
+        if tool_name(tool) not in omitted_tools
+        and (not planning or _local_tool_available_in_plan(config, local_metadata, tool_name(tool)))
+    ]
+    tools.extend(mcp_tools)
     subagents = resources.subagents
     settings = (config or {}).get("settings")
     if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
@@ -218,11 +242,12 @@ def _build_agent(
             backend,
             middleware_stack.items,
             tools,
-            resources.metadata["tools"],
+            [*local_metadata, *mcp_metadata],
             excluded_tools,
         ),
     )
-    _attach_resources(agent, resources.metadata)
+    combined_metadata = {**resources.metadata, "tools": [*local_metadata, *mcp_metadata]}
+    _attach_resources(agent, combined_metadata)
     _attach_tool_failures(agent, resources.tool_failures)
     _attach_backend(agent, backend, resources.project_backend)
     _attach_summarization(agent, middleware_stack.summarization)
@@ -337,6 +362,8 @@ def _plan_permissions() -> list[FilesystemPermission]:
 def _write_interrupts(
     config: dict[str, Any] | None = None,
     tool_metadata: list[dict[str, str]] | None = None,
+    *,
+    planning: bool = False,
 ) -> dict[str, dict[str, list[str]]]:
     """Return human approval policy for action-mode tools."""
     tools = hitl_settings(config).get("tools", {})
@@ -348,17 +375,38 @@ def _write_interrupts(
             continue
         if not tool_enabled(config, name):
             continue
+        if planning and not tool_plan_access(config, name):
+            continue
         if spec.get("always_allow") is True:
             continue
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
     for item in tool_metadata or []:
         name = item.get("name")
-        if not name or item.get("source") != "project":
+        if not name or item.get("source") not in {"project", "mcp"}:
             continue
-        if not tool_enabled(config, name) or tool_always_allow(config, name):
+        if item.get("source") == "mcp":
+            policy = mcp_tool_policy(config, item.get("server", ""), item.get("original_name", ""))
+            if not policy.enabled or (planning and not policy.plan_access) or policy.always_allow:
+                continue
+        elif (
+            not tool_enabled(config, name)
+            or (planning and not tool_plan_access(config, name))
+            or tool_always_allow(config, name)
+        ):
             continue
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
     return interrupts
+
+
+def _local_tool_available_in_plan(
+    config: dict[str, Any] | None,
+    metadata: list[dict[str, str]],
+    name: str,
+) -> bool:
+    info = next((item for item in metadata if item.get("name") == name), None)
+    if info is None or info.get("source") != "project":
+        return True
+    return tool_enabled(config, name) and tool_plan_access(config, name)
 
 
 def effective_excluded_tools(

@@ -101,8 +101,10 @@ from ui.widgets import (
     SessionHistory,
     SettingsPanel,
     StatusBar,
+    TelemetryBar,
     SubagentsPanel,
     ToolIssuesScreen,
+    MCPPanelScreen,
 )
 from ui.widgets.tool_issues import PipInstallResult
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
@@ -219,7 +221,9 @@ class MiraApp(App[None]):
         self._waiting_label = "working..."
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
+        self.mcp_manager: Any | None = None
         self.tool_failures: list[Any] = []
+        self.mcp_config_issues: list[Any] = []
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
 
@@ -234,11 +238,13 @@ class MiraApp(App[None]):
             with Vertical(id="main-panel"):
                 with Horizontal(id="status-row"):
                     yield StatusBar(id="status")
+                    yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="tool-issues-button")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
                 yield AutocompleteInput()
+                yield TelemetryBar(id="telemetry-row")
 
     def on_mount(self) -> None:
         """Start app initialization."""
@@ -298,7 +304,12 @@ class MiraApp(App[None]):
         self.context_limit_tokens = state.get("context_limit_tokens")
         self.context_limit_source = str(state.get("context_limit_source") or "unknown")
         self.checkpointer = state.get("checkpointer")
+        self.mcp_manager = state.get("mcp_manager") or self.mcp_manager
+        if self.mcp_manager is not None:
+            self.mcp_manager.set_change_handler(self._mcp_registry_changed)
         self.tool_failures = list(state.get("tool_failures") or getattr(self.agent, "mira_tool_failures", []))
+        issue = state.get("mcp_config_issue")
+        self.mcp_config_issues = [issue] if issue is not None else []
         self.runtime_snapshot = build_runtime_snapshot(
             self.config or {},
             self.launch_options,
@@ -316,9 +327,9 @@ class MiraApp(App[None]):
         prompt = self.query_one(PromptBox)
         prompt.disabled = False
         prompt.set_history(read_prompt_history(self.history_path))
-        self.query_one(AutocompleteInput).set_project_backend(
-            getattr(self.agent, "mira_project_backend", None)
-        )
+        autocomplete = self.query_one(AutocompleteInput)
+        autocomplete.set_project_backend(getattr(self.agent, "mira_project_backend", None))
+        autocomplete.set_mcp_manager(self.mcp_manager)
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -405,6 +416,26 @@ class MiraApp(App[None]):
             self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
             return
 
+        if text == "/mcp":
+            self.open_mcp_panel()
+            self.action_focus_prompt()
+            return
+
+        if text == "/prompts":
+            self.run_worker(self._run_prompts_command(), name="prompts-command", exclusive=False)
+            return
+
+        prepared = None
+        if self.mcp_manager is not None:
+            if text.startswith("/mcp__"):
+                await self.mcp_manager.discover_prompts()
+            try:
+                prepared = await self.mcp_manager.prompt_registry.resolve(text)
+            except ValueError as error:
+                self.system_message(str(error), kind="warning")
+                self.action_focus_prompt()
+                return
+
         plan_prompt = plan_command_prompt(text)
         if plan_prompt is not None:
             await handle_command("/plan", self, self.session, self.model_name, self.mode)
@@ -459,7 +490,7 @@ class MiraApp(App[None]):
             )
             return
 
-        if await handle_command(text, self, self.session, self.model_name, self.mode):
+        if prepared is None and await handle_command(text, self, self.session, self.model_name, self.mode):
             if not self.busy:
                 self._set_status(state="ready")
             if text in {"/exit", "/quit"}:
@@ -472,12 +503,36 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self._set_status(state="running")
         prompt.disabled = True
-        self.turn_worker = self.run_worker(self._run_turn(text), name="turn", exclusive=True)
+        attachments = self.mcp_manager.attachments_from_text(text) if self.mcp_manager is not None else []
+        self.turn_worker = self.run_worker(
+            self._run_turn(
+                text,
+                prepared_messages=prepared.messages if prepared is not None else None,
+                display_text=prepared.display_text if prepared is not None else None,
+                attachments=attachments,
+            ),
+            name="turn",
+            exclusive=True,
+        )
 
-    async def _run_turn(self, text: str) -> None:
+    async def _run_turn(
+        self,
+        text: str,
+        *,
+        prepared_messages: list[Any] | None = None,
+        display_text: str | None = None,
+        attachments: list[dict[str, str]] | None = None,
+    ) -> None:
         """Run one agent turn and restore prompt focus when done."""
         try:
             await self._refresh_model_metadata()
+            turn_kwargs: dict[str, Any] = {}
+            if display_text is not None:
+                turn_kwargs["display_text"] = display_text
+            if prepared_messages is not None:
+                turn_kwargs["prepared_messages"] = prepared_messages
+            if attachments:
+                turn_kwargs["attachments"] = attachments
             await run_user_turn(
                 agent=self.agent,
                 plan_agent=self.plan_agent,
@@ -486,6 +541,7 @@ class MiraApp(App[None]):
                 session=self.session,
                 mode=self.mode,
                 text=text,
+                **turn_kwargs,
                 model_name=self.model_name,
                 context_limit_tokens=self.context_limit_tokens,
                 context_limit_source=self.context_limit_source,
@@ -715,6 +771,20 @@ class MiraApp(App[None]):
             context_limit_source=self.context_limit_source,
         )
         self._render_current_session()
+
+    async def _run_prompts_command(self) -> None:
+        """List the exact shared prompt registry after lazy MCP discovery."""
+        if self.mcp_manager is None:
+            self.system_message("No prompts loaded.", kind="muted")
+            return
+        await self.mcp_manager.discover_prompts()
+        specs = sorted(self.mcp_manager.prompt_registry.specs.values(), key=lambda item: item.command.casefold())
+        if not specs:
+            self.system_message("No local or MCP prompts loaded.", kind="muted")
+        else:
+            lines = ["Prompts", *(f"{spec.usage}    {spec.description}" for spec in specs)]
+            self.system_message("\n".join(lines), kind="info")
+        self.action_focus_prompt()
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
@@ -1719,6 +1789,8 @@ class MiraApp(App[None]):
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import load_effective_config
 
+        if self.mcp_manager is not None:
+            await self.mcp_manager.reload()
         config = load_effective_config(
             self.workspace,
             self.launch_options,
@@ -1747,6 +1819,11 @@ class MiraApp(App[None]):
             getattr(agent, "mira_project_backend", None)
         )
         self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
+        self.mcp_config_issues = (
+            [self.mcp_manager.config_issue]
+            if self.mcp_manager is not None and self.mcp_manager.config_issue is not None
+            else []
+        )
         self.mode.update(mode_updates)
         self.runtime_snapshot = snapshot
         ensure_dashboard(
@@ -1797,6 +1874,7 @@ class MiraApp(App[None]):
             tool_metadata=self._settings_tool_metadata(),
             apply_change=self._apply_settings,
             close_panel=self._close_settings_panel,
+            mcp_manager=self.mcp_manager,
         )
         self._settings_panel = panel
         self.mount(panel)
@@ -2482,7 +2560,37 @@ class MiraApp(App[None]):
             turns=int(self.session.get("turns") or 0),
             detail=detail,
         )
+        self.query_one(TelemetryBar).set_state(
+            model_name=self.model_name or "loading",
+            dashboard=self.session.get("dashboard"),
+            turns=int(self.session.get("turns") or 0),
+        )
+        self._sync_mcp_button()
         self._sync_tool_issues_button()
+
+    @on(Button.Pressed, "#mcp-status-button")
+    def press_mcp_status(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.open_mcp_panel()
+
+    def open_mcp_panel(self) -> None:
+        """Shared button and slash-command pathway for the MCP panel."""
+        if self.mcp_manager is None or not self.mcp_manager.show_status:
+            self.notify("No configured MCP servers.", title="MCP")
+            return
+        if isinstance(self.screen, MCPPanelScreen):
+            return
+        self.push_screen(MCPPanelScreen(self.mcp_manager))
+
+    def _sync_mcp_button(self) -> None:
+        try:
+            button = self.query_one("#mcp-status-button", Button)
+        except NoMatches:
+            return
+        visible = self.mcp_manager is not None and self.mcp_manager.show_status
+        button.display = visible
+        if visible:
+            button.label = f"MCP {self.mcp_manager.usable_count}/{self.mcp_manager.configured_count}"
 
     @on(Button.Pressed, "#tool-issues-button")
     def press_tool_issues(self, event: Button.Pressed) -> None:
@@ -2491,13 +2599,13 @@ class MiraApp(App[None]):
         self._open_tool_issues()
 
     def _open_tool_issues(self) -> None:
-        if not self.tool_failures:
-            self.notify("No unresolved custom tool files.", title="Custom tools")
+        if not self.tool_failures and not self.mcp_config_issues:
+            self.notify("No unresolved issues.", title="Issues")
             return
         if isinstance(self.screen, ToolIssuesScreen):
-            self.screen.update_failures(self.tool_failures)
+            self.screen.update_failures(self.tool_failures, self.mcp_config_issues)
             return
-        self.push_screen(ToolIssuesScreen(self.tool_failures))
+        self.push_screen(ToolIssuesScreen(self.tool_failures, self.mcp_config_issues))
 
     def _sync_tool_issues(self) -> None:
         """Refresh the persistent Issues entry point and any open modal."""
@@ -2505,8 +2613,8 @@ class MiraApp(App[None]):
             return
         self._sync_tool_issues_button()
         if isinstance(self.screen, ToolIssuesScreen):
-            if self.tool_failures:
-                self.screen.update_failures(self.tool_failures)
+            if self.tool_failures or self.mcp_config_issues:
+                self.screen.update_failures(self.tool_failures, self.mcp_config_issues)
             elif not self.screen.installing:
                 self.screen.dismiss()
 
@@ -2528,6 +2636,19 @@ class MiraApp(App[None]):
 
     def _notify_startup_tool_failures(self) -> None:
         """Show one grouped startup warning when custom tools are unavailable."""
+        prompt_warnings = (
+            list(self.mcp_manager.prompt_registry.warnings)
+            if self.mcp_manager is not None
+            else []
+        )
+        if prompt_warnings:
+            self.notify("\n".join(prompt_warnings), title="Local prompts", severity="warning")
+        if self.mcp_config_issues:
+            self.notify(
+                "Could not parse .mira/mcp.json. Open Issues or run /issues.",
+                title="MCP configuration unavailable",
+                severity="warning",
+            )
         count = len(self._tool_failure_set())
         if not count:
             return
@@ -2545,7 +2666,7 @@ class MiraApp(App[None]):
             button = self.query_one("#tool-issues-button", Button)
         except NoMatches:
             return
-        count = len(self.tool_failures)
+        count = len(self.tool_failures) + len(self.mcp_config_issues)
         button.label = f"Issues {count}"
         button.display = count > 0
 
@@ -2665,14 +2786,42 @@ class MiraApp(App[None]):
             workspace=self.workspace,
             checkpointer=self.checkpointer,
             metadata=metadata,
+            mcp_manager=self.mcp_manager,
         )
         plan_agent = build_plan_agent(
             config=config,
             workspace=self.workspace,
             checkpointer=self.checkpointer,
             metadata=metadata,
+            mcp_manager=self.mcp_manager,
         )
         return agent, plan_agent
+
+    async def _mcp_registry_changed(self) -> None:
+        """Install one rebuilt Act/Plan pair after a manager registry transition."""
+        if self.config is not None:
+            self.config["settings"] = load_settings(self.workspace)
+        await self._rebuild_agents()
+        if self.is_mounted:
+            autocomplete = self.query_one(AutocompleteInput)
+            autocomplete.set_mcp_manager(self.mcp_manager)
+            self._set_status(state=self.status_state)
+            if isinstance(self.screen, MCPPanelScreen):
+                await self.screen.refresh_from_manager()
+
+    async def approve_mcp_server(self, state: Any, preview: str) -> str:
+        """Use MIRA's existing modal choice interaction for server trust."""
+        answer = await self._prompt_choice(
+            f"Allow MCP Server: {state.name}",
+            preview,
+            [("a", "Allow (a)"), ("d", "Deny (d)"), ("l", "Always allow (l)")],
+        )
+        return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
+
+    async def on_unmount(self) -> None:
+        """Close every MCP runtime when the Textual app exits."""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.shutdown()
 
     def _agent_mode_updates(
         self,
@@ -2704,10 +2853,13 @@ class MiraApp(App[None]):
 
     def _tick_status(self) -> None:
         """Refresh the clock and dashboard line."""
-        if not self.ready:
+        if not self.ready or not self.is_mounted:
             return
         update_duration(self.session)
-        self._set_status(state=self.status_state)
+        try:
+            self._set_status(state=self.status_state)
+        except NoMatches:
+            return
 
     def _tick_animations(self) -> None:
         """Advance lightweight chat animations."""
@@ -2749,7 +2901,7 @@ class MiraApp(App[None]):
             return "Plan Ready"
         if self.mode.get("current_goal"):
             return "Goal Ready"
-        return "Action"
+        return "Act"
 
     def _record_prompt_history(self, text: str) -> None:
         """Remember submitted prompt text and persist it for normal app runs."""

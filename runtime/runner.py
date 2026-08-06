@@ -452,6 +452,7 @@ async def run_turn(
     rubric_model_name: str = "",
     include_rubric_state: bool = False,
     planning_stage: str | None = None,
+    messages: list[Any] | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -462,7 +463,9 @@ async def run_turn(
     function asks the renderer for the needed input and resumes the same thread
     with a ``Command`` payload.
     """
-    payload: dict[str, Any] | Command = {"messages": [{"role": "user", "content": text}]}
+    payload: dict[str, Any] | Command = {
+        "messages": list(messages) if messages is not None else [{"role": "user", "content": text}]
+    }
     rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
     if include_rubric_state:
         payload["rubric"] = rubric

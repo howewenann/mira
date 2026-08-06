@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,17 @@ RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPolicy:
+    """One canonical policy shape shared by Custom and MCP tools."""
+
+    enabled: bool = True
+    always_allow: bool = False
+    plan_access: bool = False
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "system": {
         DYNAMIC_SUBAGENTS: {
@@ -153,8 +165,42 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 current["enabled"] = enabled
             if isinstance(always_allow, bool):
                 current["always_allow"] = always_allow
+            plan_access = spec.get("plan_access")
+            if name not in INBUILT_DANGEROUS_TOOLS and isinstance(plan_access, bool):
+                current["plan_access"] = plan_access
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
+
+    mcp = raw.get("mcp")
+    if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
+        normalized_servers: dict[str, Any] = {}
+        for name, spec in mcp["servers"].items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+                continue
+            server: dict[str, Any] = {}
+            for key in ("enabled", "always_allow"):
+                if isinstance(spec.get(key), bool):
+                    server[key] = spec[key]
+            fingerprint = spec.get("approved_fingerprint")
+            if isinstance(fingerprint, str) and _valid_fingerprint(fingerprint):
+                server["approved_fingerprint"] = fingerprint
+            if isinstance(spec.get("tools"), dict):
+                tool_specs: dict[str, Any] = {}
+                for tool_name, tool_spec in spec["tools"].items():
+                    if not isinstance(tool_name, str) or not tool_name or not isinstance(tool_spec, dict):
+                        continue
+                    normalized_tool = {
+                        key: tool_spec[key]
+                        for key in ("enabled", "always_allow", "plan_access")
+                        if isinstance(tool_spec.get(key), bool)
+                    }
+                    if normalized_tool:
+                        tool_specs[tool_name] = normalized_tool
+                if tool_specs:
+                    server["tools"] = tool_specs
+            normalized_servers[name] = server
+        if normalized_servers:
+            settings["mcp"] = {"servers": normalized_servers}
 
     return settings
 
@@ -356,6 +402,22 @@ def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str)
     return False
 
 
+def tool_policy(config_or_settings: dict[str, Any] | None, tool_name: str) -> ToolPolicy:
+    """Return the shared policy projection for one configurable local tool."""
+    return ToolPolicy(
+        enabled=tool_enabled(config_or_settings, tool_name),
+        always_allow=tool_always_allow(config_or_settings, tool_name),
+        plan_access=tool_plan_access(config_or_settings, tool_name),
+    )
+
+
+def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
+    hitl = hitl_settings(config_or_settings)
+    tools = hitl.get("tools", {})
+    spec = tools.get(tool_name) if isinstance(tools, dict) else None
+    return bool(spec.get("plan_access", False)) if isinstance(spec, dict) else False
+
+
 def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether a configurable user tool is enabled."""
     hitl = hitl_settings(config_or_settings)
@@ -390,6 +452,109 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
     current.setdefault("always_allow", False)
     updated["hitl"]["tools"][tool_name] = current
     return updated
+
+
+def set_tool_plan_access(settings: dict[str, Any], tool_name: str, plan_access: bool) -> dict[str, Any]:
+    """Return settings with explicit Custom Tool Plan trust."""
+    updated = normalize_settings(settings)
+    current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {}))
+    current.setdefault("enabled", True)
+    current.setdefault("always_allow", False)
+    current["plan_access"] = bool(plan_access)
+    updated["hitl"]["tools"][tool_name] = current
+    return updated
+
+
+def mcp_server_settings(config_or_settings: dict[str, Any] | None, server: str) -> dict[str, Any]:
+    settings = _settings_object(config_or_settings)
+    mcp = settings.get("mcp", {}) if isinstance(settings, dict) else {}
+    servers = mcp.get("servers", {}) if isinstance(mcp, dict) else {}
+    spec = servers.get(server, {}) if isinstance(servers, dict) else {}
+    return dict(spec) if isinstance(spec, dict) else {}
+
+
+def mcp_server_enabled(config_or_settings: dict[str, Any] | None, server: str) -> bool:
+    return bool(mcp_server_settings(config_or_settings, server).get("enabled", True))
+
+
+def mcp_server_always_allow(config_or_settings: dict[str, Any] | None, server: str) -> bool:
+    return bool(mcp_server_settings(config_or_settings, server).get("always_allow", False))
+
+
+def mcp_server_approved_fingerprint(config_or_settings: dict[str, Any] | None, server: str) -> str:
+    value = mcp_server_settings(config_or_settings, server).get("approved_fingerprint", "")
+    return value if isinstance(value, str) and _valid_fingerprint(value) else ""
+
+
+def mcp_tool_policy(
+    config_or_settings: dict[str, Any] | None,
+    server: str,
+    tool_name: str,
+) -> ToolPolicy:
+    spec = mcp_server_settings(config_or_settings, server).get("tools", {})
+    value = spec.get(tool_name, {}) if isinstance(spec, dict) else {}
+    value = value if isinstance(value, dict) else {}
+    return ToolPolicy(
+        enabled=bool(value.get("enabled", True)),
+        always_allow=bool(value.get("always_allow", False)),
+        plan_access=bool(value.get("plan_access", False)),
+    )
+
+
+def set_mcp_server_enabled(settings: dict[str, Any], server: str, enabled: bool) -> dict[str, Any]:
+    return _set_mcp_server_value(settings, server, "enabled", bool(enabled))
+
+
+def set_mcp_server_always_allow(settings: dict[str, Any], server: str, value: bool) -> dict[str, Any]:
+    return _set_mcp_server_value(settings, server, "always_allow", bool(value))
+
+
+def set_mcp_server_approved_fingerprint(settings: dict[str, Any], server: str, value: str) -> dict[str, Any]:
+    return _set_mcp_server_value(settings, server, "approved_fingerprint", value if _valid_fingerprint(value) else "")
+
+
+def set_mcp_tool_policy_value(
+    settings: dict[str, Any],
+    server: str,
+    tool_name: str,
+    key: str,
+    value: bool,
+) -> dict[str, Any]:
+    if key not in {"enabled", "always_allow", "plan_access"}:
+        return normalize_settings(settings)
+    updated = normalize_settings(settings)
+    servers = updated.setdefault("mcp", {}).setdefault("servers", {})
+    server_spec = dict(servers.get(server, {}))
+    tools = dict(server_spec.get("tools", {}))
+    tool_spec = dict(tools.get(tool_name, {}))
+    tool_spec[key] = bool(value)
+    tools[tool_name] = tool_spec
+    server_spec["tools"] = tools
+    servers[server] = server_spec
+    return updated
+
+
+def _set_mcp_server_value(settings: dict[str, Any], server: str, key: str, value: Any) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    servers = updated.setdefault("mcp", {}).setdefault("servers", {})
+    spec = dict(servers.get(server, {}))
+    if value == "":
+        spec.pop(key, None)
+    else:
+        spec[key] = value
+    servers[server] = spec
+    return updated
+
+
+def _settings_object(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config_or_settings, dict):
+        return {}
+    value = config_or_settings.get("settings", config_or_settings)
+    return value if isinstance(value, dict) else {}
+
+
+def _valid_fingerprint(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def set_execute_env_mode(settings: dict[str, Any], mode: str) -> dict[str, Any]:

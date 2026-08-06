@@ -834,3 +834,24 @@ conversation history and are not expected to add up to the latest `Ctx` value.
 
 **Update this when:** New providers need special metadata handling, context
 fallback rules change, or the dashboard changes how context is reported.
+
+## MCP ownership and capability projection
+
+**Decision:** Bootstrap creates one `MCPManager` outside agent construction.
+It owns one runtime/session and one capability cache per configured server,
+plus the shared prompt and fixed-resource registries. Act and Plan receive
+policy-filtered tool views when the existing agent-pair pathway rebuilds.
+
+**Why:** The shared agent factory builds project resources twice, once per
+mode. Starting MCP there would duplicate child processes, discovery, and
+mutable health state. Manager-owned lifecycle methods also ensure Settings,
+the MCP panel, autocomplete, reload, and shutdown observe and mutate the same
+server registry. Persisted user-event attachment metadata is projected into
+LangGraph message metadata, which lets the implicit resource reader enforce
+the attachment boundary without a second session allowlist.
+
+**Where to check:** `agent/mcp/`, `agent/factory.py`, `ui/app.py`,
+`ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
+
+**Update this when:** MCP transport ownership, capability caching, attachment
+authorization, or the Act/Plan rebuild boundary changes.

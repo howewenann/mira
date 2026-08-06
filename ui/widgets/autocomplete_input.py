@@ -13,6 +13,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.events import Key
 from textual.widgets import OptionList, TextArea
+from textual.widgets.option_list import Option
 
 from ui.command_help import command_help_entries, command_insertion
 from ui.widgets.prompt_box import PromptBox
@@ -36,10 +37,12 @@ EXCLUDED_FILE_COMPONENTS = {
 class CompletionItem:
     """The source-neutral data needed to render and insert one completion."""
 
-    kind: Literal["command", "file"]
+    kind: Literal["command", "file", "mcp_resource", "status"]
     display: str
     insertion: str
     description: str = ""
+    selectable: bool = True
+    metadata: Any = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,10 @@ class AutocompleteInput(Vertical):
         self._dismissed_start: int | None = None
         self._generation = 0
         self._file_worker: Any = None
+        self._resource_worker: Any = None
+        self._prompt_worker: Any = None
+        self._mcp_resources: list[Any] = []
+        self.mcp_manager: Any = None
 
     @property
     def active(self) -> bool:
@@ -85,6 +92,11 @@ class AutocompleteInput(Vertical):
         """Switch discovery to a rebuilt project backend and clear old state."""
         self.dismiss()
         self.project_backend = backend
+
+    def set_mcp_manager(self, manager: Any) -> None:
+        """Use the manager's canonical prompt and resource registries."""
+        self.dismiss()
+        self.mcp_manager = manager
 
     def prompt_disabled(self) -> None:
         """Make autocomplete inert whenever the underlying prompt is disabled."""
@@ -166,14 +178,21 @@ class AutocompleteInput(Vertical):
             self._file_paths = None
             self._interaction_start = None
             self._fragment = fragment
-            self._show_items(command_items(fragment.query))
+            self._show_items(command_items(fragment.query, self._prompt_registry()))
+            if self.mcp_manager is not None:
+                generation = self._generation
+                self._prompt_worker = self.run_worker(
+                    self._load_mcp_prompts(generation, fragment.start),
+                    name=f"autocomplete-prompts-{generation}",
+                    exclusive=False,
+                )
             return
 
         same_interaction = self._interaction_start == fragment.start
         self._fragment = fragment
         if same_interaction:
             if self._file_paths is not None:
-                self._show_items(file_items(self._file_paths, fragment.query))
+                self._show_items(attachment_items(self._file_paths, self._mcp_resources, fragment.query, self._resource_errors()))
             return
 
         self._cancel_file_worker()
@@ -181,14 +200,22 @@ class AutocompleteInput(Vertical):
         self._interaction_start = fragment.start
         self._file_paths = None
         self._hide_options()
-        if self.project_backend is None:
-            return
         generation = self._generation
-        self._file_worker = self.run_worker(
-            self._load_project_files(generation, fragment.start),
-            name=f"autocomplete-files-{generation}",
-            exclusive=False,
-        )
+        if self.project_backend is not None:
+            self._file_worker = self.run_worker(
+                self._load_project_files(generation, fragment.start),
+                name=f"autocomplete-files-{generation}",
+                exclusive=False,
+            )
+        else:
+            self._file_paths = []
+        if self.mcp_manager is not None:
+            self._mcp_resources = list(self.mcp_manager.resource_registry.values())
+            self._resource_worker = self.run_worker(
+                self._load_mcp_resources(generation, fragment.start),
+                name=f"autocomplete-resources-{generation}",
+                exclusive=False,
+            )
 
     async def _load_project_files(self, generation: int, interaction_start: int) -> None:
         try:
@@ -202,12 +229,42 @@ class AutocompleteInput(Vertical):
         fragment = self._fragment
         if fragment is None or fragment.kind != "file" or fragment.start != interaction_start:
             return
-        self._show_items(file_items(self._file_paths, fragment.query))
+        self._show_items(attachment_items(self._file_paths, self._mcp_resources, fragment.query, self._resource_errors()))
+
+    async def _load_mcp_resources(self, generation: int, interaction_start: int) -> None:
+        await self.mcp_manager.discover_resources()
+        if generation != self._generation or interaction_start != self._interaction_start:
+            return
+        self._resource_worker = None
+        self._mcp_resources = list(self.mcp_manager.resource_registry.values())
+        fragment = self._fragment
+        if fragment is not None and fragment.kind == "file" and fragment.start == interaction_start:
+            self._show_items(attachment_items(self._file_paths or [], self._mcp_resources, fragment.query, self._resource_errors()))
+
+    async def _load_mcp_prompts(self, generation: int, interaction_start: int) -> None:
+        await self.mcp_manager.discover_prompts()
+        if generation != self._generation:
+            return
+        self._prompt_worker = None
+        fragment = self._fragment
+        if fragment is not None and fragment.kind == "command" and fragment.start == interaction_start:
+            self._show_items(command_items(fragment.query, self._prompt_registry()))
+
+    def _prompt_registry(self) -> Any:
+        return self.mcp_manager.prompt_registry if self.mcp_manager is not None else None
+
+    def _resource_errors(self) -> list[str]:
+        return self.mcp_manager.resource_errors() if self.mcp_manager is not None else []
 
     def _show_items(self, items: list[CompletionItem]) -> None:
-        self._items = items[:MAX_COMPLETIONS]
+        statuses = [item for item in items if not item.selectable]
+        selectable = [item for item in items if item.selectable]
+        if statuses:
+            self._items = [*selectable[: MAX_COMPLETIONS - 1], statuses[0]]
+        else:
+            self._items = selectable[:MAX_COMPLETIONS]
         options = self.query_one(OptionList)
-        options.set_options([_completion_row(item) for item in self._items])
+        options.set_options([Option(_completion_row(item), disabled=not item.selectable) for item in self._items])
         options.display = bool(self._items)
         if self._items:
             options.highlighted = 0
@@ -225,6 +282,8 @@ class AutocompleteInput(Vertical):
         if fragment is None or index is None or not (0 <= index < len(self._items)):
             return
         item = self._items[index]
+        if not item.selectable:
+            return
         prompt = self.query_one(PromptBox)
         start = _location_from_offset(prompt.value, fragment.start)
         end = _location_from_offset(prompt.value, fragment.end)
@@ -233,12 +292,14 @@ class AutocompleteInput(Vertical):
         self.call_after_refresh(prompt.focus)
 
     def _cancel_file_worker(self) -> None:
-        if self._file_worker is not None:
-            self._file_worker.cancel()
-            self._file_worker = None
+        for attribute in ("_file_worker", "_resource_worker", "_prompt_worker"):
+            worker = getattr(self, attribute)
+            if worker is not None:
+                worker.cancel()
+                setattr(self, attribute, None)
 
 
-def command_items(query: str) -> list[CompletionItem]:
+def command_items(query: str, prompt_registry: Any = None) -> list[CompletionItem]:
     """Return literal substring matches from the shared /help registry."""
     folded = query.casefold()
     items = [
@@ -248,10 +309,10 @@ def command_items(query: str) -> list[CompletionItem]:
             insertion=command_insertion(usage),
             description=description,
         )
-        for usage, description in command_help_entries()
+        for usage, description in [*command_help_entries(), *(prompt_registry.rows() if prompt_registry is not None else [])]
         if folded in usage.casefold()
     ]
-    return sorted(items, key=lambda item: (item.display.casefold(), item.display))[:MAX_COMPLETIONS]
+    return sorted(items, key=lambda item: (item.display.casefold(), item.display))
 
 
 def file_items(paths: list[str], query: str) -> list[CompletionItem]:
@@ -270,6 +331,41 @@ def file_items(paths: list[str], query: str) -> list[CompletionItem]:
         )
         for path in matches
     ]
+
+
+def attachment_items(paths: list[str], resources: list[Any], query: str, errors: list[str] | None = None) -> list[CompletionItem]:
+    """Merge source-neutral local and fixed MCP attachment candidates before limiting."""
+    folded = query.casefold()
+    local_matches = sorted(
+        (path for path in paths if folded in path.casefold()),
+        key=lambda path: (path.casefold(), path),
+    )
+    items = [
+        CompletionItem(
+            kind="file",
+            display=path,
+            insertion=f'@"{path}"' if " " in path else f"@{path}",
+            description="local file",
+        )
+        for path in local_matches
+    ]
+    for resource in resources:
+        if folded not in str(resource.token).casefold() and folded not in str(resource.name).casefold():
+            continue
+        insertion = f'@"{resource.token}"' if any(char.isspace() for char in resource.token) else f"@{resource.token}"
+        items.append(
+            CompletionItem(
+                kind="mcp_resource",
+                display=resource.token,
+                insertion=insertion,
+                description=resource.description or resource.name,
+                metadata=resource,
+            )
+        )
+    items.sort(key=lambda item: (item.display.casefold(), item.display))
+    for error in errors or []:
+        items.append(CompletionItem("status", f"MCP resources unavailable: {error}", "", selectable=False))
+    return items
 
 
 async def discover_project_files(backend: Any) -> list[str]:
@@ -349,4 +445,5 @@ __all__ = [
     "completion_fragment",
     "discover_project_files",
     "file_items",
+    "attachment_items",
 ]

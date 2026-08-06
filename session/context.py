@@ -85,6 +85,10 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             if not text:
                 continue
             event["text"] = text
+            if event_type == "user":
+                attachments = normalize_mcp_attachments(item.get("attachments"))
+                if attachments:
+                    event["attachments"] = attachments
         elif event_type == "plan":
             plan = normalize_current_plan(item.get("plan"))
             if plan is None:
@@ -157,13 +161,16 @@ def normalize_messages(value: Any) -> list[dict[str, Any]]:
     messages = []
     for item in normalize_events(value):
         if item["type"] in {"user", "assistant"}:
-            messages.append({
+            message = {
                 "id": item["id"],
                 "role": item["type"],
                 "mode": str(item.get("mode") or "action"),
                 "created_at": item["created_at"],
                 "content": item["text"],
-            })
+            }
+            if item.get("attachments"):
+                message["attachments"] = item["attachments"]
+            messages.append(message)
             continue
         if item["type"] == "correction":
             messages.append({
@@ -186,6 +193,47 @@ def normalize_messages(value: Any) -> list[dict[str, Any]]:
                 "content": subagent_message_text(item, output),
             })
     return messages
+
+
+def normalize_mcp_attachments(value: Any) -> list[dict[str, str]]:
+    """Keep only exact structured MCP attachment identity fields."""
+    if not isinstance(value, list):
+        return []
+    attachments: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict) or item.get("kind") != "mcp_resource":
+            continue
+        server = str(item.get("server") or "")
+        uri = str(item.get("uri") or "")
+        if not server or not uri or (server, uri) in seen:
+            continue
+        seen.add((server, uri))
+        attachments.append(
+            {
+                "kind": "mcp_resource",
+                "token": str(item.get("token") or ""),
+                "server": server,
+                "uri": uri,
+                "name": str(item.get("name") or ""),
+                "description": str(item.get("description") or ""),
+                "mime_type": str(item.get("mime_type") or ""),
+            }
+        )
+    return attachments
+
+
+def session_mcp_attachments(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Project persisted attachment metadata into the next agent message."""
+    values: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in normalize_events(record.get("events")):
+        for item in event.get("attachments", []):
+            key = (item["server"], item["uri"])
+            if key not in seen:
+                seen.add(key)
+                values.append(item)
+    return values
 
 
 def subagent_message_text(event: dict[str, Any], output: str) -> str:

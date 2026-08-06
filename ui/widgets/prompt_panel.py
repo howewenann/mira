@@ -274,8 +274,8 @@ class PromptPanel(Vertical):
             if available_width <= 0:
                 return
             if available_width == self._last_button_width and self._button_rows:
-                if focus_first:
-                    self.call_after_refresh(self._focus_first_button)
+                if focus_first and not any(button.has_focus for button in self.query(Button)):
+                    self._focus_first_button()
                 return
             self._last_button_width = available_width
             focused_id = next((button.id for button in self.query(Button) if button.has_focus), None)
@@ -295,8 +295,6 @@ class PromptPanel(Vertical):
                 pass
         if focus_first:
             self._focus_first_button()
-            if not any(button.has_focus for button in self.query(Button)):
-                self.call_after_refresh(self._focus_first_button)
 
     async def _clear_buttons(self) -> None:
         """Remove all footer buttons from the previous prompt."""

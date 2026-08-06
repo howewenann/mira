@@ -6,9 +6,10 @@ from ui.widgets.autocomplete_input import AutocompleteInput, CompletionItem
 from ui.widgets.prompt_panel import PromptPanel
 from ui.widgets.settings_panel import SettingsPanel
 from ui.widgets.session_history import SessionHistory
-from ui.widgets.status_bar import StatusBar
+from ui.widgets.status_bar import StatusBar, TelemetryBar
 from ui.widgets.subagent_panel import SubagentsPanel
 from ui.widgets.tool_issues import ToolIssuesScreen
+from ui.widgets.mcp_panel import MCPPanelScreen
 
 __all__ = [
     "ChatLog",
@@ -19,6 +20,8 @@ __all__ = [
     "SessionHistory",
     "SettingsPanel",
     "StatusBar",
+    "TelemetryBar",
     "SubagentsPanel",
     "ToolIssuesScreen",
+    "MCPPanelScreen",
 ]

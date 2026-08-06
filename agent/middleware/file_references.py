@@ -20,12 +20,19 @@ class FileReferenceMiddleware(AgentMiddleware):
         return await handler(self._request_with_guidance(request))
 
     def _request_with_guidance(self, request: Any) -> Any:
-        message = _latest_human_message(request.state.get("messages", []))
+        messages = request.state.get("messages", [])
+        message = _latest_human_message(messages)
         references = local_file_references(str(message.text)) if message is not None else []
-        if not references:
+        attachments = _mcp_attachments(messages)
+        if not references and not attachments:
             return request
 
-        guidance = file_reference_guidance(references)
+        guidance_parts = []
+        if references:
+            guidance_parts.append(file_reference_guidance(references))
+        if attachments:
+            guidance_parts.append(mcp_resource_guidance(attachments))
+        guidance = "\n\n".join(guidance_parts)
         current = getattr(request, "system_message", None)
         if current is None:
             system_message = SystemMessage(content=guidance)
@@ -59,4 +66,39 @@ def _latest_human_message(messages: list[Any]) -> HumanMessage | None:
     return next((message for message in reversed(messages) if isinstance(message, HumanMessage)), None)
 
 
-__all__ = ["FileReferenceMiddleware", "file_reference_guidance"]
+def mcp_resource_guidance(attachments: list[dict[str, str]]) -> str:
+    lines = [
+        "## User-attached MCP resources",
+        "",
+        "The user explicitly attached these resources. Their contents were not injected.",
+        "Use read_mcp_resource with the exact server and URI when their contents are needed.",
+    ]
+    for item in attachments:
+        lines.extend(
+            (
+                "",
+                f"- {item.get('token', '')}",
+                f'  Use read_mcp_resource(server="{item.get("server", "")}", uri="{item.get("uri", "")}").',
+            )
+        )
+    return "\n".join(lines)
+
+
+def _mcp_attachments(messages: list[Any]) -> list[dict[str, str]]:
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for message in messages:
+        metadata = getattr(message, "additional_kwargs", None)
+        values = metadata.get("mira_mcp_attachments", []) if isinstance(metadata, dict) else []
+        for item in values:
+            if not isinstance(item, dict) or item.get("kind") != "mcp_resource":
+                continue
+            key = (str(item.get("server") or ""), str(item.get("uri") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append({str(k): str(v) for k, v in item.items()})
+    return found
+
+
+__all__ = ["FileReferenceMiddleware", "file_reference_guidance", "mcp_resource_guidance"]

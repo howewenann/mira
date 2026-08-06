@@ -190,7 +190,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(agent, "agent")
         kwargs = create_deep_agent.call_args.kwargs
-        self.assertIsNone(kwargs["interrupt_on"])
+        self.assertEqual(kwargs["interrupt_on"], {})
         self.assertIn("planning mode", kwargs["system_prompt"])
         self.assertEqual(kwargs["permissions"][0].operations, ["write"])
         self.assertEqual(kwargs["permissions"][0].mode, "deny")

@@ -35,6 +35,7 @@ class ChatLog(VerticalScroll):
 
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
         self._assistant_text = ""
         self._assistant_block: Static | None = None
@@ -72,6 +73,11 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_id: dict[str, str] = {}
         self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
         self._subagent_aliases: dict[str, deque[str]] = {}
+
+    def on_click(self, event: Click) -> None:
+        """Move keyboard focus to the transcript when its content is clicked."""
+        if not isinstance(event.widget, Button):
+            self.focus()
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""

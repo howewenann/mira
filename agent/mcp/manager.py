@@ -1,0 +1,517 @@
+"""Single-owner MCP lifecycle and capability registries."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import Any
+
+from langchain_core.messages import BaseMessage
+from langchain_core.tools import ToolException, tool
+from langchain_mcp_adapters.callbacks import Callbacks
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.prompts import load_mcp_prompt
+from langchain_mcp_adapters.resources import get_mcp_resource
+from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+from langgraph.prebuilt.tool_node import ToolRuntime
+
+from agent.mcp.configuration import (
+    MCPConfiguration,
+    adapter_connection,
+    approval_preview,
+    load_mcp_configuration,
+)
+from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
+from agent.mcp.prompts import PromptRegistry
+from config.settings import (
+    load_settings,
+    mcp_server_always_allow,
+    mcp_server_approved_fingerprint,
+    mcp_server_enabled,
+    mcp_tool_policy,
+    save_settings,
+    set_mcp_server_always_allow,
+    set_mcp_server_approved_fingerprint,
+    set_mcp_server_enabled,
+)
+from runtime.diagnostics import get_diagnostics_logger
+
+ApprovalHandler = Callable[[MCPServerState, str], Awaitable[str]]
+ChangeHandler = Callable[[], Awaitable[None]]
+_ATTACHMENT_PATTERN = re.compile(r'(?<![\w@])@(?:"([^"\r\n]+)"|([^\s@]+))')
+_MAX_PAGES = 1000
+
+
+class MCPManager:
+    """Own every configured server runtime and all MCP-facing registries."""
+
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace.expanduser().resolve()
+        self.configuration: MCPConfiguration = load_mcp_configuration(self.workspace)
+        self.servers: dict[str, MCPServerState] = self.configuration.servers
+        self.prompt_registry = PromptRegistry(self.workspace)
+        self.resource_registry: dict[str, MCPResource] = {}
+        self._tool_owners: dict[str, str] = {}
+        self._ambiguous_tools: set[str] = set()
+        self._session_approvals: set[tuple[str, str]] = set()
+        self._prompt_locks: dict[str, asyncio.Lock] = {}
+        self._resource_locks: dict[str, asyncio.Lock] = {}
+        self._approval_handler: ApprovalHandler | None = None
+        self._change_handler: ChangeHandler | None = None
+        self._operation_lock = asyncio.Lock()
+        self.client = self._new_client()
+        self.read_tool = self._build_read_tool()
+
+    @property
+    def config_issue(self) -> Any | None:
+        return self.configuration.issue
+
+    @property
+    def configured_count(self) -> int:
+        return len(self.servers) if self.configuration.valid else 0
+
+    @property
+    def usable_count(self) -> int:
+        return sum(state.usable for state in self.servers.values())
+
+    @property
+    def show_status(self) -> bool:
+        return self.configuration.valid and bool(self.servers)
+
+    def set_change_handler(self, handler: ChangeHandler | None) -> None:
+        self._change_handler = handler
+
+    async def initialize(self, approval_handler: ApprovalHandler | None = None) -> None:
+        """Start every independently valid, enabled, and approved server once."""
+        self._approval_handler = approval_handler or self._approval_handler
+        settings = load_settings(self.workspace)
+        for state in self.servers.values():
+            if state.status == "Failed" and not state.config.get("transport"):
+                continue
+            if state.error and state.status == "Failed":
+                continue
+            if not mcp_server_enabled(settings, state.name):
+                state.status = "Disabled"
+                continue
+            await self._start_server(state, restarting=False)
+
+    async def reload(self) -> None:
+        """Cleanly replace configuration, runtimes, and capability caches."""
+        async with self._operation_lock:
+            await self._shutdown_unlocked()
+            self.configuration = load_mcp_configuration(self.workspace)
+            self.servers = self.configuration.servers
+            self.prompt_registry.reload_local()
+            self.prompt_registry.mcp = {}
+            self.resource_registry = {}
+            self._tool_owners = {}
+            self._ambiguous_tools = set()
+            self._prompt_locks = {}
+            self._resource_locks = {}
+            self.client = self._new_client()
+            await self.initialize(self._approval_handler)
+
+    async def shutdown(self) -> None:
+        async with self._operation_lock:
+            await self._shutdown_unlocked()
+
+    async def _shutdown_unlocked(self) -> None:
+        for state in list(self.servers.values()):
+            try:
+                await self._stop_server(state, final_status="Disabled")
+            except BaseException:
+                get_diagnostics_logger().exception("MCP cleanup failed for %s", state.name)
+
+    async def set_server_enabled(self, server_name: str, enabled: bool) -> bool:
+        """Persist and apply a server enable transition through the sole pathway."""
+        state = self._server(server_name)
+        settings = load_settings(self.workspace)
+        updated = set_mcp_server_enabled(settings, server_name, enabled)
+        if not save_settings(self.workspace, updated):
+            return False
+        async with self._operation_lock:
+            if enabled:
+                await self._start_server(state, restarting=False)
+            else:
+                await self._stop_server(state, final_status="Disabled")
+        await self._notify_changed()
+        return True
+
+    async def restart_server(self, server_name: str) -> bool:
+        """Restart one server without modifying its persisted enable value."""
+        state = self._server(server_name)
+        if not mcp_server_enabled(load_settings(self.workspace), server_name):
+            state.status = "Disabled"
+            await self._notify_changed()
+            return False
+        request_approval_again = state.status == "Approval required"
+        async with self._operation_lock:
+            await self._stop_server(state, final_status="Restarting")
+            await self._start_server(state, restarting=True, force_approval=request_approval_again)
+        await self._notify_changed()
+        return state.usable
+
+    async def set_server_always_allow(self, server_name: str, value: bool) -> bool:
+        """Persist launch/use approval for the server's current fingerprint."""
+        state = self._server(server_name)
+        settings = set_mcp_server_always_allow(load_settings(self.workspace), server_name, value)
+        settings = set_mcp_server_approved_fingerprint(
+            settings,
+            server_name,
+            state.fingerprint if value else "",
+        )
+        if not save_settings(self.workspace, settings):
+            return False
+        await self._notify_changed()
+        return True
+
+    async def _start_server(
+        self,
+        state: MCPServerState,
+        *,
+        restarting: bool,
+        force_approval: bool = False,
+    ) -> None:
+        if state.exit_stack is not None:
+            return
+        state.status = "Restarting" if restarting else "Starting"
+        state.error = ""
+        settings = load_settings(self.workspace)
+        if not await self._approved(state, settings, force=force_approval):
+            state.status = "Approval required"
+            return
+        stack = AsyncExitStack()
+        try:
+            session = await stack.enter_async_context(self.client.session(state.name))
+            state.exit_stack = stack
+            state.session = session
+            await self._discover_tools(state)
+            state.status = "Partially available" if state.error else "Available"
+        except BaseException as error:
+            await _safe_close(stack, state.name)
+            state.exit_stack = None
+            state.session = None
+            state.status = "Failed"
+            state.error = _concise_error(error)
+            get_diagnostics_logger().exception("MCP server %s failed to start", state.name)
+
+    async def _approved(self, state: MCPServerState, settings: dict[str, Any], *, force: bool) -> bool:
+        key = (state.name, state.fingerprint)
+        persisted = mcp_server_approved_fingerprint(settings, state.name)
+        if not force and mcp_server_always_allow(settings, state.name) and persisted == state.fingerprint:
+            return True
+        if not force and key in self._session_approvals:
+            return True
+        if self._approval_handler is None:
+            return False
+        answer = await self._approval_handler(state, approval_preview(state))
+        if answer == "always_allow":
+            updated = set_mcp_server_always_allow(settings, state.name, True)
+            updated = set_mcp_server_approved_fingerprint(updated, state.name, state.fingerprint)
+            if save_settings(self.workspace, updated):
+                self._session_approvals.add(key)
+                return True
+            return False
+        if answer == "allow":
+            self._session_approvals.add(key)
+            return True
+        return False
+
+    async def _stop_server(self, state: MCPServerState, *, final_status: str) -> None:
+        if state.status != "Disabled" or state.exit_stack is not None:
+            state.status = "Stopping" if final_status != "Restarting" else "Restarting"
+        self._remove_server_capabilities(state)
+        stack, state.exit_stack = state.exit_stack, None
+        state.session = None
+        if stack is not None:
+            await _safe_close(stack, state.name)
+        state.status = final_status  # type: ignore[assignment]
+
+    async def _discover_tools(self, state: MCPServerState) -> None:
+        state.tools = []
+        state.tool_metadata = []
+        try:
+            descriptors = await _list_all(state.session, "list_tools", "tools")
+        except BaseException as error:
+            state.error = f"tools: {_concise_error(error)}"
+            return
+        for descriptor in descriptors:
+            original = str(getattr(descriptor, "name", "") or "")
+            generated = f"mcp__{state.name}__{original}"
+            if generated in self._ambiguous_tools:
+                state.error = _join_error(state.error, f"ambiguous tool name skipped: {generated}")
+                continue
+            owner = self._tool_owners.get(generated)
+            if owner is not None:
+                previous = self.servers[owner]
+                previous.tools = [tool for tool in previous.tools if getattr(tool, "name", "") != generated]
+                previous.tool_metadata = [item for item in previous.tool_metadata if item.get("name") != generated]
+                previous.error = _join_error(previous.error, f"ambiguous tool name skipped: {generated}")
+                if previous.usable:
+                    previous.status = "Partially available"
+                state.error = _join_error(state.error, f"ambiguous tool name skipped: {generated}")
+                self._tool_owners.pop(generated, None)
+                self._ambiguous_tools.add(generated)
+                continue
+            try:
+                converted = convert_mcp_tool_to_langchain_tool(
+                    state.session,
+                    descriptor,
+                    server_name=state.name,
+                    callbacks=self.client.callbacks,
+                )
+                converted.name = generated
+                metadata = dict(getattr(converted, "metadata", None) or {})
+                metadata["mira_mcp"] = {"server": state.name, "tool": original}
+                converted.metadata = metadata
+            except BaseException as error:
+                state.error = _join_error(state.error, f"tool {original}: {_concise_error(error)}")
+                continue
+            self._tool_owners[generated] = state.name
+            state.tools.append(converted)
+            state.tool_metadata.append(
+                {
+                    "name": generated,
+                    "original_name": original,
+                    "server": state.name,
+                    "source": "mcp",
+                    "path": state.name,
+                    "replaces": "",
+                    "runtime": "MCP",
+                    "environment": state.transport,
+                    "description": str(getattr(converted, "description", "") or ""),
+                }
+            )
+
+    async def discover_prompts(self, server_name: str | None = None) -> None:
+        states = self._discovery_states(server_name)
+        await asyncio.gather(*(self._discover_server_prompts(state) for state in states))
+
+    async def _discover_server_prompts(self, state: MCPServerState) -> None:
+        lock = self._prompt_locks.setdefault(state.name, asyncio.Lock())
+        async with lock:
+            if state.prompts is not None or state.session is None:
+                return
+            try:
+                session = state.session
+                descriptors = await _list_all(session, "list_prompts", "prompts")
+                if state.session is not session:
+                    return
+                specs: list[PromptSpec] = []
+                for descriptor in descriptors:
+                    original = str(getattr(descriptor, "name", "") or "")
+                    arguments = tuple(
+                        PromptArgument(str(argument.name), bool(getattr(argument, "required", False)))
+                        for argument in (getattr(descriptor, "arguments", None) or [])
+                    )
+
+                    async def resolve(
+                        values: list[str],
+                        *,
+                        _state: MCPServerState = state,
+                        _name: str = original,
+                        _arguments: tuple[PromptArgument, ...] = arguments,
+                    ) -> list[BaseMessage]:
+                        mapping = {argument.name: value for argument, value in zip(_arguments, values)}
+                        return list(await load_mcp_prompt(_state.session, _name, arguments=mapping or None))
+
+                    specs.append(
+                        PromptSpec(
+                            command=f"/mcp__{state.name}__{original}",
+                            description=str(getattr(descriptor, "description", "") or "MCP prompt"),
+                            arguments=arguments,
+                            source="mcp",
+                            resolver=resolve,
+                            server=state.name,
+                        )
+                    )
+                state.prompts = specs
+                state.prompt_error = ""
+                self.prompt_registry.replace_server(state.name, specs)
+            except BaseException as error:
+                state.prompts = []
+                state.prompt_error = _concise_error(error)
+                self._mark_partial(state, f"prompts: {state.prompt_error}")
+
+    async def discover_resources(self, server_name: str | None = None) -> None:
+        states = self._discovery_states(server_name)
+        await asyncio.gather(*(self._discover_server_resources(state) for state in states))
+
+    async def _discover_server_resources(self, state: MCPServerState) -> None:
+        lock = self._resource_locks.setdefault(state.name, asyncio.Lock())
+        async with lock:
+            if state.resources is not None or state.session is None:
+                return
+            try:
+                session = state.session
+                descriptors = await _list_all(session, "list_resources", "resources")
+                if state.session is not session:
+                    return
+                resources = []
+                for descriptor in descriptors:
+                    uri = str(getattr(descriptor, "uri", "") or "")
+                    token = f"mcp__{state.name}__{uri}"
+                    resource = MCPResource(
+                        token=token,
+                        server=state.name,
+                        uri=uri,
+                        name=str(getattr(descriptor, "title", None) or getattr(descriptor, "name", "") or ""),
+                        description=str(getattr(descriptor, "description", "") or ""),
+                        mime_type=str(getattr(descriptor, "mimeType", "") or ""),
+                    )
+                    resources.append(resource)
+                    self.resource_registry[token] = resource
+                state.resources = resources
+                state.resource_error = ""
+            except BaseException as error:
+                state.resources = []
+                state.resource_error = _concise_error(error)
+                self._mark_partial(state, f"resources: {state.resource_error}")
+
+    def tools_for_mode(self, settings: dict[str, Any] | None, *, planning: bool) -> tuple[list[Any], list[dict[str, str]]]:
+        tools: list[Any] = [self.read_tool]
+        metadata: list[dict[str, str]] = []
+        for state in self.servers.values():
+            if not state.usable:
+                continue
+            for item, tool_value in zip(state.tool_metadata, state.tools, strict=True):
+                policy = mcp_tool_policy(settings, state.name, item["original_name"])
+                if not policy.enabled or (planning and not policy.plan_access):
+                    continue
+                tools.append(tool_value)
+                metadata.append(item)
+        return tools, metadata
+
+    def attachments_from_text(self, text: str) -> list[dict[str, str]]:
+        attachments: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for quoted, plain in _ATTACHMENT_PATTERN.findall(text):
+            token = quoted or plain.rstrip(".,;:!?)]}")
+            resource = self.resource_registry.get(token)
+            if resource is not None and token not in seen:
+                attachments.append(resource.attachment())
+                seen.add(token)
+        return attachments
+
+    def resource_errors(self) -> list[str]:
+        return [f"{state.name}: {state.resource_error}" for state in self.servers.values() if state.resource_error]
+
+    def _build_read_tool(self) -> Any:
+        manager = self
+
+        @tool("read_mcp_resource")
+        async def read_mcp_resource(server: str, uri: str, runtime: ToolRuntime) -> str:
+            """Read one exact text MCP resource explicitly attached by the user."""
+            allowed = _attached_pairs(runtime.state.get("messages", []) if isinstance(runtime.state, dict) else [])
+            if (server, uri) not in allowed:
+                raise ToolException("MCP resource was not attached by the user.")
+            state = manager.servers.get(server)
+            if state is None or state.session is None or not state.usable:
+                raise ToolException("MCP server is not available.")
+            try:
+                blobs = await get_mcp_resource(state.session, uri)
+            except BaseException as error:
+                raise ToolException(f"MCP resource read failed: {_concise_error(error)}") from error
+            parts: list[str] = []
+            for blob in blobs:
+                data = getattr(blob, "data", None)
+                if not isinstance(data, str):
+                    raise ToolException("MCP resource content is binary or unsupported.")
+                parts.append(data)
+            return "\n\n".join(parts)
+
+        read_mcp_resource.metadata = {"mira_trusted": True}
+        return read_mcp_resource
+
+    def _remove_server_capabilities(self, state: MCPServerState) -> None:
+        for item in state.tool_metadata:
+            self._tool_owners.pop(item.get("name", ""), None)
+        state.tools = []
+        self.prompt_registry.remove_server(state.name)
+        for token in [token for token, resource in self.resource_registry.items() if resource.server == state.name]:
+            self.resource_registry.pop(token, None)
+        state.prompts = None
+        state.resources = None
+        state.prompt_error = ""
+        state.resource_error = ""
+
+    def _discovery_states(self, server_name: str | None) -> list[MCPServerState]:
+        if server_name is not None:
+            state = self.servers.get(server_name)
+            return [state] if state is not None and state.usable else []
+        return [state for state in self.servers.values() if state.usable]
+
+    def _mark_partial(self, state: MCPServerState, error: str) -> None:
+        state.error = _join_error(state.error, error)
+        if state.usable:
+            state.status = "Partially available"
+
+    def _new_client(self) -> MultiServerMCPClient:
+        connections = {
+            name: adapter_connection(state)
+            for name, state in self.servers.items()
+            if state.config.get("transport") in {"stdio", "http"}
+        }
+
+        async def log_message(params: Any, context: Any) -> None:
+            data = getattr(params, "data", "")
+            level = str(getattr(params, "level", "info") or "info").lower()
+            logger = get_diagnostics_logger()
+            method = getattr(logger, level, logger.info)
+            method("MCP %s: %s", context.server_name, data)
+
+        return MultiServerMCPClient(connections, callbacks=Callbacks(on_logging_message=log_message))
+
+    def _server(self, name: str) -> MCPServerState:
+        if name not in self.servers:
+            raise KeyError(f"unknown MCP server: {name}")
+        return self.servers[name]
+
+    async def _notify_changed(self) -> None:
+        if self._change_handler is not None:
+            await self._change_handler()
+
+
+async def _list_all(session: Any, method_name: str, field: str) -> list[Any]:
+    items: list[Any] = []
+    cursor: str | None = None
+    for _ in range(_MAX_PAGES):
+        result = await getattr(session, method_name)(cursor=cursor)
+        items.extend(getattr(result, field, None) or [])
+        cursor = getattr(result, "nextCursor", None)
+        if not cursor:
+            return items
+    raise RuntimeError(f"{method_name} exceeded {_MAX_PAGES} pages")
+
+
+def _attached_pairs(messages: list[Any]) -> set[tuple[str, str]]:
+    pairs: set[tuple[str, str]] = set()
+    for message in messages:
+        metadata = getattr(message, "additional_kwargs", None)
+        attachments = metadata.get("mira_mcp_attachments", []) if isinstance(metadata, dict) else []
+        for item in attachments:
+            if isinstance(item, dict) and item.get("kind") == "mcp_resource":
+                pairs.add((str(item.get("server") or ""), str(item.get("uri") or "")))
+    return pairs
+
+
+async def _safe_close(stack: AsyncExitStack, server_name: str) -> None:
+    try:
+        await stack.aclose()
+    except BaseException:
+        get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
+
+
+def _join_error(current: str, addition: str) -> str:
+    return "; ".join(value for value in (current, addition) if value)
+
+
+def _concise_error(error: BaseException) -> str:
+    text = " ".join(str(error).split())
+    return f"{type(error).__name__}: {text}" if text else type(error).__name__
+
+
+__all__ = ["MCPManager"]

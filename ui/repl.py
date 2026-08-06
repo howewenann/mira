@@ -220,6 +220,8 @@ async def run_user_turn(
     model_name: str = "",
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
+    prepared_messages: list[Any] | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> TurnResult:
     """Route one submitted user prompt through planning or action mode."""
     live_usage_applied = False
@@ -310,7 +312,7 @@ async def run_user_turn(
     recorder = SessionRecorder(session, store, mode_name)
     visible_text = display_text if display_text is not None else text
     if record_user:
-        user_event = recorder.user_message(visible_text)
+        user_event = recorder.user_message(visible_text, attachments=attachments)
         update_title(session)
         recorder.save()
         user_renderer = getattr(renderer, "user_message", None)
@@ -321,6 +323,26 @@ async def run_user_turn(
                 planning=mode_name == "planning",
                 created_at=str(user_event.get("created_at") or ""),
             )
+    from langchain_core.messages import HumanMessage
+    from session.context import session_mcp_attachments
+
+    all_attachments = session_mcp_attachments(session)
+    invocation_messages = list(prepared_messages) if prepared_messages is not None else None
+    if invocation_messages is None:
+        invocation_messages = [
+            HumanMessage(
+                content=request_text,
+                additional_kwargs={"mira_mcp_attachments": all_attachments} if all_attachments else {},
+            )
+        ]
+    elif all_attachments:
+        for index, message in enumerate(invocation_messages):
+            if isinstance(message, HumanMessage):
+                extra = dict(message.additional_kwargs)
+                extra["mira_mcp_attachments"] = all_attachments
+                invocation_messages[index] = message.model_copy(update={"additional_kwargs": extra})
+                break
+
     wrapped_renderer = RecordingRenderer(renderer, recorder)
     poller = asyncio.create_task(poll_compactions(recorder, active_agent, thread_id))
 
@@ -344,6 +366,7 @@ async def run_user_turn(
                     and not using_planning_agent
                 ),
                 planning_stage=planning_stage,
+                messages=invocation_messages,
             )
     except asyncio.CancelledError:
         await sync_compaction_safely(recorder, active_agent, thread_id)
@@ -535,6 +558,14 @@ async def handle_command(
 
     if text == "/runtime":
         write_line(renderer, "/runtime is available in the Textual app", kind="warning")
+        return True
+
+    if text == "/mcp":
+        write_line(renderer, "/mcp is available in the Textual app", kind="warning")
+        return True
+
+    if text == "/prompts":
+        write_line(renderer, "/prompts is available in the Textual app", kind="warning")
         return True
 
     if text == "/compact":

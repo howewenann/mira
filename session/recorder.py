@@ -39,8 +39,16 @@ class SessionRecorder:
     def save(self) -> None:
         self.store.save(self.record)
 
-    def user_message(self, text: str) -> dict[str, Any]:
-        return append_event(self.record, {"type": "user", "mode": self.mode, "text": text})
+    def user_message(
+        self,
+        text: str,
+        *,
+        attachments: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        event: dict[str, Any] = {"type": "user", "mode": self.mode, "text": text}
+        if attachments:
+            event["attachments"] = attachments
+        return append_event(self.record, event)
 
     def text_delta(self, delta: str) -> dict[str, Any] | None:
         delta = normalize_response_delta(self._assistant_text, delta)

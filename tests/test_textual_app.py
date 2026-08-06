@@ -924,8 +924,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
                 await pilot.pause()
 
-                status = renderable_plain(app.query_one("#status", Static))
-                self.assertIn("In 45.3k Out 13.0k", status)
+                telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
+                self.assertIn("In 45.3k Out 13.0k", telemetry)
 
     async def test_turn_failure_shows_error_report_path(self) -> None:
         """Suppressed TUI turn errors should show the generated report path."""
@@ -2025,10 +2025,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            status = renderable_plain(app.query_one("#status", Static))
-            self.assertIn("pending", status)
-            self.assertIn("?/10.0k", status)
-            self.assertNotIn("14/10.0k", status)
+            telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
+            self.assertIn("pending", telemetry)
+            self.assertIn("?/10.0k", telemetry)
+            self.assertNotIn("14/10.0k", telemetry)
 
     async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
         """Leading blank assistant deltas should be ignored until real text arrives."""
@@ -2412,6 +2412,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             prompt = app.query_one(PromptBox)
             assistant_block = chat.query_one(".message.assistant", Static)
+            await wait_until(lambda: assistant_block.region.bottom <= chat.region.bottom)
 
             prompt.focus()
             await pilot.click(assistant_block, offset=(1, 1))
@@ -3293,6 +3294,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                     status = renderable_plain(app.query_one(StatusBar))
+                    telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
                     startup_blocks = [child for child in app.query_one(ChatLog).children if "startup" in child.classes]
                     command_blocks = [
                         child for child in app.query_one(ChatLog).children if "command" in child.classes
@@ -3338,7 +3340,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("model     lmstudio:visual-model", rendered)
             self.assertNotIn("model     loading", rendered)
             self.assertNotIn("- starting", rendered)
-            self.assertIn("lmstudio:visual-model", status)
+            self.assertIn("lmstudio:visual-model", telemetry)
             self.assertEqual(len(reload_info_blocks), 1)
             self.assertIn("runtime reloaded", renderable_plain(reload_info_blocks[0]))
             self.assertEqual(reload_command_blocks, [])
@@ -3575,9 +3577,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             task = asyncio.create_task(app.ask_approvals([interrupt]))
-            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 3)
 
-            buttons = list(app.query_one(PromptPanel).query(Button))
+            buttons = list(panel.query(Button))
             self.assertEqual(
                 [button.label.plain for button in buttons],
                 ["Approve (a)", "Edit (e)", "Reject (r)"],
@@ -3992,7 +3995,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     app._handle_settings_command()
                     await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                     panel = app.query_one(SettingsPanel)
-                    await wait_until(lambda: len(panel.query(Button)) >= 3)
+                    await wait_until(
+                        lambda: "settings-toggle-always_allow-edit_file"
+                        in {candidate.id for candidate in panel.query(Button)}
+                    )
                     panel.query_one("#settings-toggle-always_allow-edit_file", Button).press()
                     await pilot.pause()
 
@@ -4037,7 +4043,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(Button)) >= 3)
+                await wait_until(
+                    lambda: "settings-toggle-git-git_protection"
+                    in {candidate.id for candidate in panel.query(Button)}
+                )
                 panel.query_one("#settings-toggle-git-git_protection", Button).focus()
                 await pilot.press("n")
                 await pilot.pause()
@@ -4259,7 +4268,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 3)
+                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 4)
                 await pilot.pause()
 
                 labels = {
@@ -4267,7 +4276,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     for widget in panel.query(Static)
                     if renderable_plain(widget).strip()
                 }
-                system_header, inbuilt_header, custom_header = list(panel.query(SettingsHeaderRow))
+                system_header, inbuilt_header, custom_header, mcp_header = list(panel.query(SettingsHeaderRow))
 
                 for section_name, header, first_row in (
                     ("System Settings", system_header, labels["Git Protection"]),
@@ -4277,17 +4286,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(header.region.y, section.region.y + section.region.height)
                     self.assertEqual(first_row.region.y, header.region.y + header.region.height)
 
+                panel.query_one("#settings-tab-custom", Button).press()
+                await pilot.pause()
                 custom_section = labels["Custom Tools"]
                 custom_first_row = labels["project_status"]
                 self.assertEqual(custom_header.region.y, custom_section.region.y + custom_section.region.height)
                 self.assertEqual(custom_first_row.region.y, custom_header.region.y + custom_header.region.height)
 
-                enable_x = [
-                    header.query_one(".settings-column-label.enabled", Static).region.x
-                    for header in (system_header, inbuilt_header, custom_header)
-                ]
-                self.assertEqual(enable_x, [enable_x[0]] * 3)
+                self.assertEqual(
+                    renderable_plain(custom_header.query_one(".settings-column-label.plan", Static)),
+                    "plan access",
+                )
+                self.assertEqual(
+                    renderable_plain(mcp_header.query_one(".settings-column-label.plan", Static)),
+                    "plan access",
+                )
 
+                panel.query_one("#settings-tab-general", Button).press()
+                await pilot.pause()
                 execute_section = labels["Execute Environment"]
                 inbuilt_section = labels["Inbuilt Tools"]
                 last_system_row = labels["Maximum iterations"]
@@ -4300,7 +4316,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     last_inbuilt_row.region.y + last_inbuilt_row.region.height + 1,
                 )
                 self.assertEqual(run_commands.region.y, execute_section.region.y + execute_section.region.height)
-                self.assertGreater(custom_section.region.y, last_execute_row.region.y)
+                self.assertFalse(panel.query_one("#settings-custom-body").display)
+                self.assertTrue(panel.query_one("#settings-body").display)
 
     async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
         """Inbuilt tool enable buttons should save disabled state and lock approvals."""
@@ -6207,9 +6224,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             second_row_buttons = list(rows[1].query(Button))
             self.assertTrue(first_row_buttons[0].has_focus)
 
+            await pilot.pause(0.1)
             await pilot.press("down")
             await pilot.pause()
-            await wait_until(lambda: list(panel.query(Horizontal))[1].query(Button).first().has_focus)
+            await wait_until(lambda: panel.query_one("#prompt-choice-2", Button).has_focus)
             rows = list(panel.query(Horizontal))
             second_row_buttons = list(rows[1].query(Button))
             self.assertTrue(second_row_buttons[0].has_focus)
@@ -6517,8 +6535,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             create_task = asyncio.create_task(app.ask_create_git_repo("Initialize Git?"))
-            await pilot.pause()
-            buttons = list(app.query_one(PromptPanel).query(Button))
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 2)
+            buttons = list(panel.query(Button))
             self.assertEqual(
                 [button.label.plain for button in buttons],
                 ["Yes (y)", "No (n)"],
@@ -6529,8 +6548,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await asyncio.wait_for(create_task, timeout=2))
 
             continue_task = asyncio.create_task(app.ask_continue_without_git("Continue without Git?"))
-            await pilot.pause()
-            buttons = list(app.query_one(PromptPanel).query(Button))
+            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 2)
+            buttons = list(panel.query(Button))
             self.assertEqual(
                 [button.label.plain for button in buttons],
                 ["Continue (c)", "Exit (e)"],

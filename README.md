@@ -118,6 +118,8 @@ it only with a trusted local endpoint.
 | Compact older context | `/compact` |
 | Reload configuration and resources | `/reload` |
 | Repair unavailable custom tools | `/issues` |
+| Open MCP server status and controls | `/mcp` |
+| List reusable local and MCP prompts | `/prompts` |
 
 Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 `/skills`, and `/subagents`. Destructive cleanup commands require confirmation
@@ -156,6 +158,8 @@ MIRA loads project customization from `.mira/`:
 ```text
 .mira/
   settings.yml
+  mcp.json           # optional MCP transport configuration
+  prompts/           # top-level reusable Mustache prompt files
   memories/          # always-on Markdown context
   skills/            # DeepAgents SKILL.md folders
   subagents/         # Python SUBAGENTS definitions
@@ -166,6 +170,36 @@ MIRA loads project customization from `.mira/`:
 Project resources override built-in resources with the same name. Use
 `/memories`, `/skills`, `/subagents`, and `/tools` to inspect what is active.
 Run `/reload` after changing project resources.
+
+### MCP and reusable prompts
+
+MIRA reads optional MCP transport configuration only from `.mira/mcp.json`; it
+does not create the file. Both local stdio servers and remote Streamable HTTP
+endpoints require approval before first use. `Allow` lasts for the current MIRA
+process, `Deny` leaves the server enabled but unused for that process, and
+`Always allow` persists approval for a hash of the exact configuration. A
+configuration change therefore requires approval again. Server enablement and
+per-tool enable, approval, and Plan-access choices live in `/settings`.
+
+```json
+{
+  "mcpServers": {
+    "local": {"command": "python", "args": ["server.py"], "env": {}},
+    "docs": {"type": "http", "url": "https://example.com/mcp", "headers": {}}
+  }
+}
+```
+
+MCP tools use names such as `mcp__local__search`. Fixed text resources appear
+in `@` completion as `@mcp__<server>__<exact-uri>`; selecting one attaches its
+identity, and the agent reads it on demand. MCP prompts appear as
+`/mcp__<server>__<prompt>`. Any readable top-level UTF-8 file under
+`.mira/prompts/` becomes `/prompt__<filename-stem>` and uses Mustache variables
+as required positional arguments. Double-quote arguments containing spaces.
+
+Initial MCP support intentionally covers fixed text resources only. It does
+not support resource templates, resource completion, binary materialisation,
+subscriptions, or `listChanged`; local prompt discovery is not recursive.
 
 Standard LangChain `@tool` functions run inside MIRA, so their imports must be
 installed in MIRA's Python environment. A bad project tool file is isolated and

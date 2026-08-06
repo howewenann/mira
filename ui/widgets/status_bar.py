@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.table import Table
 from rich.text import Text
 from textual.widgets import Static
 
 
 class StatusBar(Static):
-    """One-line session and activity status."""
+    """Top operational session and activity status."""
 
     def set_state(
         self,
@@ -22,19 +23,45 @@ class StatusBar(Static):
         detail: str = "",
     ) -> None:
         """Update the status bar text."""
-        dashboard = dashboard or {}
         text = Text()
         append_part(text, "MIRA", "bold #d6fff6")
         append_part(text, mode)
         append_part(text, state.title())
-        append_part(text, short_model(model_name))
-        append_context(text, dashboard.get("context") if isinstance(dashboard, dict) else {})
-        append_part(text, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))
-        append_part(text, f"Turns {max(0, int(turns or 0))}")
-        append_part(text, duration_text(dashboard.get("duration_seconds", 0)))
         if detail:
             append_part(text, detail)
         self.update(text)
+
+
+class TelemetryBar(Static):
+    """Bottom passive telemetry projected from the same dashboard snapshot."""
+
+    def set_state(
+        self,
+        *,
+        model_name: str,
+        dashboard: dict[str, Any] | None = None,
+        turns: int = 0,
+    ) -> None:
+        self.update(telemetry_row(model_name, dashboard, turns))
+
+
+def telemetry_row(model_name: str, dashboard: dict[str, Any] | None, turns: int) -> Table:
+    """Build one full-width telemetry row with usage and time on the right."""
+    dashboard = dashboard or {}
+    left = Text()
+    append_part(left, short_model(model_name))
+    append_context(left, dashboard.get("context") if isinstance(dashboard, dict) else {})
+    append_part(left, f"Turns {max(0, int(turns or 0))}")
+
+    right = Text()
+    append_part(right, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))
+    append_part(right, duration_text(dashboard.get("duration_seconds", 0)))
+
+    row = Table.grid(expand=True, padding=0)
+    row.add_column(ratio=1, overflow="ellipsis")
+    row.add_column(justify="right", no_wrap=True)
+    row.add_row(left, right)
+    return row
 
 
 def append_part(text: Text, value: str, style: str = "#d7dee2") -> None:

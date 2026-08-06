@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from io import StringIO
 import unittest
 
-from ui.widgets.status_bar import context_bar, truncate
+from rich.console import Console
+
+from ui.widgets.status_bar import context_bar, telemetry_row, truncate
 
 
 def mojibake(text: str) -> str:
@@ -27,6 +30,24 @@ class StatusBarFormattingTests(unittest.TestCase):
 
         self.assertEqual(shortened, "alpha…")
         self.assertNotIn(mojibake("…"), shortened)
+
+    def test_usage_and_duration_are_right_aligned(self) -> None:
+        output = StringIO()
+        Console(file=output, width=80, force_terminal=False).print(
+            telemetry_row(
+                "model",
+                {
+                    "context": {"used_tokens": 100, "limit_tokens": 1000},
+                    "tokens": {"in": 12, "out": 3},
+                    "duration_seconds": 65,
+                },
+                1,
+            )
+        )
+
+        line = output.getvalue().rstrip("\n")
+        self.assertEqual(len(line), 80)
+        self.assertTrue(line.endswith("In 12 Out 3 | 01:05"))
 
 
 if __name__ == "__main__":

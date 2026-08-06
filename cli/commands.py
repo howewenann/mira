@@ -128,14 +128,19 @@ async def _run(
         raise typer.Exit(code=1)
 
     app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
-    from agent.resources.tool_failures import one_shot_warning
+    try:
+        from agent.resources.tool_failures import one_shot_warning
 
-    warning = one_shot_warning(app.get("tool_failures") or [])
-    if warning:
-        renderer.system_message(warning, kind="warning")
-    result = await _run_one_shot(app, prompt, rubric=invocation_rubric)
-    if invocation_rubric is not None and result.rubric_status != "satisfied":
-        raise typer.Exit(code=3)
+        warning = one_shot_warning(app.get("tool_failures") or [])
+        if warning:
+            renderer.system_message(warning, kind="warning")
+        result = await _run_one_shot(app, prompt, rubric=invocation_rubric)
+        if invocation_rubric is not None and result.rubric_status != "satisfied":
+            raise typer.Exit(code=3)
+    finally:
+        manager = app.get("mcp_manager")
+        if manager is not None:
+            await manager.shutdown()
 
 
 def _resolve_one_shot_inputs(
@@ -227,6 +232,13 @@ async def _run_one_shot(
     from langchain_core.exceptions import ContextOverflowError
     from config.settings import rubric_enabled, rubric_max_iterations
 
+    manager = app.get("mcp_manager")
+    prepared = None
+    if manager is not None:
+        if prompt.startswith("/mcp__"):
+            await manager.discover_prompts()
+        prepared = await manager.prompt_registry.resolve(prompt)
+    attachments = manager.attachments_from_text(prompt) if manager is not None else []
     request_text = with_resume_context(app["session"], prompt)
     settings = (app.get("config") or {}).get("settings")
     rubric_kwargs = {}
@@ -243,10 +255,27 @@ async def _run_one_shot(
             "include_rubric_state": True,
         }
     recorder = SessionRecorder(app["session"], app["store"], "action")
-    recorder.user_message(prompt)
+    recorder.user_message(prompt, attachments=attachments)
     update_title(app["session"])
     recorder.save()
     renderer = RecordingRenderer(app["renderer"], recorder)
+    from langchain_core.messages import HumanMessage
+    from session.context import session_mcp_attachments
+
+    all_attachments = session_mcp_attachments(app["session"])
+    messages = list(prepared.messages) if prepared is not None else [
+        HumanMessage(
+            content=request_text,
+            additional_kwargs={"mira_mcp_attachments": all_attachments} if all_attachments else {},
+        )
+    ]
+    if prepared is not None and all_attachments:
+        for index, message in enumerate(messages):
+            if isinstance(message, HumanMessage):
+                extra = dict(message.additional_kwargs)
+                extra["mira_mcp_attachments"] = all_attachments
+                messages[index] = message.model_copy(update={"additional_kwargs": extra})
+                break
 
     def apply_deepagents_context_usage(usage: dict[str, Any]) -> None:
         apply_context_usage(
@@ -260,12 +289,15 @@ async def _run_one_shot(
 
     try:
         with context_usage_scope(apply_deepagents_context_usage):
+            turn_kwargs = dict(rubric_kwargs)
+            if manager is not None:
+                turn_kwargs["messages"] = messages
             result = await run_turn(
                 agent=app["agent"],
                 text=request_text,
                 renderer=renderer,
                 thread_id=app["session"]["id"],
-                **rubric_kwargs,
+                **turn_kwargs,
             )
     except ContextOverflowError as exc:
         with suppress(Exception):
@@ -337,6 +369,7 @@ async def _bootstrap(
 ) -> dict[str, Any]:
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
+    from agent.mcp import MCPManager
     from agent.llm import get_llm, get_model_name
     from config.metadata import ModelMetadata, infer_model_metadata
     from config.runtime import LaunchOptions, load_effective_config
@@ -356,14 +389,32 @@ async def _bootstrap(
     record = store.load(session, resume=resume, workspace=workspace)
     mark_resume_context_pending(record, resumed=bool(session or resume))
     checkpointer = make_checkpointer()
+    mcp_manager = getattr(renderer, "mcp_manager", None)
+    if mcp_manager is None:
+        mcp_manager = MCPManager(workspace)
+        setattr(renderer, "mcp_manager", mcp_manager)
+        approval = getattr(renderer, "approve_mcp_server", None)
+        await mcp_manager.initialize(approval if callable(approval) else None)
     startup_progress(renderer, "loading model metadata...")
     inspect_model = get_llm(config, metadata=ModelMetadata())
     metadata = await infer_model_metadata(config, model=inspect_model)
     config["llm_inferred_context_tokens"] = metadata.context_tokens
     config["llm_context_source"] = metadata.context_source
     startup_progress(renderer, "building agents...")
-    agent = build_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
-    plan_agent = build_plan_agent(config=config, workspace=workspace, checkpointer=checkpointer, metadata=metadata)
+    agent = build_agent(
+        config=config,
+        workspace=workspace,
+        checkpointer=checkpointer,
+        metadata=metadata,
+        mcp_manager=mcp_manager,
+    )
+    plan_agent = build_plan_agent(
+        config=config,
+        workspace=workspace,
+        checkpointer=checkpointer,
+        metadata=metadata,
+        mcp_manager=mcp_manager,
+    )
     model_name = get_model_name(config)
     context_limit_tokens = metadata.context_tokens
     context_limit_source = metadata.context_source
@@ -387,6 +438,8 @@ async def _bootstrap(
         "workspace": workspace,
         "checkpointer": checkpointer,
         "tool_failures": list(getattr(agent, "mira_tool_failures", [])),
+        "mcp_manager": mcp_manager,
+        "mcp_config_issue": mcp_manager.config_issue,
     }
 
 

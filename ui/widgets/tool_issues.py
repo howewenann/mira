@@ -37,15 +37,16 @@ class ToolIssuesScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, failures: list[ToolLoadFailure]) -> None:
+    def __init__(self, failures: list[ToolLoadFailure], config_issues: list[object] | None = None) -> None:
         super().__init__()
         self.failures = list(failures)
+        self.config_issues = list(config_issues or [])
         self.installing = False
         self.install_details = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="tool-issues-dialog"):
-            yield Static("CUSTOM TOOLS UNAVAILABLE", id="tool-issues-title")
+            yield Static("ISSUES", id="tool-issues-title")
             with VerticalScroll(id="tool-issues-scroll"):
                 yield Static(self.summary_text(), id="tool-issues-summary")
             yield Static(
@@ -63,10 +64,19 @@ class ToolIssuesScreen(ModalScreen[None]):
     def on_mount(self) -> None:
         self.query_one("#tool-issues-loading", LoadingIndicator).display = False
         self._sync_controls()
+        repairable = bool(missing_requirements(self.failures))
+        for selector in (
+            "#tool-issues-install-target",
+            "#tool-issues-package-label",
+            "#tool-issues-packages",
+            "#tool-issues-install",
+        ):
+            self.query_one(selector).display = repairable
         self.call_after_refresh(self._focus_initial_control)
 
-    def update_failures(self, failures: list[ToolLoadFailure]) -> None:
+    def update_failures(self, failures: list[ToolLoadFailure], config_issues: list[object] | None = None) -> None:
         self.failures = list(failures)
+        self.config_issues = list(config_issues or [])
         self.install_details = ""
         if self.is_mounted:
             self.query_one("#tool-issues-summary", Static).update(self.summary_text())
@@ -78,6 +88,13 @@ class ToolIssuesScreen(ModalScreen[None]):
         repairable = [failure for failure in self.failures if failure.missing_module]
         other = [failure for failure in self.failures if not failure.missing_module]
         sections: list[str] = []
+        if self.config_issues:
+            sections.append("MCP configuration:\n")
+            sections.extend(
+                f"{getattr(issue, 'display_path', '.mira/mcp.json')}\n"
+                f"  {getattr(issue, 'exception_type', 'MCP configuration')}: {getattr(issue, 'message', issue)}\n"
+                for issue in self.config_issues
+            )
         if repairable:
             noun = "file is" if len(repairable) == 1 else "files are"
             sections.append(f"{len(repairable)} {noun} missing packages:\n")
@@ -86,13 +103,14 @@ class ToolIssuesScreen(ModalScreen[None]):
             noun = "file has" if len(other) == 1 else "files have"
             sections.append(f"{len(other)} {noun} another error:\n")
             sections.extend(failure_text(failure) for failure in other)
-        sections.append(
-            "@tool runs inside MIRA.\n\n"
-            "To use the configured project environment instead, use\n"
-            "@project_tool and place project-only imports inside the\n"
-            "function.\n\n"
-            "Example:\n.mira/examples/tools/project_runtime_tool.py"
-        )
+        if self.failures:
+            sections.append(
+                "@tool runs inside MIRA.\n\n"
+                "To use the configured project environment instead, use\n"
+                "@project_tool and place project-only imports inside the\n"
+                "function.\n\n"
+                "Example:\n.mira/examples/tools/project_runtime_tool.py"
+            )
         if self.install_details:
             sections.append(self.install_details)
         return "\n".join(sections).strip()

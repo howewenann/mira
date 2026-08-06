@@ -220,6 +220,15 @@ class Renderer:
                     decisions.append({"type": "approve"})
         return decisions
 
+    async def approve_mcp_server(self, state: Any, preview: str) -> str:
+        """Use the normal terminal approval interaction for one MCP server."""
+        self.transcript.block("approval", f"MCP server: {state.name}\n{preview}")
+        answer = await self._choice(
+            "Allow this MCP server?",
+            [("a", "Allow"), ("d", "Deny"), ("l", "Always allow")],
+        )
+        return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
+
     async def ask_user(self, interrupt: Any) -> str:
         """Ask the user for a concrete next-step choice."""
         request = ask_user_request(interrupt)

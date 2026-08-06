@@ -23,6 +23,8 @@ COMMAND_HELP_SECTIONS = (
             ("/skills", "list loaded skills and replacements"),
             ("/subagents", "list loaded subagents and replacements"),
             ("/issues", "repair unavailable project tool files in the TUI"),
+            ("/prompts", "list local and MCP prompt commands"),
+            ("/mcp", "open MCP server status and controls in the TUI"),
         ),
     ),
     (
