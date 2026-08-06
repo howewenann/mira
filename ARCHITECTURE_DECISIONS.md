@@ -783,8 +783,11 @@ Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result
 so the UI can show context pressure. MIRA does not run a parallel dashboard
-counter or compute provider prompt tokens. Automatic and agent-selected
-eligibility remain DeepAgents decisions. The explicit TUI `/compact` command is
+counter or compute provider prompt tokens. Context pressure belongs to the top
+operational status row; model identity, cumulative token totals, turn count,
+and elapsed time remain in the bottom passive telemetry row. Automatic and
+agent-selected eligibility remain DeepAgents decisions. The explicit TUI
+`/compact` command is
 the narrow exception: it reuses the attached summarization middleware to apply
 the normal retention policy immediately, then writes the same
 `_summarization_event` consumed by subsequent DeepAgents model calls. Provider
@@ -844,6 +847,12 @@ policy-filtered tool views when the existing agent-pair pathway rebuilds.
 Each server runtime has one long-lived owner task and command queue. That task
 both enters and exits the adapter session context; UI workers request lifecycle
 transitions but never directly close SDK task groups or cancellation scopes.
+Start and restart discover every capability advertised by the initialized MCP
+session before publishing `Available` or `Partially available`. An absent
+tools, prompts, or resources capability is cached as an empty result without an
+invalid RPC and makes the overall projection partially available. A failed
+advertised capability has the same partial result with its concrete error.
+Panel expansion reads those completed caches and only changes presentation.
 Remote HTTP OAuth is inferred only after an approved server's ordinary
 connection returns a valid MCP OAuth challenge or its protected-resource and
 authorization-server metadata can be discovered. User JSON has no OAuth field.
@@ -856,9 +865,11 @@ in the MCP panel and never becomes an Issues entry.
 mode. Starting MCP there would duplicate child processes, discovery, and
 mutable health state. Manager-owned lifecycle methods also ensure Settings,
 the MCP panel, autocomplete, reload, and shutdown observe and mutate the same
-server registry. Persisted user-event attachment metadata is projected into
-LangGraph message metadata, which lets the implicit resource reader enforce
-the attachment boundary without a second session allowlist.
+server registry. Eager advertised-capability discovery prevents a panel action
+from changing server health and gives autocomplete, prompts, and attachments
+the same settled startup view. Persisted user-event attachment metadata is
+projected into LangGraph message metadata, which lets the implicit resource
+reader enforce the attachment boundary without a second session allowlist.
 OAuth tokens and dynamically registered client information are user-level
 state under `~/.mira/_state/mcp-tokens/`, separate from project configuration,
 settings, sessions, and diagnostics. V1 stores that state locally in plaintext.

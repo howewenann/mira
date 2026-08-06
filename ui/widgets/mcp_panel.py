@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from typing import Any
 
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -26,6 +28,7 @@ class MCPPanelScreen(ModalScreen[None]):
         self.manager = manager
         self.expanded: set[str] = set()
         self._spinner = 0
+        self._refresh_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-dialog"):
@@ -38,7 +41,7 @@ class MCPPanelScreen(ModalScreen[None]):
 
     def _server_widgets(self, state: Any) -> ComposeResult:
         expanded = state.name in self.expanded
-        marker = "−" if expanded else "+"
+        marker = "-" if expanded else "+"
         status = status_badge(state.status, spinner=self._spinner)
         with Vertical(
             id=f"mcp-card-{safe_id(state.name)}",
@@ -46,7 +49,7 @@ class MCPPanelScreen(ModalScreen[None]):
         ):
             with Horizontal(classes="mcp-server-top"):
                 yield Button(
-                    f"{marker} {state.name}",
+                    Text(f"{marker} {state.name} [{state.transport.upper()}]"),
                     id=f"mcp-header-{safe_id(state.name)}",
                     classes=f"mcp-server-header {status_class(state.status)}",
                     name=state.name,
@@ -56,8 +59,7 @@ class MCPPanelScreen(ModalScreen[None]):
                     classes=f"mcp-status-badge {status_class(state.status)}",
                     markup=False,
                 )
-            yield Static(f"Transport  {state.transport.upper()}", classes="mcp-transport", markup=False)
-            yield Static(capability_counts(state), classes="mcp-counts", markup=False)
+            yield Static(capability_summary(state), classes="mcp-counts", markup=False)
             with Horizontal(classes="mcp-controls"):
                 persisted_login = bool(
                     state.transport == "http"
@@ -93,8 +95,11 @@ class MCPPanelScreen(ModalScreen[None]):
             self.expanded.remove(name)
         else:
             self.expanded.add(name)
-            self.run_worker(self._discover_and_refresh(name), name=f"mcp-discover-{safe_id(name)}", exclusive=False)
-        self.run_worker(self.refresh_from_manager(), name="mcp-panel-refresh", exclusive=False)
+        self.run_worker(
+            self.refresh_from_manager(preferred_focus_id=event.button.id),
+            name="mcp-panel-refresh",
+            exclusive=False,
+        )
 
     @on(Button.Pressed, ".mcp-control")
     def control_server(self, event: Button.Pressed) -> None:
@@ -121,56 +126,108 @@ class MCPPanelScreen(ModalScreen[None]):
             await self.manager.forget_server_login(name)
         await self.refresh_from_manager()
 
-    async def _discover_and_refresh(self, name: str) -> None:
-        await self.manager.discover_prompts(name)
-        await self.manager.discover_resources(name)
-        await self.refresh_from_manager()
-
-    async def refresh_from_manager(self) -> None:
-        if not self.is_mounted:
-            return
-        focused_id = self.focused.id if self.focused is not None else None
-        try:
-            scroll_y = self.query_one("#mcp-scroll", VerticalScroll).scroll_y
-        except NoMatches:
-            return
-        await self.recompose()
-        if not self.is_mounted:
-            return
-        restored_focus = False
-        if focused_id:
+    async def refresh_from_manager(self, preferred_focus_id: str | None = None) -> None:
+        async with self._refresh_lock:
+            if not self.is_mounted:
+                return
+            focused_id = preferred_focus_id or (self.focused.id if self.focused is not None else None)
             try:
-                self.query_one(f"#{focused_id}").focus()
-                restored_focus = True
+                scroll_y = self.query_one("#mcp-scroll", VerticalScroll).scroll_y
             except NoMatches:
-                pass
-        if not restored_focus:
-            self._focus_first_header()
-        try:
-            scroll = self.query_one("#mcp-scroll", VerticalScroll)
-        except NoMatches:
-            return
-        scroll.scroll_to(y=scroll_y, animate=False, force=True)
+                return
+            await self.recompose()
+            if not self.is_mounted:
+                return
+            restored = asyncio.get_running_loop().create_future()
+
+            def restore_presentation() -> None:
+                try:
+                    restored_focus = False
+                    if focused_id:
+                        try:
+                            self.query_one(f"#{focused_id}").focus(scroll_visible=False)
+                            restored_focus = True
+                        except NoMatches:
+                            pass
+                    if not restored_focus:
+                        self._focus_first_header()
+                    scroll = self.query_one("#mcp-scroll", VerticalScroll)
+                    scroll.scroll_to(
+                        y=scroll_y,
+                        animate=False,
+                        force=True,
+                        immediate=True,
+                    )
+                except NoMatches:
+                    pass
+                finally:
+                    if not restored.done():
+                        restored.set_result(None)
+
+            if self.call_after_refresh(restore_presentation):
+                await restored
 
     def _focus_first_header(self) -> None:
         headers = list(self.query(".mcp-server-header"))
         if headers:
-            headers[0].focus()
+            headers[0].focus(scroll_visible=False)
 
     def _tick(self) -> None:
         if not any(state.transient for state in self.manager.servers.values()):
             return
         self._spinner += 1
-        self.run_worker(self.refresh_from_manager(), name="mcp-panel-spinner", exclusive=True)
+        for state in self.manager.servers.values():
+            if not state.transient:
+                continue
+            server_id = safe_id(state.name)
+            state_class = status_class(state.status)
+            try:
+                card = self.query_one(f"#mcp-card-{server_id}")
+                header = self.query_one(f"#mcp-header-{server_id}", Button)
+                badge = card.query_one(".mcp-status-badge", Static)
+            except NoMatches:
+                continue
+            card.set_classes(f"mcp-server-card {state_class}")
+            header.set_classes(f"mcp-server-header {state_class}")
+            badge.set_classes(f"mcp-status-badge {state_class}")
+            badge.update(status_badge(state.status, spinner=self._spinner))
+            for control in card.query(".mcp-control"):
+                control.disabled = True
 
     def action_close(self) -> None:
         self.dismiss()
 
 
-def capability_counts(state: Any) -> str:
-    prompts = "—" if state.prompts is None else str(len(state.prompts))
-    resources = "—" if state.resources is None else str(len(state.resources))
-    return f"Tools  {len(state.tools)}    Prompts  {prompts}    Resources  {resources}"
+def capability_counts(state: Any) -> tuple[tuple[str, str], ...]:
+    prompts = "-" if state.prompts is None else str(len(state.prompts))
+    resources = "-" if state.resources is None else str(len(state.resources))
+    return (
+        ("Tools", str(len(state.tools))),
+        ("Prompts", prompts),
+        ("Resources", resources),
+    )
+
+
+def capability_metric(label: str, count: str) -> Text:
+    label_colour = {
+        "Tools": "#78d5cf",
+        "Prompts": "#8fb9e8",
+        "Resources": "#c7a0e8",
+    }[label]
+    metric = Text()
+    metric.append(label, style=label_colour)
+    metric.append("  ")
+    metric.append(count, style="bold #eef7f8")
+    return metric
+
+
+def capability_summary(state: Any) -> Text:
+    summary = Text()
+    for index, (label, count) in enumerate(capability_counts(state)):
+        if index:
+            summary.append("   ·   ", style="#6f8389")
+        summary.append_text(capability_metric(label, count))
+    return summary
 
 
 def controls_for(status: str, *, persisted_login: bool = False) -> tuple[str, ...]:
@@ -179,7 +236,7 @@ def controls_for(status: str, *, persisted_login: bool = False) -> tuple[str, ..
     if status in {"Login required", "Authenticating"}:
         controls = ("Login", "Disable")
     else:
-        controls = ("Disable", "Restart")
+        controls = ("Restart", "Disable")
     return (*controls, "Forget login") if persisted_login else controls
 
 
@@ -195,15 +252,9 @@ def status_class(status: str) -> str:
 
 
 def status_badge(status: str, *, spinner: int = 0) -> str:
-    symbol = {
-        "Available": "✓",
-        "Partially available": "!",
-        "Approval required": "!",
-        "Login required": "!",
-        "Failed": "x",
-        "Disabled": "–",
-    }.get(status, SPINNER_FRAMES[spinner % len(SPINNER_FRAMES)])
-    return f"{symbol} {status}"
+    if status in {"Authenticating", "Starting", "Restarting", "Stopping"}:
+        return f"{SPINNER_FRAMES[spinner % len(SPINNER_FRAMES)]} {status}"
+    return "Partial" if status == "Partially available" else status
 
 
 def mcp_summary_symbol(states: Iterable[Any], *, spinner: int = 0) -> str:
@@ -240,7 +291,7 @@ def _discovery_content(lines: list[str], values: list[Any] | None, noun: str) ->
     if lines:
         return "\n".join(lines)
     if values is None:
-        return "  Not loaded — expand this server to discover them"
+        return "  Not loaded"
     return f"  No {noun}"
 
 

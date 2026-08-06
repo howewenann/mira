@@ -29,11 +29,12 @@ class StatusBar(Static):
         append_part(text, state.title())
         if detail:
             append_part(text, detail)
+        append_context(text, dashboard.get("context") if isinstance(dashboard, dict) else {})
         self.update(text)
 
 
 class TelemetryBar(Static):
-    """Bottom passive telemetry projected from the same dashboard snapshot."""
+    """Bottom passive session telemetry projected from the dashboard snapshot."""
 
     def set_state(
         self,
@@ -50,7 +51,6 @@ def telemetry_row(model_name: str, dashboard: dict[str, Any] | None, turns: int)
     dashboard = dashboard or {}
     left = Text()
     append_part(left, short_model(model_name))
-    append_context(left, dashboard.get("context") if isinstance(dashboard, dict) else {})
 
     right = Text()
     append_part(right, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))

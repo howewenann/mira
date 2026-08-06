@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.mcp.models import MCPConfigIssue, MCPServerState
+from agent.resources.paths import MCP_DIR, PROJECT_DIR
 
 MCP_FILE = "mcp.json"
 
@@ -22,7 +23,7 @@ class MCPConfiguration:
 
 
 def mcp_path(workspace: Path) -> Path:
-    return workspace.expanduser().resolve() / ".mira" / MCP_FILE
+    return workspace.expanduser().resolve() / PROJECT_DIR / MCP_DIR / MCP_FILE
 
 
 def load_mcp_configuration(workspace: Path) -> MCPConfiguration:

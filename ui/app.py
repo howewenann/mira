@@ -2648,7 +2648,7 @@ class MiraApp(App[None]):
             self.notify("\n".join(prompt_warnings), title="Local prompts", severity="warning")
         if self.mcp_config_issues:
             self.notify(
-                "Could not parse .mira/mcp.json. Open Issues or run /issues.",
+                "Could not parse .mira/mcp/mcp.json. Open Issues or run /issues.",
                 title="MCP configuration unavailable",
                 severity="warning",
             )

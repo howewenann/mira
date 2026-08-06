@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -27,6 +28,12 @@ from agent.resources import (
     execute_env,
     wrap_execute_command,
 )
+from agent.resources.project_setup import (
+    EMPTY_MCP_CONFIGURATION,
+    EXAMPLE_MCP_CONFIGURATION,
+    MCP_CONFIGURATION_SCHEMA,
+    ensure_project_examples,
+)
 from ui import repl
 
 
@@ -44,11 +51,22 @@ class ResourceDiscoveryTests(unittest.TestCase):
             build_resources(workspace)
 
             self.assertEqual(memory.read_text(encoding="utf-8"), "custom memory")
-            self.assertEqual(
-                (workspace / ".mira" / "mcp.json").read_text(encoding="utf-8"),
-                '{"mcpServers": {}}',
-            )
-            self.assertTrue((workspace / ".mira" / "README.md").exists())
+            mcp_dir = workspace / ".mira" / "mcp"
+            expected_files = {
+                "mcp.json": EMPTY_MCP_CONFIGURATION,
+                "example.json": EXAMPLE_MCP_CONFIGURATION,
+                "schema.json": MCP_CONFIGURATION_SCHEMA,
+            }
+            for name, expected in expected_files.items():
+                with self.subTest(name=name):
+                    generated = (mcp_dir / name).read_text(encoding="utf-8")
+                    self.assertEqual(generated, expected)
+                    self.assertTrue(generated.endswith("\n"))
+                    self.assertIsInstance(json.loads(generated), dict)
+            self.assertFalse((workspace / ".mira" / "mcp.json").exists())
+            project_readme = (workspace / ".mira" / "README.md").read_text(encoding="utf-8")
+            self.assertIn("`mcp/mcp.json`: active MCP configuration", project_readme)
+            self.assertIn("Run `/reload` after changes", project_readme)
             self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
             self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
             self.assertEqual(list((workspace / ".mira" / "tools").glob("*.py")), [])
@@ -69,18 +87,34 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 ),
             )
 
-    def test_launch_does_not_overwrite_existing_mcp_configuration(self) -> None:
-        """An existing MCP configuration should remain byte-for-byte unchanged."""
+    def test_mcp_bootstrap_preserves_each_existing_file_and_fills_missing_companions(self) -> None:
+        """Each MCP file should be preserved independently while missing files appear."""
+        filenames = ("mcp.json", "example.json", "schema.json")
+        for existing_name in filenames:
+            with self.subTest(existing_name=existing_name), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                mcp_dir = workspace / ".mira" / "mcp"
+                mcp_dir.mkdir(parents=True)
+                existing_path = mcp_dir / existing_name
+                existing = f"custom {existing_name}\n"
+                existing_path.write_text(existing, encoding="utf-8")
+
+                ensure_project_examples(workspace)
+
+                self.assertEqual(existing_path.read_text(encoding="utf-8"), existing)
+                self.assertTrue(all((mcp_dir / name).exists() for name in filenames))
+
+    def test_repeated_bootstrap_does_not_modify_existing_mcp_files(self) -> None:
+        """Re-running bootstrap should leave all three MCP files byte-for-byte unchanged."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            config_path = workspace / ".mira" / "mcp.json"
-            config_path.parent.mkdir(parents=True)
-            existing = '{\n  "mcpServers": {"custom": {"command": "serve"}}\n}\n'
-            config_path.write_text(existing, encoding="utf-8")
+            ensure_project_examples(workspace)
+            mcp_dir = workspace / ".mira" / "mcp"
+            before = {path.name: path.read_bytes() for path in mcp_dir.iterdir()}
 
-            build_resources(workspace)
+            ensure_project_examples(workspace)
 
-            self.assertEqual(config_path.read_text(encoding="utf-8"), existing)
+            self.assertEqual({path.name: path.read_bytes() for path in mcp_dir.iterdir()}, before)
 
     def test_default_memories_load_without_project_memory(self) -> None:
         """Both bundled memories should load when project examples are skipped."""

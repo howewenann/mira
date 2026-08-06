@@ -182,8 +182,11 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test() as pilot:
                 button = app.query_one("#tool-issues-button", Button)
+                mcp_button = app.query_one("#mcp-status-button", Button)
                 self.assertTrue(button.display)
                 self.assertEqual(str(button.label), "Issues 3")
+                self.assertEqual(button.styles.width, mcp_button.styles.width)
+                self.assertEqual(button.styles.min_width, mcp_button.styles.min_width)
                 await pilot.click("#tool-issues-button")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, ToolIssuesScreen)

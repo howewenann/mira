@@ -27,7 +27,7 @@ class MCPConfigIssue:
     """One whole-file MCP configuration problem shown through Issues."""
 
     message: str
-    display_path: str = ".mira/mcp.json"
+    display_path: str = ".mira/mcp/mcp.json"
     exception_type: str = "MCP configuration"
     missing_module: str = ""
     line_number: int | None = None

@@ -93,7 +93,7 @@ class ToolIssuesScreen(ModalScreen[None]):
         if self.config_issues:
             sections.append("MCP configuration:\n")
             sections.extend(
-                f"{getattr(issue, 'display_path', '.mira/mcp.json')}\n"
+                f"{getattr(issue, 'display_path', '.mira/mcp/mcp.json')}\n"
                 f"  {getattr(issue, 'exception_type', 'MCP configuration')}: {getattr(issue, 'message', issue)}\n"
                 for issue in self.config_issues
             )

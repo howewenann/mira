@@ -7,6 +7,7 @@ from pathlib import Path
 DEFAULT_ROUTE = "/mira-defaults"
 PROJECT_DIR = ".mira"
 
+MCP_DIR = "mcp"
 MEMORIES_DIR = "memories"
 SKILLS_DIR = "skills"
 SUBAGENTS_DIR = "subagents"

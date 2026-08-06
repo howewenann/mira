@@ -4,24 +4,35 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent.resources.paths import MEMORIES_DIR, PROJECT_DIR, SKILLS_DIR, SUBAGENTS_DIR, TOOLS_DIR
+from agent.resources.paths import (
+    MCP_DIR,
+    MEMORIES_DIR,
+    PROJECT_DIR,
+    SKILLS_DIR,
+    SUBAGENTS_DIR,
+    TOOLS_DIR,
+)
 
 
 def ensure_project_examples(workspace: Path) -> None:
     mira_dir = workspace / PROJECT_DIR
+    mcp_dir = mira_dir / MCP_DIR
     memories_dir = mira_dir / MEMORIES_DIR
     skills_dir = mira_dir / SKILLS_DIR / "example-skill"
     subagents_dir = mira_dir / SUBAGENTS_DIR
     tools_dir = mira_dir / TOOLS_DIR
     tool_examples_dir = mira_dir / "examples" / TOOLS_DIR
 
+    mcp_dir.mkdir(parents=True, exist_ok=True)
     memories_dir.mkdir(parents=True, exist_ok=True)
     skills_dir.mkdir(parents=True, exist_ok=True)
     subagents_dir.mkdir(parents=True, exist_ok=True)
     tools_dir.mkdir(parents=True, exist_ok=True)
     tool_examples_dir.mkdir(parents=True, exist_ok=True)
 
-    write_example(mira_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
+    write_example(mcp_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
+    write_example(mcp_dir / "example.json", EXAMPLE_MCP_CONFIGURATION)
+    write_example(mcp_dir / "schema.json", MCP_CONFIGURATION_SCHEMA)
     write_example(mira_dir / "README.md", PROJECT_README)
     write_example(memories_dir / "AGENTS.md", EXAMPLE_MEMORY)
     write_example(skills_dir / "SKILL.md", EXAMPLE_SKILL)
@@ -36,7 +47,116 @@ def write_example(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-EMPTY_MCP_CONFIGURATION = '{"mcpServers": {}}'
+EMPTY_MCP_CONFIGURATION = '''{
+  "$schema": "./schema.json",
+  "mcpServers": {}
+}
+'''
+
+
+EXAMPLE_MCP_CONFIGURATION = '''{
+  "$schema": "./schema.json",
+  "mcpServers": {
+    "local-server": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"],
+      "env": {}
+    },
+    "remote-server": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {}
+    }
+  }
+}
+'''
+
+
+MCP_CONFIGURATION_SCHEMA = '''{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MIRA MCP configuration",
+  "description": "The supported configuration format for MCP servers loaded by MIRA.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "A relative or absolute URI for this JSON Schema."
+    },
+    "mcpServers": {
+      "type": "object",
+      "description": "MCP servers keyed by the non-empty name shown in MIRA.",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "title": "stdio server",
+            "description": "A local MCP server launched as a subprocess.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "stdio",
+                "description": "The optional local subprocess transport type."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The executable used to launch the server."
+              },
+              "args": {
+                "type": "array",
+                "description": "Arguments passed to the server command.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables passed to the server process.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+          },
+          {
+            "title": "HTTP server",
+            "description": "A remote MCP server reached over Streamable HTTP.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "const": "http",
+                "description": "The required remote HTTP transport type."
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The remote MCP endpoint URL."
+              },
+              "headers": {
+                "type": "object",
+                "description": "Static HTTP headers sent with MCP requests.",
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": ["type", "url"],
+            "additionalProperties": false
+          }
+        ]
+      }
+    }
+  },
+  "required": ["mcpServers"],
+  "additionalProperties": false
+}
+'''
 
 
 PROJECT_README = """# MIRA Project Resources
@@ -53,6 +173,8 @@ MIRA loads project resources from this folder on top of its defaults.
 - `tools/*.py`: active Python tool files. Standard LangChain `@tool` runs in
   MIRA, while `mira_tool_api.project_tool` runs its function body in the
   configured project Execute Environment.
+- `mcp/mcp.json`: active MCP configuration. `mcp/example.json` is inert, and
+  `mcp/schema.json` documents the supported keys. Run `/reload` after changes.
 - `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is
   never scanned as active resources.
   Files can also define `get_tools(project_backend)` for tools that need

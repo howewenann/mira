@@ -2025,10 +2025,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
+            status = renderable_plain(app.query_one(StatusBar))
             telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
-            self.assertIn("pending", telemetry)
-            self.assertIn("?/10.0k", telemetry)
-            self.assertNotIn("14/10.0k", telemetry)
+            self.assertIn("pending", status)
+            self.assertIn("?/10.0k", status)
+            self.assertNotIn("14/10.0k", status)
+            self.assertNotIn("Ctx", telemetry)
 
     async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
         """Leading blank assistant deltas should be ignored until real text arrives."""

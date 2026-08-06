@@ -1327,7 +1327,7 @@ Observed 2026-08-04 against LM Studio in a disposable workspace:
 ## Standards-Compliant MCP OAuth
 
 Use a disposable workspace and manually add Linear's remote endpoint to
-`.mira/mcp.json` as an ordinary HTTP server with no `auth` field. Keep a normal
+`.mira/mcp/mcp.json` as an ordinary HTTP server with no `auth` field. Keep a normal
 unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
 
 1. Launch the TUI and approve the configured OAuth server. Expected: it becomes
@@ -1342,11 +1342,21 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    `~/.mira/_state/mcp-tokens/` is reused or refreshed without opening a browser.
    A one-shot invocation also never opens a browser or waits for a callback.
 4. Select `Forget login`. Expected: only this server stops, only its token
-   directory is removed, `.mira/mcp.json` is unchanged, and the enabled server
+   directory is removed, `.mira/mcp/mcp.json` is unchanged, and the enabled server
    returns to `Login required`; a disabled server remains disabled.
 5. Configure at least two available remote servers, open MCP, and restart one.
-   Expected: each server uses a vertically structured card with separate status,
-   transport, counts, and action rows. Only the selected card transitions; it
-   returns to Available without `CancelledError`, while every other server keeps
-   its session, capabilities, and status. The MCP and Issues title bars use the
-   same `x` close style as Settings.
+   Expected: each server card has a name/transport/status header, three separate
+   count cells, and a right-aligned action row. Only the selected card
+   transitions; it returns to Available without `CancelledError`, while every
+   other server keeps its session, capabilities, and status. The MCP and Issues
+   title bars use the same `x` close style as Settings.
+6. Restart MIRA with one server that advertises prompts and resources, and one
+   that advertises neither. Expected: each server remains Starting until its
+   advertised discovery completes. Counts and final health are already settled
+   before opening or expanding MCP; unadvertised capabilities show zero and the
+   incomplete server is already Partially available.
+7. Scroll to a lower server and repeatedly expand and collapse it while another
+   server is starting or restarting. Expected: no network discovery occurs,
+   health, counts, errors, and registries do not change, and the clicked header
+   retains focus and the exact scroll position. Selecting Restart then refreshes
+   all advertised capabilities for only that server.

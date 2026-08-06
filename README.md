@@ -158,7 +158,10 @@ MIRA loads project customization from `.mira/`:
 ```text
 .mira/
   settings.yml
-  mcp.json           # optional MCP transport configuration
+  mcp/
+    mcp.json         # active MCP configuration
+    example.json     # inert stdio and HTTP examples
+    schema.json      # supported configuration contract
   prompts/           # top-level reusable Mustache prompt files
   memories/          # always-on Markdown context
   skills/            # DeepAgents SKILL.md folders
@@ -173,30 +176,25 @@ Run `/reload` after changing project resources.
 
 ### MCP and reusable prompts
 
-MIRA reads optional MCP transport configuration only from `.mira/mcp.json`; it
-does not create the file. Both local stdio servers and remote Streamable HTTP
-endpoints require approval before first use. `Allow` lasts for the current MIRA
-process, `Deny` leaves the server enabled but unused for that process, and
-`Always allow` persists approval for a hash of the exact configuration. A
-configuration change therefore requires approval again. Server enablement and
-per-tool enable, approval, and Plan-access choices live in `/settings`.
+MIRA bootstraps an empty active configuration at `.mira/mcp/mcp.json`.
+`example.json` contains inert stdio and HTTP configurations to copy, and
+`schema.json` documents the exact accepted keys. `example.json` is never
+loaded. Run `/reload` after changes.
 
-```json
-{
-  "mcpServers": {
-    "local": {"command": "python", "args": ["server.py"], "env": {}},
-    "docs": {"type": "http", "url": "https://example.com/mcp", "headers": {}}
-  }
-}
-```
+Both local stdio servers and remote Streamable HTTP endpoints require approval
+before first use. `Allow` lasts for the current MIRA process, `Deny` leaves the
+server enabled but unused for that process, and `Always allow` persists approval
+for a hash of the exact configuration. A configuration change therefore
+requires approval again. Server enablement and per-tool enable, approval, and
+Plan-access choices live in `/settings`.
 
-Continue to edit `.mira/mcp.json` manually; OAuth-protected HTTP servers need
-no authentication field. After normal server approval, a standards-compliant
-OAuth challenge appears as `Login required` in the MCP panel. Select `Login`
-there to open the browser. MIRA stores access, refresh, expiry, and dynamic
-client state outside the project under `~/.mira/_state/mcp-tokens/`, locally in
-plaintext. This first version supports standards-compliant browser OAuth only,
-not provider-specific login or device-code flows.
+OAuth-protected HTTP servers need no authentication field. After normal server
+approval, a standards-compliant OAuth challenge appears as `Login required` in
+the MCP panel. Select `Login` there to open the browser. MIRA stores access,
+refresh, expiry, and dynamic client state outside the project under
+`~/.mira/_state/mcp-tokens/`, locally in plaintext. This first version supports
+standards-compliant browser OAuth only, not provider-specific login or
+device-code flows.
 
 MCP tools use names such as `mcp__local__search`. Fixed text resources appear
 in `@` completion as `@mcp__<server>__<exact-uri>`; selecting one attaches its

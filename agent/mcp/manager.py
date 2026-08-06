@@ -292,6 +292,8 @@ class MCPManager:
         try:
             state.session = await runtime.start()
             await self._discover_tools(state)
+            await self._discover_server_prompts(state, during_start=True)
+            await self._discover_server_resources(state, during_start=True)
             state.status = "Partially available" if state.error else "Available"
         except BaseException as error:
             await self._stop_runtime(runtime, state.name)
@@ -343,6 +345,9 @@ class MCPManager:
     async def _discover_tools(self, state: MCPServerState) -> None:
         state.tools = []
         state.tool_metadata = []
+        if not _advertises_capability(state.session, "tools"):
+            self._mark_partial(state, "tools: not advertised")
+            return
         try:
             descriptors = await _list_all(state.session, "list_tools", "tools")
         except BaseException as error:
@@ -401,10 +406,16 @@ class MCPManager:
         states = self._discovery_states(server_name)
         await asyncio.gather(*(self._discover_server_prompts(state) for state in states))
 
-    async def _discover_server_prompts(self, state: MCPServerState) -> None:
+    async def _discover_server_prompts(self, state: MCPServerState, *, during_start: bool = False) -> None:
         lock = self._prompt_locks.setdefault(state.name, asyncio.Lock())
         async with lock:
             if state.prompts is not None or state.session is None:
+                return
+            if not _advertises_capability(state.session, "prompts"):
+                state.prompts = []
+                state.prompt_error = ""
+                self.prompt_registry.replace_server(state.name, [])
+                self._mark_partial(state, "prompts: not advertised")
                 return
             try:
                 session = state.session
@@ -448,6 +459,8 @@ class MCPManager:
                 state.prompt_error = ""
                 self.prompt_registry.replace_server(state.name, specs)
             except BaseException as error:
+                if during_start and state.name in self._oauth_providers and is_known_oauth_failure(error, state):
+                    raise
                 if await self._handle_later_auth_failure(state, error):
                     return
                 state.prompts = []
@@ -458,10 +471,15 @@ class MCPManager:
         states = self._discovery_states(server_name)
         await asyncio.gather(*(self._discover_server_resources(state) for state in states))
 
-    async def _discover_server_resources(self, state: MCPServerState) -> None:
+    async def _discover_server_resources(self, state: MCPServerState, *, during_start: bool = False) -> None:
         lock = self._resource_locks.setdefault(state.name, asyncio.Lock())
         async with lock:
             if state.resources is not None or state.session is None:
+                return
+            if not _advertises_capability(state.session, "resources"):
+                state.resources = []
+                state.resource_error = ""
+                self._mark_partial(state, "resources: not advertised")
                 return
             try:
                 session = state.session
@@ -485,6 +503,8 @@ class MCPManager:
                 state.resources = resources
                 state.resource_error = ""
             except BaseException as error:
+                if during_start and state.name in self._oauth_providers and is_known_oauth_failure(error, state):
+                    raise
                 if await self._handle_later_auth_failure(state, error):
                     return
                 state.resources = []
@@ -685,6 +705,15 @@ def _attached_pairs(messages: list[Any]) -> set[tuple[str, str]]:
             if isinstance(item, dict) and item.get("kind") == "mcp_resource":
                 pairs.add((str(item.get("server") or ""), str(item.get("uri") or "")))
     return pairs
+
+
+def _advertises_capability(session: Any, name: str) -> bool:
+    """Treat missing SDK metadata as unknown, but honor explicit capability absence."""
+    getter = getattr(session, "get_server_capabilities", None)
+    if not callable(getter):
+        return True
+    capabilities = getter()
+    return capabilities is None or getattr(capabilities, name, None) is not None
 
 
 def _join_error(current: str, addition: str) -> str:

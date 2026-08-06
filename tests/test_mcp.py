@@ -16,11 +16,23 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import ToolException
 from langchain_mcp_adapters.callbacks import Callbacks
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from mcp.types import ReadResourceResult, TextResourceContents
+from mcp.types import (
+    PromptsCapability,
+    ReadResourceResult,
+    ResourcesCapability,
+    ServerCapabilities,
+    TextResourceContents,
+    ToolsCapability,
+)
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Static
 
-from agent.mcp.configuration import approval_preview, configuration_fingerprint, load_mcp_configuration
+from agent.mcp.configuration import (
+    approval_preview,
+    configuration_fingerprint,
+    load_mcp_configuration,
+    mcp_path,
+)
 from agent.mcp.auth import (
     FileTokenStorage,
     MiraOAuthProvider,
@@ -33,6 +45,7 @@ from agent.mcp.auth import (
 from agent.mcp.manager import MCPManager
 from agent.mcp.models import MCPResource
 from agent.mcp.prompts import PromptRegistry, mustache_variables
+from agent.resources.project_setup import ensure_project_examples
 from config.settings import (
     ToolPolicy,
     load_settings,
@@ -50,17 +63,30 @@ from config.settings import (
 )
 from session.context import normalize_events, session_mcp_attachments
 from ui.spinners import SPINNER_FRAMES
-from ui.widgets.mcp_panel import MCPPanelScreen, controls_for, mcp_summary_symbol, status_badge, status_class
+from ui.widgets.mcp_panel import (
+    MCPPanelScreen,
+    capability_metric,
+    capability_summary,
+    controls_for,
+    mcp_summary_symbol,
+    status_badge,
+    status_class,
+)
 from ui.widgets import PromptBox
 
 
 def write_config(root: Path, servers: dict) -> None:
-    directory = root / ".mira"
+    directory = root / ".mira" / "mcp"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
 
 
 class MCPConfigurationTests(unittest.TestCase):
+    def test_mcp_path_resolves_only_the_active_nested_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(mcp_path(root), root.resolve() / ".mira" / "mcp" / "mcp.json")
+
     def test_no_file_is_valid_and_unconfigured(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             loaded = load_mcp_configuration(Path(directory))
@@ -87,8 +113,9 @@ class MCPConfigurationTests(unittest.TestCase):
         for text in ("{", "[]", '{"servers": {}}'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                (root / ".mira").mkdir()
-                (root / ".mira" / "mcp.json").write_text(text, encoding="utf-8")
+                config_path = root / ".mira" / "mcp" / "mcp.json"
+                config_path.parent.mkdir(parents=True)
+                config_path.write_text(text, encoding="utf-8")
                 loaded = load_mcp_configuration(root)
                 self.assertFalse(loaded.valid)
                 self.assertIsNotNone(loaded.issue)
@@ -102,6 +129,86 @@ class MCPConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded.servers["bad"].status, "Failed")
         self.assertIn("command", loaded.servers["bad"].error)
         self.assertEqual(loaded.servers["good"].status, "Disabled")
+
+    def test_loader_ignores_old_root_file_and_schema_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / ".mira" / "mcp.json"
+            old_path.parent.mkdir(parents=True)
+            old_path.write_text(
+                json.dumps({"mcpServers": {"legacy": {"command": "legacy"}}}),
+                encoding="utf-8",
+            )
+
+            missing = load_mcp_configuration(root)
+            self.assertFalse(missing.exists)
+            self.assertEqual(missing.servers, {})
+
+            write_config(root, {})
+            active_path = mcp_path(root)
+            active_path.write_text(
+                json.dumps({"$schema": "./schema.json", "mcpServers": {}}),
+                encoding="utf-8",
+            )
+            loaded = load_mcp_configuration(root)
+            self.assertTrue(loaded.exists)
+            self.assertTrue(loaded.valid)
+            self.assertEqual(loaded.servers, {})
+
+    def test_generated_active_and_example_configurations_load_as_intended(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ensure_project_examples(root)
+            active_path = mcp_path(root)
+
+            loaded = load_mcp_configuration(root)
+            self.assertTrue(loaded.exists)
+            self.assertTrue(loaded.valid)
+            self.assertEqual(loaded.servers, {})
+
+            example_path = active_path.parent / "example.json"
+            active_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+            example = load_mcp_configuration(root)
+            self.assertEqual(set(example.servers), {"local-server", "remote-server"})
+            self.assertEqual(example.servers["local-server"].transport, "stdio")
+            self.assertEqual(
+                example.servers["local-server"].config,
+                {
+                    "transport": "stdio",
+                    "command": "python",
+                    "args": ["/absolute/path/to/server.py"],
+                    "env": {},
+                },
+            )
+            self.assertEqual(example.servers["remote-server"].transport, "http")
+            self.assertEqual(
+                example.servers["remote-server"].config,
+                {"transport": "http", "url": "https://example.com/mcp", "headers": {}},
+            )
+
+    def test_example_is_inert_and_schema_matches_public_configuration_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ensure_project_examples(root)
+            loaded = load_mcp_configuration(root)
+            self.assertEqual(loaded.servers, {})
+
+            schema = json.loads((root / ".mira" / "mcp" / "schema.json").read_text(encoding="utf-8"))
+            self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
+            self.assertEqual(set(schema["properties"]), {"$schema", "mcpServers"})
+            self.assertEqual(schema["required"], ["mcpServers"])
+            self.assertFalse(schema["additionalProperties"])
+            servers = schema["properties"]["mcpServers"]
+            self.assertEqual(servers["propertyNames"]["minLength"], 1)
+            stdio, http = servers["additionalProperties"]["oneOf"]
+            self.assertEqual(set(stdio["properties"]), {"type", "command", "args", "env"})
+            self.assertEqual(stdio["required"], ["command"])
+            self.assertFalse(stdio["additionalProperties"])
+            self.assertEqual(set(http["properties"]), {"type", "url", "headers"})
+            self.assertEqual(http["required"], ["type", "url"])
+            self.assertFalse(http["additionalProperties"])
+            self.assertNotIn('"transport"', json.dumps(schema))
+            self.assertNotIn("servers", schema["properties"])
 
     def test_fingerprint_and_preview_never_expose_secret_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -200,7 +307,7 @@ class MCPOAuthStorageTests(unittest.IsolatedAsyncioTestCase):
             loaded = await FileTokenStorage(storage.directory).get_tokens()
             self.assertEqual(loaded.access_token, "stored-access")
             self.assertTrue(has_persisted_login(first, token_root=token_root))
-            self.assertFalse((Path(directory) / ".mira" / "mcp.json").exists())
+            self.assertFalse((Path(directory) / ".mira" / "mcp" / "mcp.json").exists())
             await storage.clear()
             self.assertFalse(storage.directory.exists())
 
@@ -371,11 +478,25 @@ def tool_descriptor(name: str) -> SimpleNamespace:
 
 
 class FakeSession:
-    def __init__(self, tools: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[str] | None = None,
+        *,
+        capabilities: ServerCapabilities | None = None,
+    ) -> None:
         self.tool_names = tools or []
         self.tool_pages = 0
+        self.prompt_pages = 0
         self.resource_pages = 0
         self.calls: list[tuple[str, dict]] = []
+        self.capabilities = capabilities or ServerCapabilities(
+            tools=ToolsCapability(),
+            prompts=PromptsCapability(),
+            resources=ResourcesCapability(),
+        )
+
+    def get_server_capabilities(self) -> ServerCapabilities:
+        return self.capabilities
 
     async def list_tools(self, cursor: str | None = None) -> Page:
         self.tool_pages += 1
@@ -388,6 +509,7 @@ class FakeSession:
         return Page("resources", [SimpleNamespace(uri="repo://two", title="Two", name="two", description="second", mimeType="text/plain")])
 
     async def list_prompts(self, cursor: str | None = None) -> Page:
+        self.prompt_pages += 1
         argument = SimpleNamespace(name="topic", required=True)
         return Page("prompts", [SimpleNamespace(name="review", description="Review", arguments=[argument])])
 
@@ -436,14 +558,17 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.initialize(allow)
         return manager
 
-    async def test_persistent_runtime_namespaced_tools_lazy_caches_and_cleanup(self) -> None:
+    async def test_persistent_runtime_eager_caches_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             session = FakeSession(["search"])
             manager = await self.make_manager(root, {"github": {"command": "fake", "args": []}}, {"github": session})
             self.assertEqual(manager.client.opened, ["github"])
             self.assertEqual([tool.name for tool in manager.servers["github"].tools], ["mcp__github__search"])
-            self.assertIsNone(manager.servers["github"].resources)
+            self.assertEqual(len(manager.servers["github"].prompts or []), 1)
+            self.assertEqual(len(manager.servers["github"].resources or []), 2)
+            self.assertEqual(session.prompt_pages, 1)
+            self.assertEqual(session.resource_pages, 2)
             await manager.discover_resources()
             await manager.discover_resources()
             self.assertEqual(session.resource_pages, 2)
@@ -452,6 +577,90 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.client.closed, ["github"])
             self.assertEqual(manager.servers["github"].status, "Disabled")
             self.assertEqual(manager.resource_registry, {})
+
+    async def test_starting_status_remains_until_advertised_discovery_finishes(self) -> None:
+        class GatedPrompts(FakeSession):
+            def __init__(self) -> None:
+                super().__init__(["search"])
+                self.discovery_started = asyncio.Event()
+                self.release_discovery = asyncio.Event()
+
+            async def list_prompts(self, cursor=None):
+                self.prompt_pages += 1
+                self.discovery_started.set()
+                await self.release_discovery.wait()
+                argument = SimpleNamespace(name="topic", required=True)
+                return Page(
+                    "prompts",
+                    [SimpleNamespace(name="review", description="Review", arguments=[argument])],
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(root, {"gated": {"command": "fake", "args": []}})
+            session = GatedPrompts()
+            manager = MCPManager(root, token_root=root / "profile-tokens")
+            manager.client = FakeClient({"gated": session})
+
+            async def allow(_state, _preview):
+                return "allow"
+
+            initialization = asyncio.create_task(manager.initialize(allow))
+            await session.discovery_started.wait()
+            state = manager.servers["gated"]
+            self.assertEqual(state.status, "Starting")
+            self.assertIsNone(state.prompts)
+            self.assertIsNone(state.resources)
+
+            session.release_discovery.set()
+            await initialization
+            self.assertEqual(state.status, "Available")
+            self.assertEqual(len(state.prompts or []), 1)
+            self.assertEqual(len(state.resources or []), 2)
+            await manager.shutdown()
+
+    async def test_unadvertised_capabilities_are_empty_and_mark_projection_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = FakeSession(
+                ["search"],
+                capabilities=ServerCapabilities(tools=ToolsCapability()),
+            )
+            manager = await self.make_manager(
+                root,
+                {"tools-only": {"command": "fake", "args": []}},
+                {"tools-only": session},
+            )
+            state = manager.servers["tools-only"]
+            self.assertEqual(state.status, "Partially available")
+            self.assertEqual(state.prompts, [])
+            self.assertEqual(state.resources, [])
+            self.assertIn("prompts: not advertised", state.error)
+            self.assertIn("resources: not advertised", state.error)
+            self.assertEqual(session.prompt_pages, 0)
+            self.assertEqual(session.resource_pages, 0)
+            await manager.shutdown()
+
+    async def test_advertised_capability_failure_is_partial_during_startup(self) -> None:
+        class BrokenPrompts(FakeSession):
+            async def list_prompts(self, cursor=None):
+                self.prompt_pages += 1
+                raise ValueError("bad prompts payload")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = BrokenPrompts(["search"])
+            manager = await self.make_manager(
+                root,
+                {"broken": {"command": "fake", "args": []}},
+                {"broken": session},
+            )
+            state = manager.servers["broken"]
+            self.assertEqual(state.status, "Partially available")
+            self.assertEqual(state.prompts, [])
+            self.assertIn("prompts: ValueError: bad prompts payload", state.error)
+            self.assertEqual(session.prompt_pages, 1)
+            await manager.shutdown()
 
     async def test_failure_isolation_denial_and_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -471,6 +680,9 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             await manager.restart_server("b")
             self.assertEqual(client.opened.count("b"), 2)
             self.assertEqual(client.closed.count("b"), 1)
+            self.assertEqual(client.sessions["b"].tool_pages, 2)
+            self.assertEqual(client.sessions["b"].prompt_pages, 2)
+            self.assertEqual(client.sessions["b"].resource_pages, 4)
             entered = [task for name, task in client.entered_tasks if name == "b"]
             exited = [task for name, task in client.exited_tasks if name == "b"]
             self.assertIs(exited[0], entered[0])
@@ -653,12 +865,12 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             state = load_mcp_configuration(root).servers["linear"]
             storage = FileTokenStorage(server_token_directory(state, token_root=token_root))
             await storage.set_tokens(OAuthToken(access_token="stored", expires_in=3600))
-            original = (root / ".mira" / "mcp.json").read_text(encoding="utf-8")
+            original = mcp_path(root).read_text(encoding="utf-8")
             manager = MCPManager(root, token_root=token_root)
             self.assertTrue(await manager.forget_server_login("linear"))
             self.assertEqual(manager.servers["linear"].status, "Disabled")
             self.assertFalse(storage.directory.exists())
-            self.assertEqual((root / ".mira" / "mcp.json").read_text(encoding="utf-8"), original)
+            self.assertEqual(mcp_path(root).read_text(encoding="utf-8"), original)
 
     async def test_tool_collisions_and_conversion_failures_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -779,8 +991,8 @@ class PanelManager:
                 transient=False,
                 tools=[],
                 tool_metadata=[],
-                prompts=None,
-                resources=None,
+                prompts=[],
+                resources=[],
                 error="",
                 prompt_error="",
                 resource_error="",
@@ -792,8 +1004,8 @@ class PanelManager:
                 transient=False,
                 tools=[],
                 tool_metadata=[],
-                prompts=None,
-                resources=None,
+                prompts=[],
+                resources=[],
                 error="",
                 prompt_error="",
                 resource_error="",
@@ -869,7 +1081,23 @@ class PanelApp(App[None]):
 
 
 class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_focused_header_alone_expands_and_uses_shared_caches(self) -> None:
+    async def test_generated_empty_configuration_exposes_no_mcp_status_or_issues(self) -> None:
+        from tests.test_textual_app import make_app
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ensure_project_examples(root)
+            manager = MCPManager(root, token_root=root / "profile-tokens")
+            self.assertFalse(manager.show_status)
+            self.assertIsNone(manager.config_issue)
+
+            app = make_app(root, mcp_manager=manager)
+            async with app.run_test():
+                self.assertFalse(app.query_one("#mcp-status-button", Button).display)
+                self.assertFalse(app.query_one("#tool-issues-button", Button).display)
+                self.assertEqual(app.mcp_config_issues, [])
+
+    async def test_expansion_is_presentation_only_and_preserves_clicked_focus(self) -> None:
         manager = PanelManager()
         app = PanelApp(manager)
         async with app.run_test(size=(100, 35)) as pilot:
@@ -879,15 +1107,37 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             first = screen.query_one("#mcp-header-one", Button)
             second = screen.query_one("#mcp-header-two", Button)
             self.assertTrue(first.has_focus)
+            state = manager.servers["one"]
+            before = (
+                state.status,
+                tuple(state.tools),
+                tuple(state.prompts or []),
+                tuple(state.resources or []),
+                state.error,
+                state.prompt_error,
+                state.resource_error,
+            )
             await pilot.press("enter")
             await pilot.pause()
             self.assertIn("one", screen.expanded)
             self.assertNotIn("two", screen.expanded)
-            self.assertEqual(manager.discovered, ["prompts:one", "resources:one"])
+            self.assertEqual(manager.discovered, [])
+            self.assertEqual(
+                (
+                    state.status,
+                    tuple(state.tools),
+                    tuple(state.prompts or []),
+                    tuple(state.resources or []),
+                    state.error,
+                    state.prompt_error,
+                    state.resource_error,
+                ),
+                before,
+            )
             self.assertFalse(second.has_focus)
             self.assertTrue(screen.query_one("#mcp-header-one", Button).has_focus)
 
-    async def test_server_card_stacks_metadata_and_actions_at_narrow_width(self) -> None:
+    async def test_server_card_uses_header_counts_actions_structure(self) -> None:
         manager = PanelManager()
         app = PanelApp(manager)
         async with app.run_test(size=(62, 26)) as pilot:
@@ -896,16 +1146,32 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             card = screen.query_one("#mcp-card-one")
             header = screen.query_one("#mcp-header-one", Button)
             badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
-            transport = screen.query_one("#mcp-card-one .mcp-transport", Static)
             counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
             controls = screen.query_one("#mcp-card-one .mcp-controls")
 
             self.assertEqual(header.region.y, badge.region.y)
-            self.assertGreater(transport.region.y, header.region.y)
-            self.assertGreater(counts.region.y, transport.region.y)
+            self.assertIn("[STDIO]", str(header.label))
+            self.assertEqual(
+                capability_summary(manager.servers["one"]).plain,
+                "Tools  0   ·   Prompts  0   ·   Resources  0",
+            )
+            self.assertEqual(counts.styles.content_align[0], "left")
+            self.assertGreater(counts.region.y, header.region.y)
             self.assertGreater(controls.region.y, counts.region.y)
             self.assertLessEqual(header.region.right, badge.region.x)
             self.assertLessEqual(card.region.right, screen.query_one("#mcp-scroll").region.right)
+
+    def test_capability_metrics_colour_labels_and_keep_counts_bold_white(self) -> None:
+        expected = {
+            "Tools": "#78d5cf",
+            "Prompts": "#8fb9e8",
+            "Resources": "#c7a0e8",
+        }
+        for label, colour in expected.items():
+            metric = capability_metric(label, "3")
+            self.assertEqual(metric.plain, f"{label}  3")
+            self.assertEqual(str(metric.spans[0].style), colour)
+            self.assertEqual(str(metric.spans[-1].style), "bold #eef7f8")
 
     async def test_expanding_scrolled_server_preserves_scroll_position(self) -> None:
         from tests.test_textual_app import make_app
@@ -936,19 +1202,22 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             before = scroll.scroll_y
             self.assertGreater(before, 0)
 
-            await pilot.click("#mcp-header-server-7")
+            await pilot.click("#mcp-header-server-7", offset=(2, 1))
+            manager.servers["server-0"].status = "Restarting"
+            manager.servers["server-0"].transient = True
             for _ in range(5):
                 await pilot.pause()
 
             self.assertIn("server-7", screen.expanded)
-            self.assertEqual(manager.discovered, ["prompts:server-7", "resources:server-7"])
+            self.assertEqual(manager.discovered, [])
             self.assertEqual(screen.query_one("#mcp-scroll").scroll_y, before)
+            self.assertTrue(screen.query_one("#mcp-header-server-7", Button).has_focus)
 
     def test_controls_status_colours_and_spinner_are_consistent(self) -> None:
         self.assertEqual(controls_for("Disabled"), ("Enable",))
         self.assertEqual(controls_for("Disabled", persisted_login=True), ("Enable", "Forget login"))
         for status in ("Available", "Partially available", "Approval required", "Failed"):
-            self.assertEqual(controls_for(status), ("Disable", "Restart"))
+            self.assertEqual(controls_for(status), ("Restart", "Disable"))
         self.assertEqual(controls_for("Login required"), ("Login", "Disable"))
         self.assertEqual(controls_for("Authenticating"), ("Login", "Disable"))
         self.assertEqual(
@@ -959,8 +1228,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_class("Login required"), "warning")
         self.assertEqual(status_class("Authenticating"), "transient")
         self.assertEqual(status_class("Failed"), "failed")
-        self.assertEqual(status_badge("Available"), "✓ Available")
-        self.assertEqual(status_badge("Failed"), "x Failed")
+        self.assertEqual(status_badge("Available"), "Available")
+        self.assertEqual(status_badge("Partially available"), "Partial")
+        self.assertEqual(status_badge("Failed"), "Failed")
         self.assertEqual(SPINNER_FRAMES, ("|", "/", "-", "\\"))
 
     def test_summary_symbol_uses_explicit_worst_state(self) -> None:
@@ -1013,8 +1283,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(app.screen, MCPPanelScreen)
             self.assertEqual(str(app.screen.query_one("#mcp-close", Button).label), "x")
             self.assertIn("one", str(app.screen.query_one("#mcp-header-one", Button).label))
-            self.assertNotIn("stdio", str(app.screen.query_one("#mcp-header-one", Button).label).lower())
-            self.assertIn("STDIO", str(app.screen.query_one("#mcp-card-one .mcp-transport", Static).render()))
+            self.assertIn("[STDIO]", str(app.screen.query_one("#mcp-header-one", Button).label))
             app.screen.dismiss()
             await pilot.pause()
             prompt = app.query_one(PromptBox)

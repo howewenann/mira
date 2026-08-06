@@ -100,16 +100,21 @@ Screen {
     height: 1;
 }
 
+#mcp-status-button,
+#tool-issues-button {
+    width: 16;
+    min-width: 16;
+    max-width: 16;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    text-style: bold;
+}
+
 #tool-issues-button {
     display: none;
-    width: 10;
-    min-width: 10;
-    height: 1;
-    padding: 0;
-    border: none;
     background: #6b4f20;
     color: #fff0bd;
-    text-style: bold;
 }
 
 ToolIssuesScreen {
@@ -153,15 +158,8 @@ ToolIssuesScreen {
 
 #mcp-status-button {
     display: none;
-    width: auto;
-    min-width: 14;
-    max-width: 20;
-    height: 1;
-    padding: 0 1;
-    border: none;
     background: #5bb8b1;
     color: #081112;
-    text-style: bold;
 }
 
 #mcp-status-button:focus {
@@ -201,7 +199,7 @@ MCPPanelScreen {
     height: auto;
     margin: 0 0 1 0;
     padding: 1;
-    border-left: solid #2d5661;
+    border: solid #3e5962;
     background: #151f22;
 }
 
@@ -240,15 +238,11 @@ MCPPanelScreen {
 .mcp-status-badge.disabled { background: #30383d; color: #aeb8be; }
 .mcp-status-badge.transient { background: #263f60; color: #bcd1f5; }
 
-.mcp-transport,
 .mcp-counts {
+    width: 1fr;
     height: 1;
-    margin: 0 1;
-    color: #aeb9bf;
-}
-
-.mcp-counts {
     margin-top: 1;
+    content-align: left middle;
     color: #eef7f8;
 }
 
