@@ -841,6 +841,13 @@ fallback rules change, or the dashboard changes how context is reported.
 It owns one runtime/session and one capability cache per configured server,
 plus the shared prompt and fixed-resource registries. Act and Plan receive
 policy-filtered tool views when the existing agent-pair pathway rebuilds.
+Remote HTTP OAuth is inferred only after an approved server's ordinary
+connection returns a valid MCP OAuth challenge or its protected-resource and
+authorization-server metadata can be discovered. User JSON has no OAuth field.
+The interactive MCP panel is the only path that may open a browser; startup,
+reload, retry, and one-shot runs may silently use or refresh stored credentials
+but otherwise leave the server at `Login required`. Authentication state stays
+in the MCP panel and never becomes an Issues entry.
 
 **Why:** The shared agent factory builds project resources twice, once per
 mode. Starting MCP there would duplicate child processes, discovery, and
@@ -849,8 +856,15 @@ the MCP panel, autocomplete, reload, and shutdown observe and mutate the same
 server registry. Persisted user-event attachment metadata is projected into
 LangGraph message metadata, which lets the implicit resource reader enforce
 the attachment boundary without a second session allowlist.
+OAuth tokens and dynamically registered client information are user-level
+state under `~/.mira/_state/mcp-tokens/`, separate from project configuration,
+settings, sessions, and diagnostics. V1 stores that state locally in plaintext.
+Provider-specific flows, device codes, configured client secrets, encryption,
+and keyring integration are deferred. A refresh failure removes only the
+affected server's projected capabilities and uses the existing registry-change
+pathway so the remaining MCP sessions and agents continue running.
 
-**Where to check:** `agent/mcp/`, `agent/factory.py`, `ui/app.py`,
+**Where to check:** `agent/mcp/auth.py`, `agent/mcp/manager.py`, `agent/factory.py`, `ui/app.py`,
 `ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
 
 **Update this when:** MCP transport ownership, capability caching, attachment

@@ -190,6 +190,14 @@ per-tool enable, approval, and Plan-access choices live in `/settings`.
 }
 ```
 
+Continue to edit `.mira/mcp.json` manually; OAuth-protected HTTP servers need
+no authentication field. After normal server approval, a standards-compliant
+OAuth challenge appears as `Login required` in the MCP panel. Select `Login`
+there to open the browser. MIRA stores access, refresh, expiry, and dynamic
+client state outside the project under `~/.mira/_state/mcp-tokens/`, locally in
+plaintext. This first version supports standards-compliant browser OAuth only,
+not provider-specific login or device-code flows.
+
 MCP tools use names such as `mcp__local__search`. Fixed text resources appear
 in `@` completion as `@mcp__<server>__<exact-uri>`; selecting one attaches its
 identity, and the agent reads it on demand. MCP prompts appear as

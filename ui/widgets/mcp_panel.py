@@ -49,10 +49,14 @@ class MCPPanelScreen(ModalScreen[None]):
             name=state.name,
         )
         with Horizontal(classes="mcp-controls"):
-            for action in controls_for(state.status):
+            persisted_login = bool(
+                state.transport == "http"
+                and getattr(self.manager, "has_persisted_login", lambda _name: False)(state.name)
+            )
+            for action in controls_for(state.status, persisted_login=persisted_login):
                 button = Button(
                     action,
-                    id=f"mcp-{action.lower()}-{safe_id(state.name)}",
+                    id=f"mcp-{safe_id(action.lower())}-{safe_id(state.name)}",
                     classes="mcp-control",
                     name=state.name,
                 )
@@ -97,6 +101,10 @@ class MCPPanelScreen(ModalScreen[None]):
             await self.manager.set_server_enabled(name, False)
         elif action == "restart":
             await self.manager.restart_server(name)
+        elif action == "login":
+            await self.manager.login_server(name)
+        elif action == "forget login":
+            await self.manager.forget_server_login(name)
         await self.refresh_from_manager()
 
     async def _discover_and_refresh(self, name: str) -> None:
@@ -125,10 +133,14 @@ def capability_counts(state: Any) -> str:
     return f"{tools} tools · {prompts} prompts · {resources} resources"
 
 
-def controls_for(status: str) -> tuple[str, ...]:
+def controls_for(status: str, *, persisted_login: bool = False) -> tuple[str, ...]:
     if status == "Disabled":
-        return ("Enable",)
-    return ("Disable", "Restart")
+        return ("Enable", "Forget login") if persisted_login else ("Enable",)
+    if status in {"Login required", "Authenticating"}:
+        controls = ("Login", "Disable")
+    else:
+        controls = ("Disable", "Restart")
+    return (*controls, "Forget login") if persisted_login else controls
 
 
 def status_class(status: str) -> str:
@@ -136,6 +148,7 @@ def status_class(status: str) -> str:
         "Available": "available",
         "Partially available": "warning",
         "Approval required": "warning",
+        "Login required": "warning",
         "Failed": "failed",
         "Disabled": "disabled",
     }.get(status, "transient")

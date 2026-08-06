@@ -1320,3 +1320,23 @@ Observed 2026-08-04 against LM Studio in a disposable workspace:
   native structured response was malformed: DeepAgents supplied no normalized
   criteria and its explanation retained model tool-syntax fragments. MIRA did
   not reinterpret that provider output or add a custom rubric parser.
+
+## Standards-Compliant MCP OAuth
+
+Use a disposable workspace and manually add Linear's remote endpoint to
+`.mira/mcp.json` as an ordinary HTTP server with no `auth` field. Keep a normal
+unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
+
+1. Launch the TUI and approve the configured OAuth server. Expected: it becomes
+   `Login required`, `MCP 0/1` remains neutral, no browser opens, the state does
+   not appear under Issues, and the comparison servers behave as before.
+2. Expand the server and select `Login`. Expected: only its row shows the
+   authenticating spinner, the TUI stays responsive, and the browser opens for
+   consent. Successful consent changes the row to Available and the count to
+   `MCP 1/1`.
+3. Restart MIRA and run `/reload`. Expected: the stored credential under
+   `~/.mira/_state/mcp-tokens/` is reused or refreshed without opening a browser.
+   A one-shot invocation also never opens a browser or waits for a callback.
+4. Select `Forget login`. Expected: only this server stops, only its token
+   directory is removed, `.mira/mcp.json` is unchanged, and the enabled server
+   returns to `Login required`; a disabled server remains disabled.
