@@ -304,6 +304,8 @@ MCPPanelScreen {
     border: solid #5bb8b1;
     background: #101516;
     color: #e8edef;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }

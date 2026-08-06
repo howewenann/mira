@@ -188,7 +188,14 @@ class AutocompleteTestApp(App[None]):
 
     CSS = """
     AutocompleteInput { width: 100%; height: auto; }
-    #autocomplete-options { width: 100%; height: auto; max-height: 12; border: solid cyan; }
+    #autocomplete-options {
+        width: 100%;
+        height: auto;
+        max-height: 12;
+        border: solid cyan;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
     #prompt { width: 100%; height: 5; }
     """
 
@@ -483,6 +490,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([item.display for item in completion.items], ["row_alpha", "row_beta"])
             self.assertEqual(options.region.height, 4)
             self.assertEqual(options.content_region.height, 2)
+            options._update_lines()
+            self.assertEqual(options.virtual_size.height, 2)
+            self.assertEqual(options._line_cache.heights, {0: 1, 1: 1})
+            self.assertIn("…", options.render_line(0).text)
             for option in options.options:
                 self.assertTrue(option.prompt.no_wrap)
                 self.assertEqual(option.prompt.overflow, "ellipsis")
@@ -498,6 +509,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(options.region.height, 4)
             self.assertEqual(options.content_region.height, 2)
+            options._update_lines()
+            self.assertEqual(options.virtual_size.height, 2)
+            self.assertEqual(options._line_cache.heights, {0: 1, 1: 1})
+            self.assertIn("…", options.render_line(0).text)
             self.assertEqual(len(options.get_option_at_index(0).prompt.wrap(Console(width=16), 16)), 1)
             await pilot.press("enter")
             await pilot.pause()
@@ -651,11 +666,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             prompt = app.query_one(PromptBox)
             completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
             app.mode.update(
                 {
                     "planning": False,
                     "action_tools": [
-                        {"name": "action_writer", "description": "Write in Act mode."}
+                        {
+                            "name": "action_writer",
+                            "description": "Write in Act mode with a deliberately long description. " * 6,
+                        }
                     ],
                     "planning_tools": [
                         {"name": "plan_reader", "description": "Read in Plan mode."},
@@ -668,6 +687,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "Use @writer"
             await pilot.pause()
             self.assertEqual([item.display for item in completion.items], ["action_writer"])
+            options._update_lines()
+            self.assertEqual(options.virtual_size.height, 1)
+            self.assertEqual(options._line_cache.heights, {0: 1})
+            self.assertIn("…", options.render_line(0).text)
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(prompt.value, "Use action_writer")
