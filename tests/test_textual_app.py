@@ -25,6 +25,7 @@ from textual.widgets import Button, Input, OptionList, Select, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
+from agent.planning.policy import PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_PLAN_RESEARCH
 from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
 from config.runtime import LaunchOptions, build_runtime_snapshot
@@ -191,13 +192,17 @@ class AutocompleteTestApp(App[None]):
     #prompt { width: 100%; height: 5; }
     """
 
-    def __init__(self, backend: Any = None) -> None:
+    def __init__(self, backend: Any = None, tool_provider: Any = None) -> None:
         super().__init__()
         self.backend = backend
+        self.tool_provider = tool_provider
         self.submissions: list[str] = []
 
     def compose(self) -> ComposeResult:
-        yield AutocompleteInput(project_backend=self.backend)
+        yield AutocompleteInput(
+            project_backend=self.backend,
+            tool_provider=self.tool_provider,
+        )
 
     def on_mount(self) -> None:
         self.query_one(PromptBox).focus()
@@ -461,6 +466,45 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(options.region.height, 7)
             self.assertEqual(options.content_region.height, 5)
 
+    async def test_long_completion_rows_stay_single_line_across_narrow_resize(self) -> None:
+        tools = [
+            {"name": "row_alpha", "description": "A deliberately long description " * 8},
+            {"name": "row_beta", "description": "Second result"},
+        ]
+        app = AutocompleteTestApp(tool_provider=lambda: tools)
+
+        async with app.run_test(size=(46, 20)) as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
+            prompt.value = "Use @row"
+            await pilot.pause()
+
+            self.assertEqual([item.display for item in completion.items], ["row_alpha", "row_beta"])
+            self.assertEqual(options.region.height, 4)
+            self.assertEqual(options.content_region.height, 2)
+            for option in options.options:
+                self.assertTrue(option.prompt.no_wrap)
+                self.assertEqual(option.prompt.overflow, "ellipsis")
+                self.assertEqual(
+                    len(option.prompt.wrap(Console(width=24), 24)),
+                    1,
+                )
+
+            await pilot.press("down")
+            self.assertEqual(options.highlighted, 1)
+            await pilot.resize_terminal(28, 20)
+            await pilot.pause()
+
+            self.assertEqual(options.region.height, 4)
+            self.assertEqual(options.content_region.height, 2)
+            self.assertEqual(len(options.get_option_at_index(0).prompt.wrap(Console(width=16), 16)), 1)
+            await pilot.press("enter")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "Use row_beta")
+            self.assertEqual(app.submissions, [])
+
     async def test_optional_prompt_command_inserts_without_a_trailing_space(self) -> None:
         app = AutocompleteTestApp()
 
@@ -599,6 +643,49 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "Inspect @does/not/exist.py",
                 ],
             )
+
+    async def test_tool_completion_uses_live_act_plan_and_finalization_projection(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            app.mode.update(
+                {
+                    "planning": False,
+                    "action_tools": [
+                        {"name": "action_writer", "description": "Write in Act mode."}
+                    ],
+                    "planning_tools": [
+                        {"name": "plan_reader", "description": "Read in Plan mode."},
+                        {"name": "prepare_plan", "description": "Prepare the Plan."},
+                        {"name": "finalize_plan", "description": "Finalize the Plan."},
+                    ],
+                }
+            )
+
+            prompt.value = "Use @writer"
+            await pilot.pause()
+            self.assertEqual([item.display for item in completion.items], ["action_writer"])
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "Use action_writer")
+
+            app.mode.update(
+                {
+                    "planning": True,
+                    "planning_stage": PLANNING_STAGE_PLAN_RESEARCH,
+                }
+            )
+            prompt.value = "Use @reader"
+            await pilot.pause()
+            self.assertEqual([item.display for item in completion.items], ["plan_reader"])
+
+            app.mode["planning_stage"] = PLANNING_STAGE_PLAN_FINALIZE
+            prompt.value = "Use @final"
+            await pilot.pause()
+            self.assertEqual([item.display for item in completion.items], ["finalize_plan"])
 
     async def test_mouse_selection_accepts_and_restores_prompt_focus(self) -> None:
         backend = FakeAutocompleteBackend(["src/auth.py"])
@@ -2910,6 +2997,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             for section in ("General", "Inspect", "Workflow", "Configuration", "Chat & history"):
                 self.assertIn(section, output)
             self.assertIn("/help", output)
+            self.assertIn("/mira", output)
             self.assertIn("/compact", output)
             self.assertIn("/runtime", output)
             self.assertIn("/tools", output)
@@ -2918,6 +3006,47 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/subagents", output)
             self.assertIn("/session", output)
             self.assertNotIn("/model", output)
+
+    async def test_mira_command_appends_fresh_unpersisted_splash(self) -> None:
+        app = make_app(workspace=Path("current-workspace"))
+
+        with patch("ui.app.run_user_turn", new=AsyncMock()) as run_turn:
+            async with app.run_test(size=(80, 20)) as pilot:
+                await pilot.pause()
+                chat = app.query_one(ChatLog)
+                app.system_message("keep this block", kind="info")
+                await pilot.pause()
+                original_startup = chat._startup_block
+                original_children = tuple(chat.children)
+                original_events = list(app.session.get("events", []))
+                original_turns = app.session["turns"]
+                original_saves = len(app.store.saves)
+                original_scroll_y = chat.scroll_y
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/mira"))
+                await pilot.pause()
+
+                startup_blocks = [
+                    child for child in chat.children if "startup" in child.classes
+                ]
+                fresh_text = renderable_plain(startup_blocks[-1])
+
+                self.assertEqual(len(startup_blocks), 2)
+                self.assertIs(chat._startup_block, original_startup)
+                self.assertEqual(tuple(chat.children)[:-1], original_children)
+                self.assertIn(blocky_wordmark().splitlines()[-1].rstrip(), fresh_text)
+                self.assertIn(VERSION, fresh_text)
+                self.assertIn(HINTS, fresh_text)
+                self.assertIn("model     test-model", fresh_text)
+                self.assertIn("session   thread-1", fresh_text)
+                self.assertIn("workspace current-workspace", fresh_text)
+                self.assertGreater(chat.scroll_y, original_scroll_y)
+
+        run_turn.assert_not_awaited()
+        self.assertEqual(app.session.get("events", []), original_events)
+        self.assertEqual(app.session["turns"], original_turns)
+        self.assertEqual(len(app.store.saves), original_saves)
 
     async def test_goal_command_runs_with_rubrics_disabled(self) -> None:
         app = make_app()

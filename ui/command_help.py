@@ -10,6 +10,7 @@ COMMAND_HELP_SECTIONS = (
         "General",
         (
             ("/help", "show commands and what they do"),
+            ("/mira", "Display the MIRA splash screen"),
             ("/session", "show conversation identity, mode, goals, plans, workspace, and turns"),
             ("/exit", "quit MIRA"),
         ),
@@ -70,10 +71,8 @@ def command_help_entries() -> Iterator[tuple[str, str]]:
 
 
 def command_insertion(usage: str) -> str:
-    """Return the command token, spacing only for a required argument."""
-    command, _, arguments = usage.partition(" ")
-    suffix = " " if "<" in arguments else ""
-    return f"{command}{suffix}"
+    """Return only the exact slash-command token."""
+    return usage.partition(" ")[0]
 
 
 __all__ = ["COMMAND_HELP_SECTIONS", "command_help_entries", "command_insertion"]

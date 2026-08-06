@@ -442,6 +442,16 @@ async def handle_command(
         print_help(renderer)
         return True
 
+    if text == "/mira":
+        callback = getattr(renderer, "show_mira_splash", None)
+        if callable(callback):
+            outcome = callback()
+            if inspect.isawaitable(outcome):
+                await outcome
+        else:
+            write_line(renderer, "MIRA splash is unavailable in this interface.", kind="warning")
+        return True
+
     if text == "/tools":
         print_tools(renderer, mode)
         return True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -37,7 +38,7 @@ EXCLUDED_FILE_COMPONENTS = {
 class CompletionItem:
     """The source-neutral data needed to render and insert one completion."""
 
-    kind: Literal["command", "file", "mcp_resource", "status"]
+    kind: Literal["tool", "file", "mcp_resource", "native_command", "prompt_command", "status"]
     display: str
     insertion: str
     description: str = ""
@@ -56,9 +57,16 @@ class _CompletionFragment:
 class AutocompleteInput(Vertical):
     """PromptBox wrapper with one native popup for commands and files."""
 
-    def __init__(self, *, project_backend: Any = None, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        project_backend: Any = None,
+        tool_provider: Callable[[], list[dict[str, str]]] | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
         self.project_backend = project_backend
+        self.tool_provider = tool_provider
         self._items: list[CompletionItem] = []
         self._file_paths: list[str] | None = None
         self._fragment: _CompletionFragment | None = None
@@ -192,14 +200,22 @@ class AutocompleteInput(Vertical):
         self._fragment = fragment
         if same_interaction:
             if self._file_paths is not None:
-                self._show_items(attachment_items(self._file_paths, self._mcp_resources, fragment.query, self._resource_errors()))
+                self._show_items(
+                    attachment_items(
+                        self._file_paths,
+                        self._mcp_resources,
+                        fragment.query,
+                        self._resource_errors(),
+                        tools=self._active_tools(),
+                    )
+                )
             return
 
         self._cancel_file_worker()
         self._generation += 1
         self._interaction_start = fragment.start
         self._file_paths = None
-        self._hide_options()
+        self._mcp_resources = []
         generation = self._generation
         if self.project_backend is not None:
             self._file_worker = self.run_worker(
@@ -216,6 +232,15 @@ class AutocompleteInput(Vertical):
                 name=f"autocomplete-resources-{generation}",
                 exclusive=False,
             )
+        self._show_items(
+            attachment_items(
+                [],
+                self._mcp_resources,
+                fragment.query,
+                self._resource_errors(),
+                tools=self._active_tools(),
+            )
+        )
 
     async def _load_project_files(self, generation: int, interaction_start: int) -> None:
         try:
@@ -229,7 +254,15 @@ class AutocompleteInput(Vertical):
         fragment = self._fragment
         if fragment is None or fragment.kind != "file" or fragment.start != interaction_start:
             return
-        self._show_items(attachment_items(self._file_paths, self._mcp_resources, fragment.query, self._resource_errors()))
+        self._show_items(
+            attachment_items(
+                self._file_paths,
+                self._mcp_resources,
+                fragment.query,
+                self._resource_errors(),
+                tools=self._active_tools(),
+            )
+        )
 
     async def _load_mcp_resources(self, generation: int, interaction_start: int) -> None:
         await self.mcp_manager.discover_resources()
@@ -239,7 +272,15 @@ class AutocompleteInput(Vertical):
         self._mcp_resources = list(self.mcp_manager.resource_registry.values())
         fragment = self._fragment
         if fragment is not None and fragment.kind == "file" and fragment.start == interaction_start:
-            self._show_items(attachment_items(self._file_paths or [], self._mcp_resources, fragment.query, self._resource_errors()))
+            self._show_items(
+                attachment_items(
+                    self._file_paths or [],
+                    self._mcp_resources,
+                    fragment.query,
+                    self._resource_errors(),
+                    tools=self._active_tools(),
+                )
+            )
 
     async def _load_mcp_prompts(self, generation: int, interaction_start: int) -> None:
         await self.mcp_manager.discover_prompts()
@@ -255,6 +296,10 @@ class AutocompleteInput(Vertical):
 
     def _resource_errors(self) -> list[str]:
         return self.mcp_manager.resource_errors() if self.mcp_manager is not None else []
+
+    def _active_tools(self) -> list[dict[str, str]]:
+        """Read the current agent tool projection without caching mode state."""
+        return self.tool_provider() if self.tool_provider is not None else []
 
     def _show_items(self, items: list[CompletionItem]) -> None:
         statuses = [item for item in items if not item.selectable]
@@ -300,19 +345,43 @@ class AutocompleteInput(Vertical):
 
 
 def command_items(query: str, prompt_registry: Any = None) -> list[CompletionItem]:
-    """Return literal substring matches from the shared /help registry."""
+    """Merge native and prompt command matches while preserving their kinds."""
+    items = [*native_command_items(query), *prompt_command_items(query, prompt_registry)]
+    return sorted(items, key=lambda item: (item.display.casefold(), item.display))
+
+
+def native_command_items(query: str) -> list[CompletionItem]:
+    """Return literal substring matches from the shared native command registry."""
     folded = query.casefold()
-    items = [
+    return [
         CompletionItem(
-            kind="command",
+            kind="native_command",
             display=usage,
             insertion=command_insertion(usage),
             description=description,
         )
-        for usage, description in [*command_help_entries(), *(prompt_registry.rows() if prompt_registry is not None else [])]
+        for usage, description in command_help_entries()
         if folded in usage.casefold()
     ]
-    return sorted(items, key=lambda item: (item.display.casefold(), item.display))
+
+
+def prompt_command_items(query: str, prompt_registry: Any = None) -> list[CompletionItem]:
+    """Return literal substring matches from the canonical prompt registry."""
+    if prompt_registry is None:
+        return []
+    folded = query.casefold()
+    specs = getattr(prompt_registry, "specs", {})
+    return [
+        CompletionItem(
+            kind="prompt_command",
+            display=spec.usage,
+            insertion=command_insertion(spec.usage),
+            description=spec.description,
+            metadata=spec,
+        )
+        for spec in specs.values()
+        if folded in spec.usage.casefold()
+    ]
 
 
 def file_items(paths: list[str], query: str) -> list[CompletionItem]:
@@ -333,8 +402,15 @@ def file_items(paths: list[str], query: str) -> list[CompletionItem]:
     ]
 
 
-def attachment_items(paths: list[str], resources: list[Any], query: str, errors: list[str] | None = None) -> list[CompletionItem]:
-    """Merge source-neutral local and fixed MCP attachment candidates before limiting."""
+def attachment_items(
+    paths: list[str],
+    resources: list[Any],
+    query: str,
+    errors: list[str] | None = None,
+    *,
+    tools: list[dict[str, str]] | None = None,
+) -> list[CompletionItem]:
+    """Merge local files, fixed MCP resources, and active tools before limiting."""
     folded = query.casefold()
     local_matches = sorted(
         (path for path in paths if folded in path.casefold()),
@@ -360,6 +436,19 @@ def attachment_items(paths: list[str], resources: list[Any], query: str, errors:
                 insertion=insertion,
                 description=resource.description or resource.name,
                 metadata=resource,
+            )
+        )
+    for tool in tools or []:
+        name = str(tool.get("name") or "")
+        if not name or folded not in name.casefold():
+            continue
+        items.append(
+            CompletionItem(
+                kind="tool",
+                display=name,
+                insertion=name,
+                description=str(tool.get("description") or ""),
+                metadata=tool,
             )
         )
     items.sort(key=lambda item: (item.display.casefold(), item.display))
@@ -419,7 +508,21 @@ def completion_fragment(text: str, cursor: int) -> _CompletionFragment | None:
 
 
 def _completion_row(item: CompletionItem) -> Text:
-    row = Text(item.display, style="cyan")
+    row = Text(no_wrap=True, overflow="ellipsis")
+    if not item.selectable:
+        row.append(item.display, style="#b8c1c7")
+        return row
+    labels = {
+        "tool": ("TOOL", "#78d5cf"),
+        "mcp_resource": ("RSRC", "#c7a0e8"),
+        "file": ("FILE", "#aeb8be"),
+        "native_command": ("CMND", "#d2a957"),
+        "prompt_command": ("PRMT", "#8fb9e8"),
+    }
+    label, color = labels[item.kind]
+    row.append(label, style=f"bold {color}")
+    row.append("  ")
+    row.append(item.display, style="#e8edef")
     if item.description:
         row.append(f"  {item.description}", style="#b8c1c7")
     return row
@@ -441,9 +544,11 @@ def _location_from_offset(text: str, offset: int) -> tuple[int, int]:
 __all__ = [
     "AutocompleteInput",
     "CompletionItem",
+    "attachment_items",
     "command_items",
     "completion_fragment",
     "discover_project_files",
     "file_items",
-    "attachment_items",
+    "native_command_items",
+    "prompt_command_items",
 ]

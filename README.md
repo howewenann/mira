@@ -108,6 +108,7 @@ it only with a trusted local endpoint.
 | Complete a slash command | Type `/`, then use Up/Down and Enter |
 | Reference a local file | Type `@`, then use Up/Down and Enter |
 | Show all commands | `/help` |
+| Display a fresh MIRA splash | `/mira` |
 | Change workspace settings | `/settings` |
 | Start a new saved chat | `/new-chat` |
 | Enter Plan mode or send its first prompt | `/plan`, `/plan <prompt>` |
@@ -125,10 +126,12 @@ Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 `/skills`, and `/subagents`. Destructive cleanup commands require confirmation
 and are listed in `/help`.
 
-Slash commands autocomplete at the start of the prompt. Local project files
-autocomplete after `@` anywhere in the prompt; paths containing spaces use
-quoted mentions such as `@"docs/design notes.md"`. These visible references
-guide the agent to inspect files through its normal `read_file` tool—the file
+Slash commands autocomplete at the start of the prompt. Active tool names,
+local project files, and MCP resources autocomplete after `@` anywhere in the
+prompt. Selecting a tool removes the temporary `@` and inserts its plain name;
+files and resources remain `@` references. Paths containing spaces use quoted
+mentions such as `@"docs/design notes.md"`. Local file references guide the
+agent to inspect files through its normal `read_file` tool—the file
 contents are not embedded into the prompt automatically.
 
 Plan mode is a continuous read-only conversation. Discuss and investigate

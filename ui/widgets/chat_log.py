@@ -90,6 +90,13 @@ class ChatLog(VerticalScroll):
         self._startup_block.update(text)
         self._scroll_to_end()
 
+    def append_splash(self, *, model_name: str, session_id: str, workspace: str) -> Static:
+        """Append a fresh splash without changing the owned startup block."""
+        text = splash_text(model_name=model_name, session_id=session_id, workspace=workspace)
+        block = self._add_block("mira", text, "message startup")
+        self.call_after_refresh(block.scroll_visible, animate=False, force=True)
+        return block
+
     def startup_loading(self, *, workspace: str, state: str = "starting") -> None:
         """Show a startup splash before the session is ready."""
         self._startup_loading = True

@@ -43,7 +43,7 @@ from agent.mcp.auth import (
     server_token_directory,
 )
 from agent.mcp.manager import MCPManager
-from agent.mcp.models import MCPResource
+from agent.mcp.models import MCPResource, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry, mustache_variables
 from agent.resources.project_setup import ensure_project_examples
 from config.settings import (
@@ -465,6 +465,44 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
             registry.reload_local()
             self.assertNotIn("/prompt__one", registry.specs)
             self.assertEqual(registry.warnings, ["local prompt collision excluded: /prompt__one"])
+
+    async def test_prompt_usage_distinguishes_required_and_optional_arguments(self) -> None:
+        calls: list[list[str]] = []
+
+        async def resolve(values: list[str]) -> list[HumanMessage]:
+            calls.append(values)
+            return [HumanMessage(content="resolved")]
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = PromptRegistry(Path(directory))
+            spec = PromptSpec(
+                command="/mcp__github__review_pr",
+                description="Review a pull request",
+                arguments=(
+                    PromptArgument("repo"),
+                    PromptArgument("pr"),
+                    PromptArgument("focus", required=False),
+                ),
+                source="mcp",
+                resolver=resolve,
+                server="github",
+            )
+            registry.mcp[spec.command] = spec
+
+            self.assertEqual(spec.usage, "/mcp__github__review_pr <repo> <pr> [focus]")
+            with self.assertRaisesRegex(
+                ValueError,
+                r"^usage: /mcp__github__review_pr <repo> <pr> \[focus\]$",
+            ):
+                await registry.resolve("/mcp__github__review_pr owner/repo")
+            self.assertEqual(calls, [])
+
+            prepared = await registry.resolve(
+                "/mcp__github__review_pr owner/repo 42"
+            )
+
+        self.assertIsNotNone(prepared)
+        self.assertEqual(calls, [["owner/repo", "42"]])
 
 
 class Page:

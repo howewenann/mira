@@ -743,6 +743,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(renderer.console.lines), 1)
         output = "\n".join(renderer.console.lines)
         self.assertIn("Commands", output)
+        self.assertIn("/mira", output)
         self.assertIn("/plan", output)
         self.assertIn("enter conversational read-only Plan mode", output)
         self.assertIn("/plan-show", output)
@@ -762,6 +763,23 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(section, output)
         self.assertNotIn("/config", output)
         self.assertNotIn("/model", output)
+
+    async def test_mira_command_is_recognized_as_textual_only(self) -> None:
+        renderer = RecordingRenderer()
+
+        handled = await repl.handle_command(
+            "/mira",
+            renderer,
+            {"id": "thread-1", "workspace": "."},
+            "model",
+            {"planning": False},
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(
+            renderer.console.lines,
+            ["MIRA splash is unavailable in this interface."],
+        )
 
     def test_help_table_returns_rich_table(self) -> None:
         """The help table should render all commands together."""

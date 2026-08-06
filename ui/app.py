@@ -83,6 +83,7 @@ from ui.interrupts import (
     prepare_goal_request,
 )
 from ui.repl import (
+    available_tools,
     handle_command,
     initial_mode,
     plan_command_prompt,
@@ -245,7 +246,7 @@ class MiraApp(App[None]):
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
-                yield AutocompleteInput()
+                yield AutocompleteInput(tool_provider=self._active_autocomplete_tools)
                 yield TelemetryBar(id="telemetry-row")
 
     def on_mount(self) -> None:
@@ -1277,6 +1278,18 @@ class MiraApp(App[None]):
             self.query_one(PromptBox).focus()
         except NoMatches:
             return
+
+    def _active_autocomplete_tools(self) -> list[dict[str, str]]:
+        """Return the same live tool projection shown by /tools."""
+        return available_tools(self.mode, planning=bool(self.mode.get("planning")))
+
+    def show_mira_splash(self) -> None:
+        """Append a fresh splash using the current session metadata."""
+        self.query_one(ChatLog).append_splash(
+            model_name=self.model_name,
+            session_id=str(self.session["id"]),
+            workspace=str(self.session["workspace"]),
+        )
 
     def user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
         """Write a submitted user message to the chat log."""

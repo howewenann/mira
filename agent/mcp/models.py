@@ -75,7 +75,10 @@ class PromptSpec:
 
     @property
     def usage(self) -> str:
-        placeholders = " ".join(f"<{item.name}>" for item in self.arguments)
+        placeholders = " ".join(
+            f"<{item.name}>" if item.required else f"[{item.name}]"
+            for item in self.arguments
+        )
         return f"{self.command} {placeholders}".rstrip()
 
 
