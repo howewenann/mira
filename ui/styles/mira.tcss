@@ -102,11 +102,11 @@ Screen {
 
 #mcp-status-button,
 #tool-issues-button {
-    width: 16;
-    min-width: 16;
-    max-width: 16;
+    width: 13;
+    min-width: 13;
+    max-width: 13;
     height: 1;
-    padding: 0 1;
+    padding: 0;
     border: none;
     text-style: bold;
 }

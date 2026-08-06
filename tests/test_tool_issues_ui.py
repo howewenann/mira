@@ -187,6 +187,22 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(button.label), "Issues 3")
                 self.assertEqual(button.styles.width, mcp_button.styles.width)
                 self.assertEqual(button.styles.min_width, mcp_button.styles.min_width)
+                self.assertEqual(button.region.width, 13)
+                self.assertEqual(mcp_button.styles.max_width, button.styles.max_width)
+                for mcp_label, issues_label in (
+                    ("! MCP 3/3", "Issues 3"),
+                    ("! MCP 10/10", "Issues 10"),
+                ):
+                    mcp_button.label = mcp_label
+                    mcp_button.display = True
+                    button.label = issues_label
+                    await pilot.pause()
+                    self.assertEqual(mcp_button.region.width, 13)
+                    self.assertEqual(button.region.width, 13)
+                    self.assertIn(mcp_label, mcp_button.render_line(0).text)
+                    self.assertIn(issues_label, button.render_line(0).text)
+                mcp_button.display = False
+                button.label = "Issues 3"
                 await pilot.click("#tool-issues-button")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, ToolIssuesScreen)
