@@ -44,6 +44,10 @@ class ResourceDiscoveryTests(unittest.TestCase):
             build_resources(workspace)
 
             self.assertEqual(memory.read_text(encoding="utf-8"), "custom memory")
+            self.assertEqual(
+                (workspace / ".mira" / "mcp.json").read_text(encoding="utf-8"),
+                '{"mcpServers": {}}',
+            )
             self.assertTrue((workspace / ".mira" / "README.md").exists())
             self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
             self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
@@ -64,6 +68,19 @@ class ResourceDiscoveryTests(unittest.TestCase):
                     encoding="utf-8"
                 ),
             )
+
+    def test_launch_does_not_overwrite_existing_mcp_configuration(self) -> None:
+        """An existing MCP configuration should remain byte-for-byte unchanged."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            config_path = workspace / ".mira" / "mcp.json"
+            config_path.parent.mkdir(parents=True)
+            existing = '{\n  "mcpServers": {"custom": {"command": "serve"}}\n}\n'
+            config_path.write_text(existing, encoding="utf-8")
+
+            build_resources(workspace)
+
+            self.assertEqual(config_path.read_text(encoding="utf-8"), existing)
 
     def test_default_memories_load_without_project_memory(self) -> None:
         """Both bundled memories should load when project examples are skipped."""

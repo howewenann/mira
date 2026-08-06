@@ -21,6 +21,7 @@ def ensure_project_examples(workspace: Path) -> None:
     tools_dir.mkdir(parents=True, exist_ok=True)
     tool_examples_dir.mkdir(parents=True, exist_ok=True)
 
+    write_example(mira_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
     write_example(mira_dir / "README.md", PROJECT_README)
     write_example(memories_dir / "AGENTS.md", EXAMPLE_MEMORY)
     write_example(skills_dir / "SKILL.md", EXAMPLE_SKILL)
@@ -33,6 +34,9 @@ def write_example(path: Path, content: str) -> None:
     if path.exists():
         return
     path.write_text(content, encoding="utf-8")
+
+
+EMPTY_MCP_CONFIGURATION = '{"mcpServers": {}}'
 
 
 PROJECT_README = """# MIRA Project Resources
