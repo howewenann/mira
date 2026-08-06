@@ -596,6 +596,50 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.initialize(allow)
         return manager
 
+    async def test_all_stdio_connections_disable_sdk_stderr_logging(self) -> None:
+        calls: list[tuple[str, object]] = []
+        omitted = object()
+
+        @asynccontextmanager
+        async def fake_stdio_client(server, *, errlog=omitted):
+            calls.append((server.command, errlog))
+            yield object(), object()
+
+        class FakeClientSession:
+            def __init__(self, _read, _write, **_kwargs) -> None:
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args) -> None:
+                pass
+
+            async def initialize(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(
+                root,
+                {
+                    "implicit": {"command": "first", "args": []},
+                    "explicit": {"type": "stdio", "command": "second", "args": []},
+                    "remote": {"type": "http", "url": "https://example.test/mcp"},
+                },
+            )
+            manager = MCPManager(root, token_root=root / "profile-tokens")
+            with (
+                patch("agent.mcp.client.stdio_client", fake_stdio_client),
+                patch("agent.mcp.client.ClientSession", FakeClientSession),
+            ):
+                for name, connection in manager.client.connections.items():
+                    if connection["transport"] == "stdio":
+                        async with manager.client.session(name):
+                            pass
+
+        self.assertEqual(calls, [("first", None), ("second", None)])
+
     async def test_persistent_runtime_eager_caches_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

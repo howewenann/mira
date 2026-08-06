@@ -11,7 +11,6 @@ from typing import Any
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool, ToolException, tool
 from langchain_mcp_adapters.callbacks import Callbacks
-from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.prompts import load_mcp_prompt
 from langchain_mcp_adapters.resources import get_mcp_resource
 from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
@@ -34,6 +33,7 @@ from agent.mcp.auth import (
     is_oauth_login_required,
     sanitized_error,
 )
+from agent.mcp.client import MiraMCPClient
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry
 from agent.mcp.runtime import MCPServerRuntime
@@ -649,7 +649,7 @@ class MCPManager:
         except BaseException:
             get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
 
-    def _new_client(self) -> MultiServerMCPClient:
+    def _new_client(self) -> MiraMCPClient:
         connections: dict[str, dict[str, Any]] = {}
         for name, state in self.servers.items():
             if state.config.get("transport") not in {"stdio", "http"}:
@@ -672,7 +672,7 @@ class MCPManager:
             method = getattr(logger, level, logger.info)
             method("MCP %s: %s", context.server_name, data)
 
-        return MultiServerMCPClient(connections, callbacks=Callbacks(on_logging_message=log_message))
+        return MiraMCPClient(connections, callbacks=Callbacks(on_logging_message=log_message))
 
     def _server(self, name: str) -> MCPServerState:
         if name not in self.servers:
