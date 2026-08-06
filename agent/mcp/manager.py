@@ -431,15 +431,13 @@ class MCPManager:
                     )
 
                     async def resolve(
-                        values: list[str],
+                        values: dict[str, str],
                         *,
                         _state: MCPServerState = state,
                         _name: str = original,
-                        _arguments: tuple[PromptArgument, ...] = arguments,
                     ) -> list[BaseMessage]:
-                        mapping = {argument.name: value for argument, value in zip(_arguments, values)}
                         try:
-                            return list(await load_mcp_prompt(_state.session, _name, arguments=mapping or None))
+                            return list(await load_mcp_prompt(_state.session, _name, arguments=values or None))
                         except BaseException as error:
                             if await self._handle_later_auth_failure(_state, error):
                                 raise RuntimeError("MCP login required.") from error

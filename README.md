@@ -211,7 +211,10 @@ in `@` completion as `@mcp__<server>__<exact-uri>`; selecting one attaches its
 identity, and the agent reads it on demand. MCP prompts appear as
 `/mcp__<server>__<prompt>`. Any readable top-level UTF-8 file under
 `.mira/prompts/` becomes `/prompt__<filename-stem>` and uses Mustache variables
-as required positional arguments. Double-quote arguments containing spaces.
+as required positional arguments. MCP prompts whose arguments are all required
+also use positional values. If an MCP prompt has any optional argument, pass
+every supplied value as `name=value`; quote values containing spaces. Command
+lists keep the compact `<required> [optional]` signature in both cases.
 
 Initial MCP support intentionally covers fixed text resources only. It does
 not support resource templates, resource completion, binary materialisation,

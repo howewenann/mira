@@ -862,6 +862,10 @@ a separate resolved configuration in memory for the connection. Resolution is
 single-pass, never substitutes mapping keys, never writes resolved values, and
 fails only the affected server when a referenced variable is missing. Reload
 loads `.env` before rebuilding MCP connections so updated values take effect.
+Reusable prompt signatures stay compact as `<required> [optional]`. Prompts
+with only required arguments use positional values; the presence of any
+optional argument switches the whole invocation to `name=value` so omissions
+cannot shift later values onto the wrong MCP argument.
 The interactive MCP panel is the only path that may open a browser; startup,
 reload, retry, and one-shot runs may silently use or refresh stored credentials
 but otherwise leave the server at `Login required`. Authentication state stays

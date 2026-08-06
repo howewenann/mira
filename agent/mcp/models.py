@@ -61,7 +61,7 @@ class PromptArgument:
     required: bool = True
 
 
-PromptResolver = Callable[[list[str]], Awaitable[list[BaseMessage]]]
+PromptResolver = Callable[[dict[str, str]], Awaitable[list[BaseMessage]]]
 
 
 @dataclass(frozen=True, slots=True)

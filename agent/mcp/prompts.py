@@ -51,8 +51,8 @@ class PromptRegistry:
             names = mustache_variables(template_text)
             template = ChatPromptTemplate.from_template(template_text, template_format="mustache")
 
-            async def resolve(values: list[str], *, _template: Any = template, _names: tuple[str, ...] = names) -> list[BaseMessage]:
-                return list(_template.format_messages(**dict(zip(_names, values, strict=True))))
+            async def resolve(values: dict[str, str], *, _template: Any = template) -> list[BaseMessage]:
+                return list(_template.format_messages(**values))
 
             self.local[command] = PromptSpec(
                 command=command,
@@ -86,12 +86,7 @@ class PromptRegistry:
             if parts[0].startswith(("/prompt__", "/mcp__")):
                 raise ValueError(f"unknown prompt command: {parts[0]}")
             return None
-        values = parts[1:]
-        required = sum(argument.required for argument in spec.arguments)
-        if len(values) < required:
-            raise ValueError(f"usage: {spec.usage}")
-        if len(values) > len(spec.arguments):
-            raise ValueError(f"usage: {spec.usage}")
+        values = prompt_arguments(spec, parts[1:])
         return PreparedPrompt(invocation, await spec.resolver(values))
 
     def rows(self) -> list[tuple[str, str]]:
@@ -107,3 +102,36 @@ def mustache_variables(text: str) -> tuple[str, ...]:
         if root not in names:
             names.append(root)
     return tuple(names)
+
+
+def prompt_arguments(spec: PromptSpec, tokens: list[str]) -> dict[str, str]:
+    """Parse one invocation using the prompt's unambiguous argument style."""
+    if all(argument.required for argument in spec.arguments):
+        if len(tokens) != len(spec.arguments):
+            raise ValueError(f"usage: {spec.usage}")
+        return {
+            argument.name: value
+            for argument, value in zip(spec.arguments, tokens, strict=True)
+        }
+
+    usage = f"usage: {spec.usage}; use name=value for every argument"
+    arguments = {argument.name: argument for argument in spec.arguments}
+    values: dict[str, str] = {}
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if not separator or not name:
+            raise ValueError(usage)
+        if name not in arguments:
+            raise ValueError(f"unknown prompt argument: {name}; {usage}")
+        if name in values:
+            raise ValueError(f"duplicate prompt argument: {name}; {usage}")
+        values[name] = value
+
+    missing = [
+        argument.name
+        for argument in spec.arguments
+        if argument.required and argument.name not in values
+    ]
+    if missing:
+        raise ValueError(f"missing required prompt arguments: {', '.join(missing)}; {usage}")
+    return values

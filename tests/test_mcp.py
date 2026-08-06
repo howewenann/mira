@@ -630,9 +630,9 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(registry.warnings, ["local prompt collision excluded: /prompt__one"])
 
     async def test_prompt_usage_distinguishes_required_and_optional_arguments(self) -> None:
-        calls: list[list[str]] = []
+        calls: list[dict[str, str]] = []
 
-        async def resolve(values: list[str]) -> list[HumanMessage]:
+        async def resolve(values: dict[str, str]) -> list[HumanMessage]:
             calls.append(values)
             return [HumanMessage(content="resolved")]
 
@@ -655,17 +655,53 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(spec.usage, "/mcp__github__review_pr <repo> <pr> [focus]")
             with self.assertRaisesRegex(
                 ValueError,
-                r"^usage: /mcp__github__review_pr <repo> <pr> \[focus\]$",
+                r"^missing required prompt arguments: pr; usage: ",
             ):
-                await registry.resolve("/mcp__github__review_pr owner/repo")
+                await registry.resolve("/mcp__github__review_pr repo=owner/repo")
             self.assertEqual(calls, [])
 
+            with self.assertRaisesRegex(ValueError, r"use name=value for every argument$"):
+                await registry.resolve("/mcp__github__review_pr owner/repo 42")
+
+            prepared_without_optional = await registry.resolve(
+                "/mcp__github__review_pr repo=owner/repo pr=42"
+            )
             prepared = await registry.resolve(
-                "/mcp__github__review_pr owner/repo 42"
+                '/mcp__github__review_pr pr=42 repo=owner/repo focus="security and correctness"'
             )
 
+        self.assertIsNotNone(prepared_without_optional)
         self.assertIsNotNone(prepared)
-        self.assertEqual(calls, [["owner/repo", "42"]])
+        self.assertEqual(
+            calls,
+            [
+                {"repo": "owner/repo", "pr": "42"},
+                {"pr": "42", "repo": "owner/repo", "focus": "security and correctness"},
+            ],
+        )
+
+    async def test_optional_prompt_arguments_reject_mixed_unknown_and_duplicate_names(self) -> None:
+        async def resolve(_values: dict[str, str]) -> list[HumanMessage]:
+            return [HumanMessage(content="resolved")]
+
+        with tempfile.TemporaryDirectory() as directory:
+            registry = PromptRegistry(Path(directory))
+            spec = PromptSpec(
+                command="/mcp__github__review_pr",
+                description="Review a pull request",
+                arguments=(PromptArgument("repo"), PromptArgument("focus", required=False)),
+                source="mcp",
+                resolver=resolve,
+                server="github",
+            )
+            registry.mcp[spec.command] = spec
+
+            with self.assertRaisesRegex(ValueError, r"use name=value for every argument$"):
+                await registry.resolve("/mcp__github__review_pr repo=owner/repo security")
+            with self.assertRaisesRegex(ValueError, r"^unknown prompt argument: typo;"):
+                await registry.resolve("/mcp__github__review_pr repo=owner/repo typo=value")
+            with self.assertRaisesRegex(ValueError, r"^duplicate prompt argument: repo;"):
+                await registry.resolve("/mcp__github__review_pr repo=one repo=two")
 
 
 class Page:
