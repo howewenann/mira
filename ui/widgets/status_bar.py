@@ -51,10 +51,10 @@ def telemetry_row(model_name: str, dashboard: dict[str, Any] | None, turns: int)
     left = Text()
     append_part(left, short_model(model_name))
     append_context(left, dashboard.get("context") if isinstance(dashboard, dict) else {})
-    append_part(left, f"Turns {max(0, int(turns or 0))}")
 
     right = Text()
     append_part(right, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))
+    append_part(right, f"Turns {max(0, int(turns or 0))}")
     append_part(right, duration_text(dashboard.get("duration_seconds", 0)))
 
     row = Table.grid(expand=True, padding=0)

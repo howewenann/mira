@@ -47,7 +47,7 @@ class StatusBarFormattingTests(unittest.TestCase):
 
         line = output.getvalue().rstrip("\n")
         self.assertEqual(len(line), 80)
-        self.assertTrue(line.endswith("In 12 Out 3 | 01:05"))
+        self.assertTrue(line.endswith("In 12 Out 3 | Turns 1 | 01:05"))
 
 
 if __name__ == "__main__":
