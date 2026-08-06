@@ -43,6 +43,10 @@ _NAMED_SECRET = re.compile(
 )
 _URL_SECRET = re.compile(r"(?i)([?&](?:access_token|refresh_token|client_secret|code)=)[^&#\s]+")
 _RESOURCE_METADATA = re.compile(r'(?i)\bresource_metadata\s*=\s*"([^"\r\n]+)"')
+_AUTH_FAILURE_FIELD = re.compile(
+    r'(?i)\b(error_description|error)\s*=\s*(?:"([^"\r\n]*)"|([^,\s]+))'
+)
+_MAX_ERROR_DETAIL = 800
 
 
 class OAuthLoginRequired(RuntimeError):
@@ -166,7 +170,7 @@ class MiraOAuthProvider(OAuthClientProvider):
             token_endpoint_auth_method="none",
         )
         super().__init__(
-            server_url=str(state.config["url"]),
+            server_url=str(state.connection_config["url"]),
             client_metadata=metadata,
             storage=self.storage,
             redirect_handler=self._redirect,
@@ -250,7 +254,7 @@ def server_token_directory(state: MCPServerState, *, token_root: Path = TOKEN_RO
     component = _SAFE_COMPONENT.sub("-", state.name).strip("-._") or "server"
     component = component[:40]
     name_digest = hashlib.sha256(state.name.encode("utf-8")).hexdigest()[:8]
-    identity = normalized_server_url(str(state.config.get("url", "")))
+    identity = normalized_server_url(str(state.connection_config.get("url", "")))
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return token_root.expanduser() / f"{component}-{name_digest}-{digest}"
 
@@ -275,7 +279,7 @@ def normalized_server_url(url: str) -> str:
 
 
 def has_authorization_header(state: MCPServerState) -> bool:
-    headers = state.config.get("headers", {})
+    headers = state.connection_config.get("headers", {})
     return isinstance(headers, dict) and any(str(name).casefold() == "authorization" for name in headers)
 
 
@@ -292,7 +296,7 @@ async def is_oauth_login_required(error: BaseException, state: MCPServerState) -
         match = _RESOURCE_METADATA.search(header)
         if "bearer" in header.casefold() and match and _valid_metadata_url(match.group(1)):
             return True
-    return await _discover_oauth_metadata(str(state.config.get("url", "")))
+    return await _discover_oauth_metadata(str(state.connection_config.get("url", "")))
 
 
 def is_known_oauth_failure(error: BaseException, state: MCPServerState) -> bool:
@@ -302,11 +306,84 @@ def is_known_oauth_failure(error: BaseException, state: MCPServerState) -> bool:
 
 
 def sanitized_error(error: BaseException) -> str:
-    text = " ".join(str(error).split())
+    nested_errors = list(_leaf_errors(error))
+    substantive = [nested for nested in nested_errors if not _is_async_stream_noise(nested)]
+    if substantive:
+        nested_errors = substantive
+    details: list[str] = []
+    for nested in nested_errors:
+        detail = _error_detail(nested)
+        if detail and detail not in details:
+            details.append(detail)
+    text = "; ".join(details) or _error_detail(error)
     text = _BEARER_SECRET.sub(r"\1[redacted]", text)
     text = _NAMED_SECRET.sub(r"\1\2[redacted]", text)
     text = _URL_SECRET.sub(r"\1[redacted]", text)
-    return f"{type(error).__name__}: {text}" if text else type(error).__name__
+    return text[:_MAX_ERROR_DETAIL]
+
+
+def _leaf_errors(error: BaseException) -> Iterator[BaseException]:
+    """Yield useful leaf failures instead of async wrapper exceptions."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        children = _error_children(current)
+        if children:
+            pending[0:0] = children
+        else:
+            yield current
+
+
+def _error_children(error: BaseException) -> list[BaseException]:
+    children: list[BaseException] = []
+    children.extend(
+        child for child in getattr(error, "exceptions", ()) if isinstance(child, BaseException)
+    )
+    children.extend(value for value in error.args if isinstance(value, BaseException))
+    if isinstance(error.__cause__, BaseException):
+        children.append(error.__cause__)
+    if isinstance(error.__context__, BaseException):
+        children.append(error.__context__)
+    return children
+
+
+def _error_detail(error: BaseException) -> str:
+    response = getattr(error, "response", None)
+    if isinstance(response, httpx.Response):
+        status = f"HTTP {response.status_code} {response.reason_phrase}".strip()
+        try:
+            body = " ".join(response.text.split())
+        except httpx.ResponseNotRead:
+            body = ""
+        detail = body or _authentication_failure_detail(response)
+        return f"{status}: {detail}" if detail else status
+    message = " ".join(str(error).split())
+    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _is_async_stream_noise(error: BaseException) -> bool:
+    """Identify control-flow failures that add no context beside a real error."""
+    return type(error).__module__.startswith("anyio") and type(error).__name__ in {
+        "BrokenResourceError",
+        "ClosedResourceError",
+        "EndOfStream",
+        "WouldBlock",
+    }
+
+
+def _authentication_failure_detail(response: httpx.Response) -> str:
+    fields: dict[str, str] = {}
+    for match in _AUTH_FAILURE_FIELD.finditer(response.headers.get("www-authenticate", "")):
+        fields[match.group(1).casefold()] = match.group(2) or match.group(3) or ""
+    code = fields.get("error", "")
+    description = fields.get("error_description", "")
+    if code and description:
+        return f"{code}: {description}"
+    return code or description
 
 
 def _error_responses(error: BaseException) -> Iterator[httpx.Response]:
@@ -320,13 +397,7 @@ def _error_responses(error: BaseException) -> Iterator[httpx.Response]:
         response = getattr(current, "response", None)
         if isinstance(response, httpx.Response):
             yield response
-        children = getattr(current, "exceptions", ())
-        pending.extend(child for child in children if isinstance(child, BaseException))
-        pending.extend(value for value in current.args if isinstance(value, BaseException))
-        if isinstance(current.__cause__, BaseException):
-            pending.append(current.__cause__)
-        if isinstance(current.__context__, BaseException):
-            pending.append(current.__context__)
+        pending.extend(_error_children(current))
 
 
 async def _discover_oauth_metadata(server_url: str) -> bool:

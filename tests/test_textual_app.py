@@ -3518,10 +3518,27 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             os.environ["MIRA_LLM_PROVIDER"] = "lmstudio"
             os.environ["MIRA_LLM_MODEL"] = "already-loaded"
             launch_options = LaunchOptions(llm_direct=True)
+            mcp_reload_values: list[str | None] = []
+
+            async def reload_mcp() -> None:
+                mcp_reload_values.append(os.environ.get("MIRA_LLM_MODEL"))
+
+            mcp_manager = SimpleNamespace(
+                reload=reload_mcp,
+                shutdown=AsyncMock(),
+                set_change_handler=lambda _handler: None,
+                config_issue=None,
+                show_status=False,
+                servers={},
+                usable_count=0,
+                configured_count=0,
+                prompt_registry=SimpleNamespace(warnings=[]),
+            )
             app = make_app(
                 workspace=workspace,
                 config={"settings": load_settings(workspace), "llm_direct": True},
                 launch_options=launch_options,
+                mcp_manager=mcp_manager,
             )
 
             async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
@@ -3540,6 +3557,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.config["llm_direct"])
             self.assertIs(app.launch_options, launch_options)
             self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")
+            self.assertEqual(mcp_reload_values, ["from-env-file"])
 
     async def test_reload_command_uses_shared_reload(self) -> None:
         """The slash command should present failures after the shared reload completes."""

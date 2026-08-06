@@ -184,6 +184,13 @@ MIRA bootstraps an empty active configuration at `.mira/mcp/mcp.json`.
 `schema.json` documents the exact accepted keys. `example.json` is never
 loaded. Run `/reload` after changes.
 
+MCP string values can read explicit process environment variables with
+`${env:NAME}`. For example, an HTTP header can use
+`"Authorization": "Bearer ${env:MCP_TOKEN}"` without storing the resolved
+secret in `mcp.json`. Start MIRA from an environment containing the variable,
+or define it in the workspace `.env`; a missing variable fails only that MCP
+server with a clear error.
+
 Both local stdio servers and remote Streamable HTTP endpoints require approval
 before first use. `Allow` lasts for the current MIRA process, `Deny` leaves the
 server enabled but unused for that process, and `Always allow` persists approval

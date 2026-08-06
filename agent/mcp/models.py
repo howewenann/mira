@@ -94,6 +94,7 @@ class MCPServerState:
     transport: Literal["stdio", "http"]
     config: dict[str, Any]
     fingerprint: str
+    runtime_config: dict[str, Any] = field(default_factory=dict)
     status: MCPStatus = "Disabled"
     error: str = ""
     tools: list[Any] = field(default_factory=list)
@@ -111,3 +112,8 @@ class MCPServerState:
     @property
     def transient(self) -> bool:
         return self.status in {"Authenticating", "Starting", "Restarting", "Stopping"}
+
+    @property
+    def connection_config(self) -> dict[str, Any]:
+        """Return resolved runtime values without changing the safe source config."""
+        return self.runtime_config or self.config

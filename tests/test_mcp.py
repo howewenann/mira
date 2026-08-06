@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import anyio
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import ToolException
@@ -28,10 +29,12 @@ from textual.app import App, ComposeResult
 from textual.widgets import Button, Static
 
 from agent.mcp.configuration import (
+    adapter_connection,
     approval_preview,
     configuration_fingerprint,
     load_mcp_configuration,
     mcp_path,
+    resolve_environment_references,
 )
 from agent.mcp.auth import (
     FileTokenStorage,
@@ -109,6 +112,111 @@ class MCPConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded.servers["local"].transport, "stdio")
         self.assertEqual(loaded.servers["docs"].transport, "http")
 
+    def test_environment_references_resolve_only_in_runtime_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(
+                root,
+                {
+                    "remote": {
+                        "type": "http",
+                        "url": "https://${env:MCP_HOST}/mcp",
+                        "headers": {"Authorization": "Bearer ${env:MCP_TOKEN}"},
+                    },
+                    "local": {
+                        "command": "${env:PYTHON_COMMAND}",
+                        "args": ["--token=${env:MCP_TOKEN}", "$${env:LITERAL}"],
+                        "env": {"${env:KEY_NAME}": "${env:MCP_TOKEN}"},
+                    },
+                },
+            )
+            first = load_mcp_configuration(
+                root,
+                environ={
+                    "MCP_HOST": "example.test",
+                    "MCP_TOKEN": "first-secret",
+                    "PYTHON_COMMAND": "python",
+                },
+            )
+            second = load_mcp_configuration(
+                root,
+                environ={
+                    "MCP_HOST": "example.test",
+                    "MCP_TOKEN": "rotated-secret",
+                    "PYTHON_COMMAND": "python",
+                },
+            )
+
+        remote = first.servers["remote"]
+        self.assertEqual(remote.config["url"], "https://${env:MCP_HOST}/mcp")
+        self.assertEqual(remote.config["headers"]["Authorization"], "Bearer ${env:MCP_TOKEN}")
+        self.assertEqual(remote.connection_config["url"], "https://example.test/mcp")
+        self.assertEqual(
+            remote.connection_config["headers"]["Authorization"],
+            "Bearer first-secret",
+        )
+        self.assertEqual(
+            adapter_connection(remote)["headers"]["Authorization"],
+            "Bearer first-secret",
+        )
+        self.assertNotIn("first-secret", approval_preview(remote))
+        self.assertEqual(remote.fingerprint, second.servers["remote"].fingerprint)
+
+        local = first.servers["local"]
+        self.assertEqual(local.connection_config["command"], "python")
+        self.assertEqual(
+            local.connection_config["args"],
+            ["--token=first-secret", "${env:LITERAL}"],
+        )
+        self.assertEqual(local.connection_config["env"], {"${env:KEY_NAME}": "first-secret"})
+
+    def test_environment_resolution_is_single_pass_and_missing_values_are_server_local(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(
+                root,
+                {
+                    "missing": {
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                        "headers": {"Authorization": "Bearer ${env:MISSING_TOKEN}"},
+                    },
+                    "available": {"command": "python", "args": []},
+                },
+            )
+            loaded = load_mcp_configuration(root, environ={})
+
+        self.assertEqual(loaded.servers["missing"].status, "Failed")
+        self.assertEqual(
+            loaded.servers["missing"].error,
+            "environment variable MISSING_TOKEN is not set; define it before starting MIRA "
+            "or in the workspace .env",
+        )
+        self.assertEqual(loaded.servers["available"].status, "Disabled")
+        self.assertEqual(
+            resolve_environment_references(
+                "${env:FIRST}",
+                environ={"FIRST": "${env:SECOND}", "SECOND": "secret"},
+            ),
+            "${env:SECOND}",
+        )
+
+    def test_invalid_or_empty_environment_references_fail_clearly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid environment variable name"):
+            resolve_environment_references("${env:NOT-VALID}", environ={})
+        with self.assertRaisesRegex(ValueError, "invalid environment reference"):
+            resolve_environment_references("${env:UNCLOSED", environ={})
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(root, {"empty": {"command": "${env:COMMAND}"}})
+            loaded = load_mcp_configuration(root, environ={"COMMAND": ""})
+        self.assertEqual(loaded.servers["empty"].status, "Failed")
+        self.assertEqual(
+            loaded.servers["empty"].error,
+            "stdio server command resolved to an empty value",
+        )
+
     def test_invalid_json_and_top_level_are_whole_file_issues(self) -> None:
         for text in ("{", "[]", '{"servers": {}}'):
             with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
@@ -168,7 +276,7 @@ class MCPConfigurationTests(unittest.TestCase):
 
             example_path = active_path.parent / "example.json"
             active_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
-            example = load_mcp_configuration(root)
+            example = load_mcp_configuration(root, environ={"REMOTE_MCP_TOKEN": "resolved-secret"})
             self.assertEqual(set(example.servers), {"local-server", "remote-server"})
             self.assertEqual(example.servers["local-server"].transport, "stdio")
             self.assertEqual(
@@ -183,7 +291,15 @@ class MCPConfigurationTests(unittest.TestCase):
             self.assertEqual(example.servers["remote-server"].transport, "http")
             self.assertEqual(
                 example.servers["remote-server"].config,
-                {"transport": "http", "url": "https://example.com/mcp", "headers": {}},
+                {
+                    "transport": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer ${env:REMOTE_MCP_TOKEN}"},
+                },
+            )
+            self.assertEqual(
+                example.servers["remote-server"].connection_config["headers"],
+                {"Authorization": "Bearer resolved-secret"},
             )
 
     def test_example_is_inert_and_schema_matches_public_configuration_keys(self) -> None:
@@ -207,6 +323,9 @@ class MCPConfigurationTests(unittest.TestCase):
             self.assertEqual(set(http["properties"]), {"type", "url", "headers"})
             self.assertEqual(http["required"], ["type", "url"])
             self.assertFalse(http["additionalProperties"])
+            self.assertIn("${env:NAME}", schema["description"])
+            self.assertIn("${env:NAME}", stdio["properties"]["env"]["description"])
+            self.assertIn("${env:NAME}", http["properties"]["headers"]["description"])
             self.assertNotIn('"transport"', json.dumps(schema))
             self.assertNotIn("servers", schema["properties"])
 
@@ -273,6 +392,50 @@ class MCPOAuthClassificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("bearer-value", rendered)
         direct = sanitized_error(RuntimeError("access_token=token-value Bearer bearer-value"))
         self.assertIn("[redacted]", direct)
+
+    def test_nested_http_failure_surfaces_response_body(self) -> None:
+        request = httpx.Request("POST", "https://example.test/mcp")
+        response = httpx.Response(
+            400,
+            request=request,
+            text="IDE authentication failed: invalid token",
+        )
+        failure = httpx.HTTPStatusError("request failed", request=request, response=response)
+
+        rendered = sanitized_error(ExceptionGroup("unhandled errors in a TaskGroup", [failure]))
+
+        self.assertEqual(rendered, "HTTP 400 Bad Request: IDE authentication failed: invalid token")
+        self.assertNotIn("ExceptionGroup", rendered)
+        self.assertNotIn("TaskGroup", rendered)
+
+    def test_unread_http_failure_surfaces_authentication_header(self) -> None:
+        request = httpx.Request("POST", "https://example.test/mcp")
+        response = httpx.Response(
+            400,
+            request=request,
+            headers={
+                "WWW-Authenticate": 'Bearer error="invalid_token", error_description="Invalid token"'
+            },
+            stream=httpx.ByteStream(b"unread response body"),
+        )
+        failure = httpx.HTTPStatusError("request failed", request=request, response=response)
+
+        rendered = sanitized_error(
+            ExceptionGroup("unhandled errors in a TaskGroup", [failure, anyio.WouldBlock()])
+        )
+
+        self.assertEqual(rendered, "HTTP 400 Bad Request: invalid_token: Invalid token")
+        self.assertNotIn("WouldBlock", rendered)
+
+    def test_multiple_nested_failures_are_concise_and_redacted(self) -> None:
+        error = ExceptionGroup(
+            "outer",
+            [RuntimeError("first failure"), ValueError("Bearer secret-token")],
+        )
+
+        rendered = sanitized_error(error)
+
+        self.assertEqual(rendered, "RuntimeError: first failure; ValueError: Bearer [redacted]")
 
 
 class MCPOAuthStorageTests(unittest.IsolatedAsyncioTestCase):

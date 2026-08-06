@@ -1360,3 +1360,10 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    health, counts, errors, and registries do not change, and the clicked header
    retains focus and the exact scroll position. Selecting Restart then refreshes
    all advertised capabilities for only that server.
+8. Configure a static HTTP header as
+   `"Authorization": "Bearer ${env:MCP_TEST_TOKEN}"`, set `MCP_TEST_TOKEN`
+   before launching MIRA, and approve the server. Expected: the server receives
+   the resolved value while the approval preview, panel, logs, and `mcp.json`
+   never show it. Remove the variable and run `/reload`; only that server becomes
+   Failed with an error naming `MCP_TEST_TOKEN` and explaining how to define it.
+   Restore the variable in `.env`, run `/reload`, and confirm the server starts.

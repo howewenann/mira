@@ -1804,13 +1804,13 @@ class MiraApp(App[None]):
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import load_effective_config
 
-        if self.mcp_manager is not None:
-            await self.mcp_manager.reload()
         config = load_effective_config(
             self.workspace,
             self.launch_options,
             override_dotenv=True,
         )
+        if self.mcp_manager is not None:
+            await self.mcp_manager.reload()
         inspect_model = get_llm(config, metadata=ModelMetadata())
         metadata = await infer_model_metadata(config, model=inspect_model)
         config["llm_inferred_context_tokens"] = metadata.context_tokens

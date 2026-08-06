@@ -66,7 +66,9 @@ EXAMPLE_MCP_CONFIGURATION = '''{
     "remote-server": {
       "type": "http",
       "url": "https://example.com/mcp",
-      "headers": {}
+      "headers": {
+        "Authorization": "Bearer ${env:REMOTE_MCP_TOKEN}"
+      }
     }
   }
 }
@@ -76,7 +78,7 @@ EXAMPLE_MCP_CONFIGURATION = '''{
 MCP_CONFIGURATION_SCHEMA = '''{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MIRA MCP configuration",
-  "description": "The supported configuration format for MCP servers loaded by MIRA.",
+  "description": "The supported configuration format for MCP servers loaded by MIRA. String values may reference process environment variables with ${env:NAME}.",
   "type": "object",
   "properties": {
     "$schema": {
@@ -115,7 +117,7 @@ MCP_CONFIGURATION_SCHEMA = '''{
               },
               "env": {
                 "type": "object",
-                "description": "Environment variables passed to the server process.",
+                "description": "Environment variables passed to the server process. Values may contain ${env:NAME} references.",
                 "additionalProperties": {
                   "type": "string"
                 }
@@ -140,7 +142,7 @@ MCP_CONFIGURATION_SCHEMA = '''{
               },
               "headers": {
                 "type": "object",
-                "description": "Static HTTP headers sent with MCP requests.",
+                "description": "HTTP headers sent with MCP requests. Values may contain ${env:NAME} references, such as Bearer ${env:MCP_TOKEN}.",
                 "additionalProperties": {
                   "type": "string"
                 }
@@ -174,7 +176,9 @@ MIRA loads project resources from this folder on top of its defaults.
   MIRA, while `mira_tool_api.project_tool` runs its function body in the
   configured project Execute Environment.
 - `mcp/mcp.json`: active MCP configuration. `mcp/example.json` is inert, and
-  `mcp/schema.json` documents the supported keys. Run `/reload` after changes.
+  `mcp/schema.json` documents the supported keys. MCP string values can use
+  `${env:NAME}` to read explicit process or workspace `.env` values without
+  storing the resolved value. Run `/reload` after changes.
 - `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is
   never scanned as active resources.
   Files can also define `get_tools(project_backend)` for tools that need

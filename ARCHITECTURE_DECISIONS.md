@@ -856,6 +856,12 @@ Panel expansion reads those completed caches and only changes presentation.
 Remote HTTP OAuth is inferred only after an approved server's ordinary
 connection returns a valid MCP OAuth challenge or its protected-resource and
 authorization-server metadata can be discovered. User JSON has no OAuth field.
+MCP string values may contain explicit `${env:NAME}` references. Loading keeps
+the normalized template for approval previews and fingerprints while building
+a separate resolved configuration in memory for the connection. Resolution is
+single-pass, never substitutes mapping keys, never writes resolved values, and
+fails only the affected server when a referenced variable is missing. Reload
+loads `.env` before rebuilding MCP connections so updated values take effect.
 The interactive MCP panel is the only path that may open a browser; startup,
 reload, retry, and one-shot runs may silently use or refresh stored credentials
 but otherwise leave the server at `Login required`. Authentication state stays
@@ -881,9 +887,9 @@ Task-owned entry and exit are required by the AnyIO scopes used by remote HTTP
 sessions. They also keep restart, disable, authentication cleanup, reload, and
 shutdown deterministic if the requesting panel recomposes or closes.
 
-**Where to check:** `agent/mcp/auth.py`, `agent/mcp/manager.py`,
-`agent/mcp/runtime.py`, `agent/factory.py`, `ui/app.py`,
-`ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
+**Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`,
+`agent/mcp/manager.py`, `agent/mcp/runtime.py`, `agent/factory.py`,
+`ui/app.py`, `ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
 
 **Update this when:** MCP transport ownership, capability caching, attachment
 authorization, or the Act/Plan rebuild boundary changes.
