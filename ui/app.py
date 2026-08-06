@@ -2595,7 +2595,7 @@ class MiraApp(App[None]):
             return
         if isinstance(self.screen, MCPPanelScreen):
             return
-        self.push_screen(MCPPanelScreen(self.mcp_manager))
+        self.push_screen(MCPPanelScreen(self.mcp_manager, self._run_reload_command))
 
     def _sync_mcp_button(self) -> None:
         try:

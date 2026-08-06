@@ -194,6 +194,16 @@ MCPPanelScreen {
 #mcp-title { width: 1fr; height: 3; content-align: left middle; color: #d6fff6; text-style: bold; }
 #mcp-scroll { height: 1fr; scrollbar-color: #5bb8b1; scrollbar-background: #122023; }
 
+#mcp-actions {
+    height: 3;
+    align-horizontal: right;
+}
+
+#mcp-actions Button {
+    min-width: 12;
+    margin-left: 1;
+}
+
 .mcp-server-card {
     width: 1fr;
     height: auto;

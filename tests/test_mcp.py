@@ -9,7 +9,7 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import anyio
 import httpx
@@ -1359,8 +1359,11 @@ class PanelApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Static("host")
 
+    async def reload_runtime(self) -> None:
+        """Stand in for MiraApp's shared /reload pathway."""
+
     def on_mount(self) -> None:
-        self.push_screen(MCPPanelScreen(self.manager))
+        self.push_screen(MCPPanelScreen(self.manager, self.reload_runtime))
 
 
 class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
@@ -1593,7 +1596,10 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#mcp-status-button")
             await pilot.pause()
             self.assertIsInstance(app.screen, MCPPanelScreen)
-            self.assertEqual(str(app.screen.query_one("#mcp-close", Button).label), "x")
+            self.assertEqual(str(app.screen.query_one("#mcp-title-close", Button).label), "x")
+            actions = list(app.screen.query_one("#mcp-actions").query(Button))
+            self.assertEqual([button.id for button in actions], ["mcp-reload", "mcp-close"])
+            self.assertEqual([str(button.label) for button in actions], ["Reload Runtime", "Close"])
             self.assertIn("one", str(app.screen.query_one("#mcp-header-one", Button).label))
             self.assertIn("[STDIO]", str(app.screen.query_one("#mcp-header-one", Button).label))
             app.screen.dismiss()
@@ -1602,6 +1608,29 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await app.submit_prompt(PromptBox.Submitted(prompt, "/mcp"))
             await pilot.pause()
             self.assertIsInstance(app.screen, MCPPanelScreen)
+
+    async def test_reload_button_uses_shared_slash_reload_path_and_close_dismisses(self) -> None:
+        """MCP footer actions should reload the full runtime and close the panel."""
+        from tests.test_textual_app import make_app, wait_until
+
+        manager = PanelManager()
+        app = make_app(mcp_manager=manager)
+        app._run_reload_command = AsyncMock()  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            screen = app.screen
+            self.assertIsInstance(screen, MCPPanelScreen)
+
+            await pilot.click("#mcp-reload")
+            await wait_until(lambda: app._run_reload_command.await_count == 1)
+            await wait_until(lambda: screen.query_one("#mcp-reload", Button).has_focus)
+            app._run_reload_command.assert_awaited_once_with()
+
+            await pilot.click("#mcp-close")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, MCPPanelScreen)
 
 
 if __name__ == "__main__":

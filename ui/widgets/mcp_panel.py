@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 
 from rich.text import Text
@@ -23,10 +23,12 @@ class MCPPanelScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, manager: Any) -> None:
+    def __init__(self, manager: Any, reload_runtime: Callable[[], Awaitable[None]]) -> None:
         super().__init__()
         self.manager = manager
+        self.reload_runtime = reload_runtime
         self.expanded: set[str] = set()
+        self.reloading = False
         self._spinner = 0
         self._refresh_lock = asyncio.Lock()
         self._presentation_signature = self._server_presentation_signature()
@@ -35,10 +37,19 @@ class MCPPanelScreen(ModalScreen[None]):
         with Vertical(id="mcp-dialog"):
             with Horizontal(id="mcp-title-row"):
                 yield Static("MCP SERVERS", id="mcp-title")
-                yield Button("x", id="mcp-close", classes="panel-close")
+                title_close = Button("x", id="mcp-title-close", classes="mcp-close panel-close")
+                title_close.disabled = self.reloading
+                yield title_close
             with VerticalScroll(id="mcp-scroll"):
                 for state in self.manager.servers.values():
                     yield from self._server_widgets(state)
+            with Horizontal(id="mcp-actions"):
+                reload_button = Button("Reload Runtime", id="mcp-reload", variant="primary")
+                reload_button.disabled = self.reloading
+                yield reload_button
+                close_button = Button("Close", id="mcp-close", classes="mcp-close")
+                close_button.disabled = self.reloading
+                yield close_button
 
     def _server_widgets(self, state: Any) -> ComposeResult:
         expanded = state.name in self.expanded
@@ -109,10 +120,37 @@ class MCPPanelScreen(ModalScreen[None]):
         name = event.button.name or ""
         self.run_worker(self._apply_control(name, action), name=f"mcp-{action}-{safe_id(name)}", exclusive=False)
 
-    @on(Button.Pressed, "#mcp-close")
+    @on(Button.Pressed, "#mcp-reload")
+    def reload_pressed(self, event: Button.Pressed) -> None:
+        """Run the same full runtime reload used by /reload."""
+        event.stop()
+        if self.reloading:
+            return
+        self.reloading = True
+        self._sync_reload_controls()
+        self.run_worker(self._reload(), name="mcp-runtime-reload", exclusive=False)
+
+    @on(Button.Pressed, ".mcp-close")
     def close_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         self.action_close()
+
+    async def _reload(self) -> None:
+        """Reload the full runtime and redraw server state without closing the panel."""
+        try:
+            await self.reload_runtime()
+        finally:
+            self.reloading = False
+            if self.is_mounted:
+                await self.refresh_from_manager(preferred_focus_id="mcp-reload")
+
+    def _sync_reload_controls(self) -> None:
+        """Prevent reload or dismissal while runtime replacement is in progress."""
+        for selector in ("#mcp-reload", "#mcp-close", "#mcp-title-close"):
+            try:
+                self.query_one(selector, Button).disabled = self.reloading
+            except NoMatches:
+                pass
 
     async def _apply_control(self, name: str, action: str) -> None:
         if action == "enable":
@@ -220,7 +258,8 @@ class MCPPanelScreen(ModalScreen[None]):
         )
 
     def action_close(self) -> None:
-        self.dismiss()
+        if not self.reloading:
+            self.dismiss()
 
 
 def capability_counts(state: Any) -> tuple[tuple[str, str], ...]:

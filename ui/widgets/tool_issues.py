@@ -60,8 +60,8 @@ class ToolIssuesScreen(ModalScreen[None]):
             yield Input(" ".join(missing_requirements(self.failures)), id="tool-issues-packages")
             yield LoadingIndicator(id="tool-issues-loading")
             with Horizontal(id="tool-issues-actions"):
-                yield Button("Close", id="tool-issues-close", classes="tool-issues-close")
                 yield Button("Install All and Reload (i)", id="tool-issues-install", variant="primary")
+                yield Button("Close", id="tool-issues-close", classes="tool-issues-close")
 
     def on_mount(self) -> None:
         self.query_one("#tool-issues-loading", LoadingIndicator).display = False
@@ -224,8 +224,8 @@ class ToolIssuesScreen(ModalScreen[None]):
         """Return keyboard-focusable modal controls in document order."""
         controls: list[Input | Button] = [
             self.query_one("#tool-issues-packages", Input),
-            self.query_one("#tool-issues-close", Button),
             self.query_one("#tool-issues-install", Button),
+            self.query_one("#tool-issues-close", Button),
             self.query_one("#tool-issues-title-close", Button),
         ]
         return [control for control in controls if not control.disabled and control.display]
