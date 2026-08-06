@@ -110,7 +110,7 @@ class SettingsPanel(Vertical):
         with Vertical(id="settings-window"):
             with Horizontal(classes="settings-top-row"):
                 yield Static("Settings", classes="settings-title")
-                yield SettingsCloseButton("x", panel=self, id="settings-close", classes="settings-close")
+                yield SettingsCloseButton("x", panel=self, id="settings-close", classes="panel-close")
             with Horizontal(id="settings-tabs"):
                 yield Button("General", id="settings-tab-general", classes="settings-tab active")
                 yield Button("Custom Tools", id="settings-tab-custom", classes="settings-tab")

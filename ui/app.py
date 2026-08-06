@@ -107,6 +107,7 @@ from ui.widgets import (
     MCPPanelScreen,
 )
 from ui.widgets.tool_issues import PipInstallResult
+from ui.widgets.mcp_panel import mcp_summary_symbol
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
 from ui.windows_clipboard import set_windows_clipboard
@@ -222,6 +223,7 @@ class MiraApp(App[None]):
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
         self.mcp_manager: Any | None = None
+        self._mcp_spinner = 0
         self.tool_failures: list[Any] = []
         self.mcp_config_issues: list[Any] = []
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
@@ -2590,7 +2592,8 @@ class MiraApp(App[None]):
         visible = self.mcp_manager is not None and self.mcp_manager.show_status
         button.display = visible
         if visible:
-            button.label = f"MCP {self.mcp_manager.usable_count}/{self.mcp_manager.configured_count}"
+            symbol = mcp_summary_symbol(self.mcp_manager.servers.values(), spinner=self._mcp_spinner)
+            button.label = f"{symbol} MCP {self.mcp_manager.usable_count}/{self.mcp_manager.configured_count}"
 
     @on(Button.Pressed, "#tool-issues-button")
     def press_tool_issues(self, event: Button.Pressed) -> None:
@@ -2874,6 +2877,9 @@ class MiraApp(App[None]):
         chat.tick_subagents()
         chat.tick_compaction()
         chat.tick_rubrics()
+        if self.mcp_manager is not None and any(state.transient for state in self.mcp_manager.servers.values()):
+            self._mcp_spinner += 1
+            self._sync_mcp_button()
         try:
             self.query_one(SubagentsPanel).tick()
         except NoMatches:

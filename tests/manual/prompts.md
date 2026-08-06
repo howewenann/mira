@@ -924,12 +924,13 @@ one module name, and one installation/reload recovers both.
 
 ### 4. Close and repair later
 
-With one unresolved dependency, open Issues, Close, continue chatting, reopen
-from `Issues 1`, Close again, then reopen with `/issues` and repair it.
+With one unresolved dependency, open Issues, use the top-right `x`, continue
+chatting, reopen from `Issues 1`, use the footer Close, then reopen with
+`/issues` and repair it.
 
-Expected: Close creates no chat bubble or session event, the indicator remains,
-all normal chat works, each open reflects current failures, and repair removes
-the indicator.
+Expected: both close controls create no chat bubble or session event, the
+indicator remains, all normal chat works, each open reflects current failures,
+and repair removes the indicator.
 
 ### 5. Broken tools are invisible
 
@@ -975,8 +976,8 @@ offered.
 Enter an obviously nonexistent requirement in Issues and install.
 
 Expected: captured pip failure details appear in the scrollable body, reload is
-not called, input and both buttons are restored, Close works, and the issue
-remains.
+not called, the input and footer actions are restored, both close controls work,
+and the issue remains.
 
 ### 9. Cascading dependency
 
@@ -990,8 +991,9 @@ second install/reload.
 
 Shrink the terminal while a mixed Issues screen is open.
 
-Expected: the body scrolls, both action buttons stay together at the bottom,
-Escape closes only while idle, and `/issues` remains a reliable fallback.
+Expected: the body scrolls, both footer action buttons stay together, the
+top-right `x` remains visible, Escape closes only while idle, and `/issues`
+remains a reliable fallback.
 
 ### 11. Issues keyboard navigation
 
@@ -1001,8 +1003,9 @@ controls; Up and Down wrap through the input and actions; and Left and Right
 switch between Install and Close without moving focus out of the package input
 while editing. Type `i` and `c` in the input, then focus an action and confirm
 `i` starts installation and `c` closes. Confirm Enter submits the input, the
-button labels show `(i)` and `(c)`, disabled controls are skipped, and no
-shortcut closes or restarts the modal while installation is active.
+Install label shows `(i)`, the footer Close and top-right `x` both dismiss the
+idle modal, disabled controls are skipped, and no close control or shortcut
+dismisses the modal while installation is active.
 
 ### 12. One-shot mode
 
@@ -1328,15 +1331,22 @@ Use a disposable workspace and manually add Linear's remote endpoint to
 unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
 
 1. Launch the TUI and approve the configured OAuth server. Expected: it becomes
-   `Login required`, `MCP 0/1` remains neutral, no browser opens, the state does
-   not appear under Issues, and the comparison servers behave as before.
+   `Login required`, the filled teal indicator reads `! MCP 0/1`, no browser
+   opens, the state does not appear under Issues, and comparison servers behave
+   as before.
 2. Expand the server and select `Login`. Expected: only its row shows the
    authenticating spinner, the TUI stays responsive, and the browser opens for
-   consent. Successful consent changes the row to Available and the count to
-   `MCP 1/1`.
+   consent. Successful consent changes its labelled badge to Available and the
+   top indicator to `✓ MCP 1/1`.
 3. Restart MIRA and run `/reload`. Expected: the stored credential under
    `~/.mira/_state/mcp-tokens/` is reused or refreshed without opening a browser.
    A one-shot invocation also never opens a browser or waits for a callback.
 4. Select `Forget login`. Expected: only this server stops, only its token
    directory is removed, `.mira/mcp.json` is unchanged, and the enabled server
    returns to `Login required`; a disabled server remains disabled.
+5. Configure at least two available remote servers, open MCP, and restart one.
+   Expected: each server uses a vertically structured card with separate status,
+   transport, counts, and action rows. Only the selected card transitions; it
+   returns to Available without `CancelledError`, while every other server keeps
+   its session, capabilities, and status. The MCP and Issues title bars use the
+   same `x` close style as Settings.

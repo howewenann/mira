@@ -53,24 +53,24 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 packages = screen.query_one("#tool-issues-packages", Input)
                 install = screen.query_one("#tool-issues-install", Button)
                 close = screen.query_one("#tool-issues-close", Button)
+                title_close = screen.query_one("#tool-issues-title-close", Button)
                 await wait_until(lambda: packages.has_focus)
                 self.assertEqual(str(install.label), "Install All and Reload (i)")
-                self.assertEqual(str(close.label), "Close (c)")
+                self.assertEqual(str(close.label), "Close")
+                self.assertEqual(str(title_close.label), "x")
 
+                await pilot.press("tab")
+                self.assertTrue(close.has_focus)
                 await pilot.press("tab")
                 self.assertTrue(install.has_focus)
                 await pilot.press("shift+tab")
-                self.assertTrue(packages.has_focus)
+                self.assertTrue(close.has_focus)
                 await pilot.press("down")
                 self.assertTrue(install.has_focus)
                 await pilot.press("right")
                 self.assertTrue(close.has_focus)
-                await pilot.press("right")
-                self.assertTrue(install.has_focus)
                 await pilot.press("up")
                 self.assertTrue(packages.has_focus)
-                await pilot.press("up")
-                self.assertTrue(close.has_focus)
 
     async def test_syntax_only_issues_focus_close_and_skip_disabled_controls(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +199,8 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(screen.query_one("#tool-issues-packages", Input).value, "shared_dep")
                 actions = screen.query_one("#tool-issues-actions", Horizontal)
                 self.assertEqual(len(actions.query(Button)), 2)
+                self.assertEqual([button.id for button in actions.query(Button)], ["tool-issues-close", "tool-issues-install"])
+                self.assertEqual(str(screen.query_one("#tool-issues-title-close", Button).label), "x")
                 await pilot.press("escape")
                 await pilot.pause()
                 self.assertNotIsInstance(app.screen, ToolIssuesScreen)
@@ -236,6 +238,7 @@ class ToolIssuesUiTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertIs(app.screen, screen)
                 self.assertTrue(screen.query_one("#tool-issues-close", Button).disabled)
+                self.assertTrue(screen.query_one("#tool-issues-title-close", Button).disabled)
 
     async def test_install_worker_uses_one_shell_free_mira_python_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

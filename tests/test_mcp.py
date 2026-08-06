@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -49,7 +50,7 @@ from config.settings import (
 )
 from session.context import normalize_events, session_mcp_attachments
 from ui.spinners import SPINNER_FRAMES
-from ui.widgets.mcp_panel import MCPPanelScreen, controls_for, status_class
+from ui.widgets.mcp_panel import MCPPanelScreen, controls_for, mcp_summary_symbol, status_badge, status_class
 from ui.widgets import PromptBox
 
 
@@ -409,14 +410,18 @@ class FakeClient:
         self.callbacks = Callbacks()
         self.opened: list[str] = []
         self.closed: list[str] = []
+        self.entered_tasks: list[tuple[str, asyncio.Task | None]] = []
+        self.exited_tasks: list[tuple[str, asyncio.Task | None]] = []
 
     @asynccontextmanager
     async def session(self, name: str):
         self.opened.append(name)
+        self.entered_tasks.append((name, asyncio.current_task()))
         try:
             yield self.sessions[name]
         finally:
             self.closed.append(name)
+            self.exited_tasks.append((name, asyncio.current_task()))
 
 
 class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -466,6 +471,64 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             await manager.restart_server("b")
             self.assertEqual(client.opened.count("b"), 2)
             self.assertEqual(client.closed.count("b"), 1)
+            entered = [task for name, task in client.entered_tasks if name == "b"]
+            exited = [task for name, task in client.exited_tasks if name == "b"]
+            self.assertIs(exited[0], entered[0])
+            self.assertNotIn("a", client.closed)
+            await manager.shutdown()
+
+    async def test_restart_preserves_other_server_session_and_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = await self.make_manager(
+                root,
+                {"a": {"command": "a", "args": []}, "b": {"command": "b", "args": []}},
+                {"a": FakeSession(["replace"]), "b": FakeSession(["keep"])},
+            )
+            other = manager.servers["b"]
+            other_session = other.session
+            other_tools = list(other.tools)
+
+            self.assertTrue(await manager.restart_server("a"))
+
+            self.assertIs(other.session, other_session)
+            self.assertEqual(other.tools, other_tools)
+            self.assertEqual(other.status, "Available")
+            self.assertNotIn("b", manager.client.closed)
+            await manager.shutdown()
+
+    async def test_cancelled_restart_request_still_finishes_transition(self) -> None:
+        class GatedSession(FakeSession):
+            def __init__(self) -> None:
+                super().__init__(["search"])
+                self.tool_lists = 0
+                self.restart_started = asyncio.Event()
+                self.release_restart = asyncio.Event()
+
+            async def list_tools(self, cursor=None):
+                self.tool_lists += 1
+                if self.tool_lists == 2:
+                    self.restart_started.set()
+                    await self.release_restart.wait()
+                return await super().list_tools(cursor)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = GatedSession()
+            manager = await self.make_manager(
+                root,
+                {"a": {"command": "a", "args": []}},
+                {"a": session},
+            )
+            restart = asyncio.create_task(manager.restart_server("a"))
+            await session.restart_started.wait()
+            restart.cancel()
+            session.release_restart.set()
+
+            self.assertTrue(await restart)
+            self.assertEqual(manager.servers["a"].status, "Available")
+            self.assertEqual(manager.client.opened.count("a"), 2)
+            self.assertEqual(manager.client.closed.count("a"), 1)
             await manager.shutdown()
 
     async def test_approval_precedes_oauth_classification(self) -> None:
@@ -553,13 +616,6 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("token", state.error.casefold())
 
     async def test_later_oauth_failure_removes_only_target_capabilities(self) -> None:
-        class Stack:
-            def __init__(self) -> None:
-                self.closed = False
-
-            async def aclose(self) -> None:
-                self.closed = True
-
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manager = await self.make_manager(
@@ -571,8 +627,6 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
                 {"linear": FakeSession(["search"]), "other": FakeSession(["keep"])},
             )
             target = manager.servers["linear"]
-            stack = Stack()
-            target.exit_stack = stack
             manager._oauth_providers["linear"] = SimpleNamespace()
             changes: list[bool] = []
 
@@ -583,7 +637,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await manager._handle_later_auth_failure(target, oauth_response_error(401)))
             self.assertEqual(target.status, "Login required")
             self.assertEqual(target.tools, [])
-            self.assertTrue(stack.closed)
+            self.assertEqual(manager.client.closed, ["linear"])
             self.assertEqual(manager.servers["other"].status, "Available")
             self.assertEqual(len(manager.servers["other"].tools), 1)
             self.assertEqual(changes, [True])
@@ -831,6 +885,64 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("two", screen.expanded)
             self.assertEqual(manager.discovered, ["prompts:one", "resources:one"])
             self.assertFalse(second.has_focus)
+            self.assertTrue(screen.query_one("#mcp-header-one", Button).has_focus)
+
+    async def test_server_card_stacks_metadata_and_actions_at_narrow_width(self) -> None:
+        manager = PanelManager()
+        app = PanelApp(manager)
+        async with app.run_test(size=(62, 26)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            card = screen.query_one("#mcp-card-one")
+            header = screen.query_one("#mcp-header-one", Button)
+            badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
+            transport = screen.query_one("#mcp-card-one .mcp-transport", Static)
+            counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
+            controls = screen.query_one("#mcp-card-one .mcp-controls")
+
+            self.assertEqual(header.region.y, badge.region.y)
+            self.assertGreater(transport.region.y, header.region.y)
+            self.assertGreater(counts.region.y, transport.region.y)
+            self.assertGreater(controls.region.y, counts.region.y)
+            self.assertLessEqual(header.region.right, badge.region.x)
+            self.assertLessEqual(card.region.right, screen.query_one("#mcp-scroll").region.right)
+
+    async def test_expanding_scrolled_server_preserves_scroll_position(self) -> None:
+        from tests.test_textual_app import make_app
+
+        manager = PanelManager()
+        template = vars(manager.servers["one"])
+        manager.servers = {
+            f"server-{index}": SimpleNamespace(
+                **{
+                    **template,
+                    "name": f"server-{index}",
+                    "tools": [],
+                    "tool_metadata": [],
+                    "prompts": None,
+                    "resources": None,
+                }
+            )
+            for index in range(8)
+        }
+        app = make_app(mcp_manager=manager)
+        async with app.run_test(size=(76, 24)) as pilot:
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            screen = app.screen
+            scroll = screen.query_one("#mcp-scroll")
+            scroll.scroll_to(y=scroll.max_scroll_y, animate=False, force=True, immediate=True)
+            await pilot.pause()
+            before = scroll.scroll_y
+            self.assertGreater(before, 0)
+
+            await pilot.click("#mcp-header-server-7")
+            for _ in range(5):
+                await pilot.pause()
+
+            self.assertIn("server-7", screen.expanded)
+            self.assertEqual(manager.discovered, ["prompts:server-7", "resources:server-7"])
+            self.assertEqual(screen.query_one("#mcp-scroll").scroll_y, before)
 
     def test_controls_status_colours_and_spinner_are_consistent(self) -> None:
         self.assertEqual(controls_for("Disabled"), ("Enable",))
@@ -847,7 +959,17 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_class("Login required"), "warning")
         self.assertEqual(status_class("Authenticating"), "transient")
         self.assertEqual(status_class("Failed"), "failed")
+        self.assertEqual(status_badge("Available"), "✓ Available")
+        self.assertEqual(status_badge("Failed"), "x Failed")
         self.assertEqual(SPINNER_FRAMES, ("|", "/", "-", "\\"))
+
+    def test_summary_symbol_uses_explicit_worst_state(self) -> None:
+        states = lambda *statuses: [SimpleNamespace(status=status) for status in statuses]
+        self.assertEqual(mcp_summary_symbol(states("Available", "Available")), "✓")
+        self.assertEqual(mcp_summary_symbol(states("Available", "Disabled")), "!")
+        self.assertEqual(mcp_summary_symbol(states("Disabled", "Disabled")), "–")
+        self.assertEqual(mcp_summary_symbol(states("Starting"), spinner=1), "/")
+        self.assertEqual(mcp_summary_symbol(states("Starting", "Failed")), "x")
 
     async def test_login_control_runs_in_worker_and_authenticating_row_spins(self) -> None:
         manager = PanelManager()
@@ -869,6 +991,8 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(login.disabled)
             self.assertTrue(disable.disabled)
             self.assertIn("transient", header.classes)
+            badge = app.screen.query_one("#mcp-card-two .mcp-status-badge", Static)
+            self.assertIn("Authenticating", str(badge.render()))
 
     async def test_app_button_and_slash_open_the_same_panel_pathway(self) -> None:
         from tests.test_textual_app import make_app
@@ -879,7 +1003,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             button = app.query_one("#mcp-status-button", Button)
             self.assertTrue(button.display)
-            self.assertEqual(str(button.label), "MCP 1/2")
+            self.assertEqual(str(button.label), "! MCP 1/2")
             self.assertEqual(button.parent.id, "status-row")
             self.assertTrue(
                 {"available", "warning", "failed", "transient"}.isdisjoint(button.classes)
@@ -887,6 +1011,10 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#mcp-status-button")
             await pilot.pause()
             self.assertIsInstance(app.screen, MCPPanelScreen)
+            self.assertEqual(str(app.screen.query_one("#mcp-close", Button).label), "x")
+            self.assertIn("one", str(app.screen.query_one("#mcp-header-one", Button).label))
+            self.assertNotIn("stdio", str(app.screen.query_one("#mcp-header-one", Button).label).lower())
+            self.assertIn("STDIO", str(app.screen.query_one("#mcp-card-one .mcp-transport", Static).render()))
             app.screen.dismiss()
             await pilot.pause()
             prompt = app.query_one(PromptBox)

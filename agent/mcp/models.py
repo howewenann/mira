@@ -100,7 +100,6 @@ class MCPServerState:
     prompt_error: str = ""
     resource_error: str = ""
     session: Any = None
-    exit_stack: Any = None
 
     @property
     def usable(self) -> bool:

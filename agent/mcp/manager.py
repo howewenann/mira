@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +36,7 @@ from agent.mcp.auth import (
 )
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry
+from agent.mcp.runtime import MCPServerRuntime
 from config.settings import (
     load_settings,
     mcp_server_always_allow,
@@ -75,6 +75,7 @@ class MCPManager:
         self._change_handler: ChangeHandler | None = None
         self._operation_lock = asyncio.Lock()
         self._oauth_providers: dict[str, MiraOAuthProvider] = {}
+        self._runtimes: dict[str, MCPServerRuntime] = {}
         self.client = self._new_client()
         self.read_tool = self._build_read_tool()
 
@@ -113,6 +114,9 @@ class MCPManager:
 
     async def reload(self) -> None:
         """Cleanly replace configuration, runtimes, and capability caches."""
+        await _complete_lifecycle(self._reload(), name="mcp-reload")
+
+    async def _reload(self) -> None:
         async with self._operation_lock:
             await self._shutdown_unlocked()
             self.configuration = load_mcp_configuration(self.workspace)
@@ -125,10 +129,14 @@ class MCPManager:
             self._prompt_locks = {}
             self._resource_locks = {}
             self._oauth_providers = {}
+            self._runtimes = {}
             self.client = self._new_client()
             await self.initialize(self._approval_handler)
 
     async def shutdown(self) -> None:
+        await _complete_lifecycle(self._shutdown(), name="mcp-shutdown")
+
+    async def _shutdown(self) -> None:
         async with self._operation_lock:
             await self._shutdown_unlocked()
 
@@ -138,9 +146,21 @@ class MCPManager:
                 await self._stop_server(state, final_status="Disabled")
             except BaseException:
                 get_diagnostics_logger().exception("MCP cleanup failed for %s", state.name)
+        for runtime in list(self._runtimes.values()):
+            try:
+                await runtime.shutdown()
+            except BaseException:
+                get_diagnostics_logger().exception("MCP runtime shutdown failed for %s", runtime.name)
+        self._runtimes = {}
 
     async def set_server_enabled(self, server_name: str, enabled: bool) -> bool:
         """Persist and apply a server enable transition through the sole pathway."""
+        return await _complete_lifecycle(
+            self._set_server_enabled(server_name, enabled),
+            name=f"mcp-enable-{server_name}",
+        )
+
+    async def _set_server_enabled(self, server_name: str, enabled: bool) -> bool:
         state = self._server(server_name)
         settings = load_settings(self.workspace)
         updated = set_mcp_server_enabled(settings, server_name, enabled)
@@ -156,6 +176,12 @@ class MCPManager:
 
     async def restart_server(self, server_name: str) -> bool:
         """Restart one server without modifying its persisted enable value."""
+        return await _complete_lifecycle(
+            self._restart_server(server_name),
+            name=f"mcp-restart-{server_name}",
+        )
+
+    async def _restart_server(self, server_name: str) -> bool:
         state = self._server(server_name)
         if not mcp_server_enabled(load_settings(self.workspace), server_name):
             state.status = "Disabled"
@@ -174,6 +200,12 @@ class MCPManager:
 
     async def login_server(self, server_name: str) -> bool:
         """Run browser OAuth only for this explicit interactive panel action."""
+        return await _complete_lifecycle(
+            self._login_server(server_name),
+            name=f"mcp-login-{server_name}",
+        )
+
+    async def _login_server(self, server_name: str) -> bool:
         state = self._server(server_name)
         if state.transport != "http" or state.status != "Login required":
             return False
@@ -197,6 +229,12 @@ class MCPManager:
 
     async def forget_server_login(self, server_name: str) -> bool:
         """Stop one server and delete only its user-level OAuth state."""
+        return await _complete_lifecycle(
+            self._forget_server_login(server_name),
+            name=f"mcp-forget-login-{server_name}",
+        )
+
+    async def _forget_server_login(self, server_name: str) -> bool:
         state = self._server(server_name)
         if state.transport != "http":
             return False
@@ -233,7 +271,8 @@ class MCPManager:
         restarting: bool,
         force_approval: bool = False,
     ) -> None:
-        if state.exit_stack is not None:
+        runtime = self._runtime_for(state)
+        if runtime.open:
             return
         state.status = "Restarting" if restarting else "Starting"
         state.error = ""
@@ -250,16 +289,12 @@ class MCPManager:
                 state,
                 MiraOAuthProvider(state, interactive=False, token_root=self.token_root),
             )
-        stack = AsyncExitStack()
         try:
-            session = await stack.enter_async_context(self.client.session(state.name))
-            state.exit_stack = stack
-            state.session = session
+            state.session = await runtime.start()
             await self._discover_tools(state)
             state.status = "Partially available" if state.error else "Available"
         except BaseException as error:
-            await _safe_close(stack, state.name)
-            state.exit_stack = None
+            await self._stop_runtime(runtime, state.name)
             state.session = None
             known_oauth = state.name in self._oauth_providers and is_known_oauth_failure(error, state)
             login_required = isinstance(error, OAuthLoginRequired) or known_oauth
@@ -296,13 +331,13 @@ class MCPManager:
         return False
 
     async def _stop_server(self, state: MCPServerState, *, final_status: str) -> None:
-        if state.status != "Disabled" or state.exit_stack is not None:
+        runtime = self._runtimes.get(state.name)
+        if state.status != "Disabled" or (runtime is not None and runtime.open):
             state.status = "Stopping" if final_status != "Restarting" else "Restarting"
         self._remove_server_capabilities(state)
-        stack, state.exit_stack = state.exit_stack, None
         state.session = None
-        if stack is not None:
-            await _safe_close(stack, state.name)
+        if runtime is not None and runtime.open:
+            await self._stop_runtime(runtime, state.name)
         state.status = final_status  # type: ignore[assignment]
 
     async def _discover_tools(self, state: MCPServerState) -> None:
@@ -559,12 +594,12 @@ class MCPManager:
             if state.status == "Login required":
                 return True
             self._remove_server_capabilities(state)
-            stack, state.exit_stack = state.exit_stack, None
             state.session = None
             state.status = "Login required"
             state.error = "Login required. Stored credentials could not be refreshed."
-            if stack is not None:
-                await _safe_close(stack, state.name)
+            runtime = self._runtimes.get(state.name)
+            if runtime is not None and runtime.open:
+                await self._stop_runtime(runtime, state.name)
         await self._notify_changed()
         return True
 
@@ -580,6 +615,19 @@ class MCPManager:
         if provider is not None:
             connection["auth"] = provider
         connections[state.name] = connection
+
+    def _runtime_for(self, state: MCPServerState) -> MCPServerRuntime:
+        runtime = self._runtimes.get(state.name)
+        if runtime is None:
+            runtime = MCPServerRuntime(state.name, lambda: self.client.session(state.name))
+            self._runtimes[state.name] = runtime
+        return runtime
+
+    async def _stop_runtime(self, runtime: MCPServerRuntime, server_name: str) -> None:
+        try:
+            await runtime.stop()
+        except BaseException:
+            get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
 
     def _new_client(self) -> MultiServerMCPClient:
         connections: dict[str, dict[str, Any]] = {}
@@ -639,19 +687,23 @@ def _attached_pairs(messages: list[Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-async def _safe_close(stack: AsyncExitStack, server_name: str) -> None:
-    try:
-        await stack.aclose()
-    except BaseException:
-        get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
-
-
 def _join_error(current: str, addition: str) -> str:
     return "; ".join(value for value in (current, addition) if value)
 
 
 def _concise_error(error: BaseException) -> str:
     return sanitized_error(error)
+
+
+async def _complete_lifecycle(awaitable: Awaitable[Any], *, name: str) -> Any:
+    """Let a lifecycle transition finish even if its requesting UI worker exits."""
+    task = asyncio.create_task(awaitable, name=name)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
 
 
 __all__ = ["MCPManager"]

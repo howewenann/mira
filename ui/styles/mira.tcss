@@ -127,8 +127,15 @@ ToolIssuesScreen {
     background: #101516;
 }
 
+#tool-issues-title-row {
+    height: 3;
+    width: 1fr;
+}
+
 #tool-issues-title {
-    height: 2;
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
     color: #fff0bd;
     text-style: bold;
 }
@@ -146,19 +153,20 @@ ToolIssuesScreen {
 
 #mcp-status-button {
     display: none;
-    width: 12;
-    min-width: 12;
+    width: auto;
+    min-width: 14;
+    max-width: 20;
     height: 1;
-    padding: 0;
+    padding: 0 1;
     border: none;
-    background: transparent;
-    color: #7ce3dc;
+    background: #5bb8b1;
+    color: #081112;
     text-style: bold;
 }
 
 #mcp-status-button:focus {
-    background: #1b3036;
-    color: #eef7f8;
+    background: #7ce3dc;
+    color: #081112;
 }
 
 #telemetry-row {
@@ -185,9 +193,22 @@ MCPPanelScreen {
 }
 
 #mcp-title-row { height: 3; }
-#mcp-title { width: 1fr; color: #d6fff6; text-style: bold; }
-#mcp-close { width: 12; height: 3; }
+#mcp-title { width: 1fr; height: 3; content-align: left middle; color: #d6fff6; text-style: bold; }
 #mcp-scroll { height: 1fr; scrollbar-color: #5bb8b1; scrollbar-background: #122023; }
+
+.mcp-server-card {
+    width: 1fr;
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 1;
+    border-left: solid #2d5661;
+    background: #151f22;
+}
+
+.mcp-server-top {
+    width: 1fr;
+    height: 3;
+}
 
 .mcp-server-header {
     width: 1fr;
@@ -199,16 +220,43 @@ MCPPanelScreen {
     content-align: left middle;
     text-style: bold;
 }
-.mcp-server-header.available { color: #70d77a; }
-.mcp-server-header.warning { color: #f0c95a; }
-.mcp-server-header.failed { color: #ff6b6b; }
-.mcp-server-header.disabled { color: #7a858c; }
-.mcp-server-header.transient { color: #7D9BD1; }
 .mcp-server-header:focus { background: #25434b; }
-.mcp-controls { height: 3; align-horizontal: right; }
+
+.mcp-status-badge {
+    width: auto;
+    min-width: 14;
+    max-width: 26;
+    height: 3;
+    padding: 0 1;
+    content-align: center middle;
+    text-style: bold;
+    background: #263137;
+    color: #c6d0d5;
+}
+
+.mcp-status-badge.available { background: #194b32; color: #a9f0b1; }
+.mcp-status-badge.warning { background: #5a451e; color: #fff0ad; }
+.mcp-status-badge.failed { background: #5b272a; color: #ffb3b3; }
+.mcp-status-badge.disabled { background: #30383d; color: #aeb8be; }
+.mcp-status-badge.transient { background: #263f60; color: #bcd1f5; }
+
+.mcp-transport,
+.mcp-counts {
+    height: 1;
+    margin: 0 1;
+    color: #aeb9bf;
+}
+
+.mcp-counts {
+    margin-top: 1;
+    color: #eef7f8;
+}
+
+.mcp-controls { height: 3; margin-top: 1; align-horizontal: right; }
 .mcp-controls Button { min-width: 10; height: 3; margin-left: 1; }
-.mcp-details { height: auto; padding: 0 2 1 2; color: #b8c1c7; }
-.mcp-divider { height: 1; color: #56616a; }
+.mcp-details { height: auto; margin-top: 1; padding: 0 1; color: #b8c1c7; }
+.mcp-detail-section { height: auto; padding: 1; margin-bottom: 1; background: #101719; color: #c4cdd2; }
+.mcp-error-block { height: auto; padding: 1; border-left: solid #d95757; background: #301d1f; color: #ffb3b3; }
 
 #tool-issues-install-target {
     height: auto;
@@ -598,7 +646,7 @@ Button.goal-action:focus {
     text-style: bold;
 }
 
-.settings-close {
+.panel-close {
     width: 5;
     min-width: 5;
     height: 3;
@@ -608,7 +656,7 @@ Button.goal-action:focus {
     border: heavy #56616a;
 }
 
-.settings-close:focus {
+.panel-close:focus {
     color: #d2d8dc;
     background: transparent;
     border: heavy #56616a;

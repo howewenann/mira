@@ -841,6 +841,9 @@ fallback rules change, or the dashboard changes how context is reported.
 It owns one runtime/session and one capability cache per configured server,
 plus the shared prompt and fixed-resource registries. Act and Plan receive
 policy-filtered tool views when the existing agent-pair pathway rebuilds.
+Each server runtime has one long-lived owner task and command queue. That task
+both enters and exits the adapter session context; UI workers request lifecycle
+transitions but never directly close SDK task groups or cancellation scopes.
 Remote HTTP OAuth is inferred only after an approved server's ordinary
 connection returns a valid MCP OAuth challenge or its protected-resource and
 authorization-server metadata can be discovered. User JSON has no OAuth field.
@@ -863,8 +866,12 @@ Provider-specific flows, device codes, configured client secrets, encryption,
 and keyring integration are deferred. A refresh failure removes only the
 affected server's projected capabilities and uses the existing registry-change
 pathway so the remaining MCP sessions and agents continue running.
+Task-owned entry and exit are required by the AnyIO scopes used by remote HTTP
+sessions. They also keep restart, disable, authentication cleanup, reload, and
+shutdown deterministic if the requesting panel recomposes or closes.
 
-**Where to check:** `agent/mcp/auth.py`, `agent/mcp/manager.py`, `agent/factory.py`, `ui/app.py`,
+**Where to check:** `agent/mcp/auth.py`, `agent/mcp/manager.py`,
+`agent/mcp/runtime.py`, `agent/factory.py`, `ui/app.py`,
 `ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
 
 **Update this when:** MCP transport ownership, capability caching, attachment

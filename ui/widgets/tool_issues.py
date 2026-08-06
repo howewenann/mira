@@ -46,7 +46,9 @@ class ToolIssuesScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="tool-issues-dialog"):
-            yield Static("ISSUES", id="tool-issues-title")
+            with Horizontal(id="tool-issues-title-row"):
+                yield Static("ISSUES", id="tool-issues-title")
+                yield Button("x", id="tool-issues-title-close", classes="tool-issues-close panel-close")
             with VerticalScroll(id="tool-issues-scroll"):
                 yield Static(self.summary_text(), id="tool-issues-summary")
             yield Static(
@@ -58,8 +60,8 @@ class ToolIssuesScreen(ModalScreen[None]):
             yield Input(" ".join(missing_requirements(self.failures)), id="tool-issues-packages")
             yield LoadingIndicator(id="tool-issues-loading")
             with Horizontal(id="tool-issues-actions"):
+                yield Button("Close", id="tool-issues-close", classes="tool-issues-close")
                 yield Button("Install All and Reload (i)", id="tool-issues-install", variant="primary")
-                yield Button("Close (c)", id="tool-issues-close")
 
     def on_mount(self) -> None:
         self.query_one("#tool-issues-loading", LoadingIndicator).display = False
@@ -115,7 +117,7 @@ class ToolIssuesScreen(ModalScreen[None]):
             sections.append(self.install_details)
         return "\n".join(sections).strip()
 
-    @on(Button.Pressed, "#tool-issues-close")
+    @on(Button.Pressed, ".tool-issues-close")
     def close_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         self.action_close()
@@ -215,14 +217,16 @@ class ToolIssuesScreen(ModalScreen[None]):
         self.query_one("#tool-issues-packages", Input).disabled = self.installing or not repairable
         self.query_one("#tool-issues-install", Button).disabled = self.installing or not repairable
         self.query_one("#tool-issues-close", Button).disabled = self.installing
+        self.query_one("#tool-issues-title-close", Button).disabled = self.installing
         self.query_one("#tool-issues-loading", LoadingIndicator).display = self.installing
 
     def _enabled_controls(self) -> list[Input | Button]:
         """Return keyboard-focusable modal controls in document order."""
         controls: list[Input | Button] = [
             self.query_one("#tool-issues-packages", Input),
-            self.query_one("#tool-issues-install", Button),
             self.query_one("#tool-issues-close", Button),
+            self.query_one("#tool-issues-install", Button),
+            self.query_one("#tool-issues-title-close", Button),
         ]
         return [control for control in controls if not control.disabled and control.display]
 
@@ -240,7 +244,11 @@ class ToolIssuesScreen(ModalScreen[None]):
         focused_index = next((index for index, control in enumerate(controls) if control.has_focus), None)
 
         if key in {"left", "right"}:
-            buttons = [control for control in controls if isinstance(control, Button)]
+            buttons = [
+                control
+                for control in controls
+                if isinstance(control, Button) and control.id != "tool-issues-title-close"
+            ]
             if not buttons:
                 return
             focused_button = next((button for button in buttons if button.has_focus), None)
