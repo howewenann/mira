@@ -27,7 +27,6 @@ class PromptButton(Button):
         panel = self._prompt_panel()
         if panel is not None and panel.handle_choice_key(event):
             return
-        super().on_key(event)
 
 
 class PromptPanel(Vertical):

@@ -6565,6 +6565,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         wide_rows = await row_count(140)
         self.assertLess(wide_rows, narrow_rows)
 
+    async def test_choice_prompt_ignores_unhandled_printable_keys(self) -> None:
+        """Printable keys without choice shortcuts should not crash focused buttons."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            task = asyncio.create_task(
+                app._prompt_choice(
+                    "Cancel Turn?",
+                    "MIRA is still working. Cancel this turn?",
+                    [("y", "Yes (y)"), ("n", "No (n)")],
+                )
+            )
+            await pilot.pause()
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: any(button.has_focus for button in panel.query(Button)))
+
+            await pilot.press("right_square_bracket", "slash")
+            await pilot.pause()
+
+            self.assertTrue(panel.active)
+            self.assertFalse(task.done())
+            await pilot.press("n")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "n")
+
     async def test_wrapped_choice_prompt_down_arrow_moves_between_rows(self) -> None:
         """Arrow navigation should understand wrapped prompt button rows."""
         app = make_app()
