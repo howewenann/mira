@@ -9,8 +9,8 @@ COMMAND_HELP_SECTIONS = (
     (
         "General",
         (
-            ("/help", "show commands and what they do"),
-            ("/mira", "Display the MIRA splash screen"),
+            ("/help", "show key bindings, autocomplete, usage notes, and commands"),
+            ("/mira", "display a fresh MIRA splash"),
             ("/session", "show conversation identity, mode, goals, plans, workspace, and turns"),
             ("/exit", "quit MIRA"),
         ),
@@ -45,7 +45,7 @@ COMMAND_HELP_SECTIONS = (
     (
         "Configuration",
         (
-            ("/settings", "configure tool approvals in the TUI"),
+            ("/settings", "configure workspace settings in the TUI"),
             ("/reload", "reload .env/project resources and rebuild agents in the TUI"),
         ),
     ),
@@ -54,9 +54,9 @@ COMMAND_HELP_SECTIONS = (
         (
             ("/compact", "summarize older context now"),
             ("/new-chat", "start a fresh saved chat session in the TUI"),
-            ("/clear", "clear the log"),
+            ("/clear", "clear the chat display"),
             ("/clear-chat", "clear the current saved chat transcript in the TUI"),
-            ("/clear-all-chats", "delete all saved chat sessions in the TUI"),
+            ("/clear-all-chats", "delete all saved chats and compaction archives in the TUI"),
             ("/clear-errors", "delete saved error reports in the TUI"),
             ("/clear-prompts", "clear prompt input history in the TUI"),
         ),

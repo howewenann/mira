@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from typing import Any
 
 from langchain_core.exceptions import ContextOverflowError
+from rich.console import Group
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -591,8 +593,8 @@ async def handle_command(
 
 
 def print_help(renderer: Any) -> None:
-    """Print command descriptions."""
-    write_renderable(renderer, help_table())
+    """Print the compact interactive reference as one output block."""
+    write_renderable(renderer, help_report())
 
 
 def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
@@ -612,15 +614,74 @@ def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
     )
 
 
+def key_bindings_table() -> Table:
+    """Build the useful global key-binding reference."""
+    table = Table(title="Key bindings", title_style="bold cyan", expand=True)
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Action")
+    table.add_row("Shift+Enter", "Insert a newline")
+    table.add_row("Ctrl+C", "Copy selected text")
+    table.add_row("Ctrl+L", "Clear the chat display")
+    table.add_row("Alt+Q", "Cancel active work or quit")
+    return table
+
+
+def autocomplete_table() -> Table:
+    """Build the trigger and insertion reference for autocomplete."""
+    table = Table(title="Autocomplete", title_style="bold cyan", expand=True)
+    table.add_column("Trigger", style="cyan", no_wrap=True)
+    table.add_column("Finds")
+    table.add_column("Selection")
+    table.add_row(
+        "/",
+        "CMND commands and PRMT prompts",
+        "Inserts the command without a trailing space",
+    )
+    table.add_row(
+        "@",
+        "FILE files, RSRC resources and available TOOL tools",
+        "Files and resources keep @; tools remove it",
+    )
+    return table
+
+
+def usage_notes_table() -> Table:
+    """Build reusable guidance for important user-facing conventions."""
+    table = Table(title="Usage notes", title_style="bold cyan", expand=True)
+    table.add_column("Topic", style="cyan", no_wrap=True)
+    table.add_column("Note")
+    table.add_row(
+        "Prompt arguments",
+        escape(
+            "Required-only prompts use positional values; prompts with any [optional] "
+            "argument use name=value for every argument."
+        ),
+    )
+    return table
+
+
+def help_report() -> Group:
+    """Build all help sections in their user-facing order."""
+    return Group(
+        key_bindings_table(),
+        Text(""),
+        autocomplete_table(),
+        Text(""),
+        usage_notes_table(),
+        Text(""),
+        help_table(),
+    )
+
+
 def help_table() -> Table:
     """Build one Rich help table grouped by command purpose."""
-    table = Table(title="Commands", title_style="bold cyan")
+    table = Table(title="Commands", title_style="bold cyan", expand=True)
     table.add_column("Command", style="cyan", no_wrap=True)
     table.add_column("Description")
     for section, commands in COMMAND_HELP_SECTIONS:
         table.add_row(Text(section, style=HELP_SECTION_STYLE), "")
         for index, (command, description) in enumerate(commands):
-            table.add_row(command, description, end_section=index == len(commands) - 1)
+            table.add_row(escape(command), escape(description), end_section=index == len(commands) - 1)
     return table
 
 

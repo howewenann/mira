@@ -107,7 +107,7 @@ it only with a trusted local endpoint.
 | Return focus to the prompt | Escape |
 | Complete a slash command | Type `/`, then use Up/Down and Enter |
 | Reference a local file | Type `@`, then use Up/Down and Enter |
-| Show all commands | `/help` |
+| Show key bindings, autocomplete, usage notes, and commands | `/help` |
 | Display a fresh MIRA splash | `/mira` |
 | Change workspace settings | `/settings` |
 | Start a new saved chat | `/new-chat` |

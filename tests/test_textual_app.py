@@ -52,6 +52,7 @@ from session.goals import goal_artifact
 from session.plans import plan_artifact
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
+from ui import repl
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -3003,7 +3004,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(store.saves), 1)
 
     async def test_help_command_renders_as_one_command_panel(self) -> None:
-        """The help command should not create one chat block per command."""
+        """Help should render all four reference sections in one ordered block."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -3016,7 +3017,43 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             command_blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
             self.assertEqual(len(command_blocks), 1)
             output = renderable_plain(command_blocks[0])
-            self.assertIn("Commands", output)
+            key_index = output.index("Key bindings")
+            autocomplete_index = output.index("Autocomplete")
+            usage_notes_index = output.index("Usage notes")
+            commands_index = output.index("Commands")
+            self.assertLess(key_index, autocomplete_index)
+            self.assertLess(autocomplete_index, usage_notes_index)
+            self.assertLess(usage_notes_index, commands_index)
+
+            for key in ("Shift+Enter", "Ctrl+C", "Ctrl+L", "Alt+Q"):
+                self.assertIn(key, output)
+            listed_keys = [str(cell) for cell in repl.key_bindings_table().columns[0]._cells]
+            self.assertEqual(listed_keys, ["Shift+Enter", "Ctrl+C", "Ctrl+L", "Alt+Q"])
+            for omitted_key in ("Enter", "↑", "↓", "Escape"):
+                self.assertNotIn(omitted_key, listed_keys)
+
+            autocomplete_output = output[autocomplete_index:usage_notes_index]
+            self.assertIn("CMND", autocomplete_output)
+            self.assertIn("PRMT", autocomplete_output)
+            self.assertIn("FILE", autocomplete_output)
+            self.assertIn("RSRC", autocomplete_output)
+            self.assertIn("TOOL", autocomplete_output)
+            self.assertIn("Files and resources keep @; tools remove it", autocomplete_output)
+
+            usage_notes_output = " ".join(output[usage_notes_index:commands_index].split())
+            self.assertIn("Prompt arguments", usage_notes_output)
+            self.assertIn("prompts with any [optional] argument", usage_notes_output)
+            self.assertIn("use name=value", usage_notes_output)
+            self.assertIn("for every argument", usage_notes_output)
+
+            help_tables = (
+                repl.key_bindings_table(),
+                repl.autocomplete_table(),
+                repl.usage_notes_table(),
+                repl.help_table(),
+            )
+            self.assertTrue(all(table.expand for table in help_tables))
+
             for section in ("General", "Inspect", "Workflow", "Configuration", "Chat & history"):
                 self.assertIn(section, output)
             self.assertIn("/help", output)
@@ -3029,6 +3066,29 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/subagents", output)
             self.assertIn("/session", output)
             self.assertNotIn("/model", output)
+
+    def test_help_commands_exclude_registered_prompt_commands(self) -> None:
+        """The Commands section should remain limited to native slash commands."""
+        output = StringIO()
+        renderer = SimpleNamespace(
+            console=Console(file=output, force_terminal=False, width=120),
+            mcp_manager=SimpleNamespace(
+                prompt_registry=SimpleNamespace(
+                    rows=lambda: [
+                        ("/prompt__review <file> [focus]", "Review one file"),
+                        ("/mcp__github__issue <owner> <repo>", "Draft an issue"),
+                    ]
+                )
+            ),
+        )
+
+        repl.print_help(renderer)
+        rendered = output.getvalue()
+
+        self.assertIn("Commands", rendered)
+        self.assertIn("/prompts", rendered)
+        self.assertNotIn("/prompt__review", rendered)
+        self.assertNotIn("/mcp__github__issue", rendered)
 
     async def test_mira_command_appends_fresh_unpersisted_splash(self) -> None:
         app = make_app(workspace=Path("current-workspace"))
