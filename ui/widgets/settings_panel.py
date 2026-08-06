@@ -118,41 +118,48 @@ class SettingsPanel(Vertical):
             with VerticalScroll(id="settings-body", classes="settings-body settings-general-body"):
                 yield Static("System Settings", classes="settings-section system")
                 yield SettingsHeaderRow("", show_always=False)
-                with Horizontal(classes="settings-row"):
+                with Horizontal(classes="settings-row settings-policy-row"):
                     yield Static("Git Protection", classes="settings-label")
                     yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
-                with Horizontal(classes="settings-row"):
+                with Horizontal(classes="settings-row settings-policy-row"):
                     yield Static("Dynamic subagents", classes="settings-label")
                     yield self._toggle_button(
                         ToggleCell("system", DYNAMIC_SUBAGENTS),
                         dynamic_subagents_enabled(self.settings),
                     )
-                with Horizontal(classes="settings-row settings-child-row"):
+                with Horizontal(classes="settings-row settings-child-row settings-policy-row"):
                     yield Static("Response schemas", classes="settings-label settings-child-label")
                     yield self._toggle_button(
                         ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
                         dynamic_subagent_response_schema_enabled(self.settings),
                     )
-                with Horizontal(classes="settings-row"):
+                with Horizontal(classes="settings-row settings-policy-row"):
                     yield Static("Planning todos", classes="settings-label")
                     yield self._toggle_button(
                         ToggleCell("todos", PLANNING_TODOS),
                         planning_todos_enabled(self.settings),
                     )
-                with Horizontal(classes="settings-row settings-child-row planning-response-status-retries-row"):
+                with Horizontal(
+                    classes=(
+                        "settings-row settings-child-row settings-value-row "
+                        "planning-response-status-retries-row"
+                    )
+                ):
                     yield Static("Response-status retries", classes="settings-label settings-child-label")
                     yield Input(
                         value=str(planning_response_status_max_retries(self.settings)),
                         id="settings-planning-response-status-max-retries",
                         classes="settings-input planning-response-status-retries-input",
                     )
-                with Horizontal(classes="settings-row"):
+                with Horizontal(classes="settings-row settings-policy-row"):
                     yield Static("Rubric Middleware", classes="settings-label")
                     yield self._toggle_button(
                         ToggleCell("rubric", RUBRIC),
                         rubric_enabled(self.settings),
                     )
-                with Horizontal(classes="settings-row settings-child-row rubric-iterations-row"):
+                with Horizontal(
+                    classes="settings-row settings-child-row settings-value-row rubric-iterations-row"
+                ):
                     yield Static("Maximum iterations", classes="settings-label settings-child-label")
                     yield Input(
                         value=str(rubric_max_iterations(self.settings)),
@@ -165,7 +172,7 @@ class SettingsPanel(Vertical):
                 yield SettingsHeaderRow("")
                 for tool_name in INBUILT_DANGEROUS_TOOLS:
                     enabled = tool_enabled(self.settings, tool_name)
-                    with Horizontal(classes="settings-row"):
+                    with Horizontal(classes="settings-row settings-policy-row"):
                         yield Static(tool_name, classes="settings-label")
                         yield self._toggle_button(
                             ToggleCell("enabled", tool_name),
@@ -211,45 +218,89 @@ class SettingsPanel(Vertical):
 
             with VerticalScroll(id="settings-custom-body", classes="settings-body"):
                 yield Static("Custom Tools", classes="settings-section custom")
-                yield SettingsHeaderRow("", show_plan=True)
+                yield SettingsHeaderRow(
+                    "",
+                    show_plan=True,
+                    row_class="settings-custom-tool-header",
+                )
                 custom_names = custom_tool_names(self.tool_metadata)
                 if not custom_names:
                     yield Static("No custom tools loaded", classes="settings-empty")
                 for tool_name in custom_names:
                     enabled = tool_enabled(self.settings, tool_name)
-                    with Horizontal(classes="settings-row"):
+                    with Horizontal(classes="settings-row settings-policy-row settings-custom-tool-row"):
                         yield Static(tool_name, classes="settings-label")
                         yield self._toggle_button(ToggleCell("enabled", tool_name), enabled)
                         yield self._toggle_button(ToggleCell("always_allow", tool_name), tool_always_allow(self.settings, tool_name))
                         yield self._toggle_button(ToggleCell("plan_access", tool_name), tool_plan_access(self.settings, tool_name))
 
             with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
-                yield Static("MCP", classes="settings-section mcp")
-                yield SettingsHeaderRow("", show_plan=True)
                 states = list(getattr(self.mcp_manager, "servers", {}).values())
                 if not states:
                     yield Static("No MCP servers configured", classes="settings-empty")
-                for state in states:
+                for index, state in enumerate(states):
                     enabled = mcp_server_enabled(self.settings, state.name)
-                    with Horizontal(classes="settings-row settings-mcp-server-row"):
-                        yield Static(f"{state.name} MCP · {state.transport}", classes="settings-label settings-mcp-server-label")
-                        yield self._toggle_button(ToggleCell("mcp_server_enabled", state.name, server=state.name), enabled)
-                        yield self._toggle_button(
-                            ToggleCell("mcp_server_allow", state.name, server=state.name),
-                            mcp_server_always_allow(self.settings, state.name),
+                    group_classes = "settings-mcp-server-group"
+                    if index == 0:
+                        group_classes += " first"
+                    with Vertical(classes=group_classes):
+                        yield Static(
+                            f"{state.name} [{state.transport.upper()}]",
+                            classes="settings-mcp-server-title",
+                            markup=False,
                         )
-                        yield Static("-", classes="settings-mode settings-mcp-dash")
-                    if not state.tool_metadata:
-                        yield Static("  No tools", classes="settings-empty settings-mcp-tool-empty")
-                    for item in state.tool_metadata:
-                        original = item.get("original_name", "")
-                        policy = mcp_tool_policy(self.settings, state.name, original)
-                        with Horizontal(classes="settings-row settings-mcp-tool-row"):
-                            yield Static(original, classes="settings-label")
-                            yield self._toggle_button(ToggleCell("mcp_tool_enabled", original, not enabled, state.name), policy.enabled)
-                            yield self._toggle_button(ToggleCell("mcp_tool_allow", original, not enabled or not policy.enabled, state.name), policy.always_allow)
-                            yield self._toggle_button(ToggleCell("mcp_tool_plan", original, not enabled or not policy.enabled, state.name), policy.plan_access)
-                    yield Static("-" * 64, classes="settings-mcp-divider")
+                        yield SettingsHeaderRow(
+                            "",
+                            row_class="settings-mcp-server-header",
+                        )
+                        with Horizontal(
+                            classes="settings-row settings-policy-row settings-mcp-server-policy-row"
+                        ):
+                            yield Static("Server", classes="settings-label")
+                            yield self._toggle_button(
+                                ToggleCell("mcp_server_enabled", state.name, server=state.name),
+                                enabled,
+                            )
+                            yield self._toggle_button(
+                                ToggleCell("mcp_server_allow", state.name, server=state.name),
+                                mcp_server_always_allow(self.settings, state.name),
+                            )
+                        yield SettingsHeaderRow(
+                            "Tool",
+                            show_plan=True,
+                            row_class="settings-mcp-tool-header",
+                        )
+                        if not state.tool_metadata:
+                            yield Static("No tools", classes="settings-empty settings-mcp-tool-empty")
+                        for item in state.tool_metadata:
+                            original = item.get("original_name", "")
+                            policy = mcp_tool_policy(self.settings, state.name, original)
+                            with Horizontal(
+                                classes="settings-row settings-policy-row settings-mcp-tool-row"
+                            ):
+                                yield Static(original, classes="settings-label")
+                                yield self._toggle_button(
+                                    ToggleCell("mcp_tool_enabled", original, not enabled, state.name),
+                                    policy.enabled,
+                                )
+                                yield self._toggle_button(
+                                    ToggleCell(
+                                        "mcp_tool_allow",
+                                        original,
+                                        not enabled or not policy.enabled,
+                                        state.name,
+                                    ),
+                                    policy.always_allow,
+                                )
+                                yield self._toggle_button(
+                                    ToggleCell(
+                                        "mcp_tool_plan",
+                                        original,
+                                        not enabled or not policy.enabled,
+                                        state.name,
+                                    ),
+                                    policy.plan_access,
+                                )
 
             yield Static("", id="settings-status", classes="settings-status")
 
@@ -593,8 +644,18 @@ class SettingsToggleButton(Button):
 class SettingsHeaderRow(Horizontal):
     """Column header row for settings tables."""
 
-    def __init__(self, name_label: str, *, show_always: bool = True, show_plan: bool = False) -> None:
-        super().__init__(classes="settings-row settings-header-row")
+    def __init__(
+        self,
+        name_label: str,
+        *,
+        show_always: bool = True,
+        show_plan: bool = False,
+        row_class: str = "",
+    ) -> None:
+        classes = "settings-row settings-header-row"
+        if row_class:
+            classes += f" {row_class}"
+        super().__init__(classes=classes)
         self.name_label = name_label
         self.show_always = show_always
         self.show_plan = show_plan

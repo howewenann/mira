@@ -4273,7 +4273,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     execute_env_select_current.query_one("#label", Static).styles.color,
                     Color.parse("#e8fffb"),
                 )
-                execute_env_select.focus()
+                execute_env_select.scroll_visible(animate=False, immediate=True)
+                await pilot.pause()
+                execute_env_select.focus(scroll_visible=False)
                 await wait_until(lambda: execute_env_select.has_focus)
                 self.assertEqual(
                     execute_env_select_current.styles.border_top,
@@ -4322,6 +4324,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response_status_input.styles.min_width, rubric_input.styles.min_width)
                 self.assertEqual(response_status_input.styles.height, rubric_input.styles.height)
                 self.assertEqual(response_status_input.styles.border_top[0], "")
+                self.assertEqual(response_status_input.region.x, rubric_toggle.region.x)
+                self.assertEqual(rubric_input.region.x, rubric_toggle.region.x)
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
@@ -4453,7 +4457,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 4)
+                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 3)
                 await pilot.pause()
 
                 labels = {
@@ -4462,7 +4466,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     if renderable_plain(widget).strip()
                 }
                 tabs = panel.query_one("#settings-tabs", Horizontal)
-                system_header, inbuilt_header, custom_header, mcp_header = list(panel.query(SettingsHeaderRow))
+                system_header, inbuilt_header, custom_header = list(panel.query(SettingsHeaderRow))
                 self.assertEqual(
                     labels["System Settings"].region.y,
                     tabs.region.y + tabs.region.height + 2,
@@ -4491,23 +4495,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     renderable_plain(custom_header.query_one(".settings-column-label.plan", Static)),
                     "plan access",
                 )
-                self.assertEqual(
-                    renderable_plain(mcp_header.query_one(".settings-column-label.plan", Static)),
-                    "plan access",
-                )
-                self.assertEqual(
-                    renderable_plain(mcp_header.query_one(".settings-column-label.name", Static)),
-                    "",
-                )
-
                 panel.query_one("#settings-tab-mcp", Button).press()
                 await pilot.pause()
-                mcp_section = labels["MCP"]
-                self.assertEqual(
-                    mcp_section.region.y,
-                    tabs.region.y + tabs.region.height + 2,
-                )
-                self.assertEqual(mcp_section.styles.color, Color.parse("#7D9BD1"))
+                self.assertEqual(len(panel.query(".settings-section.mcp")), 0)
+                self.assertIn("No MCP servers configured", labels)
 
                 panel.query_one("#settings-tab-general", Button).press()
                 await pilot.pause()
@@ -4517,12 +4508,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 last_inbuilt_row = labels["execute"]
                 run_commands = labels["Run commands in"]
                 last_execute_row = labels["Additional env var names"]
+                git_protection = labels["Git Protection"]
+                git_toggle = panel.query_one("#settings-toggle-git-git_protection", Button)
                 self.assertGreater(inbuilt_section.region.y, last_system_row.region.y)
                 self.assertEqual(
                     execute_section.region.y,
                     last_inbuilt_row.region.y + last_inbuilt_row.region.height + 1,
                 )
                 self.assertEqual(run_commands.region.y, execute_section.region.y + execute_section.region.height)
+                self.assertEqual(git_protection.region.width, 44)
+                self.assertEqual(git_toggle.region.x, git_protection.region.right)
+                self.assertEqual(run_commands.region.width, 30)
                 self.assertFalse(panel.query_one("#settings-custom-body").display)
                 self.assertTrue(panel.query_one("#settings-body").display)
                 settings_window = panel.query_one("#settings-window")
@@ -4530,6 +4526,156 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 settings_status = panel.query_one("#settings-status", Static)
                 self.assertEqual(settings_status.region.y, settings_body.region.bottom + 1)
                 self.assertEqual(settings_status.region.bottom, settings_window.content_region.bottom)
+
+    async def test_settings_panel_groups_mcp_server_and_tool_policies(self) -> None:
+        """MCP settings should render one transparent policy group per server."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            state = SimpleNamespace(
+                name="microsoft-learn-tools",
+                transport="http",
+                transient=False,
+                tool_metadata=[
+                    {"original_name": "microsoft_code_sample_search"},
+                    {"original_name": "query_docs_filesystem_docs_by_langchain_with_extra_context"},
+                    {"original_name": "microsoft_docs_fetch"},
+                ],
+            )
+            second_state = SimpleNamespace(
+                name="langchain-resources",
+                transport="http",
+                transient=False,
+                tool_metadata=[{"original_name": "search_docs_by_langchain"}],
+            )
+            manager = SimpleNamespace(
+                servers={state.name: state, second_state.name: second_state},
+                show_status=False,
+                shutdown=AsyncMock(),
+            )
+
+            async with app.run_test(size=(100, 45)) as pilot:
+                await pilot.pause()
+                app.mcp_manager = manager
+                app.mode.setdefault("resources", {})["tools"] = [
+                    {
+                        "name": "custom_tool_name_that_is_far_too_long_for_the_settings_column",
+                        "path": "/.mira/tools/long_name.py",
+                        "source": "project",
+                        "replaces": "",
+                    }
+                ]
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query(".settings-mcp-server-group")) == 2)
+
+                panel.query_one("#settings-tab-custom", Button).press()
+                await pilot.pause()
+                custom_tool_label = panel.query_one(
+                    ".settings-custom-tool-row > .settings-label",
+                    Static,
+                )
+                custom_tool_header = panel.query_one(
+                    ".settings-custom-tool-header",
+                    SettingsHeaderRow,
+                )
+                custom_tool_row = panel.query_one(".settings-custom-tool-row", Horizontal)
+                self.assertEqual(custom_tool_label.styles.text_wrap, "nowrap")
+                self.assertEqual(custom_tool_label.styles.text_overflow, "ellipsis")
+                self.assertEqual(custom_tool_label.region.width, 42)
+                self.assertIn("…", custom_tool_label.render_line(0).text)
+                self.assertEqual(custom_tool_label.region.right + 2, custom_tool_row.query_one(Button).region.x)
+                self.assertEqual(
+                    custom_tool_row.query_one(Button).region.x,
+                    custom_tool_header.query_one(".settings-column-label.enabled", Static).region.x,
+                )
+
+                panel.query_one("#settings-tab-mcp", Button).press()
+                await pilot.pause()
+
+                groups = list(panel.query(".settings-mcp-server-group"))
+                group = groups[0]
+                second_title = groups[1].query_one(".settings-mcp-server-title", Static)
+                title = group.query_one(".settings-mcp-server-title", Static)
+                server_header = group.query_one(".settings-mcp-server-header", SettingsHeaderRow)
+                server_row = group.query_one(".settings-mcp-server-policy-row", Horizontal)
+                tool_header = group.query_one(".settings-mcp-tool-header", SettingsHeaderRow)
+                tool_rows = list(group.query(".settings-mcp-tool-row"))
+
+                self.assertEqual(renderable_plain(title).strip(), "microsoft-learn-tools [HTTP]")
+                rendered_title = title.render()
+                self.assertEqual(
+                    getattr(rendered_title, "plain", str(rendered_title)).strip(),
+                    "microsoft-learn-tools [HTTP]",
+                )
+                self.assertEqual(title.styles.color, Color.parse("#6CB6FF"))
+                self.assertIn("bold", str(title.styles.text_style))
+                self.assertEqual(group.styles.background.a, 0)
+                self.assertEqual(len(panel.query(".settings-section.mcp")), 0)
+                self.assertEqual(len(group.query(".settings-mcp-divider")), 0)
+                self.assertEqual(
+                    [renderable_plain(label).strip() for label in server_header.query(Static)],
+                    ["", "enable", "always allow"],
+                )
+                self.assertEqual(
+                    [renderable_plain(label).strip() for label in tool_header.query(Static)],
+                    ["Tool", "enable", "always allow", "plan access"],
+                )
+                self.assertEqual(renderable_plain(server_row.query_one(".settings-label", Static)), "Server")
+                self.assertEqual(
+                    [renderable_plain(row.query_one(".settings-label", Static)) for row in tool_rows],
+                    [
+                        "microsoft_code_sample_search",
+                        "query_docs_filesystem_docs_by_langchain_with_extra_context",
+                        "microsoft_docs_fetch",
+                    ],
+                )
+                exact_width_mcp_tool_label = tool_rows[0].query_one(".settings-label", Static)
+                self.assertIn(
+                    "microsoft_code_sample_search",
+                    exact_width_mcp_tool_label.render_line(0).text,
+                )
+                self.assertNotIn("…", exact_width_mcp_tool_label.render_line(0).text)
+                long_mcp_tool_label = tool_rows[1].query_one(".settings-label", Static)
+                self.assertEqual(long_mcp_tool_label.styles.text_wrap, "nowrap")
+                self.assertEqual(long_mcp_tool_label.styles.text_overflow, "ellipsis")
+                self.assertEqual(long_mcp_tool_label.region.width, 42)
+                self.assertIn("…", long_mcp_tool_label.render_line(0).text)
+
+                server_buttons = list(server_row.query(Button))
+                tool_buttons = list(tool_rows[0].query(Button))
+                self.assertEqual(
+                    [button.region.x for button in server_buttons],
+                    [
+                        server_header.query_one(".settings-column-label.enabled", Static).region.x,
+                        server_header.query_one(".settings-column-label.always", Static).region.x,
+                    ],
+                )
+                self.assertEqual(
+                    [button.region.x for button in tool_buttons],
+                    [
+                        tool_header.query_one(".settings-column-label.enabled", Static).region.x,
+                        tool_header.query_one(".settings-column-label.always", Static).region.x,
+                        tool_header.query_one(".settings-column-label.plan", Static).region.x,
+                    ],
+                )
+                self.assertEqual(
+                    server_row.query_one(".settings-label", Static).region.right + 2,
+                    server_buttons[0].region.x,
+                )
+                self.assertEqual(
+                    long_mcp_tool_label.region.right + 2,
+                    list(tool_rows[1].query(Button))[0].region.x,
+                )
+                self.assertLessEqual(
+                    panel.query_one("#settings-mcp-body").content_region.right
+                    - tool_buttons[-1].region.right,
+                    4,
+                )
+                self.assertEqual(server_header.region.y, title.region.bottom)
+                self.assertEqual(server_row.region.y, server_header.region.bottom)
+                self.assertEqual(second_title.region.y, tool_rows[-1].region.bottom + 1)
 
     async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
         """Inbuilt tool enable buttons should save disabled state and lock approvals."""
