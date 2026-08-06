@@ -29,6 +29,7 @@ class MCPPanelScreen(ModalScreen[None]):
         self.expanded: set[str] = set()
         self._spinner = 0
         self._refresh_lock = asyncio.Lock()
+        self._presentation_signature = self._server_presentation_signature()
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-dialog"):
@@ -130,6 +131,7 @@ class MCPPanelScreen(ModalScreen[None]):
         async with self._refresh_lock:
             if not self.is_mounted:
                 return
+            self._presentation_signature = self._server_presentation_signature()
             focused_id = preferred_focus_id or (self.focused.id if self.focused is not None else None)
             try:
                 scroll_y = self.query_one("#mcp-scroll", VerticalScroll).scroll_y
@@ -173,6 +175,15 @@ class MCPPanelScreen(ModalScreen[None]):
             headers[0].focus(scroll_visible=False)
 
     def _tick(self) -> None:
+        presentation_signature = self._server_presentation_signature()
+        if presentation_signature != self._presentation_signature:
+            self._presentation_signature = presentation_signature
+            self.run_worker(
+                self.refresh_from_manager(),
+                name="mcp-panel-state-refresh",
+                exclusive=False,
+            )
+            return
         if not any(state.transient for state in self.manager.servers.values()):
             return
         self._spinner += 1
@@ -193,6 +204,20 @@ class MCPPanelScreen(ModalScreen[None]):
             badge.update(status_badge(state.status, spinner=self._spinner))
             for control in card.query(".mcp-control"):
                 control.disabled = True
+
+    def _server_presentation_signature(self) -> tuple[Any, ...]:
+        """Return the manager state that can change an already-open card."""
+        return tuple(
+            (
+                state.name,
+                state.transport,
+                state.status,
+                bool(state.transient),
+                capability_counts(state),
+                tuple(server_detail_sections(state)),
+            )
+            for state in self.manager.servers.values()
+        )
 
     def action_close(self) -> None:
         self.dismiss()

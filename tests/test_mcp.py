@@ -1107,6 +1107,8 @@ class PanelManager:
 
 
 class PanelApp(App[None]):
+    CSS_PATH = "../ui/styles/mira.tcss"
+
     def __init__(self, manager: PanelManager) -> None:
         super().__init__()
         self.manager = manager
@@ -1186,18 +1188,47 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
             counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
             controls = screen.query_one("#mcp-card-one .mcp-controls")
+            control_buttons = list(controls.query(Button))
 
             self.assertEqual(header.region.y, badge.region.y)
+            self.assertEqual(header.region.height, 1)
+            self.assertEqual(badge.region.height, 1)
             self.assertIn("[STDIO]", str(header.label))
             self.assertEqual(
                 capability_summary(manager.servers["one"]).plain,
                 "Tools  0   ·   Prompts  0   ·   Resources  0",
             )
             self.assertEqual(counts.styles.content_align[0], "left")
-            self.assertGreater(counts.region.y, header.region.y)
-            self.assertGreater(controls.region.y, counts.region.y)
+            self.assertEqual(counts.region.height, 1)
+            self.assertEqual(counts.region.y, header.region.bottom)
+            self.assertEqual(controls.region.height, 1)
+            self.assertEqual(controls.region.y, counts.region.bottom)
+            self.assertTrue(control_buttons)
+            self.assertTrue(all(button.region.height == 1 for button in control_buttons))
             self.assertLessEqual(header.region.right, badge.region.x)
             self.assertLessEqual(card.region.right, screen.query_one("#mcp-scroll").region.right)
+
+    async def test_open_panel_refreshes_unnotified_startup_transitions(self) -> None:
+        manager = PanelManager()
+        state = manager.servers["one"]
+        state.status = "Starting"
+        state.transient = True
+        app = PanelApp(manager)
+
+        async with app.run_test(size=(62, 26)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            self.assertIn("Starting", str(screen.query_one("#mcp-card-one .mcp-status-badge", Static).render()))
+
+            state.status = "Available"
+            state.transient = False
+            state.tools.append(object())
+            await pilot.pause(0.25)
+
+            badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
+            counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
+            self.assertEqual(str(badge.render()), "Available")
+            self.assertIn("Tools  1", str(counts.render()))
 
     def test_capability_metrics_colour_labels_and_keep_counts_bold_white(self) -> None:
         expected = {
@@ -1240,7 +1271,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             before = scroll.scroll_y
             self.assertGreater(before, 0)
 
-            await pilot.click("#mcp-header-server-7", offset=(2, 1))
+            await pilot.click("#mcp-header-server-7", offset=(2, 0))
             manager.servers["server-0"].status = "Restarting"
             manager.servers["server-0"].transient = True
             for _ in range(5):

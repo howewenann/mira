@@ -198,19 +198,19 @@ MCPPanelScreen {
     width: 1fr;
     height: auto;
     margin: 0 0 1 0;
-    padding: 1;
+    padding: 0 1;
     border: solid #3e5962;
     background: #151f22;
 }
 
 .mcp-server-top {
     width: 1fr;
-    height: 3;
+    height: 1;
 }
 
 .mcp-server-header {
     width: 1fr;
-    height: 3;
+    height: 1;
     border: none;
     background: #1b3036;
     color: #eef7f8;
@@ -224,7 +224,7 @@ MCPPanelScreen {
     width: auto;
     min-width: 14;
     max-width: 26;
-    height: 3;
+    height: 1;
     padding: 0 1;
     content-align: center middle;
     text-style: bold;
@@ -241,13 +241,18 @@ MCPPanelScreen {
 .mcp-counts {
     width: 1fr;
     height: 1;
-    margin-top: 1;
     content-align: left middle;
     color: #eef7f8;
 }
 
-.mcp-controls { height: 3; margin-top: 1; align-horizontal: right; }
-.mcp-controls Button { min-width: 10; height: 3; margin-left: 1; }
+.mcp-controls { height: 1; align-horizontal: right; }
+.mcp-controls Button {
+    min-width: 10;
+    height: 1;
+    margin-left: 1;
+    padding: 0 1;
+    border: none;
+}
 .mcp-details { height: auto; margin-top: 1; padding: 0 1; color: #b8c1c7; }
 .mcp-detail-section { height: auto; padding: 1; margin-bottom: 1; background: #101719; color: #c4cdd2; }
 .mcp-error-block { height: auto; padding: 1; border-left: solid #d95757; background: #301d1f; color: #ffb3b3; }
