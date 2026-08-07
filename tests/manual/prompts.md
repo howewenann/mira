@@ -1354,7 +1354,7 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    that advertises neither. Expected: each server remains Starting until its
    advertised discovery completes. Counts and final health are already settled
    before opening or expanding MCP; unadvertised capabilities show zero and the
-   incomplete server is already Partially available.
+   server remains Available without a Needs attention section.
 7. Scroll to a lower server and repeatedly expand and collapse it while another
    server is starting or restarting. Expected: no network discovery occurs,
    health, counts, errors, and registries do not change, and the clicked header

@@ -900,26 +900,48 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(state.resources or []), 2)
             await manager.shutdown()
 
-    async def test_unadvertised_capabilities_are_empty_and_mark_projection_partial(self) -> None:
+    async def test_unadvertised_capabilities_are_empty_without_degrading_health(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            session = FakeSession(
-                ["search"],
-                capabilities=ServerCapabilities(tools=ToolsCapability()),
-            )
+            sessions = {
+                "tools-only": FakeSession(
+                    ["search"],
+                    capabilities=ServerCapabilities(tools=ToolsCapability()),
+                ),
+                "prompts-only": FakeSession(
+                    capabilities=ServerCapabilities(prompts=PromptsCapability()),
+                ),
+                "resources-only": FakeSession(
+                    capabilities=ServerCapabilities(resources=ResourcesCapability()),
+                ),
+            }
             manager = await self.make_manager(
                 root,
-                {"tools-only": {"command": "fake", "args": []}},
-                {"tools-only": session},
+                {name: {"command": "fake", "args": []} for name in sessions},
+                sessions,
             )
-            state = manager.servers["tools-only"]
-            self.assertEqual(state.status, "Partially available")
-            self.assertEqual(state.prompts, [])
-            self.assertEqual(state.resources, [])
-            self.assertIn("prompts: not advertised", state.error)
-            self.assertIn("resources: not advertised", state.error)
-            self.assertEqual(session.prompt_pages, 0)
-            self.assertEqual(session.resource_pages, 0)
+
+            for name, session in sessions.items():
+                with self.subTest(server=name):
+                    state = manager.servers[name]
+                    self.assertEqual(state.status, "Available")
+                    self.assertEqual(state.error, "")
+                    self.assertEqual(state.prompt_error, "")
+                    self.assertEqual(state.resource_error, "")
+
+                    if name != "tools-only":
+                        self.assertEqual(state.tools, [])
+                        self.assertEqual(session.tool_pages, 0)
+                    if name != "prompts-only":
+                        self.assertEqual(state.prompts, [])
+                        self.assertEqual(session.prompt_pages, 0)
+                    if name != "resources-only":
+                        self.assertEqual(state.resources, [])
+                        self.assertEqual(session.resource_pages, 0)
+
+            self.assertEqual(len(manager.servers["tools-only"].tools), 1)
+            self.assertEqual(len(manager.servers["prompts-only"].prompts or []), 1)
+            self.assertEqual(len(manager.servers["resources-only"].resources or []), 2)
             await manager.shutdown()
 
     async def test_advertised_capability_failure_is_partial_during_startup(self) -> None:
@@ -1453,6 +1475,24 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(button.region.height == 1 for button in control_buttons))
             self.assertLessEqual(header.region.right, badge.region.x)
             self.assertLessEqual(card.region.right, screen.query_one("#mcp-scroll").region.right)
+
+    async def test_available_server_without_capabilities_needs_no_attention(self) -> None:
+        manager = PanelManager()
+        app = PanelApp(manager)
+        async with app.run_test(size=(62, 26)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            await pilot.click("#mcp-header-one", offset=(2, 0))
+            await pilot.pause()
+
+            badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
+            details = "\n".join(str(section.render()) for section in screen.query(".mcp-detail-section"))
+            self.assertEqual(str(badge.render()), "Available")
+            self.assertIn("No tools", details)
+            self.assertIn("No prompts", details)
+            self.assertIn("No resources", details)
+            self.assertEqual(len(screen.query(".mcp-error-block")), 0)
+            self.assertEqual(mcp_summary_symbol([manager.servers["one"]]), "✓")
 
     async def test_open_panel_refreshes_unnotified_startup_transitions(self) -> None:
         manager = PanelManager()

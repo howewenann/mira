@@ -849,9 +849,10 @@ both enters and exits the adapter session context; UI workers request lifecycle
 transitions but never directly close SDK task groups or cancellation scopes.
 Start and restart discover every capability advertised by the initialized MCP
 session before publishing `Available` or `Partially available`. An absent
-tools, prompts, or resources capability is cached as an empty result without an
-invalid RPC and makes the overall projection partially available. A failed
-advertised capability has the same partial result with its concrete error.
+tools, prompts, or resources capability is optional and is cached as an empty
+result without an invalid RPC or degraded server health. A failed advertised
+capability makes the overall projection partially available with its concrete
+error.
 Panel expansion reads those completed caches and only changes presentation.
 Remote HTTP OAuth is inferred only after an approved server's ordinary
 connection returns a valid MCP OAuth challenge or its protected-resource and

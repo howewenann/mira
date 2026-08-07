@@ -346,7 +346,6 @@ class MCPManager:
         state.tools = []
         state.tool_metadata = []
         if not _advertises_capability(state.session, "tools"):
-            self._mark_partial(state, "tools: not advertised")
             return
         try:
             descriptors = await _list_all(state.session, "list_tools", "tools")
@@ -415,7 +414,6 @@ class MCPManager:
                 state.prompts = []
                 state.prompt_error = ""
                 self.prompt_registry.replace_server(state.name, [])
-                self._mark_partial(state, "prompts: not advertised")
                 return
             try:
                 session = state.session
@@ -477,7 +475,6 @@ class MCPManager:
             if not _advertises_capability(state.session, "resources"):
                 state.resources = []
                 state.resource_error = ""
-                self._mark_partial(state, "resources: not advertised")
                 return
             try:
                 session = state.session
