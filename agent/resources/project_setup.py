@@ -11,6 +11,7 @@ from agent.resources.paths import (
     SKILLS_DIR,
     SUBAGENTS_DIR,
     TOOLS_DIR,
+    PROMPTS_DIR,
 )
 
 
@@ -18,6 +19,7 @@ def ensure_project_examples(workspace: Path) -> None:
     mira_dir = workspace / PROJECT_DIR
     mcp_dir = mira_dir / MCP_DIR
     memories_dir = mira_dir / MEMORIES_DIR
+    prompts_dir = mira_dir / PROMPTS_DIR
     skills_dir = mira_dir / SKILLS_DIR / "example-skill"
     subagents_dir = mira_dir / SUBAGENTS_DIR
     tools_dir = mira_dir / TOOLS_DIR
@@ -25,12 +27,14 @@ def ensure_project_examples(workspace: Path) -> None:
 
     mcp_dir.mkdir(parents=True, exist_ok=True)
     memories_dir.mkdir(parents=True, exist_ok=True)
+    prompts_dir.mkdir(parents=True, exist_ok=True)
     skills_dir.mkdir(parents=True, exist_ok=True)
     subagents_dir.mkdir(parents=True, exist_ok=True)
     tools_dir.mkdir(parents=True, exist_ok=True)
     tool_examples_dir.mkdir(parents=True, exist_ok=True)
 
     write_example(mcp_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
+    write_example(mira_dir / "models.yml", MODEL_REGISTRY_TEMPLATE)
     write_example(mcp_dir / "example.json", EXAMPLE_MCP_CONFIGURATION)
     write_example(mcp_dir / "schema.json", MCP_CONFIGURATION_SCHEMA)
     write_example(mira_dir / "README.md", PROJECT_README)
@@ -67,7 +71,7 @@ EXAMPLE_MCP_CONFIGURATION = '''{
       "type": "http",
       "url": "https://example.com/mcp",
       "headers": {
-        "Authorization": "Bearer ${env:REMOTE_MCP_TOKEN}"
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
       }
     }
   }
@@ -78,7 +82,7 @@ EXAMPLE_MCP_CONFIGURATION = '''{
 MCP_CONFIGURATION_SCHEMA = '''{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MIRA MCP configuration",
-  "description": "The supported configuration format for MCP servers loaded by MIRA. String values may reference process environment variables with ${env:NAME}.",
+  "description": "The supported configuration format for MCP servers loaded by MIRA. String values may reference process environment variables with ${NAME}.",
   "type": "object",
   "properties": {
     "$schema": {
@@ -117,7 +121,7 @@ MCP_CONFIGURATION_SCHEMA = '''{
               },
               "env": {
                 "type": "object",
-                "description": "Environment variables passed to the server process. Values may contain ${env:NAME} references.",
+                "description": "Environment variables passed to the server process. Values may contain ${NAME} references.",
                 "additionalProperties": {
                   "type": "string"
                 }
@@ -142,7 +146,7 @@ MCP_CONFIGURATION_SCHEMA = '''{
               },
               "headers": {
                 "type": "object",
-                "description": "HTTP headers sent with MCP requests. Values may contain ${env:NAME} references, such as Bearer ${env:MCP_TOKEN}.",
+                "description": "HTTP headers sent with MCP requests. Values may contain ${NAME} references, such as Bearer ${MCP_TOKEN}.",
                 "additionalProperties": {
                   "type": "string"
                 }
@@ -171,21 +175,25 @@ MIRA loads project resources from this folder on top of its defaults.
   these folders and may override bundled skills if MIRA adds any later.
 - `subagents/*.py`: Python files that export `SUBAGENTS = [...]`. Project
   subagents are loaded from these files and may override bundled subagents if
-  MIRA adds any later.
+  MIRA adds any later. Enable and optionally assign them under `/models`.
 - `tools/*.py`: active Python tool files. Standard LangChain `@tool` runs in
   MIRA, while `mira_tool_api.project_tool` runs its function body in the
   configured project Execute Environment.
 - `mcp/mcp.json`: active MCP configuration. `mcp/example.json` is inert, and
   `mcp/schema.json` documents the supported keys. MCP string values can use
-  `${env:NAME}` to read explicit process or workspace `.env` values without
+  `${NAME}` to read explicit process or workspace `.env` values without
   storing the resolved value. Run `/reload` after changes.
+- `models.yml`: ordered AnyLLM profiles. Put secrets in `.env`, reference them
+  with `${NAME}`, then select Main and other assignments through `/models`.
+- `prompts/**/*`: recursive Mustache prompt files flattened to `/prompt__...`
+  commands with `__` between suffix-free path components.
 - `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is
   never scanned as active resources.
   Files can also define `get_tools(project_backend)` for tools that need
   workspace access. Project tools override defaults when the tool `name` is
   the same.
 
-Use `/runtime` in the TUI to inspect the active model and connection. Use
+Use `/models` to configure models and `/runtime` to inspect the active model. Use
 `/tools`, `/memories`, `/skills`, and `/subagents` for their focused sections.
 """
 
@@ -235,8 +243,8 @@ MIRA_RUNTIME_TOOL_EXAMPLE = '''# Standard MIRA-runtime tool.
 #   2. Rename and edit the function.
 #   3. Run /reload.
 #
-# If an imported package is missing, MIRA will offer to install it
-# into MIRA's environment.
+# If an imported package is missing, Issues shows the exact command needed to
+# install it into MIRA's environment.
 
 from langchain_core.tools import tool
 
@@ -280,4 +288,33 @@ def inspect_csv(path: str) -> str:
 
     dataframe = pd.read_csv(path)
     return dataframe.describe(include="all").to_string()
+'''
+
+
+MODEL_REGISTRY_TEMPLATE = '''# MIRA model profiles
+#
+# Add any number of named model profiles below.
+#
+# Required: provider, model
+# Optional: api_key, api_base, temperature, max_tokens, top_p, model_kwargs
+#
+# Provider-specific arguments belong under model_kwargs.
+
+models:
+
+  # example-cloud:
+  #   provider: <provider>          # Required. AnyLLM provider name.
+  #   model: <model-id>             # Required. Exact model ID/name.
+  #   api_key: ${API_KEY}           # Optional. Literal or environment reference.
+  #   temperature: 0.2              # Optional. Sampling temperature.
+  #   max_tokens: 4096              # Optional. Maximum generated output.
+  #   top_p: 0.95                    # Optional. Nucleus sampling threshold.
+  #   model_kwargs:                  # Optional. Provider-specific arguments.
+  #     reasoning_effort: medium
+
+  # example-endpoint:
+  #   provider: <provider>          # Required. AnyLLM provider name.
+  #   model: <model-id>             # Required. Exact model ID/name.
+  #   api_base: http://localhost:1234/v1  # Optional. Compatible endpoint URL.
+  #   api_key: <api-key>             # Optional. Literal or ${NAME} reference.
 '''

@@ -11,6 +11,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent.mcp.models import PreparedPrompt, PromptArgument, PromptSpec
+from runtime.issues import Issue
 
 _MUSTACHE = re.compile(r"{{{?\s*([#^/!>&]?)\s*([A-Za-z_][\w.]*)\s*}?}}")
 
@@ -22,7 +23,7 @@ class PromptRegistry:
         self.workspace = workspace
         self.local: dict[str, PromptSpec] = {}
         self.mcp: dict[str, PromptSpec] = {}
-        self.warnings: list[str] = []
+        self.issues: list[Issue] = []
         self.reload_local()
 
     @property
@@ -31,21 +32,35 @@ class PromptRegistry:
 
     def reload_local(self) -> None:
         self.local = {}
-        self.warnings = []
+        self.issues = []
         root = self.workspace / ".mira" / "prompts"
         if not root.is_dir():
             return
         grouped: dict[str, list[tuple[Path, str]]] = {}
-        for path in sorted((item for item in root.iterdir() if item.is_file()), key=lambda item: item.name.casefold()):
+        paths = sorted(
+            (item for item in root.rglob("*") if item.is_file()),
+            key=lambda item: (item.relative_to(root).as_posix().casefold(), item.relative_to(root).as_posix()),
+        )
+        for path in paths:
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
                 continue
-            command = f"/prompt__{path.stem}"
+            relative = path.relative_to(root).with_suffix("")
+            command = "/prompt__" + "__".join(relative.parts)
             grouped.setdefault(command, []).append((path, text))
         for command, items in grouped.items():
             if len(items) != 1:
-                self.warnings.append(f"local prompt collision excluded: {command}")
+                paths_text = "\n".join(f"- {path.relative_to(self.workspace).as_posix()}" for path, _ in items)
+                self.issues.append(
+                    Issue(
+                        "STARTUP",
+                        f"Duplicate prompt command: {command}",
+                        ".mira/prompts/",
+                        f"These paths flatten to the same command:\n{paths_text}",
+                        "Rename one file or folder and run /reload.",
+                    )
+                )
                 continue
             _path, template_text = items[0]
             names = mustache_variables(template_text)

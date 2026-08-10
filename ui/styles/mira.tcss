@@ -101,7 +101,7 @@ Screen {
 }
 
 #mcp-status-button,
-#tool-issues-button {
+#issues-button {
     width: 13;
     min-width: 13;
     max-width: 13;
@@ -111,18 +111,18 @@ Screen {
     text-style: bold;
 }
 
-#tool-issues-button {
+#issues-button {
     display: none;
     background: #6b4f20;
     color: #fff0bd;
 }
 
-ToolIssuesScreen {
+IssuesScreen {
     align: center middle;
     background: rgba(4, 7, 8, 0.72);
 }
 
-#tool-issues-dialog {
+#issues-dialog {
     width: 76;
     max-width: 94%;
     height: 80%;
@@ -132,12 +132,12 @@ ToolIssuesScreen {
     background: #101516;
 }
 
-#tool-issues-title-row {
+#issues-title-row {
     height: 3;
     width: 1fr;
 }
 
-#tool-issues-title {
+#issues-title {
     width: 1fr;
     height: 3;
     content-align: left middle;
@@ -145,15 +145,10 @@ ToolIssuesScreen {
     text-style: bold;
 }
 
-#tool-issues-scroll {
+#issues-scroll {
     height: 1fr;
     scrollbar-color: #d2a957;
     scrollbar-background: #20272b;
-}
-
-#tool-issues-summary {
-    height: auto;
-    padding: 0 1 1 0;
 }
 
 #mcp-status-button {
@@ -173,6 +168,23 @@ ToolIssuesScreen {
     padding: 0 1;
     background: #101b1f;
     color: #b8c1c7;
+}
+
+#model-settings-button {
+    width: auto;
+    max-width: 42;
+    min-width: 7;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: #30375f;
+    color: #dce1ff;
+}
+
+#telemetry-values {
+    width: 1fr;
+    height: 1;
+    content-align: right middle;
 }
 
 MCPPanelScreen {
@@ -266,36 +278,6 @@ MCPPanelScreen {
 .mcp-details { height: auto; margin-top: 1; padding: 0 1; color: #b8c1c7; }
 .mcp-detail-section { height: auto; padding: 1; margin-bottom: 1; background: #101719; color: #c4cdd2; }
 .mcp-error-block { height: auto; padding: 1; border-left: solid #d95757; background: #301d1f; color: #ffb3b3; }
-
-#tool-issues-install-target {
-    height: auto;
-    padding-bottom: 1;
-    color: #b8c1c7;
-}
-
-#tool-issues-package-label {
-    height: 1;
-    color: #b8c1c7;
-}
-
-#tool-issues-packages {
-    height: 3;
-}
-
-#tool-issues-loading {
-    display: none;
-    height: 1;
-}
-
-#tool-issues-actions {
-    height: 3;
-    align-horizontal: right;
-}
-
-#tool-issues-actions Button {
-    min-width: 12;
-    margin-left: 1;
-}
 
 #chat-log {
     width: 1fr;
@@ -714,6 +696,20 @@ Button.goal-action:focus {
     color: #cba6f7;
 }
 
+.settings-section.model-context {
+    color: #D9956A;
+}
+
+.settings-section.model-assignments {
+    color: #8897E8;
+    margin-top: 2;
+}
+
+.settings-section.subagents {
+    color: #93A4C3;
+    margin-top: 2;
+}
+
 .settings-row {
     height: 2;
     width: auto;
@@ -888,6 +884,22 @@ Button.goal-action:focus {
     height: 1;
     margin: 0 2 1 0;
     border: none;
+}
+
+.settings-input.settings-context-limit-input {
+    width: 24;
+    min-width: 24;
+}
+
+.settings-subagent-row > .settings-label {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.settings-column-label.model,
+.settings-subagent-model-select {
+    width: 34;
+    min-width: 24;
 }
 
 #settings-tabs { height: 3; }

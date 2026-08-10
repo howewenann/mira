@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +15,10 @@ from agent.resources.memories import load_memories
 from agent.resources.paths import DEFAULT_ROUTE, DEFAULTS_ROOT
 from agent.resources.project_setup import ensure_project_examples
 from agent.resources.skills import load_skills
-from agent.resources.subagents import load_subagents
+from agent.resources.subagents import SubagentDiscovery, discover_subagents, effective_subagent_specs
 from agent.resources.tools import load_tools, tool_name
-from agent.resources.tool_failures import ToolLoadFailure
+from agent.resources.tool_failures import ToolLoadFailure, tool_failure_issues
+from runtime.issues import Issue
 from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
 DEFAULT_EXECUTE_ENV_KEYS = (
@@ -51,6 +52,8 @@ class ResourceBundle:
     tools: list[Any]
     metadata: dict[str, list[dict[str, str]]]
     tool_failures: list[ToolLoadFailure]
+    subagent_discovery: SubagentDiscovery
+    issues: list[Issue]
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,8 @@ def build_resources(
     create_examples: bool = True,
     settings: dict[str, Any] | None = None,
     enable_execute: bool | None = None,
+    config: dict[str, Any] | None = None,
+    subagent_discovery: SubagentDiscovery | None = None,
 ) -> ResourceBundle:
     """Build the resources passed into create_deep_agent()."""
     workspace = Path(workspace).expanduser().resolve()
@@ -77,7 +82,9 @@ def build_resources(
 
     memories = load_memories(workspace)
     skill_sources, skills = load_skills(workspace)
-    subagents, subagent_info = load_subagents(workspace)
+    discovery = subagent_discovery or discover_subagents(workspace)
+    subagents = effective_subagent_specs(discovery, config) if config is not None else []
+    subagent_info = [item.display_item() for item in discovery.items]
     tools, tool_info, tool_failures = load_tools(workspace, backends.project, settings)
     active_tools = enabled_tools(tools, tool_info, settings)
 
@@ -95,6 +102,16 @@ def build_resources(
             "tools": tool_info,
         },
         tool_failures=tool_failures,
+        subagent_discovery=discovery,
+        issues=[*discovery.issues, *tool_failure_issues(tool_failures)],
+    )
+
+
+def configure_subagents(resources: ResourceBundle, config: dict[str, Any]) -> ResourceBundle:
+    """Project enabled subagent copies onto an already discovered bundle."""
+    return replace(
+        resources,
+        subagents=effective_subagent_specs(resources.subagent_discovery, config),
     )
 
 

@@ -93,8 +93,14 @@ log behavior, or trace-window behavior changes.
 
 ## Configuration And Settings
 
-**Decision:** Provider configuration comes from environment variables and
-workspace `.env`; user-facing workspace settings live in `.mira/settings.yml`.
+**Decision:** Ordered model profiles live in `.mira/models.yml`; assignments and
+the usable context cap live in `.mira/settings.yml`. Profiles contain only
+AnyLLM construction fields and are constructed directly as
+`ChatAnyLLM(**profile_data)`. Main, Rubric, Summarization, and raw-subagent
+overrides share one assignment resolver. Null secondary assignments inherit
+Main; missing explicit assignments never fall back. Environment variables are
+secret/value inputs only. Generic configuration interpolation resolves `${NAME}`
+recursively and rejects alternate, escaped, malformed, or unresolved forms.
 Immutable launch options are process-local and overlay freshly loaded values to
 form the effective runtime configuration. `/reload` reloads environment and
 workspace configuration, then reapplies the same launch options. Launch options
@@ -108,18 +114,18 @@ one section at a time without loading configuration, constructing a model, or
 checking connectivity: `/runtime`, `/tools`, `/memories`, `/skills`, and
 `/subagents`. Launch-scoped flags are displayed as rows in the Runtime table so
 their process scope remains visible beside the effective connection state.
-`/reload` builds replacement configuration, metadata, both agents, resource
-projections, and the snapshot before replacing active runtime references, then
-displays a short confirmation. Endpoint display is allowlisted and strips URL
+Startup and `/reload` discover settings, profiles, MCP, prompts, memories,
+skills, tools, and subagents before requiring Main. Expected configuration
+failures retain a usable TUI and local commands; model readiness is enforced at
+construction and execution boundaries. Endpoint display is allowlisted and strips URL
 credentials, query strings, and fragments; API keys and arbitrary config values
 never enter the snapshot or inspection output.
-LM Studio remains the default user-facing provider, but MIRA constructs its
-LangChain chat model through AnyLLM's OpenAI-compatible transport so DeepAgents
-tool calls use LM Studio's `/v1` server path instead of the native
-`lmstudio-python` SDK path. The display identity remains `lmstudio:<model>`.
+LM Studio retains its metadata probe when a profile declares `lmstudio`; MIRA
+does not remap that provider or use an alternate registry-profile constructor.
 
-**Why:** LLM provider details are environment-specific, while Git protection and
-tool approval choices are workspace behavior. Dynamic eval subagents are also
+**Why:** Named profiles make provider configuration ordered, inspectable, and
+reusable without duplicating secrets. Keeping null inheritance makes Main
+changes propagate without rewriting dependent settings. Dynamic eval subagents are also
 workspace behavior: they let JavaScript eval spawn subagents through
 QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
 requires an explicit System Settings toggle. Dynamic response schemas default
@@ -137,18 +143,10 @@ The always-on Plan/Goal response-status protocol has one workspace System Settin
 counts recovery calls after the first rejected response. Changing it follows
 the normal settings application path and rebuilds both agents; it is a bound,
 not a feature toggle.
-Main and rubric LLM profiles are environment configuration. Both accept strict
-JSON-object `MODEL_KWARGS`, which `ChatAnyLLM.model_kwargs` passes to AnyLLM as
-completion parameters after MIRA rejects runtime-owned call fields. Explicit
-temperature, maximum-token, and top-p variables take precedence over duplicate
-JSON keys. With no rubric overrides, `RubricMiddleware` receives the exact main
-model object as before. A rubric profile on the same provider inherits blank
-main fields and shallow-merges JSON kwargs; changing the rubric provider starts
-a clean profile, requires its own model, and inherits no credentials, endpoint,
-sampling configuration, or arbitrary kwargs.
-A missing `.mira/settings.yml` starts from complete defaults. An existing file
-must equal the complete normalized settings shape, so partial, malformed,
-unknown, or invalid settings are rejected instead of silently defaulted.
+A missing `.mira/settings.yml` uses defaults in memory. Unknown fixed keys and
+invalid shapes become STARTUP Issues; valid omitted known fields retain current
+defaults. Secrets are absent from persisted settings, model fingerprints, and
+Issue details.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
 `agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
@@ -156,8 +154,7 @@ unknown, or invalid settings are rejected instead of silently defaulted.
 `ui/widgets/settings_panel.py`.
 
 **Update this when:** A value moves between reloadable and launch-scoped
-configuration, a setting moves between `.env` and `.mira/settings.yml`, new
-provider variables are introduced, or `/settings` changes what it controls.
+configuration, model profile fields change, or `/settings` changes ownership.
 
 ## Execute Backend
 
@@ -223,8 +220,12 @@ to inspect.
   bundled default skills are added later, DeepAgents receives default skill
   sources first and project skill sources second, so a duplicate skill name
   follows DeepAgents' later-source-wins behavior.
-- Subagents load from Python files exporting `SUBAGENTS = [...]` and replace by
-  each subagent's `name`. MIRA does not ship an opinionated default subagent.
+- Subagents load from Python files exporting `SUBAGENTS = [...]` in file/list
+  order. `general-purpose` is always first and enabled; newly discovered raw,
+  compiled, and async definitions default disabled. A single project definition
+  may replace a single bundled definition. Ambiguous same-tier names are
+  excluded and reported. MIRA applies raw model overrides to shallow copies and
+  never mutates or serializes user source objects.
 - Tools load from module-level LangChain `@tool` objects, optional `TOOLS`, and
   optional `get_tools(project_backend)`. Duplicate tool names inside one file
   keep the first tool. Across layers, project tools replace defaults by tool
@@ -238,9 +239,9 @@ to inspect.
   a failed file never creates a disabled placeholder. `/reload` retries all
   files, and one-shot mode prints one grouped warning while continuing with the
   successful subset. The TUI shows one grouped startup warning and keeps
-  unresolved failures behind its persistent Issues entry point. Explicit
-  `/reload` repeats a warning while failures remain. Recovery and
-  Issues-driven installation/reload do not toast.
+  unresolved failures behind its persistent Issues entry point. Tool failures
+  become generic TOOL Issues with either `@project_tool` guidance or an exact
+  quoted interpreter install command; MIRA never installs from the Issues UI.
 - Standard LangChain `@tool` runs in MIRA's interpreter. The dependency-free
   `mira_tool_api.project_tool` decorator is an explicit alternative: it leaves
   the original callable unchanged and adds versioned metadata. The loader
@@ -695,15 +696,11 @@ summarizes durable conversation state, including the current Goal or Plan.
 current session. `/compact` is also TUI-only because it needs the active agent,
 thread, checkpoint, and session store; it runs outside a normal model turn and
 does not create synthetic assistant or tool messages.
-Unavailable project tool files use one narrow TUI-only issue flow rather than a
-general notification system. `App.notify()` announces a new failure fingerprint
-once per session, a compact `Issues N` button and `/issues` open one scrollable
-`ModalScreen`, and a Textual thread worker runs one explicit
-`sys.executable -m pip install ...` argument list. The modal shows that exact
-MIRA interpreter path beside the package input. The input and both bottom-row
-buttons are disabled while pip runs. Success reuses `_reload_runtime()` and
-refreshes the open modal; failure retains captured output and re-enables retry.
-Closing never changes settings, session history, or unresolved failures.
+Configuration and resource diagnostics share immutable `Issue` records ordered
+as STARTUP, MODEL, MCP, and TOOL. `/issues` opens one view-only flat list of
+initially collapsed rows; expansion shows location, details, and guidance.
+Startup and reload emit at most one current-count toast and none when the list
+is empty. Closing the screen never changes settings, resources, or sessions.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
@@ -722,7 +719,7 @@ belong in the panel.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
 
-**Where to check:** `ui/app.py`, `ui/widgets/tool_issues.py`, `ui/windows_input.py`,
+**Where to check:** `ui/app.py`, `ui/widgets/issues.py`, `ui/windows_input.py`,
 `ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
 `ui/renderer.py`, `runtime/*_events.py`, `tests/test_textual_app.py`.
 
@@ -857,7 +854,7 @@ Panel expansion reads those completed caches and only changes presentation.
 Remote HTTP OAuth is inferred only after an approved server's ordinary
 connection returns a valid MCP OAuth challenge or its protected-resource and
 authorization-server metadata can be discovered. User JSON has no OAuth field.
-MCP string values may contain explicit `${env:NAME}` references. Loading keeps
+MCP string values may contain explicit `${NAME}` references. Loading keeps
 the normalized template for approval previews and fingerprints while building
 a separate resolved configuration in memory for the connection. Resolution is
 single-pass, never substitutes mapping keys, never writes resolved values, and

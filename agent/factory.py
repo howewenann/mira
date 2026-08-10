@@ -8,7 +8,7 @@ from typing import Any
 from deepagents import FilesystemPermission, HarnessProfile, RubricMiddleware, create_deep_agent, register_harness_profile
 from langchain.agents.middleware.types import AgentMiddleware
 
-from agent.llm import get_llm, get_rubric_model_name, rubric_llm_config
+from agent.llm import get_llm, get_rubric_model_name
 from agent.middleware import (
     CorrectionMiddleware,
     ModelToolVisibilityMiddleware,
@@ -43,6 +43,9 @@ from config.settings import (
     tool_enabled,
     tool_plan_access,
     mcp_tool_policy,
+    RUBRIC_MODEL,
+    SUMMARIZATION_MODEL,
+    model_assignment,
 )
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
@@ -76,6 +79,7 @@ def build_agent(
     checkpointer: Any,
     metadata: ModelMetadata | None = None,
     mcp_manager: Any | None = None,
+    resources: Any | None = None,
 ) -> Any:
     """Build the normal action agent with read/write filesystem access."""
     agent = _build_agent(
@@ -91,6 +95,7 @@ def build_agent(
         enable_rubric=rubric_enabled(config),
         mcp_manager=mcp_manager,
         planning=False,
+        resources=resources,
     )
     return agent
 
@@ -101,6 +106,7 @@ def build_plan_agent(
     checkpointer: Any,
     metadata: ModelMetadata | None = None,
     mcp_manager: Any | None = None,
+    resources: Any | None = None,
 ) -> Any:
     """Build the planning agent with project write tools hidden and denied."""
     agent = _build_agent(
@@ -126,6 +132,7 @@ def build_plan_agent(
         omitted_tools=(),
         mcp_manager=mcp_manager,
         planning=True,
+        resources=resources,
     )
     return agent
 
@@ -145,6 +152,7 @@ def _build_agent(
     omitted_tools: tuple[str, ...] = (PREPARE_GOAL_TOOL, PREPARE_PLAN_TOOL),
     mcp_manager: Any | None = None,
     planning: bool = False,
+    resources: Any | None = None,
 ) -> Any:
     """Create a DeepAgents agent from shared MIRA wiring.
 
@@ -153,10 +161,11 @@ def _build_agent(
     control flow.
     """
     model = get_llm(config, metadata=metadata)
-    resources = build_resources(
+    resources = resources or build_resources(
         Path(workspace),
         settings=(config or {}).get("settings"),
         enable_execute=enable_execute_backend,
+        config=config,
     )
     backend = resources.backend
     permissions = [] if enable_execute_backend else permissions
@@ -164,8 +173,8 @@ def _build_agent(
     if not backend_supports_delete(backend):
         excluded_tools = (*excluded_tools, "delete")
     rubric_model = model
-    if enable_rubric and config.get("rubric_llm_overridden"):
-        rubric_model = get_llm(rubric_llm_config(config))
+    if enable_rubric and model_assignment(config, RUBRIC_MODEL):
+        rubric_model = get_llm(config, role=RUBRIC_MODEL)
     rubric_middleware = (
         [RubricMiddleware(model=rubric_model, tools=None, max_iterations=rubric_max_iterations(config))]
         if enable_rubric
@@ -177,9 +186,14 @@ def _build_agent(
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
 
-    _register_summarization_exclusion(config, model)
+    summarization_model = (
+        get_llm(config, role=SUMMARIZATION_MODEL)
+        if model_assignment(config, SUMMARIZATION_MODEL)
+        else model
+    )
+    _register_summarization_exclusion(config, summarization_model)
     middleware_stack = build_agent_middleware(
-        model=model,
+        model=summarization_model,
         backend=backend,
         workspace=Path(workspace),
         settings=(config or {}).get("settings"),
@@ -249,6 +263,7 @@ def _build_agent(
     combined_metadata = {**resources.metadata, "tools": [*local_metadata, *mcp_metadata]}
     _attach_resources(agent, combined_metadata)
     _attach_tool_failures(agent, resources.tool_failures)
+    _attach_resource_issues(agent, resources.issues, resources.subagent_discovery)
     _attach_backend(agent, backend, resources.project_backend)
     _attach_summarization(agent, middleware_stack.summarization)
     if enable_rubric:
@@ -273,13 +288,6 @@ def _register_summarization_exclusion(config: dict[str, Any] | None, model: Any 
 def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None = None) -> list[str]:
     """Return DeepAgents harness profile keys that may match this model."""
     candidates: list[str] = []
-
-    provider = str((config or {}).get("llm_provider") or "").strip().lower()
-    model_name = str((config or {}).get("llm_model") or "").strip()
-    if provider and model_name:
-        candidates.append(f"{provider}:{model_name}")
-    if provider:
-        candidates.append(provider)
 
     resolved_provider = _model_provider(model)
     identifier = _model_identifier(model)
@@ -449,6 +457,15 @@ def _attach_tool_failures(agent: Any, failures: list[Any]) -> None:
     try:
         agent.mira_tool_failures = list(failures)
     except AttributeError:
+        return
+
+
+def _attach_resource_issues(agent: Any, issues: list[Any], discovery: Any) -> None:
+    """Expose discovery diagnostics to the TUI without coupling construction."""
+    try:
+        agent.mira_resource_issues = list(issues)
+        agent.mira_subagent_discovery = discovery
+    except Exception:
         return
 
 

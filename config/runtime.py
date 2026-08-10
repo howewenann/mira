@@ -9,6 +9,8 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from config import loader
+from config.llm import ModelRegistry
+from config.settings import MAIN_MODEL, model_assignment
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +62,13 @@ def build_runtime_snapshot(
     elif direct_effective and not direct_requested:
         warnings = ("Direct mode is effective even though it was not requested at launch.",)
 
-    provider_value = effective_config.get("llm_provider")
+    profile_values = _main_profile_values(effective_config)
+    provider_value = profile_values.get("provider")
     provider = provider_value.strip() if isinstance(provider_value, str) and provider_value.strip() else None
     return RuntimeSnapshot(
         model_name=model_name.strip() or "unknown",
         provider=provider,
-        endpoint=_sanitize_endpoint(effective_config.get("llm_base_url")),
+        endpoint=_sanitize_endpoint(profile_values.get("api_base")),
         direct_effective=direct_effective,
         direct_requested=direct_requested,
         warnings=warnings,
@@ -88,3 +91,13 @@ def _sanitize_endpoint(value: Any) -> str | None:
     display_host = f"[{hostname}]" if ":" in hostname else hostname
     netloc = f"{display_host}:{port}" if port is not None else display_host
     return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _main_profile_values(config: Mapping[str, Any]) -> dict[str, Any]:
+    registry = config.get("model_registry")
+    name = model_assignment(dict(config), MAIN_MODEL)
+    if isinstance(registry, ModelRegistry):
+        profile = registry.profile(name)
+        if profile is not None:
+            return profile.values
+    return {}

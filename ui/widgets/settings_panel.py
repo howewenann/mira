@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -51,11 +52,23 @@ from config.settings import (
     mcp_server_enabled,
     mcp_tool_policy,
     set_mcp_tool_policy_value,
+    MAIN_MODEL,
+    RUBRIC_MODEL,
+    SUMMARIZATION_MODEL,
+    context_limit_tokens,
+    model_assignment,
+    set_context_limit_tokens,
+    set_model_assignment,
+    set_subagent_enabled,
+    set_subagent_model_assignment,
+    subagent_enabled,
+    subagent_model_assignment,
 )
 
 ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access",
     "mcp_server_enabled", "mcp_server_allow", "mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan",
+    "subagent_enabled",
 ]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
@@ -70,6 +83,7 @@ EXECUTE_ENV_FIELDS = {
 }
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
 CloseCallback = Callable[[], None]
+INHERIT_VALUE = "__mira_default__"
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,9 @@ class SettingsPanel(Vertical):
         apply_change: ToggleCallback,
         close_panel: CloseCallback | None = None,
         mcp_manager: Any = None,
+        model_registry: Any = None,
+        subagent_metadata: list[dict[str, str]] | None = None,
+        initial_tab: str = "general",
         **kwargs: Any,
     ) -> None:
         super().__init__(id="settings-overlay", **kwargs)
@@ -103,7 +120,14 @@ class SettingsPanel(Vertical):
         self.apply_change = apply_change
         self.close_panel = close_panel
         self.mcp_manager = mcp_manager
+        self.model_registry = model_registry
+        self.subagent_metadata = list(subagent_metadata or [])
+        self.initial_tab = initial_tab if initial_tab in {"general", "models", "custom", "mcp"} else "general"
+        self._refreshing_models = False
+        self._model_controls_ready = False
         self._button_cells: dict[str, ToggleCell] = {}
+        if self.initial_tab != "general":
+            self.styles.visibility = "hidden"
 
     def compose(self) -> ComposeResult:
         """Compose a scrollable settings window."""
@@ -112,17 +136,37 @@ class SettingsPanel(Vertical):
                 yield Static("Settings", classes="settings-title")
                 yield SettingsCloseButton("x", panel=self, id="settings-close", classes="panel-close")
             with Horizontal(id="settings-tabs"):
-                yield Button("General", id="settings-tab-general", classes="settings-tab active")
-                yield Button("Custom Tools", id="settings-tab-custom", classes="settings-tab")
-                yield Button("MCP", id="settings-tab-mcp", classes="settings-tab")
-            with VerticalScroll(id="settings-body", classes="settings-body settings-general-body"):
+                yield Button(
+                    "General",
+                    id="settings-tab-general",
+                    classes=f"settings-tab{' active' if self.initial_tab == 'general' else ''}",
+                )
+                yield Button(
+                    "Models",
+                    id="settings-tab-models",
+                    classes=f"settings-tab{' active' if self.initial_tab == 'models' else ''}",
+                )
+                yield Button(
+                    "Custom Tools",
+                    id="settings-tab-custom",
+                    classes=f"settings-tab{' active' if self.initial_tab == 'custom' else ''}",
+                )
+                yield Button(
+                    "MCP",
+                    id="settings-tab-mcp",
+                    classes=f"settings-tab{' active' if self.initial_tab == 'mcp' else ''}",
+                )
+            with VerticalScroll(
+                id="settings-body",
+                classes="settings-body settings-general-body",
+            ):
                 yield Static("System Settings", classes="settings-section system")
                 yield SettingsHeaderRow("", show_always=False)
                 with Horizontal(classes="settings-row settings-policy-row"):
                     yield Static("Git Protection", classes="settings-label")
                     yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
                 with Horizontal(classes="settings-row settings-policy-row"):
-                    yield Static("Dynamic subagents", classes="settings-label")
+                    yield Static("Dynamic eval subagents", classes="settings-label")
                     yield self._toggle_button(
                         ToggleCell("system", DYNAMIC_SUBAGENTS),
                         dynamic_subagents_enabled(self.settings),
@@ -140,12 +184,9 @@ class SettingsPanel(Vertical):
                         planning_todos_enabled(self.settings),
                     )
                 with Horizontal(
-                    classes=(
-                        "settings-row settings-child-row settings-value-row "
-                        "planning-response-status-retries-row"
-                    )
+                    classes="settings-row settings-value-row planning-response-status-retries-row"
                 ):
-                    yield Static("Response-status retries", classes="settings-label settings-child-label")
+                    yield Static("Response-status retries", classes="settings-label")
                     yield Input(
                         value=str(planning_response_status_max_retries(self.settings)),
                         id="settings-planning-response-status-max-retries",
@@ -215,6 +256,54 @@ class SettingsPanel(Vertical):
                         id="settings-execute-env-allow",
                         classes="settings-input",
                     )
+
+            with VerticalScroll(id="settings-models-body", classes="settings-body"):
+                yield Static("Model Context", classes="settings-section model-context")
+                with Horizontal(classes="settings-row settings-value-row"):
+                    yield Static("Context limit tokens", classes="settings-label")
+                    yield Input(
+                        str(context_limit_tokens(self.settings)),
+                        id="settings-model-context-limit",
+                        classes="settings-input settings-context-limit-input",
+                    )
+
+                yield Static("Model Assignments", classes="settings-section model-assignments")
+                for role, label in (
+                    (MAIN_MODEL, "Main"),
+                    (RUBRIC_MODEL, "Rubric"),
+                    (SUMMARIZATION_MODEL, "Summarization"),
+                ):
+                    with Horizontal(classes="settings-row settings-wide-row settings-model-row"):
+                        yield Static(label, classes="settings-label")
+                        yield Select(
+                            self._role_options(role),
+                            value=model_assignment(self.settings, role) or INHERIT_VALUE,
+                            allow_blank=False,
+                            id=f"settings-model-{role}",
+                            classes="settings-select settings-model-select",
+                        )
+
+                yield Static("Subagents", classes="settings-section subagents")
+                yield SettingsHeaderRow("name", show_always=False, show_model=True)
+                for item in self.subagent_metadata:
+                    name = str(item.get("name") or "")
+                    if not name:
+                        continue
+                    kind = str(item.get("kind") or "raw")
+                    with Horizontal(classes="settings-row settings-wide-row settings-subagent-row"):
+                        yield Static(name, classes="settings-label")
+                        yield self._toggle_button(
+                            ToggleCell("subagent_enabled", name, locked=name == "general-purpose"),
+                            subagent_enabled(self.settings, name),
+                        )
+                        yield Select(
+                            self._subagent_options(item),
+                            value=subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
+                            allow_blank=False,
+                            disabled=kind != "raw",
+                            id=f"settings-subagent-model-{safe_id(name)}",
+                            classes="settings-select settings-subagent-model-select",
+                        )
 
             with VerticalScroll(id="settings-custom-body", classes="settings-body"):
                 yield Static("Custom Tools", classes="settings-section custom")
@@ -306,19 +395,30 @@ class SettingsPanel(Vertical):
 
     def on_mount(self) -> None:
         """Focus the first editable toggle when the panel appears."""
-        self.query_one("#settings-custom-body").display = False
-        self.query_one("#settings-mcp-body").display = False
-        self.call_after_refresh(self._focus_first_toggle)
+        # Select composes an internal overlay. Keep the whole panel invisible
+        # until nested selectors mount and the requested tab is ready.
+        self.call_after_refresh(self._activate_initial_tab)
+
+    def _activate_initial_tab(self) -> None:
+        self._show_tab(self.initial_tab)
+        self._model_controls_ready = True
+        self.styles.visibility = "visible"
+        if not any(widget.has_focus for widget in self.query("Button, Input, Select")):
+            self._focus_first_toggle()
 
     @on(Button.Pressed, ".settings-tab")
     def press_tab(self, event: Button.Pressed) -> None:
         event.stop()
         selected = (event.button.id or "").removeprefix("settings-tab-")
-        for name in ("general", "custom", "mcp"):
+        self.initial_tab = selected
+        self._show_tab(selected)
+        self.call_after_refresh(self._focus_first_toggle)
+
+    def _show_tab(self, selected: str) -> None:
+        for name in ("general", "models", "custom", "mcp"):
             selector = "#settings-body" if name == "general" else f"#settings-{name}-body"
             self.query_one(selector).display = name == selected
             self.query_one(f"#settings-tab-{name}", Button).set_class(name == selected, "active")
-        self.call_after_refresh(self._focus_first_toggle)
 
     async def on_key(self, event: Key) -> None:
         """Handle direct yes/no and close shortcuts."""
@@ -357,6 +457,52 @@ class SettingsPanel(Vertical):
         else:
             event.select.value = current
 
+    @on(Select.Changed, ".settings-model-select")
+    async def change_model_assignment(self, event: Select.Changed) -> None:
+        """Persist an assignment while keeping the inheritance option null."""
+        event.stop()
+        if self._refreshing_models or not self._model_controls_ready:
+            return
+        role = (event.select.id or "").removeprefix("settings-model-")
+        selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
+        if selected and selected not in self._profile_names():
+            self._set_status(f"model profile '{selected}' is unavailable")
+            return
+        updated = set_model_assignment(self.settings, role, selected or None)
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+            if role == MAIN_MODEL:
+                self._refreshing_models = True
+                try:
+                    event.select.set_options(self._role_options(MAIN_MODEL))
+                    event.select.value = selected
+                finally:
+                    self._refreshing_models = False
+                self._refresh_inherited_model_labels()
+
+    @on(Select.Changed, ".settings-subagent-model-select")
+    async def change_subagent_model(self, event: Select.Changed) -> None:
+        """Persist a MIRA-owned raw-subagent override."""
+        event.stop()
+        if self._refreshing_models or not self._model_controls_ready:
+            return
+        suffix = (event.select.id or "").removeprefix("settings-subagent-model-")
+        name = next(
+            (str(item.get("name")) for item in self.subagent_metadata if safe_id(str(item.get("name") or "")) == suffix),
+            "",
+        )
+        selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
+        if not name or (selected and selected not in self._profile_names()):
+            self._set_status("selected model profile is unavailable")
+            return
+        updated = set_subagent_model_assignment(self.settings, name, selected or None)
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+
     @on(Input.Submitted, ".settings-input")
     async def submit_execute_env_input(self, event: Input.Submitted) -> None:
         """Save execute environment text fields on Enter."""
@@ -367,6 +513,21 @@ class SettingsPanel(Vertical):
             return
         if input_id == "settings-rubric-max-iterations":
             await self._submit_rubric_iterations(event.input)
+            return
+        if input_id == "settings-model-context-limit":
+            try:
+                limit = int(event.value.strip())
+            except ValueError:
+                limit = 0
+            updated = set_context_limit_tokens(self.settings, limit)
+            if context_limit_tokens(updated) != limit:
+                event.input.value = str(context_limit_tokens(self.settings))
+                self._set_status("context limit must be a positive integer")
+                return
+            ok, message = await self.apply_change(updated)
+            self._set_status(message)
+            if ok:
+                self.settings = updated
             return
         value = event.value
         if input_id == "settings-execute-env-allow":
@@ -406,7 +567,17 @@ class SettingsPanel(Vertical):
         elif cell.kind == "todos":
             updated = set_planning_todos(self.settings, value)
         elif cell.kind == "rubric":
+            override = model_assignment(self.settings, RUBRIC_MODEL)
+            if value and override and override not in self._profile_names():
+                self._set_status(f"model profile '{override}' is unavailable")
+                return
             updated = set_rubric_enabled(self.settings, value)
+        elif cell.kind == "subagent_enabled":
+            override = subagent_model_assignment(self.settings, cell.name)
+            if value and override and override not in self._profile_names():
+                self._set_status(f"model profile '{override}' is unavailable")
+                return
+            updated = set_subagent_enabled(self.settings, cell.name, value)
         elif cell.kind == "enabled":
             updated = set_tool_enabled(self.settings, cell.name, value)
         elif cell.kind == "plan_access":
@@ -563,6 +734,59 @@ class SettingsPanel(Vertical):
         if self.close_panel is not None:
             self.close_panel()
 
+    def _profile_names(self) -> list[str]:
+        return list(getattr(self.model_registry, "profiles", {}))
+
+    def _role_options(self, role: str) -> list[tuple[str, str]]:
+        assigned = model_assignment(self.settings, role)
+        names = self._profile_names()
+        options: list[tuple[str, str]] = []
+        if role != MAIN_MODEL:
+            options.append((f"{model_assignment(self.settings, MAIN_MODEL) or 'unset'} (default)", INHERIT_VALUE))
+        elif not assigned:
+            options.append(("unset", INHERIT_VALUE))
+        if assigned and assigned not in names:
+            options.append((f"{assigned} (missing)", assigned))
+        options.extend((name, name) for name in names)
+        return options
+
+    def _subagent_options(self, item: dict[str, str]) -> list[tuple[Any, str]]:
+        name = str(item.get("name") or "")
+        kind = str(item.get("kind") or "raw")
+        if kind == "compiled":
+            return [(Text("[compiled]"), INHERIT_VALUE)]
+        if kind == "async":
+            graph_id = str(item.get("graph_id") or name)
+            return [(Text(f"[async] {graph_id}"), INHERIT_VALUE)]
+        source = str(item.get("source_model") or "")
+        inherited = source or f"{model_assignment(self.settings, MAIN_MODEL) or 'unset'} (default)"
+        assigned = subagent_model_assignment(self.settings, name)
+        names = self._profile_names()
+        inherited_label: Any = Text(inherited) if inherited.startswith("[") else inherited
+        options = [(inherited_label, INHERIT_VALUE)]
+        if assigned and assigned not in names:
+            options.append((f"{assigned} (missing)", assigned))
+        options.extend((profile, profile) for profile in names)
+        return options
+
+    def _refresh_inherited_model_labels(self) -> None:
+        self._refreshing_models = True
+        try:
+            for selector in self.query(".settings-model-select"):
+                role = (selector.id or "").removeprefix("settings-model-")
+                if role != MAIN_MODEL and not model_assignment(self.settings, role):
+                    selector.set_options(self._role_options(role))
+                    selector.value = INHERIT_VALUE
+            for item in self.subagent_metadata:
+                name = str(item.get("name") or "")
+                if not name or subagent_model_assignment(self.settings, name):
+                    continue
+                selector = self.query_one(f"#settings-subagent-model-{safe_id(name)}", Select)
+                selector.set_options(self._subagent_options(item))
+                selector.value = INHERIT_VALUE
+        finally:
+            self._refreshing_models = False
+
 
 def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:
     """Return project tool names shown in the custom tools section."""
@@ -581,6 +805,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return planning_todos_enabled(settings)
     if cell.kind == "rubric":
         return rubric_enabled(settings)
+    if cell.kind == "subagent_enabled":
+        return subagent_enabled(settings, cell.name)
     if cell.kind == "enabled":
         return tool_enabled(settings, cell.name)
     if cell.kind == "plan_access":
@@ -650,6 +876,7 @@ class SettingsHeaderRow(Horizontal):
         *,
         show_always: bool = True,
         show_plan: bool = False,
+        show_model: bool = False,
         row_class: str = "",
     ) -> None:
         classes = "settings-row settings-header-row"
@@ -659,6 +886,7 @@ class SettingsHeaderRow(Horizontal):
         self.name_label = name_label
         self.show_always = show_always
         self.show_plan = show_plan
+        self.show_model = show_model
 
     def compose(self) -> ComposeResult:
         yield Static(self.name_label, classes="settings-column-label name")
@@ -667,6 +895,12 @@ class SettingsHeaderRow(Horizontal):
             yield Static("always allow", classes="settings-column-label always")
         if self.show_plan:
             yield Static("plan access", classes="settings-column-label plan")
+        if self.show_model:
+            yield Static("model", classes="settings-column-label model")
+
+
+def safe_id(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", value)
 
 
 class SettingsCloseButton(Button):

@@ -8,6 +8,7 @@ DEFAULT_ROUTE = "/mira-defaults"
 PROJECT_DIR = ".mira"
 
 MCP_DIR = "mcp"
+PROMPTS_DIR = "prompts"
 MEMORIES_DIR = "memories"
 SKILLS_DIR = "skills"
 SUBAGENTS_DIR = "subagents"

@@ -34,6 +34,7 @@ from agent.resources.project_setup import (
     MCP_CONFIGURATION_SCHEMA,
     ensure_project_examples,
 )
+from config.settings import load_settings, set_subagent_enabled
 from ui import repl
 
 
@@ -328,8 +329,8 @@ description: Project-specific workflow.
                 ],
             )
 
-    def test_project_subagent_loads_by_name(self) -> None:
-        """A project subagent should load without bundled subagent defaults."""
+    def test_project_subagent_is_discovered_disabled_then_can_be_enabled(self) -> None:
+        """New project subagents are visible but excluded until enabled."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             subagent_dir = workspace / ".mira" / "subagents"
@@ -346,31 +347,33 @@ description: Project-specific workflow.
                 encoding="utf-8",
             )
 
-            resources = build_resources(workspace, create_examples=False)
+            discovered = build_resources(workspace, create_examples=False)
+            self.assertEqual(discovered.subagents, [])
+            project = next(item for item in discovered.metadata["subagents"] if item["name"] == "project-guide")
+            self.assertEqual(project["description"], "Project guide.")
+            self.assertEqual(project["path"], "/.mira/subagents/reviewer.py")
 
-            self.assertEqual(len(resources.subagents), 1)
-            self.assertEqual(resources.subagents[0]["description"], "Project guide.")
+            configured = set_subagent_enabled(load_settings(workspace), "project-guide", True)
+            resources = build_resources(
+                workspace,
+                create_examples=False,
+                settings=configured,
+                config={"settings": configured},
+            )
             self.assertEqual(
-                resources.metadata["subagents"],
-                [
-                    {
-                        "name": "project-guide",
-                        "path": "/.mira/subagents/reviewer.py",
-                        "source": "project",
-                        "replaces": "",
-                    }
-                ],
+                [subagent["name"] for subagent in resources.subagents],
+                ["general-purpose", "project-guide"],
             )
 
-    def test_default_resources_include_no_skills_or_subagents(self) -> None:
-        """Bundled defaults should stay minimal: memory plus tools only."""
+    def test_default_resources_discover_permanent_general_purpose_subagent(self) -> None:
+        """General-purpose is first in metadata and enabled during configured builds."""
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertEqual(resources.skills, [])
             self.assertEqual(resources.metadata["skills"], [])
             self.assertEqual(resources.subagents, [])
-            self.assertEqual(resources.metadata["subagents"], [])
+            self.assertEqual(resources.metadata["subagents"][0]["name"], "general-purpose")
 
     def test_default_tools_include_planning_controls_and_regex_grep(self) -> None:
         """Default tools should include planning controls and the built-in grep replacement."""
@@ -797,7 +800,7 @@ def get_tools(project_backend):
         self.assertTrue(any(isinstance(middleware, FileReferenceMiddleware) for middleware in kwargs["middleware"]))
         self.assertIn("/.mira/skills", kwargs["skills"])
         self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")
-        self.assertTrue(any(subagent["name"] == "example-project-guide" for subagent in kwargs["subagents"]))
+        self.assertEqual([subagent["name"] for subagent in kwargs["subagents"]], ["general-purpose"])
         self.assertTrue(any(tool.name == "grep" for tool in kwargs["tools"]))
         self.assertFalse(any(tool.name == "example_project_note" for tool in kwargs["tools"]))
         self.assertIn("memories", agent.mira_resources)
@@ -887,7 +890,7 @@ def get_tools(project_backend):
             factory._register_summarization_exclusion({"llm_provider": "openai", "llm_model": "gpt-test"}, model)
 
         keys = [call.args[0] for call in register.call_args_list]
-        self.assertEqual(keys, ["openai:gpt-test", "openai", "anyllm:google/gemma", "anyllm"])
+        self.assertEqual(keys, ["anyllm:google/gemma", "anyllm"])
 
     def test_factory_skips_invalid_ollama_summarization_profile_key(self) -> None:
         """Ollama model tags should not create a double-colon registry key."""
@@ -909,7 +912,7 @@ def get_tools(project_backend):
             )
 
         keys = [call.args[0] for call in register.call_args_list]
-        self.assertEqual(keys, ["ollama", "qwen3.6:27b"])
+        self.assertEqual(keys, ["qwen3.6:27b", "ollama"])
 
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""

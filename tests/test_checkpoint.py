@@ -121,7 +121,7 @@ class CheckpointTests(unittest.TestCase):
             value,
             {
                 "schema": {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                "finding": {"__mira_type__": "tests.test_checkpoint.Finding"},
+                "finding": {"__mira_type__": f"{Finding.__module__}.Finding"},
             },
         )
 
@@ -159,7 +159,7 @@ class CheckpointTests(unittest.TestCase):
             {
                 "nested": [
                     {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                    {"__mira_type__": "tests.test_checkpoint.Finding"},
+                    {"__mira_type__": f"{Finding.__module__}.Finding"},
                 ]
             },
         )
@@ -172,7 +172,7 @@ class CheckpointTests(unittest.TestCase):
                     {
                         "nested": [
                             {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                            {"__mira_type__": "tests.test_checkpoint.Finding"},
+                            {"__mira_type__": f"{Finding.__module__}.Finding"},
                         ]
                     },
                 )

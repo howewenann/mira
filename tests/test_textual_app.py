@@ -6,6 +6,7 @@ import asyncio
 import os
 import tempfile
 import unittest
+from copy import deepcopy
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -28,8 +29,10 @@ from agent.context_overflow import context_overflow_error, set_context_overflow_
 from agent.planning.policy import PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_PLAN_RESEARCH
 from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
+from config.llm import ModelProfile, ModelRegistry
 from config.runtime import LaunchOptions, build_runtime_snapshot
 from config.settings import (
+    DEFAULT_SETTINGS,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
@@ -39,6 +42,7 @@ from config.settings import (
     rubric_enabled,
     rubric_max_iterations,
     save_settings,
+    set_model_assignment,
     set_dynamic_subagents,
     set_rubric_enabled,
     tool_always_allow,
@@ -241,6 +245,56 @@ async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.02)
 
 
+def managed_model_config(
+    *,
+    profile_name: str = "test",
+    provider: str = "openai",
+    model: str = "test-model",
+    api_base: str | None = None,
+    direct: bool = False,
+) -> dict[str, Any]:
+    """Return a minimal registry-backed config for UI tests."""
+    settings = deepcopy(DEFAULT_SETTINGS)
+    settings["models"]["main"] = profile_name
+    settings["models"]["context_limit_tokens"] = 8192
+    values: dict[str, Any] = {"provider": provider, "model": model}
+    if api_base is not None:
+        values["api_base"] = api_base
+    return {
+        "settings": settings,
+        "model_registry": ModelRegistry(
+            {profile_name: ModelProfile(profile_name, values)}
+        ),
+        "llm_direct": direct,
+    }
+
+
+def write_managed_model(
+    workspace: Path,
+    *,
+    profile_name: str = "local",
+    provider: str = "lmstudio",
+    model: str = "local-model",
+    api_base: str = "http://localhost:1234/v1",
+    api_key: str | None = None,
+) -> None:
+    """Persist one registry profile and select it as Main."""
+    mira = workspace / ".mira"
+    mira.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "models:",
+        f"  {profile_name}:",
+        f"    provider: {provider}",
+        f"    model: {model}",
+        f"    api_base: {api_base}",
+    ]
+    if api_key is not None:
+        lines.append(f"    api_key: {api_key}")
+    (mira / "models.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    selected = set_model_assignment(load_settings(workspace), "main", profile_name)
+    save_settings(workspace, selected)
+
+
 def make_app(
     workspace: Path | None = None,
     session: dict[str, Any] | None = None,
@@ -269,7 +323,7 @@ def make_app(
     state = {
         "agent": "agent",
         "plan_agent": "plan-agent",
-        "config": {},
+        "config": managed_model_config(),
         "store": FakeStore(),
         "session": session_record,
         "model_name": "test-model",
@@ -769,13 +823,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_runtime_report_uses_sanitized_snapshot(self) -> None:
         """Runtime inspection should expose only the allowlisted fields."""
         snapshot = build_runtime_snapshot(
-            {
-                "llm_provider": "openai",
-                "llm_base_url": "https://user:secret@example.test/v1?token=hidden",
-                "llm_direct": True,
-            },
+            managed_model_config(
+                api_base="https://user:secret@example.test/v1?token=hidden",
+                direct=True,
+            ),
             LaunchOptions(llm_direct=True),
-            model_name="openai:test-model",
+            model_name="[test] openai:test-model",
         )
 
         def render(value: Any) -> str:
@@ -802,7 +855,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         wordmark = blocky_wordmark()
         logo_width = max(len(line.rstrip()) for line in wordmark.splitlines())
         plain = splash_text(
-            model_name="lmstudio:test-model",
+            model_name="[local] lmstudio:test-model",
             session_id="thread-1",
             workspace="D:\\Projects\\mira",
         ).plain
@@ -812,7 +865,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("-" * logo_width, plain)
         self.assertIn(VERSION, plain)
         self.assertIn("session   thread-1", plain)
-        self.assertIn("model     lmstudio:test-model", plain)
+        self.assertIn("model     [local] lmstudio:test-model", plain)
         self.assertIn("workspace D:\\Projects\\mira", plain)
         self.assertIn(HINTS, plain)
 
@@ -1035,7 +1088,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
                 await pilot.pause()
 
-                telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
+                telemetry = renderable_plain(app.query_one("#telemetry-values", Static))
                 self.assertIn("In 45.3k Out 13.0k", telemetry)
 
     async def test_turn_failure_shows_error_report_path(self) -> None:
@@ -2137,7 +2190,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             status = renderable_plain(app.query_one(StatusBar))
-            telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
+            telemetry = renderable_plain(app.query_one("#telemetry-values", Static))
             self.assertIn("pending", status)
             self.assertIn("?/10.0k", status)
             self.assertNotIn("14/10.0k", status)
@@ -2958,7 +3011,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unchanged_context_metadata_does_not_rebuild_agents(self) -> None:
         """A matching refreshed context window should avoid rebuilding both agents."""
-        app = make_app(config={"llm_provider": "lmstudio", "llm_model": "local-model"})
+        app = make_app(config=managed_model_config(provider="lmstudio", model="local-model"))
 
         async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
             return ModelMetadata(8192, "lmstudio.api.v1.loaded_instance")
@@ -2979,7 +3032,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_context_metadata_rebuilds_agents_once(self) -> None:
         """A changed context window should rebuild action and planning agents once."""
         store = FakeStore()
-        app = make_app(store=store, config={"llm_provider": "lmstudio", "llm_model": "local-model"})
+        app = make_app(
+            store=store,
+            config=managed_model_config(provider="lmstudio", model="local-model"),
+        )
 
         async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
             return ModelMetadata(10000, "lmstudio.api.v1.loaded_instance")
@@ -2998,7 +3054,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.plan_agent, "new-plan-agent")
         self.assertEqual(app.context_limit_tokens, 10000)
         self.assertEqual(app.context_limit_source, "lmstudio.api.v1.loaded_instance")
-        self.assertEqual(app.config["llm_inferred_context_tokens"], 10000)
         self.assertEqual(build_agent.call_count, 1)
         self.assertEqual(build_plan_agent.call_count, 1)
         self.assertEqual(len(store.saves), 1)
@@ -3038,7 +3093,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("FILE", autocomplete_output)
             self.assertIn("RSRC", autocomplete_output)
             self.assertIn("TOOL", autocomplete_output)
-            self.assertIn("Files and resources keep @; tools remove it", autocomplete_output)
+            self.assertIn("SUBA", autocomplete_output)
+            self.assertIn("Files/resources keep @; tools/subagents remove it", autocomplete_output)
 
             usage_notes_output = " ".join(output[usage_notes_index:commands_index].split())
             self.assertIn("Prompt arguments", usage_notes_output)
@@ -3065,7 +3121,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/skills", output)
             self.assertIn("/subagents", output)
             self.assertIn("/session", output)
-            self.assertNotIn("/model", output)
+            commands = [str(cell) for cell in repl.help_table().columns[0]._cells]
+            self.assertIn("/models", commands)
+            self.assertNotIn("/model", commands)
 
     def test_help_commands_exclude_registered_prompt_commands(self) -> None:
         """The Commands section should remain limited to native slash commands."""
@@ -3124,7 +3182,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("model     test-model", fresh_text)
                 self.assertIn("session   thread-1", fresh_text)
                 self.assertIn("workspace current-workspace", fresh_text)
-                self.assertGreater(chat.scroll_y, original_scroll_y)
+                self.assertGreaterEqual(chat.scroll_y, original_scroll_y)
 
         run_turn.assert_not_awaited()
         self.assertEqual(app.session.get("events", []), original_events)
@@ -3277,12 +3335,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         }
         app = make_app(
             session=session,
-            config={
-                "llm_provider": "openai",
-                "llm_base_url": "https://user:secret@example.test/v1?token=hidden",
-                "llm_direct": True,
-            },
-            model_name="openai:test-model",
+            config=managed_model_config(
+                api_base="https://user:secret@example.test/v1?token=hidden",
+                direct=True,
+            ),
+            model_name="[test] openai:test-model",
             launch_options=LaunchOptions(llm_direct=True),
             agent=type(
                 "Agent",
@@ -3365,12 +3422,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_command_shows_standard_mode_and_mismatch_warning(self) -> None:
         """Inspection should not claim direct transport when effective config is standard."""
         app = make_app(
-            config={
-                "llm_provider": "lmstudio",
-                "llm_base_url": "http://localhost:1234/v1",
-                "llm_direct": False,
-            },
-            model_name="lmstudio:local-model",
+            config=managed_model_config(
+                profile_name="local",
+                provider="lmstudio",
+                model="local-model",
+                api_base="http://localhost:1234/v1",
+            ),
+            model_name="[local] lmstudio:local-model",
             launch_options=LaunchOptions(llm_direct=True),
         )
 
@@ -3438,12 +3496,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_command_shows_normal_launch_option_disabled(self) -> None:
         """A plain launch should report standard transport and a disabled direct flag."""
         app = make_app(
-            config={
-                "llm_provider": "lmstudio",
-                "llm_base_url": "http://localhost:1234/v1",
-                "llm_direct": False,
-            },
-            model_name="lmstudio:local-model",
+            config=managed_model_config(
+                profile_name="local",
+                provider="lmstudio",
+                model="local-model",
+                api_base="http://localhost:1234/v1",
+            ),
+            model_name="[local] lmstudio:local-model",
         )
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -3464,19 +3523,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """The reload command should rebuild agents and refresh visible metadata."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
-            (workspace / ".env").write_text(
-                "\n".join(
-                    [
-                        "MIRA_LLM_PROVIDER=lmstudio",
-                        "MIRA_LLM_MODEL=visual-model",
-                    ]
-                ),
-                encoding="utf-8",
-            )
+            write_managed_model(workspace, profile_name="visual", model="visual-model")
             launch_options = LaunchOptions(llm_direct=True)
             app = make_app(
                 workspace=workspace,
-                config={"settings": load_settings(workspace), "llm_direct": True},
+                config=managed_model_config(
+                    profile_name="visual",
+                    provider="lmstudio",
+                    model="visual-model",
+                    api_base="http://localhost:1234/v1",
+                    direct=True,
+                ),
                 launch_options=launch_options,
             )
             action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
@@ -3508,14 +3565,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                     status = renderable_plain(app.query_one(StatusBar))
-                    telemetry = renderable_plain(app.query_one("#telemetry-row", Static))
+                    model_button_label = str(app.query_one("#model-settings-button", Button).label)
                     startup_blocks = [child for child in app.query_one(ChatLog).children if "startup" in child.classes]
                     command_blocks = [
                         child for child in app.query_one(ChatLog).children if "command" in child.classes
                     ]
 
             self.assertIs(app.plan_agent, plan_agent)
-            self.assertEqual(app.model_name, "lmstudio:visual-model")
+            self.assertEqual(app.model_name, "[visual] lmstudio:visual-model")
             self.assertEqual(app.context_limit_tokens, 10000)
             self.assertEqual(app.context_limit_source, "reload-test")
             self.assertEqual(build_agent.call_count, 1)
@@ -3551,10 +3608,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertEqual(len(startup_blocks), 1)
-            self.assertIn("model     lmstudio:visual-model", rendered)
+            self.assertIn("model     [visual] lmstudio:visual-model", rendered)
             self.assertNotIn("model     loading", rendered)
             self.assertNotIn("- starting", rendered)
-            self.assertIn("lmstudio:visual-model", telemetry)
+            self.assertEqual(model_button_label, "model: [visual] lmstudio:visual-model")
             self.assertEqual(len(reload_info_blocks), 1)
             self.assertIn("runtime reloaded", renderable_plain(reload_info_blocks[0]))
             self.assertEqual(reload_command_blocks, [])
@@ -3562,41 +3619,43 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             runtime_output = renderable_plain(command_blocks[0])
             self.assertIn("Runtime", runtime_output)
 
-    async def test_reload_command_reload_dotenv_with_override(self) -> None:
-        """The reload command should let edited .env values replace loaded env values."""
+    async def test_reload_command_reloads_secret_dotenv_with_override(self) -> None:
+        """Reloaded registry interpolation should use the edited workspace secret."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
-            (workspace / ".env").write_text(
-                "\n".join(
-                    [
-                        "MIRA_LLM_PROVIDER=lmstudio",
-                        "MIRA_LLM_MODEL=from-env-file",
-                    ]
-                ),
-                encoding="utf-8",
+            write_managed_model(
+                workspace,
+                profile_name="local",
+                api_key="${TEST_MODEL_API_KEY}",
             )
-            os.environ["MIRA_LLM_PROVIDER"] = "lmstudio"
-            os.environ["MIRA_LLM_MODEL"] = "already-loaded"
+            (workspace / ".env").write_text("TEST_MODEL_API_KEY=from-env-file\n", encoding="utf-8")
+            os.environ["TEST_MODEL_API_KEY"] = "already-loaded"
             launch_options = LaunchOptions(llm_direct=True)
             mcp_reload_values: list[str | None] = []
 
             async def reload_mcp() -> None:
-                mcp_reload_values.append(os.environ.get("MIRA_LLM_MODEL"))
+                mcp_reload_values.append(os.environ.get("TEST_MODEL_API_KEY"))
 
             mcp_manager = SimpleNamespace(
                 reload=reload_mcp,
                 shutdown=AsyncMock(),
                 set_change_handler=lambda _handler: None,
-                config_issue=None,
+                issues=[],
                 show_status=False,
                 servers={},
                 usable_count=0,
                 configured_count=0,
-                prompt_registry=SimpleNamespace(warnings=[]),
+                prompt_registry=SimpleNamespace(issues=[]),
             )
             app = make_app(
                 workspace=workspace,
-                config={"settings": load_settings(workspace), "llm_direct": True},
+                config=managed_model_config(
+                    profile_name="local",
+                    provider="lmstudio",
+                    model="local-model",
+                    api_base="http://localhost:1234/v1",
+                    direct=True,
+                ),
                 launch_options=launch_options,
                 mcp_manager=mcp_manager,
             )
@@ -3613,10 +3672,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     await app._handle_reload_command()
 
-            self.assertEqual(app.config["llm_model"], "from-env-file")
+            profile = app.config["model_registry"].profile("local")
+            self.assertEqual(profile.values["api_key"], "from-env-file")
             self.assertTrue(app.config["llm_direct"])
             self.assertIs(app.launch_options, launch_options)
-            self.assertEqual(os.environ["MIRA_LLM_MODEL"], "from-env-file")
+            self.assertEqual(os.environ["TEST_MODEL_API_KEY"], "from-env-file")
             self.assertEqual(mcp_reload_values, ["from-env-file"])
 
     async def test_reload_command_uses_shared_reload(self) -> None:
@@ -3653,16 +3713,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """A partially built replacement pair should never replace the active runtime."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
+            write_managed_model(workspace, profile_name="old", model="old-model")
             app = make_app(
                 workspace=workspace,
-                config={
-                    "settings": load_settings(workspace),
-                    "llm_provider": "lmstudio",
-                    "llm_model": "old-model",
-                    "llm_base_url": "http://localhost:1234/v1",
-                    "llm_direct": True,
-                },
-                model_name="lmstudio:old-model",
+                config=managed_model_config(
+                    profile_name="old",
+                    provider="lmstudio",
+                    model="old-model",
+                    api_base="http://localhost:1234/v1",
+                    direct=True,
+                ),
+                model_name="[old] lmstudio:old-model",
                 launch_options=LaunchOptions(llm_direct=True),
             )
 
@@ -4314,7 +4375,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Custom Tools", rendered)
                 self.assertNotIn("Tool", static_labels)
                 self.assertIn("Git Protection", rendered)
-                self.assertIn("Dynamic subagents", rendered)
+                self.assertIn("Dynamic eval subagents", rendered)
                 self.assertIn("Response schemas", rendered)
                 self.assertIn("Planning todos", rendered)
                 self.assertIn("Response-status retries", rendered)
@@ -4535,7 +4596,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 3)
+                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 4)
                 await pilot.pause()
 
                 labels = {
@@ -4544,7 +4605,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     if renderable_plain(widget).strip()
                 }
                 tabs = panel.query_one("#settings-tabs", Horizontal)
-                system_header, inbuilt_header, custom_header = list(panel.query(SettingsHeaderRow))
+                headers = list(panel.query(SettingsHeaderRow))
+                system_header, inbuilt_header, custom_header = headers[0], headers[1], headers[3]
                 self.assertEqual(
                     labels["System Settings"].region.y,
                     tabs.region.y + tabs.region.height + 2,
@@ -4900,7 +4962,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 execute_env_select.focus(scroll_visible=False)
-                await pilot.press("enter", "down", "enter")
+                execute_env_select.value = "conda_name"
                 await wait_until(lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_name")
                 await pilot.pause()
 

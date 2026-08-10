@@ -9,6 +9,9 @@ from typing import Any
 
 import yaml
 
+from config.llm import DEFAULT_CONTEXT_TOKENS
+from runtime.issues import Issue
+
 SETTINGS_FILE = "settings.yml"
 EXECUTE_TOOL = "execute"
 DELETE_TOOL = "delete"
@@ -21,6 +24,12 @@ PLANNING_RESPONSE_STATUS_MAX_RETRIES_LIMIT = 20
 RUBRIC = "rubric"
 RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
+MODELS = "models"
+CONTEXT_LIMIT_TOKENS = "context_limit_tokens"
+MAIN_MODEL = "main"
+RUBRIC_MODEL = "rubric"
+SUMMARIZATION_MODEL = "summarization"
+SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
 
@@ -34,7 +43,23 @@ class ToolPolicy:
     plan_access: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SettingsLoadResult:
+    """Effective settings plus non-fatal source diagnostics."""
+
+    settings: dict[str, Any]
+    issues: tuple[Issue, ...] = ()
+    valid: bool = True
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
+    MODELS: {
+        CONTEXT_LIMIT_TOKENS: DEFAULT_CONTEXT_TOKENS,
+        MAIN_MODEL: None,
+        RUBRIC_MODEL: None,
+        SUMMARIZATION_MODEL: None,
+        SUBAGENT_MODELS: {},
+    },
     "system": {
         DYNAMIC_SUBAGENTS: {
             "enabled": False,
@@ -77,19 +102,30 @@ def settings_path(workspace: Path) -> Path:
     return workspace.expanduser().resolve() / ".mira" / SETTINGS_FILE
 
 
-def load_settings(workspace: Path) -> dict[str, Any]:
-    """Load one exact current settings file or defaults for a new workspace."""
+def load_settings_result(workspace: Path) -> SettingsLoadResult:
+    """Load settings without preventing independent startup diagnostics."""
     path = settings_path(workspace)
     if not path.exists():
-        return deepcopy(DEFAULT_SETTINGS)
+        return SettingsLoadResult(deepcopy(DEFAULT_SETTINGS))
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ValueError(f"invalid settings YAML: {path}") from exc
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        issue = Issue(
+            "STARTUP",
+            "Invalid settings.yml",
+            ".mira/settings.yml",
+            f"{type(exc).__name__}: {exc}",
+            "Fix .mira/settings.yml and run /reload.",
+        )
+        return SettingsLoadResult(deepcopy(DEFAULT_SETTINGS), (issue,), False)
+    issues = tuple(settings_issues(raw))
     normalized = normalize_settings(raw)
-    if not isinstance(raw, dict) or raw != normalized:
-        raise ValueError(f"settings file does not match the current schema: {path}")
-    return normalized
+    return SettingsLoadResult(normalized, issues, not issues)
+
+
+def load_settings(workspace: Path) -> dict[str, Any]:
+    """Return effective settings, using defaults for omitted current fields."""
+    return load_settings_result(workspace).settings
 
 
 def save_settings(workspace: Path, settings: dict[str, Any]) -> bool:
@@ -111,6 +147,30 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     settings = deepcopy(DEFAULT_SETTINGS)
     if not isinstance(raw, dict):
         return settings
+
+    models = raw.get(MODELS)
+    if isinstance(models, dict):
+        context_limit = models.get(CONTEXT_LIMIT_TOKENS)
+        if valid_context_limit_tokens(context_limit):
+            settings[MODELS][CONTEXT_LIMIT_TOKENS] = context_limit
+        for key in (MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL):
+            value = models.get(key)
+            if value is None or isinstance(value, str):
+                settings[MODELS][key] = value.strip() if isinstance(value, str) and value.strip() else None
+        raw_subagents = models.get(SUBAGENT_MODELS)
+        if isinstance(raw_subagents, dict):
+            subagents: dict[str, dict[str, Any]] = {}
+            for name, spec in raw_subagents.items():
+                if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+                    continue
+                normalized_spec: dict[str, Any] = {}
+                if isinstance(spec.get("enabled"), bool):
+                    normalized_spec["enabled"] = spec["enabled"]
+                model = spec.get("model")
+                if model is None or isinstance(model, str):
+                    normalized_spec["model"] = model.strip() if isinstance(model, str) and model.strip() else None
+                subagents[name] = normalized_spec
+            settings[MODELS][SUBAGENT_MODELS] = subagents
 
     system = raw.get("system")
     if isinstance(system, dict):
@@ -203,6 +263,267 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
             settings["mcp"] = {"servers": normalized_servers}
 
     return settings
+
+
+def settings_issues(raw: Any) -> list[Issue]:
+    """Return one Issue per unknown or invalid current-schema setting."""
+    issues: list[Issue] = []
+    if not isinstance(raw, dict):
+        return [_invalid_setting("settings", "top level must be a mapping")]
+    _unknown_settings(raw, {MODELS, "system", "hitl", "mcp"}, "", issues)
+
+    models = raw.get(MODELS)
+    if models is not None:
+        if not isinstance(models, dict):
+            issues.append(_invalid_setting(MODELS, "must be a mapping"))
+        else:
+            _unknown_settings(
+                models,
+                {CONTEXT_LIMIT_TOKENS, MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL, SUBAGENT_MODELS},
+                MODELS,
+                issues,
+            )
+            if CONTEXT_LIMIT_TOKENS in models and not valid_context_limit_tokens(models[CONTEXT_LIMIT_TOKENS]):
+                issues.append(_invalid_setting(f"{MODELS}.{CONTEXT_LIMIT_TOKENS}", "must be a positive integer"))
+            for key in (MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL):
+                if key in models and models[key] is not None and not isinstance(models[key], str):
+                    issues.append(_invalid_setting(f"{MODELS}.{key}", "must be a profile name or null"))
+            subagents = models.get(SUBAGENT_MODELS)
+            if subagents is not None:
+                if not isinstance(subagents, dict):
+                    issues.append(_invalid_setting(f"{MODELS}.{SUBAGENT_MODELS}", "must be a mapping"))
+                else:
+                    for name, spec in subagents.items():
+                        path = f"{MODELS}.{SUBAGENT_MODELS}.{name}"
+                        if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+                            issues.append(_invalid_setting(path, "must be a named mapping"))
+                            continue
+                        _unknown_settings(spec, {"enabled", "model"}, path, issues)
+                        if "enabled" in spec and not isinstance(spec["enabled"], bool):
+                            issues.append(_invalid_setting(f"{path}.enabled", "must be true or false"))
+                        if "model" in spec and spec["model"] is not None and not isinstance(spec["model"], str):
+                            issues.append(_invalid_setting(f"{path}.model", "must be a profile name or null"))
+
+    system = raw.get("system")
+    if system is not None:
+        if not isinstance(system, dict):
+            issues.append(_invalid_setting("system", "must be a mapping"))
+        else:
+            system_shapes = {
+                DYNAMIC_SUBAGENTS: {"enabled", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA},
+                PLANNING_TODOS: {"enabled"},
+                PLANNING_RESPONSE_STATUS: {PLANNING_RESPONSE_STATUS_MAX_RETRIES},
+                RUBRIC: {"enabled", RUBRIC_MAX_ITERATIONS},
+            }
+            _unknown_settings(system, set(system_shapes), "system", issues)
+            for name, allowed in system_shapes.items():
+                spec = system.get(name)
+                if spec is None:
+                    continue
+                path = f"system.{name}"
+                if not isinstance(spec, dict):
+                    issues.append(_invalid_setting(path, "must be a mapping"))
+                    continue
+                _unknown_settings(spec, allowed, path, issues)
+            _validate_boolean(system, DYNAMIC_SUBAGENTS, "enabled", issues)
+            _validate_boolean(system, DYNAMIC_SUBAGENTS, DYNAMIC_SUBAGENT_RESPONSE_SCHEMA, issues)
+            _validate_boolean(system, PLANNING_TODOS, "enabled", issues)
+            _validate_boolean(system, RUBRIC, "enabled", issues)
+            retries = (system.get(PLANNING_RESPONSE_STATUS) or {}).get(PLANNING_RESPONSE_STATUS_MAX_RETRIES) if isinstance(system.get(PLANNING_RESPONSE_STATUS), dict) else None
+            if retries is not None and not valid_planning_response_status_max_retries(retries):
+                issues.append(_invalid_setting(f"system.{PLANNING_RESPONSE_STATUS}.{PLANNING_RESPONSE_STATUS_MAX_RETRIES}", "is out of range"))
+            iterations = (system.get(RUBRIC) or {}).get(RUBRIC_MAX_ITERATIONS) if isinstance(system.get(RUBRIC), dict) else None
+            if iterations is not None and not valid_rubric_max_iterations(iterations):
+                issues.append(_invalid_setting(f"system.{RUBRIC}.{RUBRIC_MAX_ITERATIONS}", "is out of range"))
+
+    hitl = raw.get("hitl")
+    if hitl is not None:
+        if not isinstance(hitl, dict):
+            issues.append(_invalid_setting("hitl", "must be a mapping"))
+        else:
+            _unknown_settings(hitl, {"git_protection", "execute_env", "tools"}, "hitl", issues)
+            git = hitl.get("git_protection")
+            if git is not None:
+                if not isinstance(git, dict):
+                    issues.append(_invalid_setting("hitl.git_protection", "must be a mapping"))
+                else:
+                    _unknown_settings(git, {"enabled"}, "hitl.git_protection", issues)
+                    if "enabled" in git and not isinstance(git["enabled"], bool):
+                        issues.append(_invalid_setting("hitl.git_protection.enabled", "must be true or false"))
+            execute_env = hitl.get("execute_env")
+            if execute_env is not None:
+                if not isinstance(execute_env, dict):
+                    issues.append(_invalid_setting("hitl.execute_env", "must be a mapping"))
+                else:
+                    _unknown_settings(execute_env, {"mode", "name", "prefix", "path", "allow"}, "hitl.execute_env", issues)
+                    mode = execute_env.get("mode")
+                    if mode is not None and (not isinstance(mode, str) or mode not in EXECUTE_ENV_MODES):
+                        issues.append(_invalid_setting("hitl.execute_env.mode", "must name a supported environment mode"))
+                    for key in ("name", "prefix", "path"):
+                        if key in execute_env and not isinstance(execute_env[key], str):
+                            issues.append(_invalid_setting(f"hitl.execute_env.{key}", "must be a string"))
+                    allow = execute_env.get("allow")
+                    if allow is not None and not (
+                        isinstance(allow, list) and all(isinstance(item, str) for item in allow)
+                    ):
+                        issues.append(_invalid_setting("hitl.execute_env.allow", "must be a list of names"))
+            tools = hitl.get("tools")
+            if tools is not None:
+                _validate_dynamic_policy_mapping(tools, "hitl.tools", issues, include_plan=True)
+
+    mcp = raw.get("mcp")
+    if mcp is not None:
+        if not isinstance(mcp, dict):
+            issues.append(_invalid_setting("mcp", "must be a mapping"))
+        else:
+            _unknown_settings(mcp, {"servers"}, "mcp", issues)
+            servers = mcp.get("servers")
+            if servers is not None:
+                if not isinstance(servers, dict):
+                    issues.append(_invalid_setting("mcp.servers", "must be a mapping"))
+                else:
+                    for name, spec in servers.items():
+                        path = f"mcp.servers.{name}"
+                        if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+                            issues.append(_invalid_setting(path, "must be a named mapping"))
+                            continue
+                        _unknown_settings(spec, {"enabled", "always_allow", "approved_fingerprint", "tools"}, path, issues)
+                        for key in ("enabled", "always_allow"):
+                            if key in spec and not isinstance(spec[key], bool):
+                                issues.append(_invalid_setting(f"{path}.{key}", "must be true or false"))
+                        if "approved_fingerprint" in spec and not (
+                            isinstance(spec["approved_fingerprint"], str) and _valid_fingerprint(spec["approved_fingerprint"])
+                        ):
+                            issues.append(_invalid_setting(f"{path}.approved_fingerprint", "must be a SHA-256 fingerprint"))
+                        if "tools" in spec:
+                            _validate_dynamic_policy_mapping(spec["tools"], f"{path}.tools", issues, include_plan=True)
+    return issues
+
+
+def _unknown_settings(raw: dict[Any, Any], allowed: set[str], prefix: str, issues: list[Issue]) -> None:
+    for key in raw:
+        if key in allowed:
+            continue
+        path = f"{prefix}.{key}" if prefix else str(key)
+        issues.append(
+            Issue(
+                "STARTUP",
+                f"Unsupported setting: {path}",
+                ".mira/settings.yml",
+                f"{path} is not part of the current settings schema.",
+                "Remove the unsupported key and run /reload.",
+            )
+        )
+
+
+def _invalid_setting(path: str, detail: str) -> Issue:
+    return Issue(
+        "STARTUP",
+        f"Invalid setting: {path}",
+        ".mira/settings.yml",
+        f"{path} {detail}.",
+        "Correct the setting and run /reload.",
+    )
+
+
+def _validate_boolean(system: dict[str, Any], section: str, key: str, issues: list[Issue]) -> None:
+    spec = system.get(section)
+    if isinstance(spec, dict) and key in spec and not isinstance(spec[key], bool):
+        issues.append(_invalid_setting(f"system.{section}.{key}", "must be true or false"))
+
+
+def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *, include_plan: bool) -> None:
+    if not isinstance(raw, dict):
+        issues.append(_invalid_setting(path, "must be a mapping"))
+        return
+    allowed = {"enabled", "always_allow"}
+    if include_plan:
+        allowed.add("plan_access")
+    for name, spec in raw.items():
+        item_path = f"{path}.{name}"
+        if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+            issues.append(_invalid_setting(item_path, "must be a named mapping"))
+            continue
+        _unknown_settings(spec, allowed, item_path, issues)
+        for key in allowed:
+            if key in spec and not isinstance(spec[key], bool):
+                issues.append(_invalid_setting(f"{item_path}.{key}", "must be true or false"))
+
+
+def valid_context_limit_tokens(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def model_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
+    settings = _settings_object(config_or_settings)
+    normalized = normalize_settings(settings)
+    return deepcopy(normalized[MODELS])
+
+
+def context_limit_tokens(config_or_settings: dict[str, Any] | None) -> int:
+    return int(model_settings(config_or_settings)[CONTEXT_LIMIT_TOKENS])
+
+
+def model_assignment(config_or_settings: dict[str, Any] | None, role: str) -> str | None:
+    if role not in {MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL}:
+        return None
+    value = model_settings(config_or_settings).get(role)
+    return str(value) if isinstance(value, str) and value else None
+
+
+def set_context_limit_tokens(settings: dict[str, Any], value: Any) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    if valid_context_limit_tokens(value):
+        updated[MODELS][CONTEXT_LIMIT_TOKENS] = value
+    return updated
+
+
+def set_model_assignment(settings: dict[str, Any], role: str, profile: str | None) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    if role in {MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL}:
+        updated[MODELS][role] = str(profile).strip() if profile is not None and str(profile).strip() else None
+    return updated
+
+
+def subagent_model_settings(config_or_settings: dict[str, Any] | None, name: str) -> dict[str, Any]:
+    value = model_settings(config_or_settings).get(SUBAGENT_MODELS, {}).get(name, {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def subagent_enabled(config_or_settings: dict[str, Any] | None, name: str) -> bool:
+    if name == "general-purpose":
+        return True
+    return bool(subagent_model_settings(config_or_settings, name).get("enabled", False))
+
+
+def subagent_model_assignment(config_or_settings: dict[str, Any] | None, name: str) -> str | None:
+    value = subagent_model_settings(config_or_settings, name).get("model")
+    return str(value) if isinstance(value, str) and value else None
+
+
+def set_subagent_enabled(settings: dict[str, Any], name: str, enabled: bool) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    spec = dict(updated[MODELS][SUBAGENT_MODELS].get(name, {}))
+    spec["enabled"] = True if name == "general-purpose" else bool(enabled)
+    spec.setdefault("model", None)
+    updated[MODELS][SUBAGENT_MODELS][name] = spec
+    return updated
+
+
+def set_subagent_model_assignment(settings: dict[str, Any], name: str, profile: str | None) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    spec = dict(updated[MODELS][SUBAGENT_MODELS].get(name, {}))
+    spec.setdefault("enabled", name == "general-purpose")
+    spec["model"] = str(profile).strip() if profile is not None and str(profile).strip() else None
+    updated[MODELS][SUBAGENT_MODELS][name] = spec
+    return updated
+
+
+def prune_subagent_settings(settings: dict[str, Any], names: set[str]) -> dict[str, Any]:
+    updated = normalize_settings(settings)
+    current = updated[MODELS][SUBAGENT_MODELS]
+    updated[MODELS][SUBAGENT_MODELS] = {name: spec for name, spec in current.items() if name in names}
+    return updated
 
 
 def normalize_execute_env(raw: Any) -> dict[str, Any]:

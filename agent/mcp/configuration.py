@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent.mcp.models import MCPConfigIssue, MCPServerState
+from agent.mcp.models import MCPServerState
 from agent.resources.paths import MCP_DIR, PROJECT_DIR
+from config.interpolation import resolve_environment
+from runtime.issues import Issue
 
 MCP_FILE = "mcp.json"
-_ENV_REFERENCE = re.compile(r"(\$?)\$\{env:([^}]*)\}")
-_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,7 +22,11 @@ class MCPConfiguration:
     exists: bool
     valid: bool
     servers: dict[str, MCPServerState]
-    issue: MCPConfigIssue | None = None
+    issues: tuple[Issue, ...] = ()
+
+    @property
+    def issue(self) -> Issue | None:
+        return self.issues[0] if self.issues else None
 
 
 def mcp_path(workspace: Path) -> Path:
@@ -43,23 +45,24 @@ def load_mcp_configuration(
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        return MCPConfiguration(True, False, {}, MCPConfigIssue(_error_text(error)))
+        return MCPConfiguration(True, False, {}, (_configuration_issue(_error_text(error)),))
     if not isinstance(raw, dict) or not isinstance(raw.get("mcpServers"), dict):
         return MCPConfiguration(
             True,
             False,
             {},
-            MCPConfigIssue("top level must be an object containing an mcpServers object"),
+            (_configuration_issue("top level must be an object containing an mcpServers object"),),
         )
 
     servers: dict[str, MCPServerState] = {}
+    issues: list[Issue] = []
     for alias, definition in raw["mcpServers"].items():
         name = str(alias) if isinstance(alias, str) else ""
         if not name.strip():
             continue
         try:
             transport, effective = normalize_server_definition(definition)
-            runtime_config = resolve_environment_references(effective, environ=environ)
+            runtime_config = resolve_environment(effective, environ=environ)
             _validate_runtime_config(transport, runtime_config)
             state = MCPServerState(
                 name=name,
@@ -79,8 +82,17 @@ def load_mcp_configuration(
                 status="Failed",
                 error=str(error),
             )
+            issues.append(
+                Issue(
+                    "MCP",
+                    f"Invalid MCP server configuration: {name}",
+                    f".mira/mcp/mcp.json: mcpServers.{name}",
+                    str(error),
+                    "Correct the server configuration and run /reload.",
+                )
+            )
         servers[name] = state
-    return MCPConfiguration(True, True, servers)
+    return MCPConfiguration(True, True, servers, tuple(issues))
 
 
 def normalize_server_definition(raw: Any) -> tuple[str, dict[str, Any]]:
@@ -107,44 +119,6 @@ def normalize_server_definition(raw: Any) -> tuple[str, dict[str, Any]]:
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise ValueError("stdio env must contain string names and values")
     return "stdio", {"transport": "stdio", "command": command, "args": list(args), "env": dict(env)}
-
-
-def resolve_environment_references(
-    value: Any,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> Any:
-    """Resolve explicit ``${env:NAME}`` references in JSON values once."""
-    source = os.environ if environ is None else environ
-    if isinstance(value, str):
-        unmatched = _ENV_REFERENCE.sub("", value)
-        if "${env:" in unmatched:
-            raise ValueError("invalid environment reference; use ${env:NAME}")
-
-        def replace(match: re.Match[str]) -> str:
-            if match.group(1):
-                return match.group(0)[1:]
-            name = match.group(2)
-            if _ENV_NAME.fullmatch(name) is None:
-                raise ValueError(
-                    f"invalid environment variable name {name!r}; use ${{env:NAME}}"
-                )
-            if name not in source:
-                raise ValueError(
-                    f"environment variable {name} is not set; define it before starting MIRA "
-                    "or in the workspace .env"
-                )
-            return source[name]
-
-        return _ENV_REFERENCE.sub(replace, value)
-    if isinstance(value, list):
-        return [resolve_environment_references(item, environ=source) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: resolve_environment_references(item, environ=source)
-            for key, item in value.items()
-        }
-    return value
 
 
 def _validate_runtime_config(transport: str, config: dict[str, Any]) -> None:
@@ -187,3 +161,13 @@ def adapter_connection(state: MCPServerState) -> dict[str, Any]:
 def _error_text(error: BaseException) -> str:
     message = str(error).strip()
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _configuration_issue(message: str) -> Issue:
+    return Issue(
+        "MCP",
+        "Invalid MCP configuration",
+        ".mira/mcp/mcp.json",
+        message,
+        "Fix .mira/mcp/mcp.json and run /reload.",
+    )

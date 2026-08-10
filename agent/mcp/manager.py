@@ -80,8 +80,8 @@ class MCPManager:
         self.read_tool = self._build_read_tool()
 
     @property
-    def config_issue(self) -> Any | None:
-        return self.configuration.issue
+    def issues(self) -> list[Any]:
+        return list(self.configuration.issues)
 
     @property
     def configured_count(self) -> int:

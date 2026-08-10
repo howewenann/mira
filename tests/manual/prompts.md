@@ -106,7 +106,7 @@ Expected:
 
 ## Dynamic Eval Response Schemas
 
-In `/settings`, enable **Dynamic subagents**. First leave its nested **Response
+In `/settings`, enable **Dynamic eval subagents**. First leave its nested **Response
 schemas** setting enabled and enter:
 
 ```text
@@ -198,8 +198,9 @@ Expected:
 
 ## LM Studio Tool Calling And Reasoning
 
-Use LM Studio with a loaded reasoning-capable model and the OpenAI-compatible
-server enabled at `MIRA_LLM_BASE_URL`, usually `http://localhost:1234/v1`.
+Use LM Studio with a loaded reasoning-capable model and a `.mira/models.yml`
+profile whose `api_base` is usually `http://localhost:1234/v1`. Select it as
+Main through `/models`.
 
 ```powershell
 conda run -n ai_agents python -m cli.main -p "Use a tool to inspect README.md, then answer briefly with the project name."
@@ -1279,18 +1280,17 @@ Use a disposable Git-protected workspace and enable rubric grading. Keep the
 native Goal Success Criteria visible for comparison with the grader-authored
 criterion names.
 
-1. Configure the main LM Studio model as `google/gemma-4-12b`, set
-   `MIRA_LLM_MODEL_KWARGS={"reasoning_effort":"none"}`, and run a small Goal
+1. Configure an LM Studio profile for `google/gemma-4-12b` with
+   `model_kwargs: {reasoning_effort: none}`, select it as Main, and run a small Goal
    whose result can be verified from the transcript. Expected: the native
    DeepAgents grader completes within the configured generation limit; the TUI
-   remains responsive and shows its spinner, `lmstudio:google/gemma-4-12b`, and
+   remains responsive and shows its spinner, `[profile] lmstudio:google/gemma-4-12b`, and
    a once-per-second elapsed clock.
-2. Leave `MIRA_RUBRIC_LLM_PROVIDER` blank and set
-   `MIRA_RUBRIC_LLM_MODEL=prism-ml/bonsai-27b`,
-   `MIRA_RUBRIC_LLM_MAX_TOKENS=4096`, and
-   `MIRA_RUBRIC_LLM_MODEL_KWARGS={"reasoning_effort":"none"}`. Restart MIRA and
+2. Add a second LM Studio profile for `prism-ml/bonsai-27b` with
+   `max_tokens: 4096` and `model_kwargs: {reasoning_effort: none}`, select it
+   explicitly for Rubric, and
    repeat the Goal. Expected: the action agent remains Gemma, the progress block
-   identifies `lmstudio:prism-ml/bonsai-27b`, and grading completes through the
+   identifies `[profile] lmstudio:prism-ml/bonsai-27b`, and grading completes through the
    same DeepAgents middleware.
 3. Inspect the completed bubble. Expected: it replaces live activity with the
    grader identity, duration, `N of N criteria satisfied`, every native
@@ -1361,9 +1361,35 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    retains focus and the exact scroll position. Selecting Restart then refreshes
    all advertised capabilities for only that server.
 8. Configure a static HTTP header as
-   `"Authorization": "Bearer ${env:MCP_TEST_TOKEN}"`, set `MCP_TEST_TOKEN`
+   `"Authorization": "Bearer ${MCP_TEST_TOKEN}"`, set `MCP_TEST_TOKEN`
    before launching MIRA, and approve the server. Expected: the server receives
    the resolved value while the approval preview, panel, logs, and `mcp.json`
    never show it. Remove the variable and run `/reload`; only that server becomes
    Failed with an error naming `MCP_TEST_TOKEN` and explaining how to define it.
    Restore the variable in `.env`, run `/reload`, and confirm the server starts.
+
+## Model Registry, No-Main Startup, And SUBA Autocomplete
+
+Use a disposable workspace with no existing `.mira/`.
+
+1. Launch MIRA. Expected: `.mira/models.yml` and an empty `.mira/prompts/` are
+   created; the splash and footer show `unset`; the Models tab shows Main
+   `unset` and inherited controls `unset (default)`.
+2. Run `/help`, `/tools`, `/subagents`, `/issues`, and `/models`. Expected: all
+   local commands work without Main. A normal prompt, Goal, Plan execution, or
+   `/compact` instead says `Main model is not configured. Run /models.` without
+   creating an error report.
+3. Add two valid profiles to `models.yml`, run `/reload`, and select one as Main.
+   Expected: the footer and splash show `[profile] provider:model`; null Rubric,
+   Summarization, and raw subagents immediately show `<profile> (default)` while
+   their stored YAML values remain null. Pin one secondary assignment, change
+   Main, and confirm only inherited labels change.
+4. Add a raw subagent with a long `description`, enable it under Models, and type
+   `@general-` and a fragment of the new name. Expected: enabled matches appear
+   as single-line `SUBA` rows in alphabetical order with ellipsis overflow.
+   Selecting general-purpose inserts exactly `general-purpose subagent`.
+5. Add nested prompt files whose flattened names collide, plus malformed model,
+   MCP, and tool definitions. Expected: colliding prompts are all excluded and
+   `/issues` shows one flat, initially collapsed list ordered STARTUP, MODEL,
+   MCP, TOOL. Expanded rows show location, details, and guidance; there are no
+   package inputs or install controls.

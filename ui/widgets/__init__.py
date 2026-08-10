@@ -8,7 +8,7 @@ from ui.widgets.settings_panel import SettingsPanel
 from ui.widgets.session_history import SessionHistory
 from ui.widgets.status_bar import StatusBar, TelemetryBar
 from ui.widgets.subagent_panel import SubagentsPanel
-from ui.widgets.tool_issues import ToolIssuesScreen
+from ui.widgets.issues import IssuesScreen
 from ui.widgets.mcp_panel import MCPPanelScreen
 
 __all__ = [
@@ -22,6 +22,6 @@ __all__ = [
     "StatusBar",
     "TelemetryBar",
     "SubagentsPanel",
-    "ToolIssuesScreen",
+    "IssuesScreen",
     "MCPPanelScreen",
 ]

@@ -46,7 +46,7 @@ def run(
     except ConfigError as error:
         import typer
 
-        typer.echo(f"Configuration error: {error}", err=True)
+        typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from error
     except KeyboardInterrupt:
         raise
@@ -77,6 +77,7 @@ async def _run(
     import typer
 
     from cli.git_guard import ensure_git_repository
+    from agent.resources.project_setup import ensure_project_examples
     from config.runtime import LaunchOptions, load_effective_config
 
     workspace = workspace.expanduser().resolve()
@@ -88,6 +89,7 @@ async def _run(
         workspace,
     )
     launch_options = launch_options or LaunchOptions()
+    ensure_project_examples(workspace)
     config = load_effective_config(workspace, launch_options)
     if invocation_rubric is not None:
         from config.settings import set_rubric_enabled
@@ -215,6 +217,10 @@ async def _run_one_shot(
     rubric: str | None = None,
 ) -> Any:
     """Run one prompt and persist the visible transcript."""
+    if app.get("agent") is None:
+        from config.llm import ConfigError
+
+        raise ConfigError(str(app.get("agent_unavailable_message") or "Main model is not configured. Run /models."))
     import typer
 
     from runtime.runner import run_turn
@@ -370,7 +376,9 @@ async def _bootstrap(
     """Build config, persistence, renderer, and both action/planning agents."""
     from agent.factory import build_agent, build_plan_agent
     from agent.mcp import MCPManager
-    from agent.llm import get_llm, get_model_name
+    from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
+    from agent.resources import build_resources, configure_subagents
+    from agent.resources.subagents import subagent_model_issues
     from config.metadata import ModelMetadata, infer_model_metadata
     from config.runtime import LaunchOptions, load_effective_config
     from session.checkpoint import make_checkpointer
@@ -395,26 +403,66 @@ async def _bootstrap(
         setattr(renderer, "mcp_manager", mcp_manager)
         approval = getattr(renderer, "approve_mcp_server", None)
         await mcp_manager.initialize(approval if callable(approval) else None)
-    startup_progress(renderer, "loading model metadata...")
-    inspect_model = get_llm(config, metadata=ModelMetadata())
-    metadata = await infer_model_metadata(config, model=inspect_model)
-    config["llm_inferred_context_tokens"] = metadata.context_tokens
-    config["llm_context_source"] = metadata.context_source
-    startup_progress(renderer, "building agents...")
-    agent = build_agent(
-        config=config,
-        workspace=workspace,
-        checkpointer=checkpointer,
-        metadata=metadata,
-        mcp_manager=mcp_manager,
+    startup_progress(renderer, "discovering resources...")
+    resources = build_resources(workspace, settings=config.get("settings"), config=None)
+    if resources.subagent_discovery.complete and config.get("settings_valid", True):
+        from config.settings import prune_subagent_settings, save_settings
+
+        current_settings = config.get("settings") or {}
+        pruned = prune_subagent_settings(
+            current_settings,
+            {item.name for item in resources.subagent_discovery.items},
+        )
+        if pruned != current_settings and save_settings(workspace, pruned):
+            config["settings"] = pruned
+    assignment_issues = [
+        *active_model_issues(config),
+        *subagent_model_issues(resources.subagent_discovery, config),
+    ]
+    issues = [
+        *(config.get("issues") or []),
+        *mcp_manager.issues,
+        *mcp_manager.prompt_registry.issues,
+        *resources.issues,
+        *assignment_issues,
+    ]
+    blocking = not config.get("settings_valid", True) or bool(assignment_issues)
+    metadata = ModelMetadata(
+        context_tokens=int((config.get("settings") or {}).get("models", {}).get("context_limit_tokens", 32768)),
+        context_source="settings.models.context_limit_tokens",
     )
-    plan_agent = build_plan_agent(
-        config=config,
-        workspace=workspace,
-        checkpointer=checkpointer,
-        metadata=metadata,
-        mcp_manager=mcp_manager,
-    )
+    agent = None
+    plan_agent = None
+    if not blocking:
+        action_resources = configure_subagents(resources, config)
+        plan_resources = build_resources(
+            workspace,
+            create_examples=False,
+            settings=config.get("settings"),
+            enable_execute=False,
+            config=config,
+            subagent_discovery=resources.subagent_discovery,
+        )
+        startup_progress(renderer, "loading model metadata...")
+        inspect_model = get_llm(config, metadata=ModelMetadata())
+        metadata = await infer_model_metadata(config, model=inspect_model)
+        startup_progress(renderer, "building agents...")
+        agent = build_agent(
+            config=config,
+            workspace=workspace,
+            checkpointer=checkpointer,
+            metadata=metadata,
+            mcp_manager=mcp_manager,
+            resources=action_resources,
+        )
+        plan_agent = build_plan_agent(
+            config=config,
+            workspace=workspace,
+            checkpointer=checkpointer,
+            metadata=metadata,
+            mcp_manager=mcp_manager,
+            resources=plan_resources,
+        )
     model_name = get_model_name(config)
     context_limit_tokens = metadata.context_tokens
     context_limit_source = metadata.context_source
@@ -437,9 +485,12 @@ async def _bootstrap(
         "store": store,
         "workspace": workspace,
         "checkpointer": checkpointer,
-        "tool_failures": list(getattr(agent, "mira_tool_failures", [])),
+        "tool_failures": resources.tool_failures,
+        "issues": issues,
+        "resource_metadata": resources.metadata,
+        "project_backend": resources.project_backend,
+        "agent_unavailable_message": model_unavailable_message(config) if blocking else "",
         "mcp_manager": mcp_manager,
-        "mcp_config_issue": mcp_manager.config_issue,
     }
 
 

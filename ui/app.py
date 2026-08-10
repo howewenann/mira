@@ -31,7 +31,6 @@ from agent.planning.policy import (
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,
 )
-from agent.resources.tool_failures import ToolFailureFingerprint, tool_failure_fingerprint
 from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
 from config.settings import (
     EXECUTE_TOOL,
@@ -104,10 +103,9 @@ from ui.widgets import (
     StatusBar,
     TelemetryBar,
     SubagentsPanel,
-    ToolIssuesScreen,
+    IssuesScreen,
     MCPPanelScreen,
 )
-from ui.widgets.tool_issues import PipInstallResult
 from ui.widgets.mcp_panel import mcp_summary_symbol
 from ui.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.widgets.session_history import SessionItem
@@ -120,48 +118,6 @@ GitGuard = Callable[[Path, Any], Any]
 DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
 DESTRUCTIVE_CONFIRM_HINT = "Press O to confirm, C or Esc to cancel."
 DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
-
-
-def tool_reload_message(
-    previous: frozenset[ToolFailureFingerprint],
-    current: frozenset[ToolFailureFingerprint],
-) -> str:
-    """Return the concise unresolved-tool warning for an explicit reload."""
-    recovered = len(previous - current)
-    introduced = len(current - previous)
-    unresolved = len(current)
-    attention = "Open Issues or run /issues."
-
-    if introduced:
-        introduced_text = (
-            "1 new custom tool failure was detected."
-            if introduced == 1
-            else f"{introduced} new custom tool failures were detected."
-        )
-        unresolved_text = (
-            "1 custom tool file is unavailable."
-            if unresolved == 1
-            else f"{unresolved} custom tool files are unavailable."
-        )
-        return f"{introduced_text}\n{unresolved_text}\n\n{attention}"
-
-    if recovered:
-        recovered_text = (
-            "1 custom tool file recovered."
-            if recovered == 1
-            else f"{recovered} custom tool files recovered."
-        )
-        remaining_text = (
-            "1 is still unavailable." if unresolved == 1 else f"{unresolved} are still unavailable."
-        )
-        return f"{recovered_text}\n{remaining_text}\n\n{attention}"
-
-    unavailable_text = (
-        "1 custom tool file is still unavailable."
-        if unresolved == 1
-        else f"{unresolved} custom tool files are still unavailable."
-    )
-    return f"{unavailable_text}\n{attention}"
 
 
 class MiraApp(App[None]):
@@ -226,7 +182,8 @@ class MiraApp(App[None]):
         self.mcp_manager: Any | None = None
         self._mcp_spinner = 0
         self.tool_failures: list[Any] = []
-        self.mcp_config_issues: list[Any] = []
+        self.issues: list[Any] = []
+        self.agent_unavailable_message = "Main model is not configured. Run /models."
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
 
@@ -242,11 +199,14 @@ class MiraApp(App[None]):
                 with Horizontal(id="status-row"):
                     yield StatusBar(id="status")
                     yield Button("MCP 0/0", id="mcp-status-button")
-                    yield Button("Issues 0", id="tool-issues-button")
+                    yield Button("Issues 0", id="issues-button")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
-                yield AutocompleteInput(tool_provider=self._active_autocomplete_tools)
+                yield AutocompleteInput(
+                    tool_provider=self._active_autocomplete_tools,
+                    subagent_provider=self._active_autocomplete_subagents,
+                )
                 yield TelemetryBar(id="telemetry-row")
 
     def on_mount(self) -> None:
@@ -258,7 +218,7 @@ class MiraApp(App[None]):
         self.query_one(PromptBox).disabled = True
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
-            self._notify_startup_tool_failures()
+            self._notify_startup_issues()
             return
         self.query_one(ChatLog).startup_loading(workspace=str(self.workspace), state="starting...")
         self.call_after_refresh(self._start_startup_worker)
@@ -290,7 +250,7 @@ class MiraApp(App[None]):
                 self,
             )
             self._install_state(state)
-            self._notify_startup_tool_failures()
+            self._notify_startup_issues()
         except Exception as exc:
             error_path = self._write_error_report(exc, source="tui.startup")
             self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
@@ -311,8 +271,14 @@ class MiraApp(App[None]):
         if self.mcp_manager is not None:
             self.mcp_manager.set_change_handler(self._mcp_registry_changed)
         self.tool_failures = list(state.get("tool_failures") or getattr(self.agent, "mira_tool_failures", []))
-        issue = state.get("mcp_config_issue")
-        self.mcp_config_issues = [issue] if issue is not None else []
+        self.issues = list(state.get("issues") or [])
+        self.agent_unavailable_message = str(
+            state.get("agent_unavailable_message") or "Main model is not configured. Run /models."
+        )
+        if not self.issues and self.tool_failures:
+            from agent.resources.tool_failures import tool_failure_issues
+
+            self.issues = tool_failure_issues(self.tool_failures)
         self.runtime_snapshot = build_runtime_snapshot(
             self.config or {},
             self.launch_options,
@@ -324,6 +290,8 @@ class MiraApp(App[None]):
             (self.config or {}).get("settings"),
             self.session,
         )
+        if state.get("resource_metadata"):
+            self.mode["resources"] = state["resource_metadata"]
         self.ready = True
         self.busy = False
         self._main_stream_active = False
@@ -331,7 +299,9 @@ class MiraApp(App[None]):
         prompt.disabled = False
         prompt.set_history(read_prompt_history(self.history_path))
         autocomplete = self.query_one(AutocompleteInput)
-        autocomplete.set_project_backend(getattr(self.agent, "mira_project_backend", None))
+        autocomplete.set_project_backend(
+            getattr(self.agent, "mira_project_backend", None) or state.get("project_backend")
+        )
         autocomplete.set_mcp_manager(self.mcp_manager)
         ensure_dashboard(
             self.session,
@@ -351,7 +321,7 @@ class MiraApp(App[None]):
         chat.restore_session(self.session)
         self._refresh_sessions()
         self._set_status(state="ready")
-        self._sync_tool_issues()
+        self._sync_issues()
         self.action_focus_prompt()
 
     def _write_error_report(
@@ -403,11 +373,15 @@ class MiraApp(App[None]):
             return
 
         if text == "/settings":
-            self.run_worker(self._run_settings_command(), name="settings-command", exclusive=False)
+            self.run_worker(self._run_settings_command("general"), name="settings-command", exclusive=False)
+            return
+
+        if text == "/models":
+            self.run_worker(self._run_settings_command("models"), name="models-command", exclusive=False)
             return
 
         if text == "/issues":
-            self._open_tool_issues()
+            self._open_issues()
             self.action_focus_prompt()
             return
 
@@ -470,6 +444,8 @@ class MiraApp(App[None]):
                 self.system_message("usage: /goal <prompt>", kind="muted")
                 self.action_focus_prompt()
                 return
+            if not self._model_agents_available():
+                return
             self.busy = True
             self._main_stream_active = False
             self._set_status(state="running")
@@ -482,6 +458,8 @@ class MiraApp(App[None]):
             return
 
         if text == "/compact":
+            if not self._model_agents_available():
+                return
             self.busy = True
             self._main_stream_active = False
             self._set_status(state="running")
@@ -500,6 +478,9 @@ class MiraApp(App[None]):
                 self.exit()
             elif not self.busy:
                 self.action_focus_prompt()
+            return
+
+        if not self._model_agents_available():
             return
 
         self.busy = True
@@ -807,6 +788,9 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
             return
 
+        if action in {"revise", "implement"} and not self._model_agents_available():
+            return
+
         if action == "revise":
             feedback = await self._prompt_text("Revise Plan", "What should MIRA change about this plan?")
             feedback = (feedback or "").strip()
@@ -919,6 +903,9 @@ class MiraApp(App[None]):
             self.store.save(self.session)
             self.system_message(f'closed Goal "{goal_title(value)}"', kind="muted")
             self.action_focus_prompt()
+            return
+
+        if action in {"revise", "implement"} and not self._model_agents_available():
             return
 
         if action == "revise":
@@ -1283,6 +1270,28 @@ class MiraApp(App[None]):
         """Return the same live tool projection shown by /tools."""
         return available_tools(self.mode, planning=bool(self.mode.get("planning")))
 
+    def _active_autocomplete_subagents(self) -> list[dict[str, str]]:
+        """Return enabled effective subagents for the shared @ surface."""
+        resources = self.mode.get("resources") or {}
+        items = resources.get("subagents") or []
+        from config.settings import subagent_enabled
+
+        return [
+            item
+            for item in items
+            if item.get("name") and subagent_enabled(self.config or {}, str(item["name"]))
+        ]
+
+    def _model_agents_available(self) -> bool:
+        """Stop at a model-backed boundary without treating configuration as a crash."""
+        active = self.plan_agent if self.mode.get("planning") else self.agent
+        if active is not None:
+            return True
+        self.system_message(self.agent_unavailable_message, kind="warning")
+        self._set_status(state="ready")
+        self.action_focus_prompt()
+        return False
+
     def show_mira_splash(self) -> None:
         """Append a fresh splash using the current session metadata."""
         self.query_one(ChatLog).append_splash(
@@ -1437,6 +1446,8 @@ class MiraApp(App[None]):
 
     async def resume_plan(self) -> None:
         """Resume any incomplete current Plan immediately in Act mode."""
+        if not self._model_agents_available():
+            return
         value = current_plan(self.session)
         if value is None:
             self.system_message("no current Plan", kind="muted")
@@ -1593,6 +1604,8 @@ class MiraApp(App[None]):
 
     async def resume_goal(self) -> None:
         """Resume any incomplete current Goal immediately in Act mode."""
+        if not self._model_agents_available():
+            return
         value = current_goal(self.session)
         if value is None:
             if current_plan(self.session) is not None:
@@ -1766,10 +1779,12 @@ class MiraApp(App[None]):
 
         return False
 
-    async def _run_settings_command(self) -> None:
+    async def _run_settings_command(self, initial_tab: str = "general") -> None:
         """Run the interactive settings menu."""
         try:
-            self._handle_settings_command()
+            mounted = self._handle_settings_command(initial_tab)
+            if mounted is not True:
+                await mounted
             self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"settings error: {exc}", kind="error")
@@ -1781,7 +1796,13 @@ class MiraApp(App[None]):
             if await self._handle_reload_command():
                 self._set_status(state="ready")
         except Exception as exc:
-            self.system_message(f"reload error: {exc}", kind="error")
+            from config.llm import ConfigError
+
+            if isinstance(exc, ConfigError):
+                self.system_message(str(exc), kind="warning")
+            else:
+                error_path = self._write_error_report(exc, source="tui.reload")
+                self.system_message(f"reload error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
             self.action_focus_prompt()
@@ -1792,15 +1813,16 @@ class MiraApp(App[None]):
             self.system_message("finish the current turn before reloading agents", kind="warning")
             return True
 
-        previous_failures = self._tool_failure_set()
         await self._reload_runtime()
-        self._notify_explicit_reload(previous_failures)
+        self._notify_explicit_reload()
         self.system_message("runtime reloaded", kind="info")
         return True
 
     async def _reload_runtime(self) -> RuntimeSnapshot:
         """Reload dotenv/config, model metadata, visible chrome, and agents."""
-        from agent.llm import get_llm, get_model_name
+        from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
+        from agent.resources import build_resources
+        from agent.resources.subagents import subagent_model_issues
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import load_effective_config
 
@@ -1811,13 +1833,52 @@ class MiraApp(App[None]):
         )
         if self.mcp_manager is not None:
             await self.mcp_manager.reload()
-        inspect_model = get_llm(config, metadata=ModelMetadata())
-        metadata = await infer_model_metadata(config, model=inspect_model)
-        config["llm_inferred_context_tokens"] = metadata.context_tokens
-        config["llm_context_source"] = metadata.context_source
+        resources = build_resources(
+            self.workspace,
+            settings=config.get("settings"),
+            config=None,
+        )
+        if resources.subagent_discovery.complete and config.get("settings_valid", True):
+            from config.settings import prune_subagent_settings, save_settings
+
+            current_settings = config.get("settings") or {}
+            pruned = prune_subagent_settings(
+                current_settings,
+                {item.name for item in resources.subagent_discovery.items},
+            )
+            if pruned != current_settings and save_settings(self.workspace, pruned):
+                config["settings"] = pruned
+        assignment_issues = [
+            *active_model_issues(config),
+            *subagent_model_issues(resources.subagent_discovery, config),
+        ]
+        issues = [
+            *(config.get("issues") or []),
+            *(self.mcp_manager.issues if self.mcp_manager is not None else []),
+            *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
+            *resources.issues,
+            *assignment_issues,
+        ]
+        metadata = ModelMetadata(
+            context_tokens=int((config.get("settings") or {}).get("models", {}).get("context_limit_tokens", 32768)),
+            context_source="settings.models.context_limit_tokens",
+        )
+        agent = None
+        plan_agent = None
+        if config.get("settings_valid", True) and not assignment_issues:
+            inspect_model = get_llm(config, metadata=ModelMetadata())
+            metadata = await infer_model_metadata(config, model=inspect_model)
+            from agent.resources import configure_subagents
+
+            action_resources = configure_subagents(resources, config)
+            agent, plan_agent = self._build_agent_pair(
+                config=config,
+                metadata=metadata,
+                action_resources=action_resources,
+            )
         model_name = get_model_name(config)
-        agent, plan_agent = self._build_agent_pair(config=config, metadata=metadata)
         mode_updates = self._agent_mode_updates(agent, plan_agent, config)
+        mode_updates["resources"] = resources.metadata
         snapshot = build_runtime_snapshot(
             config,
             self.launch_options,
@@ -1830,15 +1891,12 @@ class MiraApp(App[None]):
         self.context_limit_source = metadata.context_source
         self.agent = agent
         self.plan_agent = plan_agent
+        self.agent_unavailable_message = model_unavailable_message(config) if agent is None else ""
         self.query_one(AutocompleteInput).set_project_backend(
-            getattr(agent, "mira_project_backend", None)
+            getattr(agent, "mira_project_backend", None) or resources.project_backend
         )
-        self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
-        self.mcp_config_issues = (
-            [self.mcp_manager.config_issue]
-            if self.mcp_manager is not None and self.mcp_manager.config_issue is not None
-            else []
-        )
+        self.tool_failures = resources.tool_failures
+        self.issues = issues
         self.mode.update(mode_updates)
         self.runtime_snapshot = snapshot
         ensure_dashboard(
@@ -1851,7 +1909,7 @@ class MiraApp(App[None]):
             self.store.save(self.session)
         self._refresh_startup_splash()
         self._set_status(state=self.status_state)
-        self._sync_tool_issues()
+        self._sync_issues()
         return snapshot
 
     def _render_runtime_snapshot(
@@ -1875,7 +1933,7 @@ class MiraApp(App[None]):
             workspace=str(self.session["workspace"]),
         )
 
-    def _handle_settings_command(self) -> bool:
+    def _handle_settings_command(self, initial_tab: str = "general") -> Any:
         """Mount the interactive settings panel."""
         if self.busy:
             self.system_message("finish the current turn before changing settings", kind="warning")
@@ -1890,10 +1948,12 @@ class MiraApp(App[None]):
             apply_change=self._apply_settings,
             close_panel=self._close_settings_panel,
             mcp_manager=self.mcp_manager,
+            model_registry=(self.config or {}).get("model_registry"),
+            subagent_metadata=((self.mode.get("resources") or {}).get("subagents") or []),
+            initial_tab=initial_tab,
         )
         self._settings_panel = panel
-        self.mount(panel)
-        return True
+        return self.mount(panel)
 
     async def _apply_settings(self, settings: dict[str, Any]) -> tuple[bool, str]:
         """Persist settings and apply any needed runtime changes."""
@@ -1914,7 +1974,18 @@ class MiraApp(App[None]):
                 return await self._ensure_git_after_enabling()
             return True, "git protection disabled"
 
-        await self._rebuild_agents()
+        if old_settings.get("models") != settings.get("models"):
+            await self._reload_runtime()
+            return True, "model settings saved; runtime refreshed"
+
+        try:
+            await self._rebuild_agents()
+        except Exception as error:
+            from config.llm import ConfigError
+
+            if not isinstance(error, ConfigError):
+                raise
+            await self._reload_runtime()
         return True, "settings saved; agents rebuilt"
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
@@ -2581,12 +2652,18 @@ class MiraApp(App[None]):
             turns=int(self.session.get("turns") or 0),
         )
         self._sync_mcp_button()
-        self._sync_tool_issues_button()
+        self._sync_issues_button()
 
     @on(Button.Pressed, "#mcp-status-button")
     def press_mcp_status(self, event: Button.Pressed) -> None:
         event.stop()
         self.open_mcp_panel()
+
+    @on(Button.Pressed, "#model-settings-button")
+    def press_model_settings(self, event: Button.Pressed) -> None:
+        """Open the shared Settings panel directly on Models."""
+        event.stop()
+        self.run_worker(self._run_settings_command("models"), name="models-button", exclusive=False)
 
     def open_mcp_panel(self) -> None:
         """Shared button and slash-command pathway for the MCP panel."""
@@ -2608,103 +2685,61 @@ class MiraApp(App[None]):
             symbol = mcp_summary_symbol(self.mcp_manager.servers.values(), spinner=self._mcp_spinner)
             button.label = f"{symbol} MCP {self.mcp_manager.usable_count}/{self.mcp_manager.configured_count}"
 
-    @on(Button.Pressed, "#tool-issues-button")
-    def press_tool_issues(self, event: Button.Pressed) -> None:
+    @on(Button.Pressed, "#issues-button")
+    def press_issues(self, event: Button.Pressed) -> None:
         """Open current project tool failures without recording chat history."""
         event.stop()
-        self._open_tool_issues()
+        self._open_issues()
 
-    def _open_tool_issues(self) -> None:
-        if not self.tool_failures and not self.mcp_config_issues:
+    def _open_issues(self) -> None:
+        if not self.issues:
             self.notify("No unresolved issues.", title="Issues")
             return
-        if isinstance(self.screen, ToolIssuesScreen):
-            self.screen.update_failures(self.tool_failures, self.mcp_config_issues)
+        if isinstance(self.screen, IssuesScreen):
             return
-        self.push_screen(ToolIssuesScreen(self.tool_failures, self.mcp_config_issues))
+        self.push_screen(IssuesScreen(self.issues))
 
-    def _sync_tool_issues(self) -> None:
+    def _sync_issues(self) -> None:
         """Refresh the persistent Issues entry point and any open modal."""
         if not self.is_mounted:
             return
-        self._sync_tool_issues_button()
-        if isinstance(self.screen, ToolIssuesScreen):
-            if self.tool_failures or self.mcp_config_issues:
-                self.screen.update_failures(self.tool_failures, self.mcp_config_issues)
-            elif not self.screen.installing:
-                self.screen.dismiss()
+        self._sync_issues_button()
+        if isinstance(self.screen, IssuesScreen):
+            self.screen.dismiss()
 
-    def _tool_failure_set(self) -> frozenset[ToolFailureFingerprint]:
-        """Return the current stable failure fingerprints."""
-        return frozenset(tool_failure_fingerprint(failure, self.workspace) for failure in self.tool_failures)
-
-    def _notify_explicit_reload(self, previous: frozenset[ToolFailureFingerprint]) -> None:
-        """Report a successful explicit reload only while failures remain."""
-        current = self._tool_failure_set()
-        if not current:
+    def _notify_explicit_reload(self) -> None:
+        """Show one consolidated current-Issues toast after reload."""
+        count = len(self.issues)
+        if not count:
             return
-        message = tool_reload_message(previous, current)
         self.notify(
-            message,
+            f"{count} current issue{'s' if count != 1 else ''}.\nOpen Issues or run /issues.",
             title="Reload completed",
             severity="warning",
         )
 
-    def _notify_startup_tool_failures(self) -> None:
+    def _notify_startup_issues(self) -> None:
         """Show one grouped startup warning when custom tools are unavailable."""
-        prompt_warnings = (
-            list(self.mcp_manager.prompt_registry.warnings)
-            if self.mcp_manager is not None
-            else []
-        )
-        if prompt_warnings:
-            self.notify("\n".join(prompt_warnings), title="Local prompts", severity="warning")
-        if self.mcp_config_issues:
-            self.notify(
-                "Could not parse .mira/mcp/mcp.json. Open Issues or run /issues.",
-                title="MCP configuration unavailable",
-                severity="warning",
-            )
-        count = len(self._tool_failure_set())
+        count = len(self.issues)
         if not count:
             return
         self.notify(
-            f"{count} project tool file{'s' if count != 1 else ''} could not be loaded.\n"
+            f"{count} current issue{'s' if count != 1 else ''}.\n"
             "Open Issues or run /issues.",
-            title="Custom tools unavailable",
+            title="Configuration issues",
             severity="warning",
         )
 
-    def _sync_tool_issues_button(self) -> None:
+    def _sync_issues_button(self) -> None:
         if not self.is_mounted:
             return
         try:
-            button = self.query_one("#tool-issues-button", Button)
+            button = self.query_one("#issues-button", Button)
         except NoMatches:
             return
-        count = len(self.tool_failures) + len(self.mcp_config_issues)
+        count = len(self.issues)
         button.label = f"Issues {count}"
         button.display = count > 0
-
-    async def reload_after_tool_install(
-        self,
-        screen: ToolIssuesScreen,
-        result: PipInstallResult,
-    ) -> None:
-        """Reuse runtime reload after an explicit successful pip repair."""
-        try:
-            await self._reload_runtime()
-        except BaseException as error:
-            screen.installing = False
-            screen.install_details = f"Packages installed, but reload failed:\n{type(error).__name__}: {error}"
-            screen.query_one("#tool-issues-summary", Static).update(screen.summary_text())
-            screen._sync_controls()
-            return
-        screen.installing = False
-        screen.update_failures(self.tool_failures)
-        self._sync_tool_issues()
-        if not self.tool_failures:
-            return
 
     @on(ListView.Selected, "#sessions")
     def select_session(self, event: ListView.Selected) -> None:
@@ -2755,7 +2790,12 @@ class MiraApp(App[None]):
         """Refresh model metadata and rebuild agents when context changes."""
         if self.config is None or self.checkpointer is None:
             return
-        if not self.config.get("llm_provider") or not self.config.get("llm_model"):
+        from agent.llm import resolve_model_profile
+        from config.llm import ConfigError
+
+        try:
+            resolve_model_profile(self.config)
+        except ConfigError:
             return
 
         from agent.llm import get_llm
@@ -2766,8 +2806,6 @@ class MiraApp(App[None]):
         if not metadata.context_tokens or metadata.context_tokens == self.context_limit_tokens:
             return
 
-        self.config["llm_inferred_context_tokens"] = metadata.context_tokens
-        self.config["llm_context_source"] = metadata.context_source
         self.context_limit_tokens = metadata.context_tokens
         self.context_limit_source = metadata.context_source
         await self._rebuild_agents(metadata=metadata)
@@ -2785,17 +2823,69 @@ class MiraApp(App[None]):
         if self.config is None or self.checkpointer is None:
             return
 
-        agent, plan_agent = self._build_agent_pair(config=self.config, metadata=metadata)
+        from agent.llm import active_model_issues, model_unavailable_message
+        from agent.resources import build_resources, configure_subagents
+        from agent.resources.subagents import subagent_model_issues
+
+        resources = build_resources(
+            self.workspace,
+            settings=self.config.get("settings"),
+            config=None,
+        )
+        assignment_issues = [
+            *active_model_issues(self.config),
+            *subagent_model_issues(resources.subagent_discovery, self.config),
+        ]
+        agent = None
+        plan_agent = None
+        if self.config.get("settings_valid", True) and not assignment_issues:
+            action_resources = configure_subagents(resources, self.config)
+            agent, plan_agent = self._build_agent_pair(
+                config=self.config,
+                metadata=metadata,
+                action_resources=action_resources,
+            )
         mode_updates = self._agent_mode_updates(agent, plan_agent, self.config)
+        mode_updates["resources"] = resources.metadata
         self.agent = agent
         self.plan_agent = plan_agent
-        self.tool_failures = list(getattr(agent, "mira_tool_failures", []))
+        self.agent_unavailable_message = model_unavailable_message(self.config) if agent is None else ""
+        self.tool_failures = resources.tool_failures
+        self.issues = [
+            *(self.config.get("issues") or []),
+            *(self.mcp_manager.issues if self.mcp_manager is not None else []),
+            *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
+            *resources.issues,
+            *assignment_issues,
+        ]
         self.mode.update(mode_updates)
-        self._sync_tool_issues()
+        self.query_one(AutocompleteInput).set_project_backend(resources.project_backend)
+        self._sync_issues()
 
-    def _build_agent_pair(self, *, config: dict[str, Any], metadata: Any | None) -> tuple[Any, Any]:
+    def _build_agent_pair(
+        self,
+        *,
+        config: dict[str, Any],
+        metadata: Any | None,
+        action_resources: Any | None = None,
+    ) -> tuple[Any, Any]:
         """Build both agents without replacing the active pair."""
         from agent.factory import build_agent, build_plan_agent
+        from agent.resources import build_resources
+
+        action_resources = action_resources or build_resources(
+            self.workspace,
+            settings=config.get("settings"),
+            config=config,
+        )
+        plan_resources = build_resources(
+            self.workspace,
+            create_examples=False,
+            settings=config.get("settings"),
+            enable_execute=False,
+            config=config,
+            subagent_discovery=action_resources.subagent_discovery,
+        )
 
         agent = build_agent(
             config=config,
@@ -2803,6 +2893,7 @@ class MiraApp(App[None]):
             checkpointer=self.checkpointer,
             metadata=metadata,
             mcp_manager=self.mcp_manager,
+            resources=action_resources,
         )
         plan_agent = build_plan_agent(
             config=config,
@@ -2810,6 +2901,7 @@ class MiraApp(App[None]):
             checkpointer=self.checkpointer,
             metadata=metadata,
             mcp_manager=self.mcp_manager,
+            resources=plan_resources,
         )
         return agent, plan_agent
 

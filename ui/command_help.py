@@ -23,7 +23,7 @@ COMMAND_HELP_SECTIONS = (
             ("/memories", "list loaded memory files and replacements"),
             ("/skills", "list loaded skills and replacements"),
             ("/subagents", "list loaded subagents and replacements"),
-            ("/issues", "repair unavailable project tool files in the TUI"),
+            ("/issues", "view current configuration and resource issues"),
             ("/prompts", "list local and MCP prompt commands"),
             ("/mcp", "open MCP server status and controls in the TUI"),
         ),
@@ -46,6 +46,7 @@ COMMAND_HELP_SECTIONS = (
         "Configuration",
         (
             ("/settings", "configure workspace settings in the TUI"),
+            ("/models", "open Settings directly on model management"),
             ("/reload", "reload .env/project resources and rebuild agents in the TUI"),
         ),
     ),

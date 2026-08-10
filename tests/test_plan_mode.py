@@ -19,7 +19,9 @@ from agent.middleware import CorrectionMiddleware, ModelToolVisibilityMiddleware
 from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
 from agent.tools.specs import mira_environment_label, tool_name
 from config.metadata import ModelMetadata
+from config.llm import ModelProfile, ModelRegistry
 from config.runtime import RuntimeSnapshot
+from config.settings import DEFAULT_SETTINGS
 from runtime import runner
 from runtime.context_usage import record_deepagents_context_tokens
 from session.plans import plan_artifact
@@ -334,7 +336,15 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_rubric_middleware_is_action_only_and_uses_configured_cap(self) -> None:
         """Enabled rubric grading should not leak into the planning agent."""
-        config = {"settings": {"system": {"rubric": {"enabled": True, "max_iterations": 5}}}}
+        settings = deepcopy(DEFAULT_SETTINGS)
+        settings["models"]["main"] = "main"
+        settings["system"]["rubric"] = {"enabled": True, "max_iterations": 5}
+        config = {
+            "settings": settings,
+            "model_registry": ModelRegistry(
+                {"main": ModelProfile("main", {"provider": "openai", "model": "gpt-test"})}
+            ),
+        }
         with (
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
@@ -356,20 +366,18 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_rubric_override_builds_a_dedicated_grader_without_tools(self) -> None:
         """A configured grader profile should not replace the action model or gain tools."""
+        settings = deepcopy(DEFAULT_SETTINGS)
+        settings["models"]["main"] = "main"
+        settings["models"]["rubric"] = "grader"
+        settings["system"]["rubric"] = {"enabled": True, "max_iterations": 2}
         config = {
-            "llm_provider": "lmstudio",
-            "llm_model": "gemma",
-            "rubric_llm_provider": "lmstudio",
-            "rubric_llm_model": "bonsai",
-            "rubric_llm_api_key": "lm-studio",
-            "rubric_llm_base_url": "http://localhost:1234/v1",
-            "rubric_llm_temperature": None,
-            "rubric_llm_max_tokens": 2048,
-            "rubric_llm_top_p": None,
-            "rubric_llm_context_tokens": 32768,
-            "rubric_llm_model_kwargs": {"reasoning_effort": "none"},
-            "rubric_llm_overridden": True,
-            "settings": {"system": {"rubric": {"enabled": True, "max_iterations": 2}}},
+            "settings": settings,
+            "model_registry": ModelRegistry(
+                {
+                    "main": ModelProfile("main", {"provider": "lmstudio", "model": "gemma"}),
+                    "grader": ModelProfile("grader", {"provider": "lmstudio", "model": "bonsai"}),
+                }
+            ),
         }
         built_agent = type("Agent", (), {})()
         with (
@@ -383,10 +391,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             agent = factory.build_agent(config, ".", "checkpointer")
 
         self.assertEqual(get_llm.call_count, 2)
-        self.assertEqual(get_llm.call_args_list[1].args[0]["llm_model"], "bonsai")
+        self.assertEqual(get_llm.call_args_list[1].kwargs["role"], "rubric")
         rubric.assert_called_once_with(model="grader-model", tools=None, max_iterations=2)
         self.assertEqual(create.call_args.kwargs["model"], "main-model")
-        self.assertEqual(agent.mira_rubric_model_name, "lmstudio:bonsai")
+        self.assertEqual(agent.mira_rubric_model_name, "[grader] lmstudio:bonsai")
 
     def test_planning_response_status_cap_is_passed_to_correction_middleware(self) -> None:
         """The workspace recovery cap should configure the shared Plan/Goal middleware."""
@@ -762,7 +770,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         for section in ("General", "Inspect", "Workflow", "Configuration", "Chat & history"):
             self.assertIn(section, output)
         self.assertNotIn("/config", output)
-        self.assertNotIn("/model", output)
+        commands = [str(cell) for cell in repl.help_table().columns[0]._cells]
+        self.assertIn("/models", commands)
+        self.assertNotIn("/model", commands)
 
     async def test_mira_command_is_recognized_as_textual_only(self) -> None:
         renderer = RecordingRenderer()
@@ -797,7 +807,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/runtime", rendered)
         self.assertIn("/tools", rendered)
         self.assertIn("/session", rendered)
-        self.assertNotIn("/model", rendered)
+        commands = [str(cell) for cell in table.columns[0]._cells]
+        self.assertIn("/models", commands)
+        self.assertNotIn("/model", commands)
         section_cells = [cell for cell in table.columns[0]._cells if isinstance(cell, Text)]
         self.assertTrue(section_cells)
         self.assertTrue(all(str(cell.style) == repl.HELP_SECTION_STYLE for cell in section_cells))

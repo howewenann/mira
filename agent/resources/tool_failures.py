@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import linecache
+import sys
 import traceback
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-ToolFailureFingerprint = tuple[str, str, str, str]
+from runtime.issues import Issue
 
 
 @dataclass(frozen=True)
@@ -25,28 +26,6 @@ class ToolLoadFailure:
     traceback_text: str
     missing_module: str
     suggested_requirement: str
-
-
-def tool_failure_fingerprint(
-    failure: ToolLoadFailure,
-    workspace: Path,
-) -> ToolFailureFingerprint:
-    """Return stable fields for an explicit reload's before-and-after comparison."""
-    try:
-        source = (
-            failure.source_path.expanduser()
-            .resolve()
-            .relative_to(workspace.expanduser().resolve())
-            .as_posix()
-        )
-    except (OSError, RuntimeError, ValueError):
-        source = failure.display_path
-    return (
-        source,
-        failure.exception_type,
-        failure.missing_module,
-        failure.message,
-    )
 
 
 def tool_load_failure(path: Path, workspace: Path, error: BaseException) -> ToolLoadFailure:
@@ -141,3 +120,30 @@ def one_shot_warning(failures: list[ToolLoadFailure]) -> str:
         )
     )
     return "\n".join(lines)
+
+
+def tool_failure_issues(failures: list[ToolLoadFailure]) -> list[Issue]:
+    """Project optional-tool failures projected into the generic Issues model."""
+    issues: list[Issue] = []
+    for failure in failures:
+        location = failure.display_path
+        if failure.line_number:
+            location = f"{location}:{failure.line_number}"
+        if failure.suggested_requirement:
+            command = f'"{sys.executable}" -m pip install {failure.suggested_requirement}'
+            guidance = (
+                "Either expose the dependency through an @project_tool wrapper, or install it into "
+                f"MIRA's environment with {command}, then run /reload."
+            )
+        else:
+            guidance = "Correct the tool definition or its imports, then run /reload."
+        issues.append(
+            Issue(
+                "TOOL",
+                f"Could not load custom tool: {failure.source_path.name}",
+                location,
+                f"{failure.exception_type}: {failure.message}",
+                guidance,
+            )
+        )
+    return issues

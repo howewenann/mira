@@ -639,8 +639,8 @@ def autocomplete_table() -> Table:
     )
     table.add_row(
         "@",
-        "FILE files, RSRC resources and available TOOL tools",
-        "Files and resources keep @; tools remove it",
+        "FILE files, RSRC resources, TOOL tools and SUBA subagents",
+        "Files/resources keep @; tools/subagents remove it",
     )
     return table
 

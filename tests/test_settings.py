@@ -172,7 +172,7 @@ class SettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.planning_response_status_max_retries(malformed), 2)
 
-    def test_retired_planning_next_action_key_is_rejected(self) -> None:
+    def test_retired_planning_next_action_key_becomes_startup_issue(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             retired = deepcopy(settings.DEFAULT_SETTINGS)
@@ -186,11 +186,12 @@ class SettingsTests(unittest.TestCase):
             )
             path.write_text(text, encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "current schema"):
-                settings.load_settings(workspace)
+            result = settings.load_settings_result(workspace)
+            self.assertFalse(result.valid)
+            self.assertIn("planning_next_action", result.issues[0].summary)
 
-    def test_existing_partial_or_malformed_yaml_is_rejected(self) -> None:
-        """Only a missing file receives defaults; existing files must match exactly."""
+    def test_partial_settings_use_defaults_and_invalid_shapes_become_issues(self) -> None:
+        """Omitted fields use defaults while malformed or unknown fields remain visible."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             path = settings.settings_path(workspace)
@@ -210,22 +211,27 @@ class SettingsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "current schema"):
-                settings.load_settings(workspace)
+            partial = settings.load_settings_result(workspace)
+            self.assertTrue(partial.valid)
+            self.assertEqual(partial.issues, ())
+            self.assertEqual(partial.settings["models"]["context_limit_tokens"], 32768)
 
             path.write_text("hitl: [", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "invalid settings YAML"):
-                settings.load_settings(workspace)
+            malformed = settings.load_settings_result(workspace)
+            self.assertFalse(malformed.valid)
+            self.assertIn("Invalid settings.yml", malformed.issues[0].summary)
 
             self.assertTrue(settings.save_settings(workspace, settings.DEFAULT_SETTINGS))
             exact = path.read_text(encoding="utf-8")
             path.write_text(f"{exact}unknown: true\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "current schema"):
-                settings.load_settings(workspace)
+            unknown = settings.load_settings_result(workspace)
+            self.assertFalse(unknown.valid)
+            self.assertIn("Unsupported setting: unknown", unknown.issues[0].summary)
 
             path.write_text(exact.replace("max_retries: 2", "max_retries: 0"), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "current schema"):
-                settings.load_settings(workspace)
+            invalid = settings.load_settings_result(workspace)
+            self.assertFalse(invalid.valid)
+            self.assertIn("planning_response_status.max_retries", invalid.issues[0].summary)
 
     def test_save_settings_writes_expected_yaml(self) -> None:
         """Saving toggles should persist the normalized schema."""

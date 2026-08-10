@@ -6,7 +6,9 @@ from typing import Any
 
 from rich.table import Table
 from rich.text import Text
-from textual.widgets import Static
+from textual.app import ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import Button, Static
 
 
 class StatusBar(Static):
@@ -33,8 +35,12 @@ class StatusBar(Static):
         self.update(text)
 
 
-class TelemetryBar(Static):
-    """Bottom passive session telemetry projected from the dashboard snapshot."""
+class TelemetryBar(Horizontal):
+    """Bottom model shortcut and compact session telemetry."""
+
+    def compose(self) -> ComposeResult:
+        yield Button("model: unset", id="model-settings-button")
+        yield Static(id="telemetry-values")
 
     def set_state(
         self,
@@ -43,24 +49,24 @@ class TelemetryBar(Static):
         dashboard: dict[str, Any] | None = None,
         turns: int = 0,
     ) -> None:
-        self.update(telemetry_row(model_name, dashboard, turns))
+        self.query_one("#model-settings-button", Button).label = Text(f"model: {model_name or 'unset'}")
+        self.query_one("#telemetry-values", Static).update(telemetry_values(dashboard, turns))
+
+
+def telemetry_values(dashboard: dict[str, Any] | None, turns: int) -> Text:
+    dashboard = dashboard or {}
+    text = Text()
+    append_part(text, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))
+    append_part(text, f"Turns {max(0, int(turns or 0))}")
+    append_part(text, duration_text(dashboard.get("duration_seconds", 0)))
+    return text
 
 
 def telemetry_row(model_name: str, dashboard: dict[str, Any] | None, turns: int) -> Table:
-    """Build one full-width telemetry row with usage and time on the right."""
-    dashboard = dashboard or {}
-    left = Text()
-    append_part(left, short_model(model_name))
-
-    right = Text()
-    append_part(right, token_part(dashboard.get("tokens") if isinstance(dashboard, dict) else {}))
-    append_part(right, f"Turns {max(0, int(turns or 0))}")
-    append_part(right, duration_text(dashboard.get("duration_seconds", 0)))
-
+    """Build the legacy renderable projection without passive model text."""
     row = Table.grid(expand=True, padding=0)
-    row.add_column(ratio=1, overflow="ellipsis")
     row.add_column(justify="right", no_wrap=True)
-    row.add_row(left, right)
+    row.add_row(telemetry_values(dashboard, turns))
     return row
 
 

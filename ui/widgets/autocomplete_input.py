@@ -38,7 +38,7 @@ EXCLUDED_FILE_COMPONENTS = {
 class CompletionItem:
     """The source-neutral data needed to render and insert one completion."""
 
-    kind: Literal["tool", "file", "mcp_resource", "native_command", "prompt_command", "status"]
+    kind: Literal["tool", "subagent", "file", "mcp_resource", "native_command", "prompt_command", "status"]
     display: str
     insertion: str
     description: str = ""
@@ -62,11 +62,13 @@ class AutocompleteInput(Vertical):
         *,
         project_backend: Any = None,
         tool_provider: Callable[[], list[dict[str, str]]] | None = None,
+        subagent_provider: Callable[[], list[dict[str, str]]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
         self.project_backend = project_backend
         self.tool_provider = tool_provider
+        self.subagent_provider = subagent_provider
         self._items: list[CompletionItem] = []
         self._file_paths: list[str] | None = None
         self._fragment: _CompletionFragment | None = None
@@ -207,6 +209,7 @@ class AutocompleteInput(Vertical):
                         fragment.query,
                         self._resource_errors(),
                         tools=self._active_tools(),
+                        subagents=self._active_subagents(),
                     )
                 )
             return
@@ -239,6 +242,7 @@ class AutocompleteInput(Vertical):
                 fragment.query,
                 self._resource_errors(),
                 tools=self._active_tools(),
+                subagents=self._active_subagents(),
             )
         )
 
@@ -261,6 +265,7 @@ class AutocompleteInput(Vertical):
                 fragment.query,
                 self._resource_errors(),
                 tools=self._active_tools(),
+                subagents=self._active_subagents(),
             )
         )
 
@@ -279,6 +284,7 @@ class AutocompleteInput(Vertical):
                     fragment.query,
                     self._resource_errors(),
                     tools=self._active_tools(),
+                    subagents=self._active_subagents(),
                 )
             )
 
@@ -300,6 +306,10 @@ class AutocompleteInput(Vertical):
     def _active_tools(self) -> list[dict[str, str]]:
         """Read the current agent tool projection without caching mode state."""
         return self.tool_provider() if self.tool_provider is not None else []
+
+    def _active_subagents(self) -> list[dict[str, str]]:
+        """Read effective enabled subagents without caching reload state."""
+        return self.subagent_provider() if self.subagent_provider is not None else []
 
     def _show_items(self, items: list[CompletionItem]) -> None:
         statuses = [item for item in items if not item.selectable]
@@ -409,8 +419,9 @@ def attachment_items(
     errors: list[str] | None = None,
     *,
     tools: list[dict[str, str]] | None = None,
+    subagents: list[dict[str, str]] | None = None,
 ) -> list[CompletionItem]:
-    """Merge local files, fixed MCP resources, and active tools before limiting."""
+    """Merge files, resources, tools, and enabled subagents before limiting."""
     folded = query.casefold()
     local_matches = sorted(
         (path for path in paths if folded in path.casefold()),
@@ -449,6 +460,19 @@ def attachment_items(
                 insertion=name,
                 description=str(tool.get("description") or ""),
                 metadata=tool,
+            )
+        )
+    for subagent in subagents or []:
+        name = str(subagent.get("name") or "")
+        if not name or folded not in name.casefold():
+            continue
+        items.append(
+            CompletionItem(
+                kind="subagent",
+                display=f"{name} subagent",
+                insertion=f"{name} subagent",
+                description=str(subagent.get("description") or ""),
+                metadata=subagent,
             )
         )
     items.sort(key=lambda item: (item.display.casefold(), item.display))
@@ -514,6 +538,7 @@ def _completion_row(item: CompletionItem) -> Text:
         return row
     labels = {
         "tool": ("TOOL", "#78d5cf"),
+        "subagent": ("SUBA", "#93A4C3"),
         "mcp_resource": ("RSRC", "#c7a0e8"),
         "file": ("FILE", "#aeb8be"),
         "native_command": ("CMND", "#d2a957"),

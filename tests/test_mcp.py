@@ -34,7 +34,6 @@ from agent.mcp.configuration import (
     configuration_fingerprint,
     load_mcp_configuration,
     mcp_path,
-    resolve_environment_references,
 )
 from agent.mcp.auth import (
     FileTokenStorage,
@@ -64,6 +63,7 @@ from config.settings import (
     set_tool_plan_access,
     tool_plan_access,
 )
+from config.interpolation import resolve_environment
 from session.context import normalize_events, session_mcp_attachments
 from ui.spinners import SPINNER_FRAMES
 from ui.widgets.mcp_panel import (
@@ -120,13 +120,13 @@ class MCPConfigurationTests(unittest.TestCase):
                 {
                     "remote": {
                         "type": "http",
-                        "url": "https://${env:MCP_HOST}/mcp",
-                        "headers": {"Authorization": "Bearer ${env:MCP_TOKEN}"},
+                        "url": "https://${MCP_HOST}/mcp",
+                        "headers": {"Authorization": "Bearer ${MCP_TOKEN}"},
                     },
                     "local": {
-                        "command": "${env:PYTHON_COMMAND}",
-                        "args": ["--token=${env:MCP_TOKEN}", "$${env:LITERAL}"],
-                        "env": {"${env:KEY_NAME}": "${env:MCP_TOKEN}"},
+                        "command": "${PYTHON_COMMAND}",
+                        "args": ["--token=${MCP_TOKEN}", "literal"],
+                        "env": {"${KEY_NAME}": "${MCP_TOKEN}"},
                     },
                 },
             )
@@ -148,8 +148,8 @@ class MCPConfigurationTests(unittest.TestCase):
             )
 
         remote = first.servers["remote"]
-        self.assertEqual(remote.config["url"], "https://${env:MCP_HOST}/mcp")
-        self.assertEqual(remote.config["headers"]["Authorization"], "Bearer ${env:MCP_TOKEN}")
+        self.assertEqual(remote.config["url"], "https://${MCP_HOST}/mcp")
+        self.assertEqual(remote.config["headers"]["Authorization"], "Bearer ${MCP_TOKEN}")
         self.assertEqual(remote.connection_config["url"], "https://example.test/mcp")
         self.assertEqual(
             remote.connection_config["headers"]["Authorization"],
@@ -166,9 +166,9 @@ class MCPConfigurationTests(unittest.TestCase):
         self.assertEqual(local.connection_config["command"], "python")
         self.assertEqual(
             local.connection_config["args"],
-            ["--token=first-secret", "${env:LITERAL}"],
+            ["--token=first-secret", "literal"],
         )
-        self.assertEqual(local.connection_config["env"], {"${env:KEY_NAME}": "first-secret"})
+        self.assertEqual(local.connection_config["env"], {"${KEY_NAME}": "first-secret"})
 
     def test_environment_resolution_is_single_pass_and_missing_values_are_server_local(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -179,7 +179,7 @@ class MCPConfigurationTests(unittest.TestCase):
                     "missing": {
                         "type": "http",
                         "url": "https://example.test/mcp",
-                        "headers": {"Authorization": "Bearer ${env:MISSING_TOKEN}"},
+                        "headers": {"Authorization": "Bearer ${MISSING_TOKEN}"},
                     },
                     "available": {"command": "python", "args": []},
                 },
@@ -194,22 +194,22 @@ class MCPConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(loaded.servers["available"].status, "Disabled")
         self.assertEqual(
-            resolve_environment_references(
-                "${env:FIRST}",
-                environ={"FIRST": "${env:SECOND}", "SECOND": "secret"},
+            resolve_environment(
+                "${FIRST}",
+                environ={"FIRST": "${SECOND}", "SECOND": "secret"},
             ),
-            "${env:SECOND}",
+            "${SECOND}",
         )
 
     def test_invalid_or_empty_environment_references_fail_clearly(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid environment variable name"):
-            resolve_environment_references("${env:NOT-VALID}", environ={})
-        with self.assertRaisesRegex(ValueError, "invalid environment reference"):
-            resolve_environment_references("${env:UNCLOSED", environ={})
+            resolve_environment("${NOT-VALID}", environ={})
+        with self.assertRaisesRegex(ValueError, "malformed environment reference"):
+            resolve_environment("${UNCLOSED", environ={})
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_config(root, {"empty": {"command": "${env:COMMAND}"}})
+            write_config(root, {"empty": {"command": "${COMMAND}"}})
             loaded = load_mcp_configuration(root, environ={"COMMAND": ""})
         self.assertEqual(loaded.servers["empty"].status, "Failed")
         self.assertEqual(
@@ -294,7 +294,7 @@ class MCPConfigurationTests(unittest.TestCase):
                 {
                     "transport": "http",
                     "url": "https://example.com/mcp",
-                    "headers": {"Authorization": "Bearer ${env:REMOTE_MCP_TOKEN}"},
+                    "headers": {"Authorization": "Bearer ${REMOTE_MCP_TOKEN}"},
                 },
             )
             self.assertEqual(
@@ -323,9 +323,9 @@ class MCPConfigurationTests(unittest.TestCase):
             self.assertEqual(set(http["properties"]), {"type", "url", "headers"})
             self.assertEqual(http["required"], ["type", "url"])
             self.assertFalse(http["additionalProperties"])
-            self.assertIn("${env:NAME}", schema["description"])
-            self.assertIn("${env:NAME}", stdio["properties"]["env"]["description"])
-            self.assertIn("${env:NAME}", http["properties"]["headers"]["description"])
+            self.assertIn("${NAME}", schema["description"])
+            self.assertIn("${NAME}", stdio["properties"]["env"]["description"])
+            self.assertIn("${NAME}", http["properties"]["headers"]["description"])
             self.assertNotIn('"transport"', json.dumps(schema))
             self.assertNotIn("servers", schema["properties"])
 
@@ -627,7 +627,9 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
             (prompts / "one.txt").write_text("duplicate", encoding="utf-8")
             registry.reload_local()
             self.assertNotIn("/prompt__one", registry.specs)
-            self.assertEqual(registry.warnings, ["local prompt collision excluded: /prompt__one"])
+            self.assertEqual(len(registry.issues), 1)
+            self.assertEqual(registry.issues[0].category, "STARTUP")
+            self.assertIn("/prompt__one", registry.issues[0].summary)
 
     async def test_prompt_usage_distinguishes_required_and_optional_arguments(self) -> None:
         calls: list[dict[str, str]] = []
@@ -1397,13 +1399,13 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             ensure_project_examples(root)
             manager = MCPManager(root, token_root=root / "profile-tokens")
             self.assertFalse(manager.show_status)
-            self.assertIsNone(manager.config_issue)
+            self.assertEqual(manager.issues, [])
 
             app = make_app(root, mcp_manager=manager)
             async with app.run_test():
                 self.assertFalse(app.query_one("#mcp-status-button", Button).display)
-                self.assertFalse(app.query_one("#tool-issues-button", Button).display)
-                self.assertEqual(app.mcp_config_issues, [])
+                self.assertFalse(app.query_one("#issues-button", Button).display)
+                self.assertEqual(app.issues, [])
 
     async def test_expansion_is_presentation_only_and_preserves_clicked_focus(self) -> None:
         manager = PanelManager()

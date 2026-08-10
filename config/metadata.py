@@ -7,7 +7,8 @@ from typing import Any
 
 import httpx
 
-from config.llm import DEFAULT_CONTEXT_TOKENS
+from config.llm import ModelRegistry
+from config.settings import MAIN_MODEL, context_limit_tokens, model_assignment
 from runtime.usage import positive_int
 
 
@@ -23,7 +24,8 @@ async def infer_model_metadata(config: dict[str, Any], model: Any | None = None)
     """Infer metadata for the configured model."""
     candidates: list[ModelMetadata] = []
 
-    provider = str(config.get("llm_provider") or "").lower()
+    profile = _main_profile_values(config)
+    provider = str(profile.get("provider") or "").lower()
     if provider == "lmstudio":
         metadata = await infer_lmstudio_metadata(config)
         if metadata.context_tokens:
@@ -34,8 +36,8 @@ async def infer_model_metadata(config: dict[str, Any], model: Any | None = None)
         if profile_limit:
             candidates.append(ModelMetadata(profile_limit, "model_profile.max_input_tokens"))
 
-    configured_limit = positive_int(config.get("llm_context_tokens")) or DEFAULT_CONTEXT_TOKENS
-    candidates.append(ModelMetadata(configured_limit, "MIRA_LLM_CONTEXT_TOKENS"))
+    configured_limit = context_limit_tokens(config)
+    candidates.append(ModelMetadata(configured_limit, "settings.models.context_limit_tokens"))
 
     return minimum_metadata(candidates)
 
@@ -62,13 +64,14 @@ def minimum_metadata(candidates: list[ModelMetadata]) -> ModelMetadata:
 
 async def infer_lmstudio_metadata(config: dict[str, Any]) -> ModelMetadata:
     """Read the loaded LM Studio context length from the REST API."""
-    base_url = str(config.get("llm_base_url") or "").rstrip("/")
+    profile = _main_profile_values(config)
+    base_url = str(profile.get("api_base") or "").rstrip("/")
     if not base_url:
         return ModelMetadata()
 
     root_url = base_url[:-3] if base_url.endswith("/v1") else base_url
     url = f"{root_url}/api/v1/models"
-    headers = {"Authorization": f"Bearer {config.get('llm_api_key') or 'lm-studio'}"}
+    headers = {"Authorization": f"Bearer {profile.get('api_key') or 'lm-studio'}"}
     try:
         timeout = positive_float(config.get("lmstudio_metadata_timeout"), 2.0)
         async with httpx.AsyncClient(trust_env=False, verify=False, timeout=timeout) as client:
@@ -78,7 +81,7 @@ async def infer_lmstudio_metadata(config: dict[str, Any]) -> ModelMetadata:
     except Exception:
         return ModelMetadata()
 
-    context_tokens = lmstudio_context_tokens(payload, str(config.get("llm_model") or ""))
+    context_tokens = lmstudio_context_tokens(payload, str(profile.get("model") or ""))
     if not context_tokens:
         return ModelMetadata()
     return ModelMetadata(context_tokens, "lmstudio.api.v1.loaded_instance")
@@ -155,3 +158,13 @@ def positive_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _main_profile_values(config: dict[str, Any]) -> dict[str, Any]:
+    registry = config.get("model_registry")
+    name = model_assignment(config, MAIN_MODEL)
+    if isinstance(registry, ModelRegistry):
+        profile = registry.profile(name)
+        if profile is not None:
+            return profile.values
+    return {}

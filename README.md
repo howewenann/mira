@@ -30,29 +30,20 @@ pip install -e .
 
 ## Configure
 
-Copy the values you need from `.env.example` into a workspace `.env`. MIRA
-does not create or overwrite this file.
+On first run MIRA creates `.mira/models.yml` with a schema guide and two
+commented examples. Add named model profiles there, put secrets in `.env`, and
+reference them as `${NAME}`. MIRA resolves only that syntax; unresolved,
+malformed, `${env:NAME}`, and `$${NAME}` references appear in Issues.
 
-The default configuration targets LM Studio:
-
-```dotenv
-MIRA_LLM_PROVIDER=lmstudio
-MIRA_LLM_MODEL=local-model
-MIRA_LLM_BASE_URL=http://localhost:1234/v1
-MIRA_LLM_API_KEY=lm-studio
-MIRA_LLM_CONTEXT_TOKENS=32768
-MIRA_TOOL_OUTPUT_CHARS=240
-```
-
-Common providers include `lmstudio`, `ollama`, `openai`, `anthropic`, `gemini`,
-`groq`, and `openrouter`. Provider examples and optional generation settings
-are documented in `.env.example`. Strict JSON `MIRA_LLM_MODEL_KWARGS` values
-pass provider-specific generation controls to AnyLLM; optional
-`MIRA_RUBRIC_LLM_*` values can select a separate rubric grader.
+Open `/models` to select Main and manage Rubric, Summarization, context limits,
+and subagents. Fresh workspaces show Main as `unset`. Null secondary assignments
+inherit Main and display the effective profile, such as `claude (default)`,
+without storing a fake assignment. The usable context is the smaller of the
+Settings cap and trustworthy provider/model metadata.
 
 Workspace settings live in `.mira/settings.yml`. Use `/settings` in the TUI to
 manage Git protection, tools and approvals, execution environments, dynamic
-subagents, optional planning todos, and rubric grading.
+eval subagents, optional planning todos, and rubric grading.
 
 ## Run
 
@@ -71,17 +62,10 @@ mira --prompt "add focused tests" --rubric "The requested tests pass."
 mira --file task.txt --rubric-file criteria.txt
 ```
 
-`--prompt/-p` and `--file/-f` are mutually exclusive task inputs.
-`--rubric` and `--rubric-file` are mutually exclusive, invocation-only rubric
-inputs and require a task input. File inputs accept any readable, non-empty
-UTF-8 text file regardless of extension; literal and file inputs cannot be
-empty or whitespace-only. Invocation rubrics use the configured rubric
-iteration cap without changing the saved workspace rubric setting.
-
-One-shot exit codes are `0` for success (and rubric satisfaction when supplied),
-`1` for runtime/provider/execution failure, `2` for invalid arguments or input
-files, and `3` when the supplied rubric remains unsatisfied at the iteration
-limit.
+Task text/file options and rubric text/file options are mutually exclusive.
+Files must be readable, non-empty UTF-8 text. One-shot exits with `0` on
+success, `1` on runtime failure, `2` on invalid input, and `3` when an
+invocation rubric remains unsatisfied.
 
 Useful startup options:
 
@@ -104,21 +88,17 @@ it only with a trusted local endpoint.
 | Insert a newline | Shift+Enter |
 | Copy selected chat or prompt text | Ctrl+C |
 | Cancel active work or quit | Alt+Q |
-| Return focus to the prompt | Escape |
 | Complete a slash command | Type `/`, then use Up/Down and Enter |
 | Reference a local file | Type `@`, then use Up/Down and Enter |
 | Show key bindings, autocomplete, usage notes, and commands | `/help` |
-| Display a fresh MIRA splash | `/mira` |
 | Change workspace settings | `/settings` |
-| Start a new saved chat | `/new-chat` |
+| Manage model assignments | `/models` or the footer model button |
 | Enter Plan mode or send its first prompt | `/plan`, `/plan <prompt>` |
 | Return to action mode | `/act` |
-| Show, resume, or clear the current Plan | `/plan-show`, `/plan-resume`, `/plan-clear` |
 | Create an outcome-focused Goal | `/goal <prompt>` |
-| Show, resume, or clear the current Goal | `/goal-show`, `/goal-resume`, `/goal-clear` |
 | Compact older context | `/compact` |
 | Reload configuration and resources | `/reload` |
-| Repair unavailable custom tools | `/issues` |
+| View configuration/resource Issues | `/issues` |
 | Open MCP server status and controls | `/mcp` |
 | List reusable local and MCP prompts | `/prompts` |
 
@@ -127,32 +107,18 @@ Inspection commands include `/runtime`, `/session`, `/tools`, `/memories`,
 and are listed in `/help`.
 
 Slash commands autocomplete at the start of the prompt. Active tool names,
-local project files, and MCP resources autocomplete after `@` anywhere in the
-prompt. Selecting a tool removes the temporary `@` and inserts its plain name;
-files and resources remain `@` references. Paths containing spaces use quoted
+enabled subagents, local project files, and MCP resources autocomplete after
+`@` anywhere in the prompt. Selecting a TOOL or SUBA removes the temporary `@`;
+a subagent inserts text such as `general-purpose subagent`. FILE and RSRC
+entries remain `@` references. Paths containing spaces use quoted
 mentions such as `@"docs/design notes.md"`. Local file references guide the
 agent to inspect files through its normal `read_file` tool—the file
 contents are not embedded into the prompt automatically.
 
-Plan mode is a continuous read-only conversation. Discuss and investigate
-normally; when the work is decision-complete, MIRA generates Success Criteria
-before presenting one durable Plan with Implement, Revise, and Close actions.
-`/plan-show` reopens the exact retained Plan, `/plan-resume` continues incomplete
-work, and `/plan-clear` removes it without erasing transcript history. Rubric
-grading changes only execution-time evaluation, not Plan construction.
-
-Plan and Goal are alternative durable formal-work artifacts: a Plan contains an
-Objective, approach, and Success Criteria; a Goal contains only an Objective
-and Success Criteria, leaving the approach to the Act agent. MIRA retains one
-current Plan or Goal, never both. Replacing incomplete formal work requires
-confirmation, and replacement occurs only after the new artifact is presented.
-
-`/goal <prompt>` works with rubric grading on or off and presents Implement,
-Revise, and Close actions. `/goal-show` reopens the exact Goal, `/goal-resume`
-continues incomplete work, and `/goal-clear` removes it without deleting
-history. Successful non-rubric attempts are agent-declared; rubric-enabled
-attempts complete only when rubric-verified. A Goal never contains a hidden
-implementation Plan; agents reopen it through `show_goal`.
+Plan mode is a continuous read-only conversation that can present one durable
+Plan. Goals retain an Objective and Success Criteria while leaving the approach
+to Act. Use the corresponding `-show`, `-resume`, and `-clear` commands shown in
+`/help`; MIRA retains only one current Plan or Goal.
 
 ## Project Resources
 
@@ -160,12 +126,13 @@ MIRA loads project customization from `.mira/`:
 
 ```text
 .mira/
+  models.yml        # ordered AnyLLM model profiles
   settings.yml
   mcp/
     mcp.json         # active MCP configuration
     example.json     # inert stdio and HTTP examples
     schema.json      # supported configuration contract
-  prompts/           # top-level reusable Mustache prompt files
+  prompts/           # recursive reusable Mustache prompt files
   memories/          # always-on Markdown context
   skills/            # DeepAgents SKILL.md folders
   subagents/         # Python SUBAGENTS definitions
@@ -173,7 +140,10 @@ MIRA loads project customization from `.mira/`:
   examples/tools/    # inert MIRA- and project-runtime examples
 ```
 
-Project resources override built-in resources with the same name. Use
+Prompt paths flatten to commands with `__` between suffix-free path components.
+For example, `prompts/review/python.md` becomes `/prompt__review__python`.
+Collisions are excluded and reported in Issues. Project resources override
+built-in resources with the same name. Use
 `/memories`, `/skills`, `/subagents`, and `/tools` to inspect what is active.
 Run `/reload` after changing project resources.
 
@@ -184,46 +154,32 @@ MIRA bootstraps an empty active configuration at `.mira/mcp/mcp.json`.
 `schema.json` documents the exact accepted keys. `example.json` is never
 loaded. Run `/reload` after changes.
 
-MCP string values can read explicit process environment variables with
-`${env:NAME}`. For example, an HTTP header can use
-`"Authorization": "Bearer ${env:MCP_TOKEN}"` without storing the resolved
+MCP string values use the same `${NAME}` resolver as model profiles. For
+example, an HTTP header can use
+`"Authorization": "Bearer ${MCP_TOKEN}"` without storing the resolved
 secret in `mcp.json`. Start MIRA from an environment containing the variable,
 or define it in the workspace `.env`; a missing variable fails only that MCP
 server with a clear error.
 
-Both local stdio servers and remote Streamable HTTP endpoints require approval
-before first use. `Allow` lasts for the current MIRA process, `Deny` leaves the
-server enabled but unused for that process, and `Always allow` persists approval
-for a hash of the exact configuration. A configuration change therefore
-requires approval again. Server enablement and per-tool enable, approval, and
-Plan-access choices live in `/settings`.
-
-OAuth-protected HTTP servers need no authentication field. After normal server
-approval, a standards-compliant OAuth challenge appears as `Login required` in
-the MCP panel. Select `Login` there to open the browser. MIRA stores access,
-refresh, expiry, and dynamic client state outside the project under
-`~/.mira/_state/mcp-tokens/`, locally in plaintext. This first version supports
-standards-compliant browser OAuth only, not provider-specific login or
-device-code flows.
+Local stdio and remote Streamable HTTP servers require approval before first
+use. Server and tool enablement, persistent approval, and Plan access live in
+`/settings`. Standards-compliant browser OAuth is available from the MCP panel;
+token state is stored locally under `~/.mira/_state/mcp-tokens/`.
 
 MCP tools use names such as `mcp__local__search`. Fixed text resources appear
 in `@` completion as `@mcp__<server>__<exact-uri>`; selecting one attaches its
 identity, and the agent reads it on demand. MCP prompts appear as
-`/mcp__<server>__<prompt>`. Any readable top-level UTF-8 file under
-`.mira/prompts/` becomes `/prompt__<filename-stem>` and uses Mustache variables
+`/mcp__<server>__<prompt>`. Any readable UTF-8 file recursively under
+`.mira/prompts/` becomes a flattened `/prompt__...` command and uses Mustache variables
 as required positional arguments. MCP prompts whose arguments are all required
 also use positional values. If an MCP prompt has any optional argument, pass
 every supplied value as `name=value`; quote values containing spaces. Command
 lists keep the compact `<required> [optional]` signature in both cases.
 
-Initial MCP support intentionally covers fixed text resources only. It does
-not support resource templates, resource completion, binary materialisation,
-subscriptions, or `listChanged`; local prompt discovery is not recursive.
-
 Standard LangChain `@tool` functions run inside MIRA, so their imports must be
 installed in MIRA's Python environment. A bad project tool file is isolated and
-kept out of the agent; `/issues` can install all detected missing packages into
-MIRA and reload, while `/reload` retries every failed file. See
+kept out of the agent; `/issues` shows the exact install command or project-tool
+guidance, while `/reload` retries every failed file. See
 `.mira/examples/tools/mira_runtime_tool.py`.
 
 Use `mira_tool_api.project_tool` when a function body must run in the configured
@@ -247,19 +203,5 @@ Do not commit `.env` files, credentials, session data, or diagnostic logs.
 
 ## Development
 
-Use the shared development environment and run focused tests for changed code:
-
-```powershell
-conda run -n ai_agents python -m unittest tests.test_textual_app
-conda run -n ai_agents python -m compileall agent cli config runtime session ui tests
-git diff --check
-```
-
-Run the current checkout directly when smoke testing:
-
-```powershell
-conda run --no-capture-output -n ai_agents python -m cli.main
-```
-
-Repository guidance is in [AGENTS.md](AGENTS.md). Manual scenarios are in
+Repository guidance is in [AGENTS.md](AGENTS.md); manual scenarios are in
 `tests/manual/`.

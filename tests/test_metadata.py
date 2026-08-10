@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import unittest
+from copy import deepcopy
 from typing import Any
 from unittest.mock import patch
 
 import httpx
 
 from config.metadata import ModelMetadata, apply_model_metadata, infer_model_metadata
+from config.llm import ModelProfile, ModelRegistry
+from config.settings import DEFAULT_SETTINGS
 
 
 class ProfileModel:
@@ -42,14 +45,37 @@ class FakeAsyncClient:
         return httpx.Response(200, json=FakeAsyncClient.payload, request=httpx.Request("GET", url))
 
 
-def lmstudio_config(model: str = "gemma-4-e4b") -> dict[str, Any]:
-    """Return the minimal LM Studio config used by metadata tests."""
+def profile_config(
+    provider: str,
+    model: str,
+    *,
+    context_limit_tokens: int = 32768,
+    api_base: str | None = None,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    settings = deepcopy(DEFAULT_SETTINGS)
+    settings["models"]["main"] = "main"
+    settings["models"]["context_limit_tokens"] = context_limit_tokens
+    values: dict[str, Any] = {"provider": provider, "model": model}
+    if api_base is not None:
+        values["api_base"] = api_base
+    if api_key is not None:
+        values["api_key"] = api_key
     return {
-        "llm_provider": "lmstudio",
-        "llm_model": model,
-        "llm_base_url": "http://localhost:1234/v1",
-        "llm_api_key": "lm-studio",
+        "settings": settings,
+        "model_registry": ModelRegistry({"main": ModelProfile("main", values)}),
     }
+
+
+def lmstudio_config(model: str = "gemma-4-e4b", *, context_limit_tokens: int = 32768) -> dict[str, Any]:
+    """Return the minimal LM Studio config used by metadata tests."""
+    return profile_config(
+        "lmstudio",
+        model,
+        context_limit_tokens=context_limit_tokens,
+        api_base="http://localhost:1234/v1",
+        api_key="lm-studio",
+    )
 
 
 class MetadataTests(unittest.IsolatedAsyncioTestCase):
@@ -103,14 +129,16 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
     async def test_configured_context_caps_provider_metadata(self) -> None:
         """Manual context limits should cap provider metadata without raising it."""
         with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
-            metadata = await infer_model_metadata({**lmstudio_config(), "llm_context_tokens": 8192})
+            metadata = await infer_model_metadata(lmstudio_config(context_limit_tokens=8192))
 
-        self.assertEqual(metadata, ModelMetadata(8192, "MIRA_LLM_CONTEXT_TOKENS"))
+        self.assertEqual(metadata, ModelMetadata(8192, "settings.models.context_limit_tokens"))
 
     async def test_provider_metadata_wins_when_below_configured_cap(self) -> None:
         """Provider metadata should remain the effective limit when below the env cap."""
         with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
-            metadata = await infer_model_metadata({**lmstudio_config("other-model"), "llm_context_tokens": 8192})
+            metadata = await infer_model_metadata(
+                lmstudio_config("other-model", context_limit_tokens=8192)
+            )
 
         self.assertEqual(metadata, ModelMetadata(4096, "lmstudio.api.v1.loaded_instance"))
 
@@ -121,13 +149,13 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
         with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
             metadata = await infer_model_metadata(lmstudio_config())
 
-        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+        self.assertEqual(metadata, ModelMetadata(32768, "settings.models.context_limit_tokens"))
 
     async def test_profile_is_used_when_provider_metadata_is_missing(self) -> None:
         """A supplied LangChain profile remains a fallback for non-LM Studio models."""
         model = ProfileModel({"max_input_tokens": 32000})
 
-        metadata = await infer_model_metadata({"llm_provider": "openai", "llm_context_tokens": 32768}, model=model)
+        metadata = await infer_model_metadata(profile_config("openai", "gpt-test"), model=model)
 
         self.assertEqual(metadata, ModelMetadata(32000, "model_profile.max_input_tokens"))
 
@@ -135,9 +163,9 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
         """Manual context limits should cap LangChain profile context."""
         model = ProfileModel({"max_input_tokens": 64000})
 
-        metadata = await infer_model_metadata({"llm_provider": "openai", "llm_context_tokens": 32768}, model=model)
+        metadata = await infer_model_metadata(profile_config("openai", "gpt-test"), model=model)
 
-        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+        self.assertEqual(metadata, ModelMetadata(32768, "settings.models.context_limit_tokens"))
 
     async def test_lmstudio_failure_uses_env_fallback_not_model_profile(self) -> None:
         """LM Studio should use its API or env/default cap, not an incidental profile."""
@@ -145,15 +173,15 @@ class MetadataTests(unittest.IsolatedAsyncioTestCase):
         model = ProfileModel({"max_input_tokens": 16000})
 
         with patch("config.metadata.httpx.AsyncClient", FakeAsyncClient):
-            metadata = await infer_model_metadata({**lmstudio_config(), "llm_context_tokens": 32768}, model=model)
+            metadata = await infer_model_metadata(lmstudio_config(), model=model)
 
-        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+        self.assertEqual(metadata, ModelMetadata(32768, "settings.models.context_limit_tokens"))
 
     async def test_default_context_is_used_when_env_key_is_missing(self) -> None:
         """The backend should provide a default profile limit when no source reports one."""
-        metadata = await infer_model_metadata({"llm_provider": "custom"})
+        metadata = await infer_model_metadata(profile_config("custom", "model"))
 
-        self.assertEqual(metadata, ModelMetadata(32768, "MIRA_LLM_CONTEXT_TOKENS"))
+        self.assertEqual(metadata, ModelMetadata(32768, "settings.models.context_limit_tokens"))
 
     def test_apply_metadata_sets_profile_for_deepagents(self) -> None:
         """The model profile should be populated before summarization middleware is built."""
