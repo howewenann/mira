@@ -259,7 +259,7 @@ class SettingsPanel(Vertical):
 
             with VerticalScroll(id="settings-models-body", classes="settings-body"):
                 yield Static("Model Context", classes="settings-section model-context")
-                with Horizontal(classes="settings-row settings-value-row"):
+                with Horizontal(classes="settings-row settings-wide-row settings-value-row settings-context-row"):
                     yield Static("Context limit tokens", classes="settings-label")
                     yield Input(
                         str(context_limit_tokens(self.settings)),
@@ -284,7 +284,12 @@ class SettingsPanel(Vertical):
                         )
 
                 yield Static("Subagents", classes="settings-section subagents")
-                yield SettingsHeaderRow("name", show_always=False, show_model=True)
+                yield SettingsHeaderRow(
+                    "name",
+                    show_always=False,
+                    show_model=True,
+                    row_class="settings-subagent-header",
+                )
                 for item in self.subagent_metadata:
                     name = str(item.get("name") or "")
                     if not name:

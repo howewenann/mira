@@ -117,6 +117,60 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.agent_unavailable_message, "Main model is not configured. Run /models.")
                 self.assertTrue(app.ready)
 
+    async def test_models_layout_uses_aligned_full_height_rows(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            config = {"settings": load_settings(workspace), "model_registry": ModelRegistry()}
+            subagents = [
+                {"name": "general-purpose", "kind": "raw", "description": "General work."},
+                {"name": "example-project-guide", "kind": "raw", "description": "Project guidance."},
+            ]
+            app = make_app(
+                workspace,
+                config=config,
+                model_name="unset",
+                resource_metadata={"subagents": subagents},
+            )
+
+            async with app.run_test(size=(110, 48)) as pilot:
+                await pilot.pause()
+                app.query_one("#model-settings-button", Button).press()
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: panel._model_controls_ready)
+                await pilot.pause()
+
+                context_section = panel.query_one(".settings-section.model-context")
+                context_row = panel.query_one(".settings-context-row")
+                context_input = panel.query_one("#settings-model-context-limit")
+                assignments_section = panel.query_one(".settings-section.model-assignments")
+                subagents_section = panel.query_one(".settings-section.subagents")
+                header = panel.query_one(".settings-subagent-header")
+                enable_header = header.query_one(".settings-column-label.enabled")
+                model_header = header.query_one(".settings-column-label.model")
+                rows = list(panel.query(".settings-subagent-row"))
+
+                self.assertEqual(context_section.styles.margin.top, 2)
+                self.assertEqual(assignments_section.styles.margin.top, 1)
+                self.assertEqual(header.styles.margin.top, 1)
+                self.assertEqual(context_row.region.height, 3)
+                self.assertEqual(context_input.region.y, context_row.region.y)
+                self.assertEqual(context_input.region.height, context_row.region.height)
+                self.assertEqual(len(rows), 2)
+
+                for row in rows:
+                    toggle = row.query_one(".settings-toggle")
+                    selector = row.query_one(".settings-subagent-model-select")
+                    self.assertEqual(selector.region.width, 28)
+                    self.assertEqual(toggle.region.x, enable_header.region.x)
+                    self.assertEqual(toggle.region.y, selector.region.y + 1)
+                    self.assertEqual(
+                        selector.region.x * 2 + selector.region.width,
+                        model_header.region.x * 2 + model_header.region.width,
+                    )
+
+                self.assertLess(subagents_section.region.y, header.region.y)
+
     async def test_inherited_labels_follow_main_while_explicit_assignments_stay_pinned(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             settings = load_settings(Path(directory))

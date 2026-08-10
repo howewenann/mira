@@ -698,11 +698,12 @@ Button.goal-action:focus {
 
 .settings-section.model-context {
     color: #D9956A;
+    margin-top: 2;
 }
 
 .settings-section.model-assignments {
     color: #8897E8;
-    margin-top: 2;
+    margin-top: 1;
 }
 
 .settings-section.subagents {
@@ -892,14 +893,30 @@ Button.goal-action:focus {
 }
 
 .settings-subagent-row > .settings-label {
+    width: 44;
+    min-width: 20;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
 
+.settings-subagent-header {
+    margin-top: 1;
+}
+
+.settings-subagent-row > .settings-toggle {
+    margin: 1 2 1 0;
+}
+
 .settings-column-label.model,
 .settings-subagent-model-select {
-    width: 34;
-    min-width: 24;
+    width: 28;
+    min-width: 22;
+}
+
+.settings-column-label.model {
+    height: 1fr;
+    content-align: center middle;
+    text-align: center;
 }
 
 #settings-tabs { height: 3; }
