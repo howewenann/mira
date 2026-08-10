@@ -285,7 +285,7 @@ class SettingsPanel(Vertical):
 
                 yield Static("Subagents", classes="settings-section subagents")
                 yield SettingsHeaderRow(
-                    "name",
+                    "",
                     show_always=False,
                     show_model=True,
                     row_class="settings-subagent-header",
@@ -470,6 +470,8 @@ class SettingsPanel(Vertical):
             return
         role = (event.select.id or "").removeprefix("settings-model-")
         selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
+        if (selected or None) == model_assignment(self.settings, role):
+            return
         if selected and selected not in self._profile_names():
             self._set_status(f"model profile '{selected}' is unavailable")
             self._restore_select_value(
@@ -485,11 +487,15 @@ class SettingsPanel(Vertical):
             if role == MAIN_MODEL:
                 self._refreshing_models = True
                 try:
-                    event.select.set_options(self._role_options(MAIN_MODEL))
-                    event.select.value = selected
-                finally:
+                    self._replace_model_select_options(
+                        event.select,
+                        self._role_options(MAIN_MODEL),
+                        selected,
+                    )
+                    self._refresh_inherited_model_labels()
+                except Exception:
                     self._refreshing_models = False
-                self._refresh_inherited_model_labels()
+                    raise
         else:
             self._restore_select_value(
                 event.select,
@@ -508,6 +514,8 @@ class SettingsPanel(Vertical):
             "",
         )
         selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
+        if name and (selected or None) == subagent_model_assignment(self.settings, name):
+            return
         if not name or (selected and selected not in self._profile_names()):
             self._set_status("selected model profile is unavailable")
             if name:
@@ -727,6 +735,18 @@ class SettingsPanel(Vertical):
     def _finish_model_value_restore(self) -> None:
         self._refreshing_models = False
 
+    def _replace_model_select_options(
+        self,
+        select: Select,
+        options: list[tuple[Any, str]],
+        value: str,
+    ) -> None:
+        """Replace options and repaint a value whose identity did not change."""
+        select.set_options(options)
+        select.value = value
+        label = next((label for label, option_value in options if option_value == value), value)
+        select.query_one("SelectCurrent").update(label)
+
     def _refresh_execute_env_section(self, focus_id: str | None = None) -> None:
         execute_env = execute_env_settings(self.settings)
         mode = str(execute_env.get("mode") or "system")
@@ -810,17 +830,25 @@ class SettingsPanel(Vertical):
             for selector in self.query(".settings-model-select"):
                 role = (selector.id or "").removeprefix("settings-model-")
                 if role != MAIN_MODEL and not model_assignment(self.settings, role):
-                    selector.set_options(self._role_options(role))
-                    selector.value = INHERIT_VALUE
+                    self._replace_model_select_options(
+                        selector,
+                        self._role_options(role),
+                        INHERIT_VALUE,
+                    )
             for item in self.subagent_metadata:
                 name = str(item.get("name") or "")
                 if not name or subagent_model_assignment(self.settings, name):
                     continue
                 selector = self.query_one(f"#settings-subagent-model-{safe_id(name)}", Select)
-                selector.set_options(self._subagent_options(item))
-                selector.value = INHERIT_VALUE
-        finally:
+                self._replace_model_select_options(
+                    selector,
+                    self._subagent_options(item),
+                    INHERIT_VALUE,
+                )
+        except Exception:
             self._refreshing_models = False
+            raise
+        self.call_after_refresh(self._finish_model_value_restore)
 
 
 def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:

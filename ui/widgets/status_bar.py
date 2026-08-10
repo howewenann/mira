@@ -49,7 +49,9 @@ class TelemetryBar(Horizontal):
         dashboard: dict[str, Any] | None = None,
         turns: int = 0,
     ) -> None:
-        self.query_one("#model-settings-button", Button).label = Text(f"model: {model_name or 'unset'}")
+        button = self.query_one("#model-settings-button", Button)
+        button.label = Text(f"model: {model_name or 'unset'}")
+        button.refresh(layout=True)
         self.query_one("#telemetry-values", Static).update(telemetry_values(dashboard, turns))
 
 

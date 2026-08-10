@@ -172,13 +172,22 @@ IssuesScreen {
 
 #model-settings-button {
     width: auto;
-    max-width: 42;
-    min-width: 7;
+    max-width: 60%;
+    min-width: 14;
     height: 1;
     border: none;
     padding: 0 1;
-    background: #30375f;
-    color: #dce1ff;
+    content-align: left middle;
+    text-align: left;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    background: #8897E8;
+    color: #0C0F10;
+}
+
+#model-settings-button:focus {
+    background: #A8B3FF;
+    color: #0C0F10;
 }
 
 #telemetry-values {
@@ -892,31 +901,48 @@ Button.goal-action:focus {
     min-width: 24;
 }
 
-.settings-subagent-row > .settings-label {
-    width: 44;
-    min-width: 20;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
+.settings-context-row > .settings-label {
+    width: 30;
 }
 
-.settings-subagent-header {
-    margin-top: 1;
+.settings-subagent-header > .settings-column-label.name,
+.settings-subagent-row > .settings-label {
+    width: 28;
+    min-width: 20;
+    margin-right: 2;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 .settings-subagent-row > .settings-toggle {
     margin: 1 2 1 0;
 }
 
-.settings-column-label.model,
+.settings-subagent-header > .settings-column-label.model,
 .settings-subagent-model-select {
-    width: 28;
+    width: 1fr;
     min-width: 22;
 }
 
-.settings-column-label.model {
+.settings-subagent-header > .settings-column-label.model {
+    max-width: 44;
+}
+
+.settings-subagent-model-select {
+    max-width: 43;
+}
+
+.settings-subagent-header > .settings-column-label.model {
     height: 1fr;
+    margin-right: 1;
     content-align: center middle;
     text-align: center;
+}
+
+.settings-subagent-model-select > SelectCurrent > Static#label {
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #settings-tabs { height: 3; }

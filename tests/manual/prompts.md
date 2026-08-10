@@ -1387,11 +1387,17 @@ Use a disposable workspace with no existing `.mira/`.
    connected, change Main, Rubric, Summarization, the context limit, a subagent
    enable toggle, and a raw subagent model. Expected: each change reports
    `settings saved; agents rebuilt`, takes effect immediately, and does not
-   disconnect or restart any MCP server.
-4. Add a raw subagent with a long `description`, enable it under Models, and type
-   `@general-` and a fragment of the new name. Expected: enabled matches appear
-   as single-line `SUBA` rows in alphabetical order with ellipsis overflow.
-   Selecting general-purpose inserts exactly `general-purpose subagent`.
+   disconnect or restart any MCP server. The bright footer button reads
+   `model: [profile] provider:model`, stays left-aligned, and truncates with `…`
+   only when the terminal cannot fit the complete identity.
+4. Add a raw subagent with a long name and `description`, and use a long profile
+   name. Expected: Context, the assignment dropdowns, and Subagent Enable share
+   one left edge; the Subagents header has no visible `name`; and names and model
+   selections remain on one line with `…` instead of wrapping. Enable keeps the
+   standard width and a two-cell gap follows each name. Enable the subagent, then
+   type `@general-` and a fragment of the new name. Expected: enabled matches
+   appear as single-line `SUBA` rows in alphabetical order with ellipsis
+   overflow. Selecting general-purpose inserts exactly `general-purpose subagent`.
 5. Add nested prompt files whose flattened names collide, plus malformed model,
    MCP, and tool definitions. Expected: colliding prompts are all excluded and
    `/issues` shows one flat, initially collapsed list ordered STARTUP, MODEL,

@@ -23,13 +23,25 @@ from config.settings import (
     set_model_assignment,
     set_subagent_enabled,
     set_subagent_model_assignment,
+    subagent_model_assignment,
 )
 from runtime.issues import Issue
 from tests.test_textual_app import make_app, renderable_plain, wait_until
 from ui.command_help import command_help_entries
 from ui.widgets import IssuesScreen, PromptBox, SettingsPanel
 from ui.widgets.settings_panel import INHERIT_VALUE
-from textual.widgets import Button, Collapsible, Select
+from textual.color import Color
+from textual.geometry import Region
+from textual.widgets import Button, Collapsible, Select, Static
+
+
+def rendered_lines(widget: object) -> list[str]:
+    """Return the exact terminal-cell lines rendered by a mounted widget."""
+    region = getattr(widget, "region")
+    return [
+        strip.text
+        for strip in widget.render_lines(Region(0, 0, region.width, region.height))
+    ]
 
 
 class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
@@ -102,6 +114,67 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/models", commands)
             self.assertNotIn("/model", commands)
 
+    async def test_footer_model_button_is_bright_left_aligned_and_responsive(self) -> None:
+        """The footer shortcut should preserve its template and ellipsize only when needed."""
+        long_identity = "[lmstudio-gemma] openai:google/gemma-4-12b"
+        rendered_by_width: dict[int, str] = {}
+        button_widths: list[int] = []
+
+        for width in (80, 110, 140):
+            app = make_app(model_name=long_identity)
+            async with app.run_test(size=(width, 20)) as pilot:
+                await pilot.pause()
+                row = app.query_one("#telemetry-row")
+                button = app.query_one("#model-settings-button", Button)
+                telemetry = app.query_one("#telemetry-values")
+                rendered = rendered_lines(button)[0].strip()
+
+                self.assertEqual(str(button.label), f"model: {long_identity}")
+                self.assertEqual(button.styles.background, Color.parse("#8897E8"))
+                self.assertEqual(button.styles.color, Color.parse("#0C0F10"))
+                self.assertEqual(button.styles.content_align_horizontal, "left")
+                self.assertEqual(button.styles.text_align, "left")
+                self.assertLessEqual(button.region.width, int(row.region.width * 0.6) + 1)
+                self.assertGreater(telemetry.region.width, 0)
+                self.assertEqual(button.region.right, telemetry.region.x)
+
+                if width == 110:
+                    button.focus()
+                    await pilot.pause()
+                    self.assertEqual(button.styles.background, Color.parse("#A8B3FF"))
+
+                rendered_by_width[width] = rendered
+                button_widths.append(button.region.width)
+
+        self.assertTrue(rendered_by_width[80].startswith("model: [lmstudio"))
+        self.assertTrue(rendered_by_width[80].endswith("…"))
+        self.assertTrue(rendered_by_width[110].endswith("…"))
+        self.assertEqual(rendered_by_width[140], f"model: {long_identity}")
+        self.assertEqual(button_widths, sorted(button_widths))
+
+        app = make_app(model_name="unset")
+        async with app.run_test(size=(80, 20)) as pilot:
+            await pilot.pause()
+            button = app.query_one("#model-settings-button", Button)
+            self.assertEqual(rendered_lines(button)[0].strip(), "model: unset")
+
+    async def test_footer_model_button_reflows_immediately_when_identity_changes(self) -> None:
+        """A runtime model update should resize the mounted footer button immediately."""
+        identity = "[lmstudio-gemma] openai:google/gemma-4-12b"
+        app = make_app(model_name="unset")
+
+        async with app.run_test(size=(140, 20)) as pilot:
+            await pilot.pause()
+            button = app.query_one("#model-settings-button", Button)
+            unset_width = button.region.width
+
+            app.model_name = identity
+            app._set_status(state=app.status_state)
+            await pilot.pause()
+
+            self.assertGreater(button.region.width, unset_width)
+            self.assertEqual(rendered_lines(button)[0].strip(), f"model: {identity}")
+
     async def test_disabling_mcp_without_main_keeps_runtime_available(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
@@ -146,15 +219,32 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
     async def test_models_layout_uses_aligned_full_height_rows(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
-            config = {"settings": load_settings(workspace), "model_registry": ModelRegistry()}
+            profile = "lmstudio-gemma-profile-name-that-is-deliberately-long"
+            settings = set_model_assignment(load_settings(workspace), "main", profile)
+            self.assertTrue(save_settings(workspace, settings))
+            config = {
+                "settings": settings,
+                "model_registry": ModelRegistry(
+                    {
+                        profile: ModelProfile(
+                            profile,
+                            {"provider": "openai", "model": "google/gemma-4-12b"},
+                        )
+                    }
+                ),
+            }
             subagents = [
                 {"name": "general-purpose", "kind": "raw", "description": "General work."},
-                {"name": "example-project-guide", "kind": "raw", "description": "Project guidance."},
+                {
+                    "name": "extremely-long-user-defined-subagent-name-that-needs-ellipsis",
+                    "kind": "raw",
+                    "description": "Project guidance.",
+                },
             ]
             app = make_app(
                 workspace,
                 config=config,
-                model_name="unset",
+                model_name=f"[{profile}] openai:google/gemma-4-12b",
                 resource_metadata={"subagents": subagents},
             )
 
@@ -169,31 +259,50 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 context_section = panel.query_one(".settings-section.model-context")
                 context_row = panel.query_one(".settings-context-row")
                 context_input = panel.query_one("#settings-model-context-limit")
+                main_selector = panel.query_one("#settings-model-main", Select)
                 assignments_section = panel.query_one(".settings-section.model-assignments")
                 subagents_section = panel.query_one(".settings-section.subagents")
                 header = panel.query_one(".settings-subagent-header")
+                name_header = header.query_one(".settings-column-label.name", Static)
                 enable_header = header.query_one(".settings-column-label.enabled")
                 model_header = header.query_one(".settings-column-label.model")
                 rows = list(panel.query(".settings-subagent-row"))
 
                 self.assertEqual(context_section.styles.margin.top, 2)
                 self.assertEqual(assignments_section.styles.margin.top, 1)
-                self.assertEqual(header.styles.margin.top, 1)
+                self.assertEqual(header.styles.margin.top, 0)
                 self.assertEqual(context_row.region.height, 3)
                 self.assertEqual(context_input.region.y, context_row.region.y)
                 self.assertEqual(context_input.region.height, context_row.region.height)
+                self.assertEqual(context_input.region.x, main_selector.region.x)
+                self.assertEqual(renderable_plain(name_header), "")
+                self.assertEqual(header.region.y, subagents_section.region.bottom)
                 self.assertEqual(len(rows), 2)
 
                 for row in rows:
+                    name = row.query_one(".settings-label", Static)
                     toggle = row.query_one(".settings-toggle")
                     selector = row.query_one(".settings-subagent-model-select")
-                    self.assertEqual(selector.region.width, 28)
+                    selector_label = selector.query_one("SelectCurrent").query_one("#label", Static)
+                    self.assertEqual(toggle.region.x, main_selector.region.x)
                     self.assertEqual(toggle.region.x, enable_header.region.x)
+                    self.assertEqual(toggle.region.x - name.region.right, 2)
                     self.assertEqual(toggle.region.y, selector.region.y + 1)
+                    self.assertEqual(row.region.height, 3)
+                    self.assertGreaterEqual(selector.region.width, 40)
+                    self.assertGreater(selector.region.width, name.region.width)
+                    self.assertEqual(selector_label.region.height, 1)
                     self.assertEqual(
                         selector.region.x * 2 + selector.region.width,
                         model_header.region.x * 2 + model_header.region.width,
                     )
+
+                long_row = rows[1]
+                long_name = long_row.query_one(".settings-label", Static)
+                long_model = long_row.query_one("SelectCurrent").query_one("#label", Static)
+                self.assertEqual([line for line in rendered_lines(long_name) if line.strip()][0][-1], "…")
+                self.assertEqual(len(rendered_lines(long_model)), 1)
+                self.assertEqual(rendered_lines(long_model)[0].rstrip()[-1], "…")
 
                 self.assertLess(subagents_section.region.y, header.region.y)
 
@@ -231,6 +340,86 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             str(panel._subagent_options({"name": "async", "kind": "async", "graph_id": "jobs"})[0][0]),
             "[async] jobs",
         )
+
+    async def test_mounted_inherited_labels_repaint_immediately_after_main_changes(self) -> None:
+        """Null assignments should repaint without closing and reopening Settings."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            settings = set_model_assignment(load_settings(workspace), "summarization", "old")
+            settings = set_subagent_model_assignment(settings, "reviewer", "old")
+            self.assertTrue(save_settings(workspace, settings))
+            registry = ModelRegistry(
+                {
+                    "old": ModelProfile("old", {"provider": "openai", "model": "old-model"}),
+                    "new": ModelProfile("new", {"provider": "openai", "model": "new-model"}),
+                }
+            )
+            subagents = [
+                {"name": "general-purpose", "kind": "raw", "description": "General work."},
+                {"name": "reviewer", "kind": "raw", "description": "Review work."},
+            ]
+            app = make_app(
+                workspace,
+                config={"settings": settings, "model_registry": registry},
+                model_name="unset",
+                resource_metadata={"subagents": subagents},
+            )
+
+            async with app.run_test(size=(110, 42)) as pilot:
+                await pilot.pause()
+                app._apply_settings = AsyncMock(  # type: ignore[method-assign]
+                    return_value=(True, "settings saved; agents rebuilt")
+                )
+                app._handle_settings_command("models")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: panel._model_controls_ready)
+
+                main = panel.query_one("#settings-model-main", Select)
+                rubric = panel.query_one("#settings-model-rubric", Select)
+                summarization = panel.query_one("#settings-model-summarization", Select)
+                general = panel.query_one("#settings-subagent-model-general-purpose", Select)
+                reviewer = panel.query_one("#settings-subagent-model-reviewer", Select)
+                self.assertEqual(
+                    renderable_plain(rubric.query_one("SelectCurrent").query_one("#label")),
+                    "unset (default)",
+                )
+                self.assertEqual(
+                    renderable_plain(general.query_one("SelectCurrent").query_one("#label")),
+                    "unset (default)",
+                )
+
+                main.value = "new"
+                await wait_until(lambda: model_assignment(panel.settings, "main") == "new")
+                await wait_until(
+                    lambda: renderable_plain(
+                        rubric.query_one("SelectCurrent").query_one("#label")
+                    )
+                    == "new (default)"
+                )
+
+                self.assertEqual(
+                    renderable_plain(rubric.query_one("SelectCurrent").query_one("#label")),
+                    "new (default)",
+                )
+                self.assertEqual(
+                    renderable_plain(general.query_one("SelectCurrent").query_one("#label")),
+                    "new (default)",
+                )
+                self.assertEqual(
+                    renderable_plain(summarization.query_one("SelectCurrent").query_one("#label")),
+                    "old",
+                )
+                self.assertEqual(
+                    renderable_plain(reviewer.query_one("SelectCurrent").query_one("#label")),
+                    "old",
+                )
+
+            self.assertEqual(app._apply_settings.await_count, 1)
+            self.assertIsNone(model_assignment(settings, "main"))
+            self.assertEqual(model_assignment(panel.settings, "main"), "new")
+            self.assertEqual(model_assignment(panel.settings, "summarization"), "old")
+            self.assertEqual(subagent_model_assignment(panel.settings, "reviewer"), "old")
 
     async def test_models_changes_rebuild_agents_without_reloading_mcp(self) -> None:
         """Every Models control should preserve MCP and share the rebuild status."""
