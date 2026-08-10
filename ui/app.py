@@ -1967,25 +1967,32 @@ class MiraApp(App[None]):
         if not save_settings(self.workspace, settings):
             return False, "could not save .mira/settings.yml"
 
-        self.config = dict(self.config or {})
+        old_config = self.config
+        self.config = dict(old_config or {})
         self.config["settings"] = settings
         if new_git_enabled != old_git_enabled:
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
             return True, "git protection disabled"
 
-        if old_settings.get("models") != settings.get("models"):
-            await self._reload_runtime()
-            return True, "model settings saved; runtime refreshed"
-
         try:
-            await self._rebuild_agents()
+            if old_settings.get("models") != settings.get("models"):
+                await self._rebuild_model_agents(old_settings)
+            else:
+                await self._rebuild_agents()
         except Exception as error:
             from config.llm import ConfigError
 
-            if not isinstance(error, ConfigError):
-                raise
-            await self._reload_runtime()
+            restored = save_settings(self.workspace, old_settings)
+            self.config = old_config
+            if isinstance(error, ConfigError):
+                message = f"settings not saved: {error}"
+            else:
+                error_path = self._write_error_report(error, source="tui.settings")
+                message = f"settings not saved; agent rebuild failed: {error}; error report: {error_path}"
+            if not restored:
+                message += "; could not restore .mira/settings.yml"
+            return False, message
         return True, "settings saved; agents rebuilt"
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
@@ -2786,6 +2793,70 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
+    async def _rebuild_model_agents(self, old_settings: dict[str, Any]) -> None:
+        """Apply Models settings without reloading configuration or MCP servers."""
+        if self.config is None or self.checkpointer is None:
+            return
+
+        from agent.llm import get_llm, get_model_name, resolve_model_profile
+        from config.llm import ConfigError
+        from config.metadata import ModelMetadata, infer_model_metadata
+        from config.settings import MAIN_MODEL, context_limit_tokens, model_assignment
+
+        metadata = self._current_model_metadata()
+        main_changed = model_assignment(old_settings, MAIN_MODEL) != model_assignment(
+            self.config,
+            MAIN_MODEL,
+        )
+        context_changed = context_limit_tokens(old_settings) != context_limit_tokens(self.config)
+        if main_changed or context_changed:
+            try:
+                resolve_model_profile(self.config)
+            except ConfigError:
+                metadata = ModelMetadata(
+                    context_limit_tokens(self.config),
+                    "settings.models.context_limit_tokens",
+                )
+            else:
+                inspect_model = get_llm(self.config, metadata=ModelMetadata())
+                metadata = await infer_model_metadata(self.config, model=inspect_model)
+
+        await self._rebuild_agents(metadata=metadata)
+
+        self.model_name = get_model_name(self.config)
+        self.context_limit_tokens = metadata.context_tokens
+        self.context_limit_source = metadata.context_source
+        self.runtime_snapshot = build_runtime_snapshot(
+            self.config,
+            self.launch_options,
+            model_name=self.model_name,
+        )
+        ensure_dashboard(
+            self.session,
+            model_name=self.model_name,
+            context_limit_tokens=self.context_limit_tokens,
+            context_limit_source=self.context_limit_source,
+        )
+        if self.store is not None:
+            self.store.save(self.session)
+        self._refresh_startup_splash()
+        self._set_status(state=self.status_state)
+
+    def _current_model_metadata(self) -> Any:
+        """Return the metadata currently bound to the active agent pair."""
+        from config.metadata import ModelMetadata
+        from config.settings import context_limit_tokens
+
+        configured_limit = context_limit_tokens(self.config)
+        return ModelMetadata(
+            context_tokens=self.context_limit_tokens or configured_limit,
+            context_source=(
+                self.context_limit_source
+                if self.context_limit_tokens
+                else "settings.models.context_limit_tokens"
+            ),
+        )
+
     async def _refresh_model_metadata(self) -> None:
         """Refresh model metadata and rebuild agents when context changes."""
         if self.config is None or self.checkpointer is None:
@@ -2806,9 +2877,9 @@ class MiraApp(App[None]):
         if not metadata.context_tokens or metadata.context_tokens == self.context_limit_tokens:
             return
 
+        await self._rebuild_agents(metadata=metadata)
         self.context_limit_tokens = metadata.context_tokens
         self.context_limit_source = metadata.context_source
-        await self._rebuild_agents(metadata=metadata)
         ensure_dashboard(
             self.session,
             model_name=self.model_name,
@@ -2822,6 +2893,8 @@ class MiraApp(App[None]):
         """Rebuild action and planning agents after settings or metadata changes."""
         if self.config is None or self.checkpointer is None:
             return
+
+        metadata = metadata or self._current_model_metadata()
 
         from agent.llm import active_model_issues, model_unavailable_message
         from agent.resources import build_resources, configure_subagents

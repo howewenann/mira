@@ -122,6 +122,12 @@ credentials, query strings, and fragments; API keys and arbitrary config values
 never enter the snapshot or inspection output.
 LM Studio retains its metadata probe when a profile declares `lmstudio`; MIRA
 does not remap that provider or use an alternate registry-profile constructor.
+Models-tab changes rebuild the Act/Plan pair from the already loaded registry
+and current MCP manager. Main and context-cap changes also refresh model
+metadata and visible identity; secondary assignments and subagent controls
+reuse the active metadata. These settings never restart MCP servers. Explicit
+`/reload` remains the boundary for rereading environment and workspace
+configuration and restarting MCP runtimes.
 
 **Why:** Named profiles make provider configuration ordered, inspectable, and
 reusable without duplicating secrets. Keeping null inheritance makes Main

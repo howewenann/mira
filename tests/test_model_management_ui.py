@@ -5,11 +5,25 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from agent.mcp.manager import MCPManager
-from config.llm import ModelProfile, ModelRegistry
-from config.settings import load_settings, model_assignment, set_model_assignment
+from config.llm import ConfigError, ModelProfile, ModelRegistry
+from config.metadata import ModelMetadata
+from config.settings import (
+    DEFAULT_SETTINGS,
+    context_limit_tokens,
+    load_settings,
+    model_assignment,
+    save_settings,
+    set_context_limit_tokens,
+    set_model_assignment,
+    set_subagent_enabled,
+    set_subagent_model_assignment,
+)
 from runtime.issues import Issue
 from tests.test_textual_app import make_app, renderable_plain, wait_until
 from ui.command_help import command_help_entries
@@ -19,6 +33,18 @@ from textual.widgets import Button, Collapsible, Select
 
 
 class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _mcp_manager() -> SimpleNamespace:
+        return SimpleNamespace(
+            reload=AsyncMock(),
+            shutdown=AsyncMock(),
+            set_change_handler=lambda _handler: None,
+            issues=[],
+            show_status=False,
+            servers={},
+            prompt_registry=SimpleNamespace(issues=[]),
+        )
+
     async def test_no_main_keeps_local_commands_and_blocks_only_model_turns(self) -> None:
         app = make_app(agent=None, plan_agent=None, model_name="unset")
         async with app.run_test() as pilot:
@@ -205,6 +231,197 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             str(panel._subagent_options({"name": "async", "kind": "async", "graph_id": "jobs"})[0][0]),
             "[async] jobs",
         )
+
+    async def test_models_changes_rebuild_agents_without_reloading_mcp(self) -> None:
+        """Every Models control should preserve MCP and share the rebuild status."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            settings = deepcopy(DEFAULT_SETTINGS)
+            settings["models"]["main"] = "old"
+            settings["models"]["context_limit_tokens"] = 8192
+            registry = ModelRegistry(
+                {
+                    "old": ModelProfile("old", {"provider": "openai", "model": "old-model"}),
+                    "new": ModelProfile("new", {"provider": "openai", "model": "new-model"}),
+                }
+            )
+            manager = self._mcp_manager()
+            app = make_app(
+                workspace,
+                config={"settings": settings, "settings_valid": True, "model_registry": registry},
+                model_name="[old] openai:old-model",
+                mcp_manager=manager,
+            )
+
+            async def infer_metadata(config: dict, model: object | None = None) -> ModelMetadata:
+                return ModelMetadata(
+                    context_limit_tokens(config),
+                    "settings.models.context_limit_tokens",
+                )
+
+            with (
+                patch("agent.llm.get_llm", return_value=SimpleNamespace(profile={})),
+                patch(
+                    "config.metadata.infer_model_metadata",
+                    new_callable=AsyncMock,
+                    side_effect=infer_metadata,
+                ) as infer,
+            ):
+                async with app.run_test(size=(110, 36)) as pilot:
+                    await pilot.pause()
+                    app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
+                    app._rebuild_agents = AsyncMock()  # type: ignore[method-assign]
+
+                    updates = [
+                        lambda current: set_model_assignment(current, "main", "new"),
+                        lambda current: set_model_assignment(current, "rubric", "old"),
+                        lambda current: set_model_assignment(current, "summarization", "new"),
+                        lambda current: set_subagent_enabled(current, "project-guide", True),
+                        lambda current: set_subagent_model_assignment(current, "project-guide", "old"),
+                        lambda current: set_context_limit_tokens(current, 4096),
+                    ]
+                    for update in updates:
+                        ok, message = await app._apply_settings(update(app.config["settings"]))
+                        self.assertTrue(ok)
+                        self.assertEqual(message, "settings saved; agents rebuilt")
+
+                    footer = str(app.query_one("#model-settings-button", Button).label)
+
+            app._reload_runtime.assert_not_awaited()
+            app._rebuild_agents.assert_awaited()
+            self.assertEqual(app._rebuild_agents.await_count, 6)
+            manager.reload.assert_not_awaited()
+            self.assertEqual(infer.await_count, 2)
+            self.assertEqual(
+                app._rebuild_agents.await_args_list[1].kwargs["metadata"],
+                ModelMetadata(8192, "settings.models.context_limit_tokens"),
+            )
+            self.assertEqual(app.model_name, "[new] openai:new-model")
+            self.assertEqual(app.context_limit_tokens, 4096)
+            self.assertEqual(app.runtime_snapshot.provider, "openai")
+            self.assertEqual(footer, "model: [new] openai:new-model")
+
+    async def test_plain_agent_rebuild_preserves_active_model_metadata(self) -> None:
+        """General settings rebuilds should keep the provider-derived context."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            app = make_app(
+                Path(directory),
+                context_limit_tokens=4096,
+                context_limit_source="provider.profile.max_input_tokens",
+            )
+
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                with patch.object(
+                    app,
+                    "_build_agent_pair",
+                    return_value=("rebuilt-agent", "rebuilt-plan-agent"),
+                ) as build_pair:
+                    await app._rebuild_agents()
+
+            self.assertEqual(
+                build_pair.call_args.kwargs["metadata"],
+                ModelMetadata(4096, "provider.profile.max_input_tokens"),
+            )
+            self.assertEqual(app.agent, "rebuilt-agent")
+            self.assertEqual(app.plan_agent, "rebuilt-plan-agent")
+
+    async def test_models_change_without_main_keeps_expected_model_issue(self) -> None:
+        """Subagent settings should rebuild locally even while Main is unset."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            manager = self._mcp_manager()
+            app = make_app(
+                workspace,
+                config={
+                    "settings": load_settings(workspace),
+                    "settings_valid": True,
+                    "model_registry": ModelRegistry(),
+                },
+                agent=None,
+                plan_agent=None,
+                model_name="unset",
+                mcp_manager=manager,
+            )
+
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
+                updated = set_subagent_enabled(app.config["settings"], "project-guide", True)
+                ok, message = await app._apply_settings(updated)
+
+            self.assertTrue(ok)
+            self.assertEqual(message, "settings saved; agents rebuilt")
+            app._reload_runtime.assert_not_awaited()
+            manager.reload.assert_not_awaited()
+            self.assertIsNone(app.agent)
+            self.assertIsNone(app.plan_agent)
+            self.assertTrue(any(issue.summary == "Main model is not configured" for issue in app.issues))
+
+    async def test_rejected_model_selection_restores_visible_value(self) -> None:
+        """A failed immediate save should put the selector back on its prior assignment."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            settings = set_model_assignment(load_settings(workspace), "main", "old")
+            self.assertTrue(save_settings(workspace, settings))
+            registry = ModelRegistry(
+                {
+                    "old": ModelProfile("old", {"provider": "openai", "model": "old-model"}),
+                    "new": ModelProfile("new", {"provider": "openai", "model": "new-model"}),
+                }
+            )
+            app = make_app(
+                workspace,
+                config={"settings": settings, "model_registry": registry},
+                model_name="[old] openai:old-model",
+            )
+
+            async with app.run_test(size=(110, 36)) as pilot:
+                await pilot.pause()
+                app._apply_settings = AsyncMock(  # type: ignore[method-assign]
+                    return_value=(False, "settings not saved: rebuild failed")
+                )
+                app._handle_settings_command("models")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: panel._model_controls_ready)
+                selector = panel.query_one("#settings-model-main", Select)
+                await wait_until(lambda: selector.value == "old")
+                selector.value = "new"
+                event = SimpleNamespace(stop=lambda: None, select=selector, value="new")
+                await panel.change_model_assignment(event)
+
+                status = renderable_plain(panel.query_one("#settings-status"))
+
+            self.assertEqual(app._apply_settings.await_count, 1)
+            self.assertIn("settings not saved: rebuild failed", status)
+
+    async def test_failed_model_rebuild_restores_settings_without_full_reload(self) -> None:
+        """A rejected Models change should leave disk, config, and agents unchanged."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            manager = self._mcp_manager()
+            app = make_app(workspace, mcp_manager=manager)
+
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                old_agent = app.agent
+                old_plan_agent = app.plan_agent
+                app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
+                app._rebuild_agents = AsyncMock(  # type: ignore[method-assign]
+                    side_effect=ConfigError("rubric model is unavailable")
+                )
+                updated = set_model_assignment(app.config["settings"], "rubric", "test")
+                ok, message = await app._apply_settings(updated)
+
+            self.assertFalse(ok)
+            self.assertEqual(message, "settings not saved: rubric model is unavailable")
+            self.assertIsNone(model_assignment(load_settings(workspace), "rubric"))
+            self.assertIsNone(model_assignment(app.config, "rubric"))
+            self.assertIs(app.agent, old_agent)
+            self.assertIs(app.plan_agent, old_plan_agent)
+            app._reload_runtime.assert_not_awaited()
+            manager.reload.assert_not_awaited()
 
     async def test_issues_screen_is_flat_collapsed_and_view_only(self) -> None:
         issue = Issue("MODEL", "Main model is not configured", ".mira/settings.yml", "Unset", "Run /models.")

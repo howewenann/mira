@@ -472,6 +472,10 @@ class SettingsPanel(Vertical):
         selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
         if selected and selected not in self._profile_names():
             self._set_status(f"model profile '{selected}' is unavailable")
+            self._restore_select_value(
+                event.select,
+                model_assignment(self.settings, role) or INHERIT_VALUE,
+            )
             return
         updated = set_model_assignment(self.settings, role, selected or None)
         ok, message = await self.apply_change(updated)
@@ -486,6 +490,11 @@ class SettingsPanel(Vertical):
                 finally:
                     self._refreshing_models = False
                 self._refresh_inherited_model_labels()
+        else:
+            self._restore_select_value(
+                event.select,
+                model_assignment(self.settings, role) or INHERIT_VALUE,
+            )
 
     @on(Select.Changed, ".settings-subagent-model-select")
     async def change_subagent_model(self, event: Select.Changed) -> None:
@@ -501,12 +510,22 @@ class SettingsPanel(Vertical):
         selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
         if not name or (selected and selected not in self._profile_names()):
             self._set_status("selected model profile is unavailable")
+            if name:
+                self._restore_select_value(
+                    event.select,
+                    subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
+                )
             return
         updated = set_subagent_model_assignment(self.settings, name, selected or None)
         ok, message = await self.apply_change(updated)
         self._set_status(message)
         if ok:
             self.settings = updated
+        else:
+            self._restore_select_value(
+                event.select,
+                subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
+            )
 
     @on(Input.Submitted, ".settings-input")
     async def submit_execute_env_input(self, event: Input.Submitted) -> None:
@@ -533,6 +552,8 @@ class SettingsPanel(Vertical):
             self._set_status(message)
             if ok:
                 self.settings = updated
+            else:
+                event.input.value = str(context_limit_tokens(self.settings))
             return
         value = event.value
         if input_id == "settings-execute-env-allow":
@@ -696,6 +717,15 @@ class SettingsPanel(Vertical):
 
     def _set_status(self, message: str) -> None:
         self.query_one("#settings-status", Static).update(message)
+
+    def _restore_select_value(self, select: Select, value: str) -> None:
+        """Restore a rejected model selection without firing another save."""
+        self._refreshing_models = True
+        select.value = value
+        self.call_after_refresh(self._finish_model_value_restore)
+
+    def _finish_model_value_restore(self) -> None:
+        self._refreshing_models = False
 
     def _refresh_execute_env_section(self, focus_id: str | None = None) -> None:
         execute_env = execute_env_settings(self.settings)

@@ -1383,7 +1383,11 @@ Use a disposable workspace with no existing `.mira/`.
    Expected: the footer and splash show `[profile] provider:model`; null Rubric,
    Summarization, and raw subagents immediately show `<profile> (default)` while
    their stored YAML values remain null. Pin one secondary assignment, change
-   Main, and confirm only inherited labels change.
+   Main, and confirm only inherited labels change. While MCP servers are
+   connected, change Main, Rubric, Summarization, the context limit, a subagent
+   enable toggle, and a raw subagent model. Expected: each change reports
+   `settings saved; agents rebuilt`, takes effect immediately, and does not
+   disconnect or restart any MCP server.
 4. Add a raw subagent with a long `description`, enable it under Models, and type
    `@general-` and a fragment of the new name. Expected: enabled matches appear
    as single-line `SUBA` rows in alphabetical order with ellipsis overflow.
