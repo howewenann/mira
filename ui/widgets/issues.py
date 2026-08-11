@@ -37,6 +37,13 @@ class IssuesScreen(ModalScreen[None]):
                     with Collapsible(title=f"[{issue.category}] {issue.summary}", collapsed=True):
                         yield Static(body, markup=False, classes="issue-details")
 
+    def on_mount(self) -> None:
+        """Open as a passive viewer without selecting an action or issue."""
+        self.call_after_refresh(self._clear_initial_focus)
+
+    def _clear_initial_focus(self) -> None:
+        self.set_focus(None)
+
     def action_close(self) -> None:
         self.dismiss()
 

@@ -45,6 +45,8 @@ class IssuesScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(row.collapsed for row in rows))
             self.assertEqual(len(app.screen.query("Input")), 0)
             self.assertEqual(len(app.screen.query("#issues-title-close")), 1)
+            self.assertFalse(app.screen.query_one("#issues-title-close", Button).has_focus)
+            self.assertIsNone(app.focused)
 
     async def test_escape_closes_screen(self) -> None:
         app = IssuesApp([Issue("MODEL", "missing")])
