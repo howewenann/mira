@@ -173,6 +173,9 @@ class AutocompleteInput(Vertical):
         if prompt.disabled:
             self.dismiss()
             return
+        if prompt.displaying_untouched_history_entry:
+            self.dismiss()
+            return
         cursor = _offset_from_location(prompt.value, prompt.cursor_location)
         fragment = completion_fragment(prompt.value, cursor)
         if fragment is None:

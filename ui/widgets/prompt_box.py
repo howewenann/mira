@@ -21,6 +21,7 @@ class PromptBox(TextArea):
         self._history: list[str] = []
         self._history_index: int | None = None
         self._history_draft = ""
+        self._untouched_history_entry = False
 
     @property
     def value(self) -> str:
@@ -36,6 +37,7 @@ class PromptBox(TextArea):
         self._history = [entry for entry in entries if entry]
         self._history_index = len(self._history)
         self._history_draft = ""
+        self._untouched_history_entry = False
 
     def remember(self, text: str) -> None:
         """Add a submitted prompt to in-memory history."""
@@ -46,6 +48,20 @@ class PromptBox(TextArea):
             self._history.append(entry)
         self._history_index = len(self._history)
         self._history_draft = ""
+        self._untouched_history_entry = False
+
+    @property
+    def displaying_untouched_history_entry(self) -> bool:
+        """Return whether the prompt still contains a recalled history entry."""
+        if not self._untouched_history_entry:
+            return False
+        if (
+            self._history_index is None
+            or self._history_index >= len(self._history)
+            or self.value != self._history[self._history_index]
+        ):
+            self._untouched_history_entry = False
+        return self._untouched_history_entry
 
     def on_key(self, event: Key) -> None:
         """Submit prompts and navigate history."""
@@ -98,12 +114,14 @@ class PromptBox(TextArea):
             return
 
         self._history_index = len(self._history)
+        self._untouched_history_entry = False
         self.value = self._history_draft
 
     def _show_history_value(self) -> None:
         """Render the current history entry in the prompt."""
         if self._history_index is None or self._history_index >= len(self._history):
             return
+        self._untouched_history_entry = True
         self.value = self._history[self._history_index]
 
     def _move_cursor_to_end(self) -> None:

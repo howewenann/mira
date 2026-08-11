@@ -648,6 +648,27 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(completion.active)
             self.assertTrue(prompt.has_focus)
 
+    async def test_manually_typed_slash_fragment_keeps_completion_navigation(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
+
+            await pilot.press("/", "r", "e", "l")
+            await pilot.pause()
+
+            self.assertTrue(completion.active)
+            self.assertEqual(
+                [item.display for item in completion.items],
+                ["/reload", "/reload-runtime"],
+            )
+            self.assertEqual(options.highlighted, 0)
+            await pilot.press("down")
+            self.assertEqual(options.highlighted, 1)
+            await pilot.press("up")
+            self.assertEqual(options.highlighted, 0)
+
     async def test_escape_keeps_normal_app_focus_behavior_without_completion(self) -> None:
         app = make_app()
 
@@ -679,6 +700,116 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")
             await pilot.pause()
             self.assertEqual(app.submissions, ["draft\n"])
+
+    async def test_history_navigation_keeps_slash_entries_passive(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["foo", "/reload", "bar", "/help"])
+
+            expected = ["/help", "bar", "/reload", "foo", "/reload", "bar", "/help"]
+            for key, value in zip(["up"] * 4 + ["down"] * 3, expected, strict=True):
+                await pilot.press(key)
+                await pilot.pause()
+                self.assertEqual(prompt.value, value)
+                self.assertFalse(completion.active)
+
+    async def test_cursor_movement_does_not_activate_recalled_slash_entry(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["/reload"])
+
+            await pilot.press("up", "left", "left", "right")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "/reload")
+            self.assertTrue(prompt.displaying_untouched_history_entry)
+            self.assertFalse(completion.active)
+
+    async def test_editing_recalled_entry_restores_autocomplete(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["/reload"])
+
+            await pilot.press("up")
+            await pilot.pause()
+            self.assertFalse(completion.active)
+
+            await pilot.press("backspace")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "/reloa")
+            self.assertFalse(prompt.displaying_untouched_history_entry)
+            self.assertTrue(completion.active)
+
+    async def test_restored_history_draft_uses_normal_autocomplete(self) -> None:
+        backend = FakeAutocompleteBackend(["src/auth.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["/reload"])
+            prompt.value = "Review "
+
+            await pilot.press("up", "down")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "Review ")
+            self.assertFalse(prompt.displaying_untouched_history_entry)
+            await pilot.press("@")
+            await wait_until(lambda: completion.active)
+            self.assertEqual([item.display for item in completion.items], ["src/auth.py"])
+
+    async def test_recalled_file_trigger_stays_passive_until_edited(self) -> None:
+        backend = FakeAutocompleteBackend(["src/auth.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["Review @auth"])
+
+            await pilot.press("up")
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "Review @auth")
+            self.assertFalse(completion.active)
+            self.assertEqual(backend.walks, 0)
+
+            await pilot.press("backspace")
+            await wait_until(lambda: completion.active)
+            self.assertEqual(prompt.value, "Review @aut")
+            self.assertEqual([item.display for item in completion.items], ["src/auth.py"])
+
+    async def test_stale_file_result_cannot_reopen_completion_after_history_recall(self) -> None:
+        backend = DelayedAutocompleteBackend(["src/auth.py"])
+        app = AutocompleteTestApp(backend)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.set_history(["Review @remembered"])
+            prompt.value = "Review @auth"
+            await wait_until(lambda: backend.walks == 1)
+
+            await pilot.press("up")
+            await pilot.pause()
+            backend.release.set()
+            await pilot.pause()
+
+            self.assertEqual(prompt.value, "Review @remembered")
+            self.assertTrue(prompt.displaying_untouched_history_entry)
+            self.assertFalse(completion.active)
+            self.assertEqual(completion.items, ())
 
     async def test_file_interaction_enumerates_once_while_query_changes_and_again_after_dismissal(self) -> None:
         backend = FakeAutocompleteBackend(["agent/resources/items.py", "runtime/recorder.py"])
