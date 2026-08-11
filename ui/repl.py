@@ -560,8 +560,8 @@ async def handle_command(
         write_line(renderer, session_summary_text(session, mode))
         return True
 
-    if text == "/reload":
-        write_line(renderer, "/reload is available in the Textual app", kind="warning")
+    if text in {"/reload", "/reload-runtime"}:
+        write_line(renderer, f"{text} is available in the Textual app", kind="warning")
         return True
 
     if text == "/issues":

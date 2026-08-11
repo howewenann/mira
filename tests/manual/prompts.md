@@ -1338,7 +1338,7 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    authenticating spinner, the TUI stays responsive, and the browser opens for
    consent. Successful consent changes its labelled badge to Available and the
    top indicator to `✓ MCP 1/1`.
-3. Restart MIRA and run `/reload`. Expected: the stored credential under
+3. Restart MIRA and run `/reload-runtime`. Expected: the stored credential under
    `~/.mira/_state/mcp-tokens/` is reused or refreshed without opening a browser.
    A one-shot invocation also never opens a browser or waits for a callback.
 4. Select `Forget login`. Expected: only this server stops, only its token
@@ -1364,9 +1364,9 @@ unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
    `"Authorization": "Bearer ${MCP_TEST_TOKEN}"`, set `MCP_TEST_TOKEN`
    before launching MIRA, and approve the server. Expected: the server receives
    the resolved value while the approval preview, panel, logs, and `mcp.json`
-   never show it. Remove the variable and run `/reload`; only that server becomes
+   never show it. Remove the variable and run `/reload-runtime`; only that server becomes
    Failed with an error naming `MCP_TEST_TOKEN` and explaining how to define it.
-   Restore the variable in `.env`, run `/reload`, and confirm the server starts.
+   Restore the variable in `.env`, run `/reload-runtime`, and confirm the server starts.
 
 ## Model Registry, No-Main Startup, And SUBA Autocomplete
 

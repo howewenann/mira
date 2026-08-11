@@ -1384,7 +1384,7 @@ class PanelApp(App[None]):
         yield Static("host")
 
     async def reload_runtime(self) -> None:
-        """Stand in for MiraApp's shared /reload pathway."""
+        """Stand in for MiraApp's shared /reload-runtime pathway."""
 
     def on_mount(self) -> None:
         self.push_screen(MCPPanelScreen(self.manager, self.reload_runtime))
@@ -1651,13 +1651,15 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertIsInstance(app.screen, MCPPanelScreen)
 
-    async def test_reload_button_uses_shared_slash_reload_path_and_close_dismisses(self) -> None:
+    async def test_reload_button_uses_full_runtime_path_and_close_dismisses(self) -> None:
         """MCP footer actions should reload the full runtime and close the panel."""
-        from tests.test_textual_app import make_app, wait_until
+        from tests.test_textual_app import make_app, renderable_plain, wait_until
+        from ui.widgets import ChatLog
 
         manager = PanelManager()
         app = make_app(mcp_manager=manager)
-        app._run_reload_command = AsyncMock()  # type: ignore[method-assign]
+        app._reload_agents = AsyncMock()  # type: ignore[method-assign]
+        app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
 
         async with app.run_test(size=(100, 35)) as pilot:
             await pilot.click("#mcp-status-button")
@@ -1666,9 +1668,15 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(screen, MCPPanelScreen)
 
             await pilot.click("#mcp-reload")
-            await wait_until(lambda: app._run_reload_command.await_count == 1)
+            await wait_until(lambda: app._reload_runtime.await_count == 1)
             await wait_until(lambda: screen.query_one("#mcp-reload", Button).has_focus)
-            app._run_reload_command.assert_awaited_once_with()
+            app._reload_runtime.assert_awaited_once_with()
+            app._reload_agents.assert_not_awaited()
+            rendered = "\n".join(
+                renderable_plain(block) for block in app.query_one(ChatLog).children
+            )
+            self.assertIn("runtime reloaded", rendered)
+            self.assertNotIn("agent reloaded", rendered)
 
             await pilot.click("#mcp-close")
             await pilot.pause()

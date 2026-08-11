@@ -389,6 +389,14 @@ class MiraApp(App[None]):
             self.run_worker(self._run_reload_command(), name="reload-command", exclusive=False)
             return
 
+        if text == "/reload-runtime":
+            self.run_worker(
+                self._run_reload_runtime_command(),
+                name="reload-runtime-command",
+                exclusive=False,
+            )
+            return
+
         if text == "/new-chat":
             self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
             return
@@ -1791,9 +1799,17 @@ class MiraApp(App[None]):
             self._set_status(state="error")
 
     async def _run_reload_command(self) -> None:
-        """Reload project resources and rebuild agents."""
+        """Reload configuration/resources and rebuild agents without restarting MCP."""
+        await self._run_reload(full_runtime=False)
+
+    async def _run_reload_runtime_command(self) -> None:
+        """Reload the full runtime, including MCP connections."""
+        await self._run_reload(full_runtime=True)
+
+    async def _run_reload(self, *, full_runtime: bool) -> None:
+        """Run one reload scope with shared status and error handling."""
         try:
-            if await self._handle_reload_command():
+            if await self._handle_reload_command(full_runtime=full_runtime):
                 self._set_status(state="ready")
         except Exception as exc:
             from config.llm import ConfigError
@@ -1807,19 +1823,30 @@ class MiraApp(App[None]):
         finally:
             self.action_focus_prompt()
 
-    async def _handle_reload_command(self) -> bool:
-        """Reload config, UI metadata, and agents from current workspace state."""
+    async def _handle_reload_command(self, *, full_runtime: bool = False) -> bool:
+        """Reload config, resources, and agents, optionally restarting MCP."""
         if self.busy:
             self.system_message("finish the current turn before reloading agents", kind="warning")
             return True
 
-        await self._reload_runtime()
+        if full_runtime:
+            await self._reload_runtime()
+        else:
+            await self._reload_agents()
         self._notify_explicit_reload()
-        self.system_message("runtime reloaded", kind="info")
+        self.system_message("runtime reloaded" if full_runtime else "agent reloaded", kind="info")
         return True
 
+    async def _reload_agents(self) -> RuntimeSnapshot:
+        """Reload configuration/resources and agents while preserving live MCP."""
+        return await self._reload_runtime_state(reload_mcp=False)
+
     async def _reload_runtime(self) -> RuntimeSnapshot:
-        """Reload dotenv/config, model metadata, visible chrome, and agents."""
+        """Reload configuration/resources, MCP, visible state, and agents."""
+        return await self._reload_runtime_state(reload_mcp=True)
+
+    async def _reload_runtime_state(self, *, reload_mcp: bool) -> RuntimeSnapshot:
+        """Build and install refreshed runtime state for the requested scope."""
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.resources import build_resources
         from agent.resources.subagents import subagent_model_issues
@@ -1832,7 +1859,10 @@ class MiraApp(App[None]):
             override_dotenv=True,
         )
         if self.mcp_manager is not None:
-            await self.mcp_manager.reload()
+            if reload_mcp:
+                await self.mcp_manager.reload()
+            else:
+                self.mcp_manager.prompt_registry.reload_local()
         resources = build_resources(
             self.workspace,
             settings=config.get("settings"),
@@ -2679,7 +2709,7 @@ class MiraApp(App[None]):
             return
         if isinstance(self.screen, MCPPanelScreen):
             return
-        self.push_screen(MCPPanelScreen(self.mcp_manager, self._run_reload_command))
+        self.push_screen(MCPPanelScreen(self.mcp_manager, self._run_reload_runtime_command))
 
     def _sync_mcp_button(self) -> None:
         try:

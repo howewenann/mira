@@ -67,7 +67,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertFalse((workspace / ".mira" / "mcp.json").exists())
             project_readme = (workspace / ".mira" / "README.md").read_text(encoding="utf-8")
             self.assertIn("`mcp/mcp.json`: active MCP configuration", project_readme)
-            self.assertIn("Run `/reload` after changes", project_readme)
+            self.assertIn("Run `/reload-runtime` after changes", project_readme)
             self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
             self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
             self.assertEqual(list((workspace / ".mira" / "tools").glob("*.py")), [])

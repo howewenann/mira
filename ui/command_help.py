@@ -47,7 +47,8 @@ COMMAND_HELP_SECTIONS = (
         (
             ("/settings", "configure workspace settings in the TUI"),
             ("/models", "open Settings directly on model management"),
-            ("/reload", "reload .env/project resources and rebuild agents in the TUI"),
+            ("/reload", "reload configuration/resources and rebuild agents"),
+            ("/reload-runtime", "reload the full runtime including MCP"),
         ),
     ),
     (

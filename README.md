@@ -97,7 +97,8 @@ it only with a trusted local endpoint.
 | Return to action mode | `/act` |
 | Create an outcome-focused Goal | `/goal <prompt>` |
 | Compact older context | `/compact` |
-| Reload configuration and resources | `/reload` |
+| Reload configuration/resources and rebuild agents | `/reload` |
+| Reload the full runtime including MCP | `/reload-runtime` |
 | View configuration/resource Issues | `/issues` |
 | Open MCP server status and controls | `/mcp` |
 | List reusable local and MCP prompts | `/prompts` |
@@ -145,14 +146,15 @@ For example, `prompts/review/python.md` becomes `/prompt__review__python`.
 Collisions are excluded and reported in Issues. Project resources override
 built-in resources with the same name. Use
 `/memories`, `/skills`, `/subagents`, and `/tools` to inspect what is active.
-Run `/reload` after changing project resources.
+Run `/reload` after changing project resources or non-MCP model/settings
+configuration.
 
 ### MCP and reusable prompts
 
 MIRA bootstraps an empty active configuration at `.mira/mcp/mcp.json`.
 `example.json` contains inert stdio and HTTP configurations to copy, and
 `schema.json` documents the exact accepted keys. `example.json` is never
-loaded. Run `/reload` after changes.
+loaded. Run `/reload-runtime` after MCP configuration changes.
 
 MCP string values use the same `${NAME}` resolver as model profiles. For
 example, an HTTP header can use

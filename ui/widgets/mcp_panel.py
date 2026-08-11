@@ -122,7 +122,7 @@ class MCPPanelScreen(ModalScreen[None]):
 
     @on(Button.Pressed, "#mcp-reload")
     def reload_pressed(self, event: Button.Pressed) -> None:
-        """Run the same full runtime reload used by /reload."""
+        """Run the same full runtime reload used by /reload-runtime."""
         event.stop()
         if self.reloading:
             return

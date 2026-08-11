@@ -50,6 +50,14 @@ class AutocompleteModelTests(unittest.TestCase):
         self.assertEqual(next(item for item in command_items("plan") if item.display == "/plan [prompt]").insertion, "/plan")
         self.assertEqual(command_items("help")[0].insertion, "/help")
 
+    def test_reload_commands_are_ordinary_exact_token_candidates(self) -> None:
+        items = command_items("rel")
+
+        self.assertEqual([item.display for item in items], ["/reload", "/reload-runtime"])
+        self.assertEqual([item.insertion for item in items], ["/reload", "/reload-runtime"])
+        self.assertTrue(all(item.kind == "native_command" for item in items))
+        self.assertTrue(all(_completion_row(item).plain.startswith("CMND  ") for item in items))
+
     def test_native_and_prompt_commands_keep_explicit_kinds_and_full_usage(self) -> None:
         async def resolve(_values: dict[str, str]) -> list[Any]:
             return []

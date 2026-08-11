@@ -26,6 +26,7 @@ from textual.widgets import Button, Input, OptionList, Select, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
+from agent.mcp.prompts import PromptRegistry
 from agent.planning.policy import PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_PLAN_RESEARCH
 from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
@@ -57,6 +58,7 @@ from session.plans import plan_artifact
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from ui import repl
+from ui.command_help import command_help_entries
 from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
 from ui.renderer import Renderer
@@ -499,6 +501,32 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "/help "
             await pilot.pause()
             self.assertFalse(completion.active)
+
+    async def test_reload_completions_insert_exact_tokens_without_trailing_spaces(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
+
+            for command in ("/reload", "/reload-runtime"):
+                prompt.value = "/rel"
+                await pilot.pause()
+                self.assertEqual(
+                    [item.display for item in completion.items],
+                    ["/reload", "/reload-runtime"],
+                )
+                options.highlighted = next(
+                    index for index, item in enumerate(completion.items) if item.display == command
+                )
+                await pilot.press("enter")
+                await pilot.pause()
+                self.assertEqual(prompt.value, command)
+                self.assertFalse(prompt.value.endswith(" "))
+                self.assertEqual(app.submissions, [])
+                prompt.value = ""
+                await pilot.pause()
 
     async def test_single_completion_has_one_visible_content_row(self) -> None:
         app = AutocompleteTestApp()
@@ -3123,7 +3151,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/session", output)
             commands = [str(cell) for cell in repl.help_table().columns[0]._cells]
             self.assertIn("/models", commands)
+            self.assertIn("/reload", commands)
+            self.assertIn("/reload-runtime", commands)
             self.assertNotIn("/model", commands)
+            help_entries = dict(command_help_entries())
+            self.assertEqual(
+                help_entries["/reload"],
+                "reload configuration/resources and rebuild agents",
+            )
+            self.assertEqual(
+                help_entries["/reload-runtime"],
+                "reload the full runtime including MCP",
+            )
 
     def test_help_commands_exclude_registered_prompt_commands(self) -> None:
         """The Commands section should remain limited to native slash commands."""
@@ -3524,6 +3563,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
             write_managed_model(workspace, profile_name="visual", model="visual-model")
+            prompt_registry = PromptRegistry(workspace)
+            mcp_manager = SimpleNamespace(
+                reload=AsyncMock(),
+                shutdown=AsyncMock(),
+                set_change_handler=lambda _handler: None,
+                issues=[],
+                show_status=False,
+                servers={},
+                usable_count=0,
+                configured_count=0,
+                prompt_registry=prompt_registry,
+            )
+            memory_dir = workspace / ".mira" / "memories"
+            memory_dir.mkdir(parents=True)
+            (memory_dir / "reload.md").write_text("Reload memory.", encoding="utf-8")
+            skill_dir = workspace / ".mira" / "skills" / "reload-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: reload-skill\ndescription: Reload test.\n---\n",
+                encoding="utf-8",
+            )
+            subagent_dir = workspace / ".mira" / "subagents"
+            subagent_dir.mkdir(parents=True)
+            (subagent_dir / "reload.py").write_text(
+                'SUBAGENTS = [{"name": "reload-reviewer", "description": "Review reloads.", '
+                '"system_prompt": "Review."}]\n',
+                encoding="utf-8",
+            )
+            tool_dir = workspace / ".mira" / "tools"
+            tool_dir.mkdir(parents=True)
+            (tool_dir / "reload_tool.py").write_text(
+                'from langchain_core.tools import tool\n\n@tool\ndef reload_tool(value: str) -> str:\n'
+                '    """Echo a reload value."""\n    return value\n',
+                encoding="utf-8",
+            )
+            prompt_dir = workspace / ".mira" / "prompts"
+            prompt_dir.mkdir(parents=True)
+            (prompt_dir / "reload.md").write_text("Review {{topic}}.", encoding="utf-8")
             launch_options = LaunchOptions(llm_direct=True)
             app = make_app(
                 workspace=workspace,
@@ -3535,6 +3612,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     direct=True,
                 ),
                 launch_options=launch_options,
+                mcp_manager=mcp_manager,
             )
             action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
             plan_agent = type("PlanAgent", (), {"mira_tool_specs": [{"name": "plan_tool", "description": "Plan."}]})()
@@ -3572,6 +3650,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     ]
 
             self.assertIs(app.plan_agent, plan_agent)
+            self.assertIs(app.mcp_manager, mcp_manager)
+            mcp_manager.reload.assert_not_awaited()
+            self.assertIn("/prompt__reload", prompt_registry.local)
             self.assertEqual(app.model_name, "[visual] lmstudio:visual-model")
             self.assertEqual(app.context_limit_tokens, 10000)
             self.assertEqual(app.context_limit_source, "reload-test")
@@ -3613,14 +3694,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("- starting", rendered)
             self.assertEqual(model_button_label, "model: [visual] lmstudio:visual-model")
             self.assertEqual(len(reload_info_blocks), 1)
-            self.assertIn("runtime reloaded", renderable_plain(reload_info_blocks[0]))
+            self.assertIn("agent reloaded", renderable_plain(reload_info_blocks[0]))
             self.assertEqual(reload_command_blocks, [])
             self.assertEqual(len(command_blocks), 1)
             runtime_output = renderable_plain(command_blocks[0])
             self.assertIn("Runtime", runtime_output)
+            self.assertTrue(any(item["name"] == "reload.md" for item in app.mode["resources"]["memories"]))
+            self.assertTrue(any(item["name"] == "reload-skill" for item in app.mode["resources"]["skills"]))
+            self.assertTrue(any(item["name"] == "reload-reviewer" for item in app.mode["resources"]["subagents"]))
+            self.assertTrue(any(item["name"] == "reload_tool" for item in app.mode["resources"]["tools"]))
 
-    async def test_reload_command_reloads_secret_dotenv_with_override(self) -> None:
-        """Reloaded registry interpolation should use the edited workspace secret."""
+    async def test_reload_paths_reread_dotenv_and_only_runtime_reload_restarts_mcp(self) -> None:
+        """Both scopes reread config while only the full runtime scope reloads MCP."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory, patch.dict(os.environ, {}, clear=True):
             workspace = Path(directory)
             write_managed_model(
@@ -3645,7 +3730,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 servers={},
                 usable_count=0,
                 configured_count=0,
-                prompt_registry=SimpleNamespace(issues=[]),
+                prompt_registry=SimpleNamespace(issues=[], reload_local=Mock()),
             )
             app = make_app(
                 workspace=workspace,
@@ -3671,22 +3756,68 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(100, 30)) as pilot:
                     await pilot.pause()
                     await app._handle_reload_command()
+                    self.assertEqual(mcp_reload_values, [])
+                    await app._handle_reload_command(full_runtime=True)
+                    rendered = "\n".join(
+                        renderable_plain(block) for block in app.query_one(ChatLog).children
+                    )
 
             profile = app.config["model_registry"].profile("local")
             self.assertEqual(profile.values["api_key"], "from-env-file")
             self.assertTrue(app.config["llm_direct"])
             self.assertIs(app.launch_options, launch_options)
+            self.assertIs(app.mcp_manager, mcp_manager)
             self.assertEqual(os.environ["TEST_MODEL_API_KEY"], "from-env-file")
             self.assertEqual(mcp_reload_values, ["from-env-file"])
+            mcp_manager.prompt_registry.reload_local.assert_called_once_with()
+            self.assertIn("agent reloaded", rendered)
+            self.assertIn("runtime reloaded", rendered)
 
-    async def test_reload_command_uses_shared_reload(self) -> None:
-        """The slash command should present failures after the shared reload completes."""
+    async def test_reload_commands_route_to_distinct_reload_scopes(self) -> None:
+        """Normal and full reload commands should use their explicit shared scopes."""
         app = make_app()
         async with app.run_test():
+            app._reload_agents = AsyncMock()  # type: ignore[method-assign]
             app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
             await app._handle_reload_command()
+            await app._handle_reload_command(full_runtime=True)
 
+        app._reload_agents.assert_awaited_once_with()
         app._reload_runtime.assert_awaited_once_with()
+
+    async def test_reload_command_tokens_route_to_distinct_workers(self) -> None:
+        """Each independent slash token should invoke only its matching worker."""
+        app = make_app()
+        app._run_reload_command = AsyncMock()  # type: ignore[method-assign]
+        app._run_reload_runtime_command = AsyncMock()  # type: ignore[method-assign]
+
+        async with app.run_test():
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
+            await wait_until(lambda: app._run_reload_command.await_count == 1)
+            app._run_reload_runtime_command.assert_not_awaited()
+
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/reload-runtime"))
+            await wait_until(lambda: app._run_reload_runtime_command.await_count == 1)
+
+        app._run_reload_command.assert_awaited_once_with()
+        app._run_reload_runtime_command.assert_awaited_once_with()
+
+    async def test_reload_keeps_consolidated_issues_notification(self) -> None:
+        """Explicit reload should continue to report all Issues in one notification."""
+        app = make_app(issues=[object(), object()])
+        app.notify = Mock()  # type: ignore[method-assign]
+        app._reload_agents = AsyncMock()  # type: ignore[method-assign]
+
+        async with app.run_test():
+            app.notify.reset_mock()
+            await app._handle_reload_command()
+
+        app.notify.assert_called_once_with(
+            "2 current issues.\nOpen Issues or run /issues.",
+            title="Reload completed",
+            severity="warning",
+        )
 
     async def test_reload_without_direct_mode_remains_non_direct(self) -> None:
         """Reload should explicitly preserve the normal launch default."""
@@ -3764,23 +3895,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_reload_command_is_refused_while_busy(self) -> None:
-        """The reload command should not rebuild agents during an active turn."""
+        """Neither reload scope should run during an active turn."""
         app = make_app()
-        calls: list[str] = []
-
-        async def rebuild(**kwargs: Any) -> None:
-            calls.append("rebuild")
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app._rebuild_agents = rebuild
+            app._reload_agents = AsyncMock()  # type: ignore[method-assign]
+            app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
             app.busy = True
 
-            handled = await app._handle_reload_command()
+            handled_agent = await app._handle_reload_command()
+            handled_runtime = await app._handle_reload_command(full_runtime=True)
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
-        self.assertTrue(handled)
-        self.assertEqual(calls, [])
+        self.assertTrue(handled_agent)
+        self.assertTrue(handled_runtime)
+        app._reload_agents.assert_not_awaited()
+        app._reload_runtime.assert_not_awaited()
         self.assertIn("finish the current turn before reloading agents", rendered)
 
     async def test_approval_prompt_uses_in_window_panel_with_arrow_keys(self) -> None:

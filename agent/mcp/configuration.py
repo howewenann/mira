@@ -88,7 +88,7 @@ def load_mcp_configuration(
                     f"Invalid MCP server configuration: {name}",
                     f".mira/mcp/mcp.json: mcpServers.{name}",
                     str(error),
-                    "Correct the server configuration and run /reload.",
+                    "Correct the server configuration and run /reload-runtime.",
                 )
             )
         servers[name] = state
@@ -169,5 +169,5 @@ def _configuration_issue(message: str) -> Issue:
         "Invalid MCP configuration",
         ".mira/mcp/mcp.json",
         message,
-        "Fix .mira/mcp/mcp.json and run /reload.",
+        "Fix .mira/mcp/mcp.json and run /reload-runtime.",
     )

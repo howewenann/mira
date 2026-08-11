@@ -182,7 +182,7 @@ MIRA loads project resources from this folder on top of its defaults.
 - `mcp/mcp.json`: active MCP configuration. `mcp/example.json` is inert, and
   `mcp/schema.json` documents the supported keys. MCP string values can use
   `${NAME}` to read explicit process or workspace `.env` values without
-  storing the resolved value. Run `/reload` after changes.
+  storing the resolved value. Run `/reload-runtime` after changes.
 - `models.yml`: ordered AnyLLM profiles. Put secrets in `.env`, reference them
   with `${NAME}`, then select Main and other assignments through `/models`.
 - `prompts/**/*`: recursive Mustache prompt files flattened to `/prompt__...`

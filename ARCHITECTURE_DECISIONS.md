@@ -114,8 +114,10 @@ one section at a time without loading configuration, constructing a model, or
 checking connectivity: `/runtime`, `/tools`, `/memories`, `/skills`, and
 `/subagents`. Launch-scoped flags are displayed as rows in the Runtime table so
 their process scope remains visible beside the effective connection state.
-Startup and `/reload` discover settings, profiles, MCP, prompts, memories,
-skills, tools, and subagents before requiring Main. Expected configuration
+Startup discovers settings, profiles, MCP, prompts, memories, skills, tools,
+and subagents before requiring Main. `/reload` repeats configuration and
+non-MCP project-resource discovery while preserving the live MCP manager;
+`/reload-runtime` also reloads MCP before rebuilding agents. Expected configuration
 failures retain a usable TUI and local commands; model readiness is enforced at
 construction and execution boundaries. Endpoint display is allowlisted and strips URL
 credentials, query strings, and fragments; API keys and arbitrary config values
@@ -127,7 +129,8 @@ and current MCP manager. Main and context-cap changes also refresh model
 metadata and visible identity; secondary assignments and subagent controls
 reuse the active metadata. These settings never restart MCP servers. Explicit
 `/reload` remains the boundary for rereading environment and workspace
-configuration and restarting MCP runtimes.
+configuration without disturbing MCP connections. `/reload-runtime` is the
+explicit boundary for also restarting MCP runtimes.
 
 **Why:** Named profiles make provider configuration ordered, inspectable, and
 reusable without duplicating secrets. Keeping null inheritance makes Main
@@ -690,7 +693,8 @@ rendering.
 TUI-only commands that need live app state stay in `ui/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
-rebuilding agents without restarting the session. Read-only process and agent
+rebuilding agents without restarting the session or MCP. `/reload-runtime`
+adds the existing MCP lifecycle reload. Read-only process and agent
 inspection is split across `/runtime`, `/tools`, `/memories`, `/skills`, and
 `/subagents`; each command renders one focused section without rebuilding agents
 or making a model/network request. `/help` keeps every command in one table but
@@ -864,8 +868,9 @@ MCP string values may contain explicit `${NAME}` references. Loading keeps
 the normalized template for approval previews and fingerprints while building
 a separate resolved configuration in memory for the connection. Resolution is
 single-pass, never substitutes mapping keys, never writes resolved values, and
-fails only the affected server when a referenced variable is missing. Reload
-loads `.env` before rebuilding MCP connections so updated values take effect.
+fails only the affected server when a referenced variable is missing.
+`/reload-runtime` loads `.env` before rebuilding MCP connections so updated
+values take effect.
 Reusable prompt signatures stay compact as `<required> [optional]`. Prompts
 with only required arguments use positional values; the presence of any
 optional argument switches the whole invocation to `name=value` so omissions
@@ -878,7 +883,7 @@ in the MCP panel and never becomes an Issues entry.
 **Why:** The shared agent factory builds project resources twice, once per
 mode. Starting MCP there would duplicate child processes, discovery, and
 mutable health state. Manager-owned lifecycle methods also ensure Settings,
-the MCP panel, autocomplete, reload, and shutdown observe and mutate the same
+the MCP panel, autocomplete, reload paths, and shutdown observe and mutate the same
 server registry. Eager advertised-capability discovery prevents a panel action
 from changing server health and gives autocomplete, prompts, and attachments
 the same settled startup view. Persisted user-event attachment metadata is
