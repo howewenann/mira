@@ -21,7 +21,6 @@ class ToolCallDrafts:
     def push(self, chunk: Any) -> None:
         data = tool_call_chunk_data(chunk)
         if data is None:
-            call_renderer(self.renderer, "model_activity")
             return
 
         key = data["key"]
@@ -37,7 +36,6 @@ class ToolCallDrafts:
 
         name = str(call.get("name") or "")
         if not name:
-            call_renderer(self.renderer, "model_activity")
             return
 
         record_draft = getattr(self.result, "record_tool_call_draft", None)
@@ -47,18 +45,16 @@ class ToolCallDrafts:
         draft_call = self.draft_call(call)
         if name == "task":
             task_calls = [self.draft_call(value) for value in self._calls.values() if value.get("name") == "task"]
-            if not call_renderer(self.renderer, "delegation_delta", task_calls):
-                call_renderer(self.renderer, "model_activity")
+            call_renderer(self.renderer, "delegation_delta", task_calls)
             return
 
-        if not call_renderer(
+        call_renderer(
             self.renderer,
             "tool_call_delta",
             name,
             draft_call["args"],
             call_id=str(call.get("id") or ""),
-        ):
-            call_renderer(self.renderer, "model_activity")
+        )
 
     def draft_call(self, call: dict[str, Any]) -> dict[str, Any]:
         return {

@@ -216,7 +216,6 @@ async def _finalized_tool_calls(
 
     finalized = calls.get() if hasattr(calls, "get") else (calls or [])
     if hasattr(finalized, "__await__"):
-        call_renderer(renderer, "model_activity")
         finalized = await finalized
 
     return list(finalized or [])

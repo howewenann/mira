@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from contextlib import redirect_stdout
@@ -1577,7 +1578,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             ("compaction", lambda app: app.compaction_started()),
             ("system", lambda app: app.system_message("status update", kind="status")),
             ("command", lambda app: app.command_output("command output")),
-            ("activity", lambda app: app.model_activity()),
         ]
 
         for name, action in cases:
@@ -1857,15 +1857,74 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await started.wait()
                 await pilot.pause()
                 self.assertIn(
-                    "drafting Success Criteria...",
+                    "Generating success criteria · 00:00 elapsed",
+                    renderable_plain(app.query_one(ChatLog).children[-1]),
+                )
+                chat = app.query_one(ChatLog)
+                chat._waiting_started_at = time.monotonic() - 62
+                chat.tick_waiting()
+                self.assertIn(
+                    "Generating success criteria · 01:02 elapsed",
                     renderable_plain(app.query_one(ChatLog).children[-1]),
                 )
 
                 release.set()
                 await task
                 await pilot.pause()
-                self.assertIn("finalizing Goal...", renderable_plain(app.query_one(ChatLog).children[-1]))
+                self.assertIn(
+                    "Finalizing Goal · 00:00 elapsed",
+                    renderable_plain(app.query_one(ChatLog).children[-1]),
+                )
                 app.finish_turn()
+                app.busy = False
+
+    async def test_prepare_plan_uses_elapsed_activity_for_both_model_stages(self) -> None:
+        app = make_app()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        service = type("CriteriaService", (), {})()
+
+        async def generate(_objective: str, _context: str = "") -> str:
+            started.set()
+            await release.wait()
+            return "- The focused change is verified."
+
+        service.generate = AsyncMock(side_effect=generate)
+        with patch("ui.app.SuccessCriteriaService", return_value=service):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.busy = True
+                app.mode.update({"planning": True, "plan_revision": None})
+                task = asyncio.create_task(
+                    app.prepare_plan(
+                        {
+                            "type": "prepare_plan",
+                            "objective": "Improve timing UX.",
+                            "context_and_constraints": "Keep the patch focused.",
+                        }
+                    )
+                )
+                await started.wait()
+                await pilot.pause()
+
+                activity = renderable_plain(app.query_one(ChatLog).children[-1])
+                self.assertIn("Generating success criteria · 00:00 elapsed", activity)
+
+                release.set()
+                await task
+                await pilot.pause()
+
+                activity = renderable_plain(app.query_one(ChatLog).children[-1])
+                self.assertIn("Creating plan · 00:00 elapsed", activity)
+                app.finish_turn()
+                await pilot.pause()
+                self.assertNotIn(
+                    "Creating plan",
+                    "\n".join(
+                        renderable_plain(block)
+                        for block in app.query_one(ChatLog).children
+                    ),
+                )
                 app.busy = False
 
     async def test_goal_command_uses_transient_staging_without_switching_mode(self) -> None:
@@ -2273,7 +2332,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Respond", prompts)
 
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
-        """Tool-call JSON chunks should show activity instead of silent waiting."""
+        """Tool-call JSON chunks should put activity in the draft bubble."""
         app = make_app()
         app._waiting_delay_seconds = 0.05
 
@@ -2283,23 +2342,25 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.waiting_started()
             await pilot.pause(0.03)
-            app.model_activity()
+            app.tool_call_delta("ls", {"path": "/"}, call_id="call-1")
             await pilot.pause(0.08)
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            self.assertIn("preparing tool call...", rendered)
+            self.assertIn("draft: {'path': '/'}", rendered)
+            self.assertIn("Preparing · 00:00 elapsed", rendered)
             self.assertNotIn("working...", rendered)
+            self.assertNotIn("preparing tool call...", rendered.lower())
 
             app.tool_call("ls", {"path": "/"}, call_id="call-1")
             await pilot.pause()
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            self.assertNotIn("preparing tool call...", rendered)
             self.assertIn("call:", rendered)
+            self.assertIn("Running · 00:00 elapsed", rendered)
             app.busy = False
 
-    async def test_cancel_turn_removes_waiting_and_model_activity(self) -> None:
-        """Cancellation should clear transient status bubbles before the next turn."""
+    async def test_cancel_turn_removes_waiting_and_tool_draft(self) -> None:
+        """Cancellation should clear transient waiting and incomplete draft bubbles."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -2319,15 +2380,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.busy = True
             app.turn_worker = FakeWorker()
-            app.model_activity()
+            app.tool_call_delta("read_file", {"path": "README.md"}, call_id="call-read")
             await pilot.pause()
-            self.assertIn("preparing tool call...", renderable_plain(app.query_one(ChatLog).children[-1]))
+            self.assertIn("Preparing", renderable_plain(app.query_one(ChatLog).children[-1]))
 
             app._cancel_turn()
             await pilot.pause()
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            self.assertNotIn("preparing tool call...", rendered)
+            self.assertNotIn("README.md", rendered)
 
     async def test_unknown_context_usage_renders_pending(self) -> None:
         """A context limit without provider usage should not pretend to be measured."""
@@ -5604,6 +5665,83 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("draft:", final)
             self.assertIn("README.md", final)
 
+    async def test_tool_timer_spans_draft_running_and_completion(self) -> None:
+        """Preparation and execution should share one clock and one bubble."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            started_at = time.monotonic()
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at):
+                app.tool_call_delta("eval", {"code": "1"}, call_id="call-eval")
+                app.tool_call_delta("eval", {"code": "1 + 1"}, call_id="call-eval")
+            await pilot.pause()
+
+            tools = [block for block in chat.children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 1)
+            self.assertIn("Preparing · 00:00 elapsed", renderable_plain(tools[0]))
+
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 19):
+                app.tool_call("eval", {"code": "1 + 1"}, call_id="call-eval")
+                chat.tick_tools()
+            running = renderable_plain(tools[0])
+            self.assertIn("Running · 00:19 elapsed", running)
+
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 31):
+                app.completed_tool_result("eval", "2", call_id="call-eval")
+            completed = renderable_plain(tools[0])
+            self.assertIn("output:\n2", completed)
+            self.assertIn("Completed in 00:31", completed)
+
+    async def test_tool_without_draft_starts_running_and_failed_duration(self) -> None:
+        """Providers without draft chunks should begin cleanly at execution."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=50.0):
+                app.tool_call("read_file", {"path": "missing"}, call_id="call-read")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=62.0):
+                app.completed_tool_error("read_file", "not found", call_id="call-read")
+            await pilot.pause()
+
+            tool = [
+                block
+                for block in app.query_one(ChatLog).children
+                if "tool-call" in block.classes
+            ][-1]
+            rendered = renderable_plain(tool)
+            self.assertNotIn("Preparing", rendered)
+            self.assertIn("error:\nnot found", rendered)
+            self.assertIn("Failed after 00:12", rendered)
+
+    async def test_concurrent_tool_timers_finish_the_matching_bubbles(self) -> None:
+        """Independent call ids should never cross-update duration or output."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+                app.tool_call("eval", {"code": "slow"}, call_id="call-slow")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=20.0):
+                app.tool_call("eval", {"code": "fast"}, call_id="call-fast")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=25.0):
+                app.completed_tool_result("eval", "fast result", call_id="call-fast")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=40.0):
+                app.completed_tool_result("eval", "slow result", call_id="call-slow")
+            await pilot.pause()
+
+            tools = [
+                renderable_plain(block)
+                for block in app.query_one(ChatLog).children
+                if "tool-call" in block.classes
+            ]
+            self.assertIn("slow result", tools[0])
+            self.assertIn("Completed in 00:30", tools[0])
+            self.assertIn("fast result", tools[1])
+            self.assertIn("Completed in 00:05", tools[1])
+
     async def test_edited_tool_call_updates_existing_block_in_place(self) -> None:
         app = make_app()
 
@@ -6025,6 +6163,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                             "name": "read_file",
                             "output": "contents",
                             "call_id": "call-read",
+                            "duration_ms": 31_000,
                         },
                     ]
                 }
@@ -6034,6 +6173,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
             self.assertEqual(len(tools), 1)
             self.assertIn("contents", renderable_plain(tools[0]))
+            self.assertIn("Completed in 00:31", renderable_plain(tools[0]))
 
     async def test_replayed_ask_user_keeps_question_choices_answer_and_result(self) -> None:
         app = make_app()
@@ -6109,6 +6249,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = renderable_plain(tool)
             self.assertIn("error:\nfile not found", rendered)
             self.assertNotIn("output:", rendered)
+            self.assertNotIn("Failed after", rendered)
 
     async def test_tool_results_without_ids_attach_by_name_order(self) -> None:
         """Tool results without ids should attach to the oldest unresolved matching call."""

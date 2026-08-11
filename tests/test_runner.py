@@ -354,6 +354,16 @@ class AsyncToolCallList:
         return self.calls
 
 
+class AwaitableToolCallList(AsyncToolCallList):
+    """Tool-call projection whose final empty value requires synchronization."""
+
+    def get(self) -> Any:
+        async def finalized() -> list[Any]:
+            return self.calls
+
+        return finalized()
+
+
 class BlockingReasoning:
     """Reasoning stream that stays open until released."""
 
@@ -3799,6 +3809,16 @@ Await further instructions.
                 ("tool_call", "read_file", {"path": "README.md"}, ""),
             ],
         )
+
+    async def test_awaitable_empty_tool_projection_creates_no_activity(self) -> None:
+        """Final synchronization alone is not evidence of tool preparation."""
+        renderer = RecordingRenderer()
+        messages = AsyncItems([Message(tool_calls=AwaitableToolCallList([], chunks=[]))])
+
+        await consume_messages(messages, renderer)
+
+        self.assertNotIn(("model_activity",), renderer.events)
+        self.assertFalse(any(event[0] == "tool_call_delta" for event in renderer.events))
 
     async def test_task_tool_call_chunks_render_delegation_draft_before_final_call(self) -> None:
         renderer = RecordingRenderer()

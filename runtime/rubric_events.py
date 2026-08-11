@@ -65,7 +65,7 @@ class RubricEventRenderer:
             None,
         )
         if started_at is not None:
-            evaluation["duration_ms"] = max(0, round((self.clock() - started_at) * 1000))
+            evaluation["duration_ms"] = elapsed_ms(started_at, clock=self.clock)
         self.evaluations.append(evaluation)
         self._latest[evaluation["grading_run_id"]] = evaluation
         call_renderer(
@@ -213,3 +213,13 @@ def format_elapsed(duration_ms: int | float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def elapsed_ms(
+    started_at: float,
+    *,
+    clock: Callable[[], float] | None = None,
+) -> int:
+    """Return a non-negative whole-millisecond monotonic duration."""
+    active_clock = clock or time.monotonic
+    return max(0, round((active_clock() - float(started_at)) * 1000))

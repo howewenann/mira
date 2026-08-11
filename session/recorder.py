@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from collections import defaultdict, deque
 from inspect import Parameter, signature
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
 from runtime.output_events import normalize_response_delta
 from runtime.correction_events import normalize_correction_event
+from runtime.rubric_events import elapsed_ms
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 from session.goals import current_goal, goal_artifact_text
 from session.plans import current_plan, plan_artifact_text
@@ -93,11 +96,20 @@ class SessionRecorder:
         self.save()
         return stored
 
-    def tool_result(self, name: str, output: Any, call_id: str = "") -> dict[str, Any]:
+    def tool_result(
+        self,
+        name: str,
+        output: Any,
+        call_id: str = "",
+        *,
+        duration_ms: int | None = None,
+    ) -> dict[str, Any]:
         self.finish_main()
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
             event["call_id"] = call_id
+        if duration_ms is not None:
+            event["duration_ms"] = max(0, int(duration_ms))
         stored = append_event(self.record, event)
         self.save()
         return stored
@@ -129,6 +141,7 @@ class SessionRecorder:
         call_id: str = "",
         *,
         status: str = "success",
+        duration_ms: int | None = None,
     ) -> dict[str, Any]:
         """Persist a live completion beside its call without closing model output."""
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
@@ -136,14 +149,29 @@ class SessionRecorder:
             event["status"] = "error"
         if call_id:
             event["call_id"] = call_id
+        if duration_ms is not None:
+            event["duration_ms"] = max(0, int(duration_ms))
         stored = append_event(self.record, event)
         self._move_result_after_call(stored, name, call_id)
         self.save()
         return stored
 
-    def completed_tool_error(self, name: str, error: Any, call_id: str = "") -> dict[str, Any]:
+    def completed_tool_error(
+        self,
+        name: str,
+        error: Any,
+        call_id: str = "",
+        *,
+        duration_ms: int | None = None,
+    ) -> dict[str, Any]:
         """Persist a live failed completion beside its original call."""
-        return self.completed_tool_result(name, error, call_id, status="error")
+        return self.completed_tool_result(
+            name,
+            error,
+            call_id,
+            status="error",
+            duration_ms=duration_ms,
+        )
 
     def recovered_tool_result(
         self,
@@ -454,11 +482,22 @@ class SessionRecorder:
 class RecordingRenderer:
     """Forward renderer calls while recording the same visible transcript."""
 
-    def __init__(self, renderer: Any, recorder: SessionRecorder) -> None:
+    def __init__(
+        self,
+        renderer: Any,
+        recorder: SessionRecorder,
+        *,
+        clock: Any = time.monotonic,
+    ) -> None:
         self.renderer = renderer
         self.recorder = recorder
+        self._clock = clock
         self._context_notice_rendered = False
         self._open_idless_tool_calls: list[tuple[int, str]] = []
+        self._tool_timer_sequence = 0
+        self._tool_timers: dict[int, dict[str, Any]] = {}
+        self._tool_timer_ids: dict[str, int] = {}
+        self._tool_timer_queues: dict[str, deque[int]] = defaultdict(deque)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
@@ -540,6 +579,7 @@ class RecordingRenderer:
         call_renderer(self.renderer.text_delta, delta, created_at=event_created_at(event))
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+        self._start_tool_timer(name, call_id, preparing=False)
         event = self.recorder.tool_call(name, args, call_id=call_id)
         if not call_id:
             self._open_idless_tool_calls.append((int(event["id"]), name))
@@ -586,10 +626,23 @@ class RecordingRenderer:
             callback(name, call_id=call_id)
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
-        event = self.recorder.tool_result(name, result, call_id=call_id)
+        duration_ms = self._finish_tool_timer(name, call_id)
+        event = self.recorder.tool_result(
+            name,
+            result,
+            call_id=call_id,
+            duration_ms=duration_ms,
+        )
         if not call_id:
             self._discard_open_idless_tool_call(name)
-        call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.tool_result,
+            name,
+            result,
+            call_id=call_id,
+            created_at=event_created_at(event),
+            duration_ms=duration_ms,
+        )
 
     def _discard_open_idless_tool_call(self, name: str) -> None:
         for index, (_event_id, pending_name) in enumerate(self._open_idless_tool_calls):
@@ -599,25 +652,65 @@ class RecordingRenderer:
 
     def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Record and update a completed tool without ending active model output."""
-        event = self.recorder.completed_tool_result(name, result, call_id=call_id)
+        duration_ms = self._finish_tool_timer(name, call_id)
+        event = self.recorder.completed_tool_result(
+            name,
+            result,
+            call_id=call_id,
+            duration_ms=duration_ms,
+        )
         if not call_id:
             self._discard_open_idless_tool_call(name)
         callback = getattr(self.renderer, "completed_tool_result", None)
         if callable(callback):
-            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(
+                callback,
+                name,
+                result,
+                call_id=call_id,
+                created_at=event_created_at(event),
+                duration_ms=duration_ms,
+            )
         else:
-            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(
+                self.renderer.tool_result,
+                name,
+                result,
+                call_id=call_id,
+                created_at=event_created_at(event),
+                duration_ms=duration_ms,
+            )
 
     def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
         """Record and update a failed tool without ending active model output."""
-        event = self.recorder.completed_tool_error(name, error, call_id=call_id)
+        duration_ms = self._finish_tool_timer(name, call_id)
+        event = self.recorder.completed_tool_error(
+            name,
+            error,
+            call_id=call_id,
+            duration_ms=duration_ms,
+        )
         if not call_id:
             self._discard_open_idless_tool_call(name)
         callback = getattr(self.renderer, "completed_tool_error", None)
         if callable(callback):
-            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(
+                callback,
+                name,
+                error,
+                call_id=call_id,
+                created_at=event_created_at(event),
+                duration_ms=duration_ms,
+            )
         else:
-            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(
+                self.renderer.tool_result,
+                name,
+                error,
+                call_id=call_id,
+                created_at=event_created_at(event),
+                duration_ms=duration_ms,
+            )
 
     def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Render and record a late-discovered tool result."""
@@ -659,19 +752,70 @@ class RecordingRenderer:
         callback = getattr(self.renderer, "delegation_delta", None)
         if callable(callback):
             callback(calls)
-            return
-        activity = getattr(self.renderer, "model_activity", None)
-        if callable(activity):
-            activity()
 
     def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        self._start_tool_timer(name, call_id, preparing=True)
         callback = getattr(self.renderer, "tool_call_delta", None)
         if callable(callback):
             callback(name, args, call_id=call_id)
-            return
-        activity = getattr(self.renderer, "model_activity", None)
-        if callable(activity):
-            activity()
+
+    def _start_tool_timer(self, name: str, call_id: str, *, preparing: bool) -> None:
+        """Start or promote one independently keyed tool interaction clock."""
+        token = self._tool_timer_ids.get(call_id) if call_id else None
+        if token is None and not preparing:
+            token = self._oldest_tool_timer(name, preparing=True)
+        if token is None and preparing and not call_id:
+            token = self._oldest_tool_timer(name, preparing=True)
+        if token is None:
+            self._tool_timer_sequence += 1
+            token = self._tool_timer_sequence
+            self._tool_timers[token] = {
+                "name": name,
+                "started_at": self._clock(),
+                "preparing": preparing,
+                "call_id": "",
+            }
+            self._tool_timer_queues[name].append(token)
+
+        timer = self._tool_timers[token]
+        timer["preparing"] = preparing
+        if call_id:
+            previous_id = str(timer.get("call_id") or "")
+            if previous_id and previous_id != call_id:
+                self._tool_timer_ids.pop(previous_id, None)
+            timer["call_id"] = call_id
+            self._tool_timer_ids[call_id] = token
+
+    def _finish_tool_timer(self, name: str, call_id: str) -> int | None:
+        """Freeze and forget the matching tool clock at terminal completion."""
+        token = self._tool_timer_ids.get(call_id) if call_id else None
+        if token is None:
+            token = self._oldest_tool_timer(name, preparing=False)
+        if token is None:
+            token = self._oldest_tool_timer(name)
+        if token is None:
+            return None
+
+        timer = self._tool_timers.pop(token)
+        timer_id = str(timer.get("call_id") or "")
+        if timer_id:
+            self._tool_timer_ids.pop(timer_id, None)
+        queue = self._tool_timer_queues.get(str(timer.get("name") or name))
+        if queue:
+            self._tool_timer_queues[str(timer.get("name") or name)] = deque(
+                item for item in queue if item != token
+            )
+        return elapsed_ms(float(timer["started_at"]), clock=self._clock)
+
+    def _oldest_tool_timer(self, name: str, *, preparing: bool | None = None) -> int | None:
+        """Return the oldest live timer for a tool name and optional phase."""
+        for token in self._tool_timer_queues.get(name, ()):
+            timer = self._tool_timers.get(token)
+            if timer is None:
+                continue
+            if preparing is None or bool(timer.get("preparing")) == preparing:
+                return token
+        return None
 
     def subagent_started(
         self,

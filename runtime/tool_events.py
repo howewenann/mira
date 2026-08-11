@@ -89,8 +89,6 @@ async def watch_tool_result(
         return
 
     text = tool_output_text(output) or ("tool failed" if is_error else "")
-    if not text:
-        return
     render_tool_completion(
         renderer,
         result,

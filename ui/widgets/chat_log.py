@@ -18,7 +18,7 @@ from textual.events import Click, DescendantFocus, Key
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
-from runtime.rubric_events import format_elapsed, rubric_result_text
+from runtime.rubric_events import elapsed_ms, format_elapsed, rubric_result_text
 from runtime.correction_events import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
@@ -42,7 +42,6 @@ class ChatLog(VerticalScroll):
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
-        self._activity_block: Static | None = None
         self._delegation_block: Static | None = None
         self._delegation_draft_block: Static | None = None
         self._delegation_calls: list[dict[str, Any]] = []
@@ -66,6 +65,8 @@ class ChatLog(VerticalScroll):
         self._fallback_suffixes = count(1)
         self._waiting_spinner_index = 0
         self._waiting_label = "working..."
+        self._waiting_elapsed = False
+        self._waiting_started_at = 0.0
         self._subagent_spinner_index = 0
         self._tool_sequence = count(1)
         self._tool_blocks: dict[str, dict[str, Any]] = {}
@@ -163,10 +164,17 @@ class ChatLog(VerticalScroll):
                     event.get("args", {}),
                     call_id=str(event.get("call_id") or ""),
                     created_at=created_at,
+                    start_timing=False,
                 )
             elif event_type == "tool_result":
                 callback = self.tool_error if event.get("status") == "error" else self.tool_result
-                callback(event["name"], event["output"], call_id=str(event.get("call_id") or ""), created_at=created_at)
+                callback(
+                    event["name"],
+                    event["output"],
+                    call_id=str(event.get("call_id") or ""),
+                    created_at=created_at,
+                    duration_ms=event.get("duration_ms"),
+                )
             elif event_type == "delegation":
                 self.delegation_started(event["calls"], created_at=created_at)
             elif event_type == "subagent":
@@ -249,7 +257,6 @@ class ChatLog(VerticalScroll):
         if not cleaned.strip() and not self._reasoning_text:
             return
         self.hide_waiting()
-        self.hide_model_activity()
         self._close_assistant_phase()
 
         if self._reasoning_block is None:
@@ -268,7 +275,6 @@ class ChatLog(VerticalScroll):
         if not delta:
             return
         self.hide_waiting()
-        self.hide_model_activity()
         self._close_reasoning_phase()
 
         if self._assistant_block is None:
@@ -282,7 +288,6 @@ class ChatLog(VerticalScroll):
     def correction(self, event: dict[str, Any], *, created_at: str = "") -> None:
         """Append a technical correction bubble after rejected assistant prose."""
         self.hide_waiting()
-        self.hide_model_activity()
         self._close_assistant_phase()
         self._close_reasoning_phase()
         self._add_block(
@@ -294,7 +299,6 @@ class ChatLog(VerticalScroll):
 
     def finish_main(self) -> None:
         """Close the current streamed blocks so the next turn starts fresh."""
-        self.hide_model_activity()
         self._close_assistant_phase()
         self._close_reasoning_phase()
 
@@ -333,20 +337,17 @@ class ChatLog(VerticalScroll):
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Append a system, info, status, warning, or error message."""
         self.finish_stream_phase()
-        self.hide_model_activity()
         title = "mira" if kind == "startup" else kind
         self._add_block(title, Text(text), f"message {kind}", created_at=created_at)
 
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
         self.finish_stream_phase()
-        self.hide_model_activity()
         self._add_block("output", renderable, "message command")
 
     def compaction_started(self) -> None:
         """Show that DeepAgents is compacting conversation context."""
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         self._compaction_running = True
         text = self._render_compaction()
@@ -373,10 +374,17 @@ class ChatLog(VerticalScroll):
         self._compaction_block.update(self._render_compaction())
         self._scroll_to_end()
 
-    def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
+    def tool_call(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        start_timing: bool = True,
+    ) -> None:
         """Append a coordinator-level tool call in transcript order."""
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
@@ -389,6 +397,10 @@ class ChatLog(VerticalScroll):
                 "widget": widget,
                 "draft": False,
                 "is_error": False,
+                "started_at": time.monotonic() if start_timing else None,
+                "duration_ms": None,
+                "frame": 0,
+                "last_second": 0,
             }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
@@ -397,10 +409,14 @@ class ChatLog(VerticalScroll):
             block["args"] = args
             block["draft"] = False
 
-        pending, pending_is_error = self._take_pending_tool_result(name, call_id)
-        if pending:
+        pending_found, pending, pending_is_error, pending_duration_ms = self._take_pending_tool_result(
+            name,
+            call_id,
+        )
+        if pending_found:
             block["result"] = pending
             block["is_error"] = pending_is_error
+            self._finish_tool_timing(block, pending_duration_ms)
         self._update_tool_block(key)
 
     def tool_call_updated(
@@ -440,7 +456,6 @@ class ChatLog(VerticalScroll):
     def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
         """Create or update a live draft of a streamed tool call."""
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
@@ -453,6 +468,10 @@ class ChatLog(VerticalScroll):
                 "widget": widget,
                 "draft": True,
                 "is_error": False,
+                "started_at": time.monotonic(),
+                "duration_ms": None,
+                "frame": 0,
+                "last_second": 0,
             }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
@@ -462,52 +481,90 @@ class ChatLog(VerticalScroll):
             block["draft"] = True
         self._update_tool_block(key)
 
-    def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+    def tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Append a coordinator-level tool result in transcript order."""
-        if not result:
-            return
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         key = self._resolve_tool_key(name, call_id)
         if key is None:
-            self._queue_pending_tool_result(name, result, call_id, created_at=created_at)
+            self._queue_pending_tool_result(
+                name,
+                result,
+                call_id,
+                created_at=created_at,
+                duration_ms=duration_ms,
+            )
             return
         block = self._tool_blocks[key]
         block["result"] = result
         block["is_error"] = False
         block["draft"] = False
+        self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
-    def tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+    def tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Attach a failed result to its coordinator-level tool call."""
-        if not error:
-            return
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         key = self._resolve_tool_key(name, call_id)
         if key is None:
-            self._queue_pending_tool_result(name, error, call_id, created_at=created_at, is_error=True)
+            self._queue_pending_tool_result(
+                name,
+                error,
+                call_id,
+                created_at=created_at,
+                is_error=True,
+                duration_ms=duration_ms,
+            )
             return
         block = self._tool_blocks[key]
         block["result"] = error
         block["is_error"] = True
         block["draft"] = False
+        self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
-    def completed_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+    def completed_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Update an existing tool block without disturbing active model output."""
-        if not result:
-            return
         key = self._resolve_tool_key(name, call_id)
         if key is None:
-            self._queue_pending_tool_result(name, result, call_id, created_at=created_at)
+            self._queue_pending_tool_result(
+                name,
+                result,
+                call_id,
+                created_at=created_at,
+                duration_ms=duration_ms,
+            )
             return
         block = self._tool_blocks[key]
         block["result"] = result
         block["is_error"] = False
         block["draft"] = False
+        self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
 
     def completed_tool_error(
@@ -517,18 +574,25 @@ class ChatLog(VerticalScroll):
         call_id: str = "",
         *,
         created_at: str = "",
+        duration_ms: int | None = None,
     ) -> None:
         """Update an existing tool block with a failure without disturbing model output."""
-        if not error:
-            return
         key = self._resolve_tool_key(name, call_id)
         if key is None:
-            self._queue_pending_tool_result(name, error, call_id, created_at=created_at, is_error=True)
+            self._queue_pending_tool_result(
+                name,
+                error,
+                call_id,
+                created_at=created_at,
+                is_error=True,
+                duration_ms=duration_ms,
+            )
             return
         block = self._tool_blocks[key]
         block["result"] = error
         block["is_error"] = True
         block["draft"] = False
+        self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
@@ -542,7 +606,6 @@ class ChatLog(VerticalScroll):
             return
 
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         if self._delegation_draft_block is not None:
             self._delegation_draft_block.update(text)
@@ -561,7 +624,6 @@ class ChatLog(VerticalScroll):
         text = self._render_delegation(calls, draft=True)
         if text is None:
             self.hide_waiting()
-            self.hide_model_activity()
             self.finish_main()
             placeholder = Text("preparing subagent tasks...")
             if self._delegation_draft_block is None:
@@ -573,7 +635,6 @@ class ChatLog(VerticalScroll):
             return
 
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         if self._delegation_draft_block is None:
             self._delegation_draft_block = self._add_block("task", text, "message delegation")
@@ -646,7 +707,6 @@ class ChatLog(VerticalScroll):
     ) -> None:
         """Create or replace the block for a running subagent."""
         self.hide_waiting()
-        self.hide_model_activity()
         self.finish_main()
         subagent = self._new_subagent_display_label(subagent)
         self._subagent_blocks[subagent] = {
@@ -834,14 +894,14 @@ class ChatLog(VerticalScroll):
         activity = self._rubric_activity[key]
         pass_number = key[1]
         max_iterations = int(activity.get("max_iterations") or 1)
-        elapsed_ms = (time.monotonic() - float(activity["started_at"])) * 1000
+        duration_ms = elapsed_ms(float(activity["started_at"]))
         frame = SPINNER_FRAMES[int(activity.get("frame") or 0) % len(SPINNER_FRAMES)]
         text = Text()
         text.append(f"Rubric review · pass {pass_number} of {max_iterations}", style=f"bold {RUBRIC_HEADER_COLOR}")
         grader_model = str(activity.get("grader_model") or "").strip()
         if grader_model:
             text.append(f"\n\nGrader: {grader_model}", style=RUBRIC_BODY_COLOR)
-        text.append(f"\n{frame} Reviewing · {format_elapsed(elapsed_ms)} elapsed", style=RUBRIC_BODY_COLOR)
+        text.append(f"\n{frame} Reviewing · {format_elapsed(duration_ms)} elapsed", style=RUBRIC_BODY_COLOR)
         return text
 
     def rubric_evaluation_finished(
@@ -907,7 +967,8 @@ class ChatLog(VerticalScroll):
         """Remove all chat messages."""
         self.finish_main()
         self._waiting_block = None
-        self._activity_block = None
+        self._waiting_elapsed = False
+        self._waiting_started_at = 0.0
         self._reset_delegation_group()
         self._startup_block = None
         self._startup_state = "starting"
@@ -933,10 +994,13 @@ class ChatLog(VerticalScroll):
         for child in list(self.children):
             child.remove()
 
-    def show_waiting(self, label: str = "working...") -> None:
+    def show_waiting(self, label: str = "working...", *, elapsed: bool = False) -> None:
         """Show the transient thinking status while MIRA is idle."""
-        self.hide_model_activity()
+        if self._waiting_block is None or label != self._waiting_label or elapsed != self._waiting_elapsed:
+            self._waiting_started_at = time.monotonic()
+            self._waiting_spinner_index = 0
         self._waiting_label = label
+        self._waiting_elapsed = elapsed
         text = self._render_waiting()
         if self._waiting_block is None:
             self._waiting_block = self._add_block("mira", text, "message status")
@@ -950,24 +1014,8 @@ class ChatLog(VerticalScroll):
             return
         self._waiting_block.remove()
         self._waiting_block = None
-
-    def model_activity(self, text: str = "preparing tool call...") -> None:
-        """Show transient model activity while tool-call JSON is streaming."""
-        self.finish_stream_phase()
-        self.hide_waiting()
-        renderable = Text(text, style="bold #DCE6FA")
-        if self._activity_block is None:
-            self._activity_block = self._add_block("mira", renderable, "message status")
-            return
-        self._activity_block.update(renderable)
-        self._scroll_to_end()
-
-    def hide_model_activity(self) -> None:
-        """Remove the transient model-activity status block."""
-        if self._activity_block is None:
-            return
-        self._activity_block.remove()
-        self._activity_block = None
+        self._waiting_elapsed = False
+        self._waiting_started_at = 0.0
 
     def tick_waiting(self) -> None:
         """Advance the spinner on the transient thinking block."""
@@ -976,6 +1024,25 @@ class ChatLog(VerticalScroll):
         self._waiting_spinner_index = (self._waiting_spinner_index + 1) % len(SPINNER_FRAMES)
         self._waiting_block.update(self._render_waiting())
         self._scroll_to_end()
+
+    def tick_tools(self) -> None:
+        """Advance live tool spinners and elapsed clocks in place."""
+        for key, block in list(self._tool_blocks.items()):
+            if block.get("duration_ms") is not None or block.get("started_at") is None:
+                continue
+            second = elapsed_ms(float(block["started_at"])) // 1000
+            if second == int(block.get("last_second") or 0):
+                continue
+            block["last_second"] = second
+            block["frame"] = int(block.get("frame") or 0) + 1
+            self._update_tool_block(key, scroll=False)
+
+    def has_live_tools(self) -> bool:
+        """Return whether any tool bubble currently owns live activity."""
+        return any(
+            block.get("started_at") is not None and block.get("duration_ms") is None
+            for block in self._tool_blocks.values()
+        )
 
     def tick_startup(self) -> None:
         """Advance the spinner on the startup splash."""
@@ -1270,6 +1337,9 @@ class ChatLog(VerticalScroll):
         text = Text()
         text.append(f"{SPINNER_FRAMES[self._waiting_spinner_index]} ", style="bold yellow")
         text.append(self._waiting_label, style="bold yellow")
+        if self._waiting_elapsed:
+            duration = elapsed_ms(self._waiting_started_at)
+            text.append(f" · {format_elapsed(duration)} elapsed", style="bold yellow")
         return text
 
     def _render_compaction(self) -> Text:
@@ -1363,22 +1433,36 @@ class ChatLog(VerticalScroll):
         *,
         created_at: str = "",
         is_error: bool = False,
+        duration_ms: int | None = None,
     ) -> None:
-        value = json.dumps({"result": result, "created_at": created_at, "is_error": is_error})
+        value = json.dumps(
+            {
+                "result": result,
+                "created_at": created_at,
+                "is_error": is_error,
+                "duration_ms": duration_ms,
+            }
+        )
         if call_id:
             self._pending_tool_results_by_id[call_id] = value
             return
         self._pending_tool_results_by_name[name].append(value)
 
-    def _take_pending_tool_result(self, name: str, call_id: str = "") -> tuple[str, bool]:
+    def _take_pending_tool_result(
+        self,
+        name: str,
+        call_id: str = "",
+    ) -> tuple[bool, str, bool, int | None]:
         if call_id:
             result = self._pending_tool_results_by_id.pop(call_id, "")
             if result:
-                return pending_result(result)
+                pending, is_error, duration_ms = pending_result(result)
+                return True, pending, is_error, duration_ms
         queue = self._pending_tool_results_by_name.get(name)
         if not queue:
-            return "", False
-        return pending_result(queue.popleft())
+            return False, "", False, None
+        pending, is_error, duration_ms = pending_result(queue.popleft())
+        return True, pending, is_error, duration_ms
 
     def _remove_tool_queue_key(self, name: str, key: str) -> None:
         queue = self._tool_name_queues.get(name)
@@ -1401,9 +1485,29 @@ class ChatLog(VerticalScroll):
             else:
                 text.append("\noutput:\n", style="bold cyan")
                 text.append(self.truncate_multiline(block["result"]), style="dim")
+        duration_ms = block.get("duration_ms")
+        if duration_ms is not None:
+            verb = "Failed after" if block.get("is_error") else "Completed in"
+            text.append(f"\n{verb} {format_elapsed(duration_ms)}", style="dim")
+        elif block.get("started_at") is not None:
+            state = "Preparing" if block.get("draft") else "Running"
+            frame = SPINNER_FRAMES[int(block.get("frame") or 0) % len(SPINNER_FRAMES)]
+            text.append(
+                f"\n{frame} {state} · {format_elapsed(elapsed_ms(block['started_at']))} elapsed",
+                style="dim",
+            )
         block["widget"].update(text)
         if scroll:
             self._scroll_to_end()
+
+    def _finish_tool_timing(self, block: dict[str, Any], duration_ms: int | None) -> None:
+        """Freeze a tool's total duration without resetting its preparation clock."""
+        if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+            block["duration_ms"] = max(0, round(duration_ms))
+            return
+        started_at = block.get("started_at")
+        if started_at is not None:
+            block["duration_ms"] = elapsed_ms(float(started_at))
 
 
 def timestamp_text(value: Any) -> str:
@@ -1418,14 +1522,20 @@ def timestamp_text(value: Any) -> str:
     return parsed.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def pending_result(value: str) -> tuple[str, bool]:
+def pending_result(value: str) -> tuple[str, bool, int | None]:
     try:
         payload = json.loads(value)
     except json.JSONDecodeError:
-        return value, False
+        return value, False, None
     if isinstance(payload, dict):
-        return str(payload.get("result") or ""), bool(payload.get("is_error"))
-    return value, False
+        duration_ms = payload.get("duration_ms")
+        duration = (
+            max(0, round(duration_ms))
+            if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool)
+            else None
+        )
+        return str(payload.get("result") or ""), bool(payload.get("is_error")), duration
+    return value, False, None
 
 
 class PlanActionButton(Button):

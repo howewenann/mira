@@ -1013,6 +1013,37 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             [("tool_result", "read_file", "contents", "call-read")],
         )
 
+    def test_tool_duration_spans_draft_and_persists_on_result(self) -> None:
+        """Saved completion metadata should use the earliest streamed draft clock."""
+        record = {"events": []}
+        now = [10.0]
+        recorder = SessionRecorder(record, Store(), "action")
+        recording = SessionRecordingRenderer(
+            RunTurnRenderer(),
+            recorder,
+            clock=lambda: now[0],
+        )
+
+        recording.tool_call_delta("read_file", {"path": "REA"}, call_id="index:0")
+        now[0] = 20.0
+        recording.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+        now[0] = 41.0
+        recording.completed_tool_result("read_file", "contents", call_id="call-read")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual(events[1]["duration_ms"], 31_000)
+
+    def test_historical_tool_result_without_duration_still_normalizes(self) -> None:
+        events = context.normalize_events(
+            [
+                {"type": "tool_call", "name": "read_file", "args": {}},
+                {"type": "tool_result", "name": "read_file", "output": "contents"},
+            ]
+        )
+
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result"])
+        self.assertNotIn("duration_ms", events[1])
+
     def test_completed_tool_error_persists_before_turn_failure(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

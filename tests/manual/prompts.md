@@ -166,7 +166,8 @@ Expected:
 - The next turn starts a new `thinking` block instead of appending to the old
   one.
 - Any running subagent blocks become `CANCELLED` and stop animating.
-- Transient `working...` or `preparing tool call...` status blocks disappear.
+- Transient `working...` status blocks disappear; no standalone
+  `preparing tool call...` bubble appears.
 
 Enter this tool/delegation prompt, cancel while tool or task setup is visible,
 then submit `continue`:
@@ -1285,6 +1286,22 @@ conda run -n ai_agents python -m cli.main --workspace <workspace>
     readable, and ambient host/network APIs are unavailable. Separately run a
     bounded infinite-loop probe and cancel an active eval; both must return
     control without terminating MIRA.
+
+## Tool And Formal-Construction Timing
+
+In the TUI, run a tool whose arguments stream and whose execution lasts several
+seconds, then create both a Plan and a Goal.
+
+- The tool uses one bubble throughout: `Preparing · MM:SS elapsed` while a real
+  draft is available, `Running · MM:SS elapsed` when execution begins, and
+  `Completed in MM:SS` or `Failed after MM:SS` with the final output. The clock
+  does not reset, and the normal bottom-right timestamp remains unchanged.
+- No standalone `Preparing tool call...` bubble appears during a text-only turn
+  or after the final response.
+- Success Criteria generation and Plan/Goal creation show temporary spinner
+  bubbles with elapsed time; those bubbles disappear when the existing final
+  Plan or Goal UI takes over.
+- Resume the session and confirm completed tool durations remain visible.
 
 ## Rubric Model Profiles And Live Progress
 

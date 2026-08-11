@@ -1343,7 +1343,7 @@ class MiraApp(App[None]):
         context = request["context_and_constraints"] or "No additional constraints."
         if not objective:
             raise RuntimeError("prepare_plan requires the authoritative user objective")
-        self.waiting_started("drafting Success Criteria...", immediate=True)
+        self.waiting_started("Generating success criteria", immediate=True, elapsed=True)
         service = SuccessCriteriaService(self.config or {})
         if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
             previous = revision["previous_plan"]
@@ -1361,7 +1361,7 @@ class MiraApp(App[None]):
             "success_criteria": criteria,
         }
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_FINALIZE
-        self.waiting_started("drafting Plan...", immediate=True)
+        self.waiting_started("Creating plan", immediate=True, elapsed=True)
         revision_context = ""
         if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
             revision_context = (
@@ -1503,7 +1503,7 @@ class MiraApp(App[None]):
         context = request["context_and_constraints"]
         evidence = request["research_evidence"]
         research_context = "\n\n".join(value for value in (context, evidence) if value)
-        self.waiting_started("drafting Success Criteria...", immediate=True)
+        self.waiting_started("Generating success criteria", immediate=True, elapsed=True)
         service = SuccessCriteriaService(self.config or {})
         previous = revision.get("previous_goal") if isinstance(revision, dict) else None
         if isinstance(previous, dict):
@@ -1529,7 +1529,7 @@ class MiraApp(App[None]):
             }
         )
         self.mode["planning_stage"] = PLANNING_STAGE_GOAL_FINALIZE
-        self.waiting_started("finalizing Goal...", immediate=True)
+        self.waiting_started("Finalizing Goal", immediate=True, elapsed=True)
         revision_context = ""
         if isinstance(revision, dict):
             revision_context = (
@@ -2148,13 +2148,6 @@ class MiraApp(App[None]):
         self._mark_main_stream_active()
         self.query_one(ChatLog).text_delta(delta, created_at=created_at)
 
-    def model_activity(self) -> None:
-        """Render transient activity for streamed non-text model output."""
-        self.waiting_finished()
-        self._mark_main_stream_active()
-        self.query_one(ChatLog).model_activity()
-        self._set_status(state="running", detail="preparing tool call...")
-
     def model_stream_finished(self) -> None:
         """Re-arm waiting UI after streamed model text/reasoning goes quiet."""
         self.query_one(ChatLog).finish_stream_phase()
@@ -2166,7 +2159,7 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self._mark_main_stream_active()
         self.query_one(ChatLog).tool_call_delta(name, args, call_id=call_id)
-        self._set_status(state="running", detail="preparing tool call...")
+        self._set_status(state="running", detail="preparing arguments...")
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
         """Render a live draft of streamed task delegation input."""
@@ -2200,38 +2193,108 @@ class MiraApp(App[None]):
         """Advance idless approval matching without changing visible content."""
         self.query_one(ChatLog).tool_call_approval_resolved(name, call_id=call_id)
 
-    def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+    def tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Render a tool result in transcript order."""
         self.trace.tool_result(name, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).tool_result(
+            name,
+            result,
+            call_id=call_id,
+            created_at=created_at,
+            duration_ms=duration_ms,
+        )
         self._rearm_waiting_if_busy()
 
-    def completed_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+    def completed_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Update a finished ordinary tool without closing active model output."""
         self.trace.completed_tool_result(name, result)
-        self.query_one(ChatLog).completed_tool_result(name, result, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).completed_tool_result(
+            name,
+            result,
+            call_id=call_id,
+            created_at=created_at,
+            duration_ms=duration_ms,
+        )
 
-    def completed_tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+    def completed_tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Update a failed ordinary tool without closing active model output."""
         self.trace.completed_tool_error(name, error)
-        self.query_one(ChatLog).completed_tool_error(name, error, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).completed_tool_error(
+            name,
+            error,
+            call_id=call_id,
+            created_at=created_at,
+            duration_ms=duration_ms,
+        )
 
-    def recovered_tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
+    def recovered_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Render a late-discovered tool result in session transcript order."""
         self.trace.recovered_tool_result(name, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_result(name, result, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).tool_result(
+            name,
+            result,
+            call_id=call_id,
+            created_at=created_at,
+            duration_ms=duration_ms,
+        )
         self._rearm_waiting_if_busy()
 
-    def recovered_tool_error(self, name: str, error: str, call_id: str = "", *, created_at: str = "") -> None:
+    def recovered_tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        *,
+        created_at: str = "",
+        duration_ms: int | None = None,
+    ) -> None:
         """Render a late-discovered failed tool result in session transcript order."""
         self.trace.recovered_tool_error(name, error)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_error(name, error, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).tool_error(
+            name,
+            error,
+            call_id=call_id,
+            created_at=created_at,
+            duration_ms=duration_ms,
+        )
         self._rearm_waiting_if_busy()
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
@@ -2607,7 +2670,13 @@ class MiraApp(App[None]):
             if self.is_mounted and self.ready and not self.busy and not prompt.disabled:
                 self.action_focus_prompt()
 
-    def waiting_started(self, label: str | None = None, *, immediate: bool = False) -> None:
+    def waiting_started(
+        self,
+        label: str | None = None,
+        *,
+        immediate: bool = False,
+        elapsed: bool = False,
+    ) -> None:
         """Arm the transient working indicator while the turn is silent."""
         if label is not None:
             self._waiting_label = label
@@ -2621,7 +2690,7 @@ class MiraApp(App[None]):
         except NoMatches:
             return
         if immediate:
-            self.query_one(ChatLog).show_waiting(self._waiting_label)
+            self.query_one(ChatLog).show_waiting(self._waiting_label, elapsed=elapsed)
             return
         generation = self._waiting_generation
         self._waiting_task = self.run_worker(
@@ -2664,7 +2733,11 @@ class MiraApp(App[None]):
 
     def _rearm_waiting_if_busy(self) -> None:
         """Start the silent-wait timer again after a visible runtime event."""
-        if self.busy and not self._main_stream_active:
+        if (
+            self.busy
+            and not self._main_stream_active
+            and not self.query_one(ChatLog).has_live_tools()
+        ):
             self.waiting_started()
 
     def startup_progress(self, state: str) -> None:
@@ -3099,6 +3172,7 @@ class MiraApp(App[None]):
         chat.tick_subagents()
         chat.tick_compaction()
         chat.tick_rubrics()
+        chat.tick_tools()
         if self.mcp_manager is not None and any(state.transient for state in self.mcp_manager.servers.values()):
             self._mcp_spinner += 1
             self._sync_mcp_button()
