@@ -65,7 +65,14 @@ from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, 
 from ui.renderer import Renderer
 from ui.runtime_snapshot import runtime_report
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
-from ui.terminal_colors import strip_ansi
+from ui.terminal_colors import (
+    TOOL_COMPLETED_COLOR,
+    TOOL_DURATION_COLOR,
+    TOOL_FAILED_COLOR,
+    TOOL_PREPARING_COLOR,
+    TOOL_RUNNING_COLOR,
+    strip_ansi,
+)
 from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
@@ -363,6 +370,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             if text.plain[span.start : span.end] == char and expected_style in str(span.style)
         ]
         self.assertTrue(matches, f"expected {char!r} to have style {expected_style!r}")
+
+    def assert_styled_text(self, widget: Any, value: str, expected_style: str) -> None:
+        """Assert that an exact text span has the expected style."""
+        text = getattr(widget, "_renderable", None) or getattr(widget, "content", None)
+        self.assertIsInstance(text, Text)
+        matches = [
+            span
+            for span in text.spans
+            if text.plain[span.start : span.end] == value
+            and expected_style.lower() in str(span.style).lower()
+        ]
+        self.assertTrue(matches, f"expected {value!r} to have style {expected_style!r}")
 
     def test_destructive_confirm_choices_match_visible_shortcuts(self) -> None:
         """Clear confirmations should return the same shortcuts shown in their labels."""
@@ -5681,18 +5700,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tools = [block for block in chat.children if "tool-call" in block.classes]
             self.assertEqual(len(tools), 1)
             self.assertIn("Preparing · 00:00 elapsed", renderable_plain(tools[0]))
+            self.assert_styled_text(tools[0], "Preparing", TOOL_PREPARING_COLOR)
+            self.assert_styled_text(tools[0], " · 00:00 elapsed", TOOL_DURATION_COLOR)
 
             with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 19):
                 app.tool_call("eval", {"code": "1 + 1"}, call_id="call-eval")
                 chat.tick_tools()
             running = renderable_plain(tools[0])
             self.assertIn("Running · 00:19 elapsed", running)
+            self.assert_styled_text(tools[0], "Running", TOOL_RUNNING_COLOR)
 
             with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 31):
                 app.completed_tool_result("eval", "2", call_id="call-eval")
             completed = renderable_plain(tools[0])
             self.assertIn("output:\n2", completed)
-            self.assertIn("Completed in 00:31", completed)
+            self.assertIn("output:\n2\nCompleted in 00:31", completed)
+            self.assert_styled_text(tools[0], "Completed in", TOOL_COMPLETED_COLOR)
+            self.assert_styled_text(tools[0], " 00:31", TOOL_DURATION_COLOR)
 
     async def test_tool_without_draft_starts_running_and_failed_duration(self) -> None:
         """Providers without draft chunks should begin cleanly at execution."""
@@ -5714,7 +5738,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rendered = renderable_plain(tool)
             self.assertNotIn("Preparing", rendered)
             self.assertIn("error:\nnot found", rendered)
-            self.assertIn("Failed after 00:12", rendered)
+            self.assertIn("error:\nnot found\nFailed after 00:12", rendered)
+            self.assert_styled_text(tool, "Failed after", TOOL_FAILED_COLOR)
+            self.assert_styled_text(tool, " 00:12", TOOL_DURATION_COLOR)
 
     async def test_concurrent_tool_timers_finish_the_matching_bubbles(self) -> None:
         """Independent call ids should never cross-update duration or output."""

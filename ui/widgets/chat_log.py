@@ -24,7 +24,15 @@ from session.context import normalize_events
 from session.goals import GOAL_STATUSES
 from ui.names import generate_slug
 from ui.spinners import SPINNER_FRAMES
-from ui.terminal_colors import RUBRIC_BODY_COLOR, RUBRIC_HEADER_COLOR
+from ui.terminal_colors import (
+    RUBRIC_BODY_COLOR,
+    RUBRIC_HEADER_COLOR,
+    TOOL_COMPLETED_COLOR,
+    TOOL_DURATION_COLOR,
+    TOOL_FAILED_COLOR,
+    TOOL_PREPARING_COLOR,
+    TOOL_RUNNING_COLOR,
+)
 from ui.splash import loading_splash_text, splash_text
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -1488,13 +1496,19 @@ class ChatLog(VerticalScroll):
         duration_ms = block.get("duration_ms")
         if duration_ms is not None:
             verb = "Failed after" if block.get("is_error") else "Completed in"
-            text.append(f"\n{verb} {format_elapsed(duration_ms)}", style="dim")
+            verb_color = TOOL_FAILED_COLOR if block.get("is_error") else TOOL_COMPLETED_COLOR
+            text.append("\n")
+            text.append(verb, style=verb_color)
+            text.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
         elif block.get("started_at") is not None:
             state = "Preparing" if block.get("draft") else "Running"
             frame = SPINNER_FRAMES[int(block.get("frame") or 0) % len(SPINNER_FRAMES)]
+            state_color = TOOL_PREPARING_COLOR if block.get("draft") else TOOL_RUNNING_COLOR
+            text.append(f"\n{frame} ", style=TOOL_DURATION_COLOR)
+            text.append(state, style=state_color)
             text.append(
-                f"\n{frame} {state} · {format_elapsed(elapsed_ms(block['started_at']))} elapsed",
-                style="dim",
+                f" · {format_elapsed(elapsed_ms(block['started_at']))} elapsed",
+                style=TOOL_DURATION_COLOR,
             )
         block["widget"].update(text)
         if scroll:
