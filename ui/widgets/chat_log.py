@@ -42,6 +42,8 @@ class ChatLog(VerticalScroll):
     """A small scrollable chat transcript with streaming message updates."""
 
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS, **kwargs: Any) -> None:
+        self.follow_tail = True
+        self._programmatic_tail_scroll = False
         super().__init__(**kwargs)
         self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
@@ -88,6 +90,23 @@ class ChatLog(VerticalScroll):
         if not isinstance(event.widget, Button):
             self.focus()
 
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Pause or resume tail-following when the user moves the viewport."""
+        super().watch_scroll_y(old_value, new_value)
+        if not self._programmatic_tail_scroll:
+            self.follow_tail = self.is_vertical_scroll_end
+
+    def watch_scroll_target_y(self, old_value: float, new_value: float) -> None:
+        """Pause before an animated manual scroll starts moving the viewport."""
+        if not self._programmatic_tail_scroll and new_value < self.max_scroll_y:
+            self.follow_tail = False
+
+    def resume_tail_following(self) -> None:
+        """Resume following new output and move to the current transcript end."""
+        self.follow_tail = True
+        self._apply_tail_scroll()
+        self._scroll_to_end()
+
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""
         self._startup_loading = False
@@ -103,7 +122,6 @@ class ChatLog(VerticalScroll):
         """Append a fresh splash without changing the owned startup block."""
         text = splash_text(model_name=model_name, session_id=session_id, workspace=workspace)
         block = self._add_block("mira", text, "message startup")
-        self.call_after_refresh(block.scroll_visible, animate=False, force=True)
         return block
 
     def startup_loading(self, *, workspace: str, state: str = "starting") -> None:
@@ -1099,7 +1117,24 @@ class ChatLog(VerticalScroll):
 
     def _scroll_to_end(self) -> None:
         """Keep new output visible."""
-        self.call_after_refresh(self.scroll_end, animate=False, force=True)
+        if self.follow_tail:
+            self.call_after_refresh(self._scroll_follow_tail)
+
+    def _scroll_follow_tail(self) -> None:
+        """Wait for new content to finish layout before applying a tail scroll."""
+        if not self.follow_tail:
+            return
+        self.call_after_refresh(self._apply_tail_scroll)
+
+    def _apply_tail_scroll(self) -> None:
+        """Apply a pending tail scroll without treating it as user input."""
+        if not self.follow_tail:
+            return
+        self._programmatic_tail_scroll = True
+        try:
+            self.scroll_end(animate=False, force=True, immediate=True)
+        finally:
+            self._programmatic_tail_scroll = False
 
     def _delegation_details(self, calls: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Return valid task descriptions and compact parse errors."""

@@ -361,6 +361,7 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
             return
 
+        self.query_one(ChatLog).resume_tail_following()
         self._record_prompt_history(text)
         if text == "/runtime":
             self._render_runtime_snapshot()

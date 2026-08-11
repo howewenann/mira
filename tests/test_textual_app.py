@@ -359,6 +359,12 @@ def stage_plan(app: MiraApp) -> None:
     }
 
 
+def fill_scrollable_chat(chat: ChatLog) -> None:
+    """Add enough transcript history for Pilot scrolling tests."""
+    for index in range(12):
+        chat.system_message(f"history {index}\nsecond line", kind="info")
+
+
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
 
@@ -1249,6 +1255,95 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(calls, ["hello\nsecond line"])
                 self.assertFalse(prompt.disabled)
                 self.assertTrue(prompt.has_focus)
+
+    async def test_chat_log_follows_transcript_updates_at_bottom(self) -> None:
+        """New and updated output should keep an active transcript at its exact end."""
+        app = make_app()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            fill_scrollable_chat(chat)
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+
+            self.assertGreater(chat.max_scroll_y, 0)
+            self.assertTrue(chat.follow_tail)
+            self.assertTrue(chat.is_vertical_scroll_end)
+
+            app.text_delta("streaming line")
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+            self.assertTrue(chat.is_vertical_scroll_end)
+
+            app.text_delta("\nupdated line")
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+            self.assertTrue(chat.is_vertical_scroll_end)
+
+    async def test_chat_log_pauses_active_updates_until_user_returns_to_bottom(self) -> None:
+        """Manual scrolling should pause every routine transcript scroll until End."""
+        app = make_app()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            fill_scrollable_chat(chat)
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+            chat.focus()
+
+            await pilot.press("up")
+            await pilot.pause()
+            self.assertFalse(chat.follow_tail)
+            self.assertFalse(chat.is_vertical_scroll_end)
+            paused_scroll_y = chat.scroll_y
+
+            chat.show_waiting()
+            await pilot.pause()
+            chat.tick_waiting()
+            app.text_delta("streaming")
+            app.text_delta(" update")
+            app.tool_call("read_file", {"path": "README.md"}, call_id="call-scroll")
+            await pilot.pause(0.1)
+
+            self.assertFalse(chat.follow_tail)
+            self.assertEqual(chat.scroll_y, paused_scroll_y)
+
+            await pilot.press("end")
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+            self.assertTrue(chat.follow_tail)
+            self.assertTrue(chat.is_vertical_scroll_end)
+
+            app.system_message("new tail output")
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+            self.assertTrue(chat.is_vertical_scroll_end)
+
+    async def test_prompt_submission_resumes_paused_chat_tail(self) -> None:
+        """A normal submitted prompt should intentionally override paused scrolling."""
+        app = make_app()
+        calls: list[str] = []
+
+        async def fake_run_user_turn(**kwargs: Any) -> None:
+            calls.append(kwargs["text"])
+            kwargs["renderer"].text_delta("done")
+
+        with patch("ui.app.run_user_turn", fake_run_user_turn):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await pilot.pause()
+                chat = app.query_one(ChatLog)
+                fill_scrollable_chat(chat)
+                await wait_until(lambda: chat.is_vertical_scroll_end)
+                chat.focus()
+                await pilot.press("up")
+                await pilot.pause()
+                self.assertFalse(chat.follow_tail)
+
+                prompt = app.query_one(PromptBox)
+                prompt.value = "hello"
+                prompt.focus()
+                await pilot.press("enter")
+                await wait_until(lambda: calls == ["hello"])
+                await wait_until(lambda: chat.is_vertical_scroll_end)
+
+                self.assertTrue(chat.follow_tail)
+                self.assertTrue(chat.is_vertical_scroll_end)
 
     async def test_prompt_submission_refreshes_status_after_live_usage(self) -> None:
         """Live usage updates should redraw the mounted status bar immediately."""
