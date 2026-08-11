@@ -123,7 +123,6 @@ class SettingsPanel(Vertical):
         self.model_registry = model_registry
         self.subagent_metadata = list(subagent_metadata or [])
         self.initial_tab = initial_tab if initial_tab in {"general", "models", "custom", "mcp"} else "general"
-        self._refreshing_models = False
         self._model_controls_ready = False
         self._button_cells: dict[str, ToggleCell] = {}
         if self.initial_tab != "general":
@@ -466,7 +465,7 @@ class SettingsPanel(Vertical):
     async def change_model_assignment(self, event: Select.Changed) -> None:
         """Persist an assignment while keeping the inheritance option null."""
         event.stop()
-        if self._refreshing_models or not self._model_controls_ready:
+        if not self._model_controls_ready:
             return
         role = (event.select.id or "").removeprefix("settings-model-")
         selected = "" if event.value == INHERIT_VALUE else str(event.value or "")
@@ -485,17 +484,12 @@ class SettingsPanel(Vertical):
         if ok:
             self.settings = updated
             if role == MAIN_MODEL:
-                self._refreshing_models = True
-                try:
-                    self._replace_model_select_options(
-                        event.select,
-                        self._role_options(MAIN_MODEL),
-                        selected,
-                    )
-                    self._refresh_inherited_model_labels()
-                except Exception:
-                    self._refreshing_models = False
-                    raise
+                self._replace_model_select_options(
+                    event.select,
+                    self._role_options(MAIN_MODEL),
+                    selected,
+                )
+                self._refresh_inherited_model_labels()
         else:
             self._restore_select_value(
                 event.select,
@@ -506,7 +500,7 @@ class SettingsPanel(Vertical):
     async def change_subagent_model(self, event: Select.Changed) -> None:
         """Persist a MIRA-owned raw-subagent override."""
         event.stop()
-        if self._refreshing_models or not self._model_controls_ready:
+        if not self._model_controls_ready:
             return
         suffix = (event.select.id or "").removeprefix("settings-subagent-model-")
         name = next(
@@ -728,12 +722,8 @@ class SettingsPanel(Vertical):
 
     def _restore_select_value(self, select: Select, value: str) -> None:
         """Restore a rejected model selection without firing another save."""
-        self._refreshing_models = True
-        select.value = value
-        self.call_after_refresh(self._finish_model_value_restore)
-
-    def _finish_model_value_restore(self) -> None:
-        self._refreshing_models = False
+        with select.prevent(Select.Changed):
+            select.value = value
 
     def _replace_model_select_options(
         self,
@@ -742,8 +732,9 @@ class SettingsPanel(Vertical):
         value: str,
     ) -> None:
         """Replace options and repaint a value whose identity did not change."""
-        select.set_options(options)
-        select.value = value
+        with select.prevent(Select.Changed):
+            select.set_options(options)
+            select.value = value
         label = next((label for label, option_value in options if option_value == value), value)
         select.query_one("SelectCurrent").update(label)
 
@@ -825,30 +816,24 @@ class SettingsPanel(Vertical):
         return options
 
     def _refresh_inherited_model_labels(self) -> None:
-        self._refreshing_models = True
-        try:
-            for selector in self.query(".settings-model-select"):
-                role = (selector.id or "").removeprefix("settings-model-")
-                if role != MAIN_MODEL and not model_assignment(self.settings, role):
-                    self._replace_model_select_options(
-                        selector,
-                        self._role_options(role),
-                        INHERIT_VALUE,
-                    )
-            for item in self.subagent_metadata:
-                name = str(item.get("name") or "")
-                if not name or subagent_model_assignment(self.settings, name):
-                    continue
-                selector = self.query_one(f"#settings-subagent-model-{safe_id(name)}", Select)
+        for selector in self.query(".settings-model-select"):
+            role = (selector.id or "").removeprefix("settings-model-")
+            if role != MAIN_MODEL and not model_assignment(self.settings, role):
                 self._replace_model_select_options(
                     selector,
-                    self._subagent_options(item),
+                    self._role_options(role),
                     INHERIT_VALUE,
                 )
-        except Exception:
-            self._refreshing_models = False
-            raise
-        self.call_after_refresh(self._finish_model_value_restore)
+        for item in self.subagent_metadata:
+            name = str(item.get("name") or "")
+            if not name or subagent_model_assignment(self.settings, name):
+                continue
+            selector = self.query_one(f"#settings-subagent-model-{safe_id(name)}", Select)
+            self._replace_model_select_options(
+                selector,
+                self._subagent_options(item),
+                INHERIT_VALUE,
+            )
 
 
 def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:

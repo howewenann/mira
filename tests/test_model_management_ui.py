@@ -421,6 +421,91 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(model_assignment(panel.settings, "summarization"), "old")
             self.assertEqual(subagent_model_assignment(panel.settings, "reviewer"), "old")
 
+    async def test_keyboard_main_selection_is_saved_once_without_reverting(self) -> None:
+        """Repainting Main after a real selection must not persist its stale prior value."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            current = "lmstudio-gemma"
+            target = "lmstudio-gemma-no-reasoning"
+            settings = set_model_assignment(load_settings(workspace), "main", current)
+            self.assertTrue(save_settings(workspace, settings))
+            registry = ModelRegistry(
+                {
+                    current: ModelProfile(
+                        current,
+                        {"provider": "openai", "model": "google/gemma-4-12b"},
+                    ),
+                    target: ModelProfile(
+                        target,
+                        {
+                            "provider": "openai",
+                            "model": "google/gemma-4-12b",
+                            "model_kwargs": {"reasoning_effort": "none"},
+                        },
+                    ),
+                }
+            )
+            subagents = [
+                {"name": "general-purpose", "kind": "raw", "description": "General work."},
+            ]
+            app = make_app(
+                workspace,
+                config={"settings": settings, "settings_valid": True, "model_registry": registry},
+                model_name=f"[{current}] openai:google/gemma-4-12b",
+                resource_metadata={"subagents": subagents},
+            )
+
+            async def infer_metadata(config: dict, model: object | None = None) -> ModelMetadata:
+                return ModelMetadata(
+                    context_limit_tokens(config),
+                    "settings.models.context_limit_tokens",
+                )
+
+            with (
+                patch("agent.llm.get_llm", return_value=SimpleNamespace(profile={})),
+                patch(
+                    "config.metadata.infer_model_metadata",
+                    new_callable=AsyncMock,
+                    side_effect=infer_metadata,
+                ),
+            ):
+                async with app.run_test(size=(110, 42)) as pilot:
+                    await pilot.pause()
+                    app._rebuild_agents = AsyncMock()  # type: ignore[method-assign]
+                    app._apply_settings = AsyncMock(  # type: ignore[method-assign]
+                        wraps=app._apply_settings
+                    )
+                    app._handle_settings_command("models")
+                    await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                    panel = app.query_one(SettingsPanel)
+                    await wait_until(lambda: panel._model_controls_ready)
+
+                    main = panel.query_one("#settings-model-main", Select)
+                    rubric = panel.query_one("#settings-model-rubric", Select)
+                    summarization = panel.query_one("#settings-model-summarization", Select)
+                    general = panel.query_one("#settings-subagent-model-general-purpose", Select)
+                    main.focus()
+                    await pilot.press("enter")
+                    await wait_until(lambda: main.expanded)
+                    await pilot.press("down", "enter")
+                    await wait_until(lambda: app._apply_settings.await_count >= 1)
+                    await pilot.pause(0.2)
+
+                    self.assertEqual(app._apply_settings.await_count, 1)
+                    self.assertEqual(main.value, target)
+                    self.assertEqual(model_assignment(panel.settings, "main"), target)
+                    self.assertEqual(model_assignment(app.config, "main"), target)
+                    self.assertEqual(model_assignment(load_settings(workspace), "main"), target)
+                    self.assertEqual(
+                        str(app.query_one("#model-settings-button", Button).label),
+                        f"model: [{target}] openai:google/gemma-4-12b",
+                    )
+                    for selector in (rubric, summarization, general):
+                        self.assertEqual(
+                            renderable_plain(selector.query_one("SelectCurrent").query_one("#label")),
+                            f"{target} (default)",
+                        )
+
     async def test_models_changes_rebuild_agents_without_reloading_mcp(self) -> None:
         """Every Models control should preserve MCP and share the rebuild status."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -576,13 +661,17 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: panel._model_controls_ready)
                 selector = panel.query_one("#settings-model-main", Select)
                 await wait_until(lambda: selector.value == "old")
-                selector.value = "new"
-                event = SimpleNamespace(stop=lambda: None, select=selector, value="new")
-                await panel.change_model_assignment(event)
+                selector.focus()
+                await pilot.press("enter")
+                await wait_until(lambda: selector.expanded)
+                await pilot.press("down", "enter")
+                await wait_until(lambda: app._apply_settings.await_count == 1)
+                await pilot.pause(0.1)
 
                 status = renderable_plain(panel.query_one("#settings-status"))
 
             self.assertEqual(app._apply_settings.await_count, 1)
+            self.assertEqual(selector.value, "old")
             self.assertIn("settings not saved: rebuild failed", status)
 
     async def test_failed_model_rebuild_restores_settings_without_full_reload(self) -> None:
