@@ -823,6 +823,59 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result", "assistant"])
 
+    def test_recording_renderer_replaces_edited_tool_call_args(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        renderer = RunTurnRenderer()
+        recording = SessionRecordingRenderer(renderer, recorder)
+
+        recording.tool_call(
+            "write_file",
+            {"file_path": "/story.txt", "content": "draft"},
+            call_id="call-write",
+        )
+        recording.tool_call_updated(
+            "write_file",
+            {"file_path": "/story.txt", "content": "final"},
+            call_id="call-write",
+        )
+        recording.completed_tool_result(
+            "write_file",
+            "Successfully wrote to /story.txt",
+            call_id="call-write",
+        )
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result"])
+        self.assertEqual(events[0]["args"]["content"], "final")
+        self.assertEqual(events[0]["call_id"], events[1]["call_id"])
+        self.assertIn(
+            (
+                "tool_call_updated",
+                "write_file",
+                {"file_path": "/story.txt", "content": "final"},
+                "call-write",
+            ),
+            renderer.events,
+        )
+
+    def test_recording_renderer_updates_ordered_idless_call_after_unchanged_approval(self) -> None:
+        record = {"events": []}
+        recorder = SessionRecorder(record, Store(), "action")
+        recording = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+
+        recording.tool_call("write_file", {"file_path": "/one", "content": "one"})
+        recording.tool_call("write_file", {"file_path": "/two", "content": "two"})
+        recording.tool_call_approval_resolved("write_file")
+        recording.tool_call_updated(
+            "write_file",
+            {"file_path": "/two", "content": "changed"},
+        )
+
+        calls = [event for event in record["events"] if event["type"] == "tool_call"]
+        self.assertEqual(calls[0]["args"]["content"], "one")
+        self.assertEqual(calls[1]["args"]["content"], "changed")
+
     def test_correction_keeps_rejected_prose_and_retry_prompt_in_session(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")

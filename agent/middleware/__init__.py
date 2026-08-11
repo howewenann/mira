@@ -16,6 +16,7 @@ from agent.middleware.execute_tool_description_rewrite import (
 from agent.middleware.file_references import FileReferenceMiddleware, file_reference_guidance
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
+from agent.middleware.project_tool_errors import ProjectToolErrorMiddleware
 from agent.middleware.builder import (
     AgentMiddlewareBundle,
     QUICKJS_MEMORY_LIMIT,
@@ -42,6 +43,7 @@ __all__ = [
     "FileReferenceMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
     "ModelResponseNormalizationMiddleware",
+    "ProjectToolErrorMiddleware",
     "ModelToolVisibilityMiddleware",
     "PlanningStageEnforcementMiddleware",
     "PlanningStageState",

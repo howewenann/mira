@@ -77,6 +77,11 @@ class TraceStream:
         """Trace a tool call."""
         self._emit("tool_call", name, args)
 
+    def tool_call_updated(self, name: str, args: Any) -> None:
+        """Trace an edited call as an explicit amendment."""
+        self.transcript.tool_call_updated(name, args)
+        self._flush()
+
     def tool_result(self, name: str, result: Any) -> None:
         """Trace a tool result."""
         self._emit("tool_result", name, result)

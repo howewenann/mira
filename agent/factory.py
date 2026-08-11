@@ -13,6 +13,7 @@ from agent.middleware import (
     CorrectionMiddleware,
     ModelToolVisibilityMiddleware,
     PlanningStageEnforcementMiddleware,
+    ProjectToolErrorMiddleware,
     build_agent_middleware,
 )
 from agent.planning.response_status import PlanningResponseStatusRule
@@ -168,6 +169,13 @@ def _build_agent(
         config=config,
     )
     backend = resources.backend
+    local_metadata = resources.metadata["tools"]
+    active_local_names = {tool_name(tool) for tool in resources.tools}
+    project_tool_names = frozenset(
+        str(item["name"])
+        for item in local_metadata
+        if item.get("source") == "project" and item.get("name") in active_local_names
+    )
     permissions = [] if enable_execute_backend else permissions
     excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
     if not backend_supports_delete(backend):
@@ -183,6 +191,7 @@ def _build_agent(
     extra_middleware = [
         *(extra_middleware or []),
         *rubric_middleware,
+        *([ProjectToolErrorMiddleware(project_tool_names)] if project_tool_names else []),
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
 
@@ -206,7 +215,6 @@ def _build_agent(
             (config or {}).get("settings"),
             planning=planning,
         )
-    local_metadata = resources.metadata["tools"]
     resolved_interrupt_on = (
         _write_interrupts(config, [*local_metadata, *mcp_metadata], planning=planning)
         if interrupt_on == SETTINGS_INTERRUPTS
@@ -223,7 +231,7 @@ def _build_agent(
         and (not planning or _local_tool_available_in_plan(config, local_metadata, tool_name(tool)))
     ]
     tools.extend(mcp_tools)
-    subagents = resources.subagents
+    subagents = subagents_with_project_tool_errors(resources.subagents, project_tool_names)
     settings = (config or {}).get("settings")
     if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
         subagents = compile_dynamic_subagents(
@@ -269,6 +277,28 @@ def _build_agent(
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))
     return agent
+
+
+def subagents_with_project_tool_errors(
+    subagents: list[Any],
+    project_tool_names: frozenset[str],
+) -> list[Any]:
+    """Add project-tool recovery to raw subagents without mutating user specs."""
+    if not project_tool_names:
+        return list(subagents)
+
+    prepared: list[Any] = []
+    for spec in subagents:
+        if not isinstance(spec, dict) or "graph_id" in spec or "runnable" in spec:
+            prepared.append(spec)
+            continue
+        copied = dict(spec)
+        middleware = list(spec.get("middleware") or [])
+        if not any(isinstance(item, ProjectToolErrorMiddleware) for item in middleware):
+            middleware.append(ProjectToolErrorMiddleware(project_tool_names))
+        copied["middleware"] = middleware
+        prepared.append(copied)
+    return prepared
 
 
 def _register_summarization_exclusion(config: dict[str, Any] | None, model: Any | None = None) -> None:

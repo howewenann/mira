@@ -258,6 +258,12 @@ to inspect.
   `StructuredTool` proxy under the public name. Imported marked functions are
   ignored, and project-only imports must stay inside the marked function
   because discovery still imports the containing file in MIRA.
+- Enabled workspace tools run behind a project-name-scoped error middleware in
+  coordinator and MIRA-compiled raw subagents. Ordinary `Exception` values
+  become native `ToolMessage(status="error")` results with the original call
+  id so the model can recover without leaving a dangling call. Graph control
+  flow, cancellation, process-level exceptions, bundled/MCP tools, and
+  user-owned compiled or remote subagents keep their native behavior.
 - A project proxy launches one standard-library child runner per call using the
   existing Execute Environment selection. It exchanges JSON through the child
   process's stdin and stdout, redirects project-tool prints to stderr so they
@@ -272,8 +278,8 @@ to inspect.
   backend's virtual-path resolver so `/file` refers to the workspace rather
   than the host filesystem root.
 - A normal `@tool` that delays a missing import until its function body loads
-  successfully and remains outside startup repair; that invocation follows the
-  ordinary tool-error path.
+  remains outside startup repair; invocation returns the import failure through
+  the model-visible workspace tool-error path.
 - Disabled project tools stay in metadata for the settings UI but are not
   exposed to the agent.
 
@@ -626,6 +632,16 @@ tools `ask_user`, `prepare_goal`, `prepare_plan`, `finalize_goal`, `finalize_pla
 no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
+When HITL edits a call, MIRA binds the decision back to the current-loop call
+by stable id, with ordered tool-name matching only for idless compatibility.
+The TUI and saved event replace the proposed arguments in place; immutable
+one-shot output prints an explicit amendment before execution resumes.
+
+Local `@file` mentions add ephemeral, tool-neutral model guidance containing
+only normalized paths. Their contents are never injected. An explicitly named
+reader takes precedence; otherwise the model chooses an appropriate available
+read-only tool, so specialized readers are not contradicted by a hard-coded
+`read_file` instruction.
 
 Completed tool results update their original tool blocks before the overall turn
 ends when the provider exposes a live terminal event. MIRA also consumes root

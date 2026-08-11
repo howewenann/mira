@@ -311,6 +311,41 @@ class SessionRecorder:
         self.save()
         return stored
 
+    def tool_call_updated(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        *,
+        event_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Replace the saved proposal with the edited action that will run."""
+        events = self.record.get("events", [])
+        if not isinstance(events, list):
+            return None
+
+        target = None
+        for event in reversed(events):
+            if not isinstance(event, dict) or event.get("type") != "tool_call":
+                continue
+            if event_id is not None:
+                if int(event.get("id") or 0) != event_id:
+                    continue
+            elif call_id:
+                if str(event.get("call_id") or "") != call_id:
+                    continue
+            elif str(event.get("name") or "") != name or event.get("call_id"):
+                continue
+            target = event
+            break
+
+        if target is None:
+            return None
+        target["name"] = name
+        target["args"] = json_value(args)
+        self.save()
+        return target
+
     def ensure_assistant(self, text: str) -> None:
         text = text.strip()
         if not text:
@@ -423,6 +458,7 @@ class RecordingRenderer:
         self.renderer = renderer
         self.recorder = recorder
         self._context_notice_rendered = False
+        self._open_idless_tool_calls: list[tuple[int, str]] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
@@ -505,15 +541,67 @@ class RecordingRenderer:
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         event = self.recorder.tool_call(name, args, call_id=call_id)
+        if not call_id:
+            self._open_idless_tool_calls.append((int(event["id"]), name))
         call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
+
+    def tool_call_updated(self, name: str, args: Any, call_id: str = "") -> None:
+        """Update one durable call event and its existing visible block."""
+        event_id = None
+        if not call_id and self._open_idless_tool_calls:
+            match = next(
+                (
+                    index
+                    for index, (_pending_id, pending_name) in enumerate(self._open_idless_tool_calls)
+                    if pending_name == name
+                ),
+                0,
+            )
+            event_id, _original_name = self._open_idless_tool_calls.pop(match)
+        event = self.recorder.tool_call_updated(name, args, call_id=call_id, event_id=event_id)
+        callback = getattr(self.renderer, "tool_call_updated", None)
+        if callable(callback):
+            call_renderer(
+                callback,
+                name,
+                args,
+                call_id=call_id,
+                created_at=event_created_at(event),
+            )
+        else:
+            call_renderer(
+                self.renderer.tool_call,
+                name,
+                args,
+                call_id=call_id,
+                created_at=event_created_at(event),
+            )
+
+    def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
+        """Advance idless edit matching when approval kept the proposed call."""
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
+        callback = getattr(self.renderer, "tool_call_approval_resolved", None)
+        if callable(callback):
+            callback(name, call_id=call_id)
 
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         event = self.recorder.tool_result(name, result, call_id=call_id)
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
         call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+
+    def _discard_open_idless_tool_call(self, name: str) -> None:
+        for index, (_event_id, pending_name) in enumerate(self._open_idless_tool_calls):
+            if pending_name == name:
+                self._open_idless_tool_calls.pop(index)
+                return
 
     def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Record and update a completed tool without ending active model output."""
         event = self.recorder.completed_tool_result(name, result, call_id=call_id)
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
         callback = getattr(self.renderer, "completed_tool_result", None)
         if callable(callback):
             call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
@@ -523,6 +611,8 @@ class RecordingRenderer:
     def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
         """Record and update a failed tool without ending active model output."""
         event = self.recorder.completed_tool_error(name, error, call_id=call_id)
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
         callback = getattr(self.renderer, "completed_tool_error", None)
         if callable(callback):
             call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
@@ -533,6 +623,8 @@ class RecordingRenderer:
         """Render and record a late-discovered tool result."""
         callback = getattr(self.renderer, "recovered_tool_result", None)
         event = self.recorder.recovered_tool_result(name, result, call_id=call_id)
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
         if callable(callback):
             call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
         else:
@@ -551,6 +643,8 @@ class RecordingRenderer:
         """Render and record a late-discovered failed tool result."""
         callback = getattr(self.renderer, "recovered_tool_error", None)
         event = self.recorder.recovered_tool_error(name, error, call_id=call_id)
+        if not call_id:
+            self._discard_open_idless_tool_call(name)
         if callable(callback):
             call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
         else:

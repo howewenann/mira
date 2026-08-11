@@ -62,6 +62,10 @@ class Renderer:
         """Print a compact tool call."""
         self.transcript.tool_call(name, args)
 
+    def tool_call_updated(self, name: str, args: Any, call_id: str = "") -> None:
+        """Print the edited action that replaces an earlier proposal."""
+        self.transcript.tool_call_updated(name, args)
+
     def tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Print a compact tool result."""
         self.transcript.tool_result(name, result)

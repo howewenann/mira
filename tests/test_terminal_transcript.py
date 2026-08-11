@@ -52,6 +52,16 @@ class TerminalTranscriptTests(unittest.TestCase):
             "\nread_file:\nargs: {'file_path' ... truncated ...\nread_file output: xxxxxxxxxxxx ... truncated ...\n",
         )
 
+    def test_edited_tool_call_prints_an_explicit_amendment(self) -> None:
+        transcript, chunks = self.make_transcript()
+
+        transcript.tool_call("write_file", {"content": "draft"})
+        transcript.tool_call_updated("write_file", {"content": "final"})
+
+        rendered = "".join(chunks)
+        self.assertIn("\nwrite_file:\nargs: {'content': 'draft'}", rendered)
+        self.assertIn("\nwrite_file edited:\nargs: {'content': 'final'}", rendered)
+
     def test_completed_tool_result_prints_promptly_at_safe_boundary(self) -> None:
         transcript, chunks = self.make_transcript()
 

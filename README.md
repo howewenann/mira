@@ -113,8 +113,8 @@ enabled subagents, local project files, and MCP resources autocomplete after
 a subagent inserts text such as `general-purpose subagent`. FILE and RSRC
 entries remain `@` references. Paths containing spaces use quoted
 mentions such as `@"docs/design notes.md"`. Local file references guide the
-agent to inspect files through its normal `read_file` tool—the file
-contents are not embedded into the prompt automatically.
+agent to use an explicitly requested or appropriate available read-only tool;
+the file contents are not embedded into the prompt automatically.
 
 Plan mode is a continuous read-only conversation that can present one durable
 Plan. Goals retain an Objective and Success Criteria while leaving the approach
@@ -183,6 +183,9 @@ installed in MIRA's Python environment. A bad project tool file is isolated and
 kept out of the agent; `/issues` shows the exact install command or project-tool
 guidance, while `/reload` retries every failed file. See
 `.mira/examples/tools/mira_runtime_tool.py`.
+Ordinary exceptions raised while an enabled workspace tool runs become error
+results the agent can inspect and recover from; graph interrupts and explicit
+turn cancellation keep their native control flow.
 
 Use `mira_tool_api.project_tool` when a function body must run in the configured
 project Execute Environment. Keep project-only imports inside that function;

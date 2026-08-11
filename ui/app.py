@@ -2186,6 +2186,20 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).tool_call(name, args, call_id=call_id, created_at=created_at)
         self._rearm_waiting_if_busy()
 
+    def tool_call_updated(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
+        """Update an edited call without creating another transcript block."""
+        self.trace.tool_call_updated(name, args)
+        self.query_one(ChatLog).tool_call_updated(
+            name,
+            args,
+            call_id=call_id,
+            created_at=created_at,
+        )
+
+    def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
+        """Advance idless approval matching without changing visible content."""
+        self.query_one(ChatLog).tool_call_approval_resolved(name, call_id=call_id)
+
     def tool_result(self, name: str, result: str, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool result in transcript order."""
         self.trace.tool_result(name, result)

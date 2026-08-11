@@ -52,6 +52,10 @@ class TerminalTranscript:
         """Write a compact tool call block."""
         self.block(name, f"args: {self.truncate(args)}")
 
+    def tool_call_updated(self, name: str, args: Any) -> None:
+        """Print an amendment when an already-written call is edited."""
+        self.block(f"{name} edited", f"args: {self.truncate(args)}")
+
     def tool_result(self, name: str, result: Any) -> None:
         """Write a compact tool result line."""
         if result:

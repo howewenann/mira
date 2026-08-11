@@ -456,6 +456,12 @@ class RecordingRenderer:
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.events.append(("tool_call", name, args, call_id))
 
+    def tool_call_updated(self, name: str, args: Any, call_id: str = "") -> None:
+        self.events.append(("tool_call_updated", name, args, call_id))
+
+    def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
+        self.events.append(("tool_call_approval_resolved", name, call_id))
+
     def recovered_tool_call(self, name: str, args: Any, call_id: str = "") -> None:
         self.events.append(("tool_call", name, args, call_id))
 
@@ -680,6 +686,101 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
+
+    async def test_run_turn_updates_displayed_call_after_approval_edit(self) -> None:
+        original = {"file_path": "/test.txt", "content": "hello"}
+        edited = {"file_path": "/test.txt", "content": "goodbye"}
+        interrupt = {
+            "action_requests": [{"name": "write_file", "args": original}],
+            "review_configs": [
+                {"action_name": "write_file", "allowed_decisions": ["approve", "edit", "reject"]}
+            ],
+        }
+        call = IncompleteToolCall("write_file", original, "", "call-write")
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(
+            decisions=[
+                {
+                    "type": "edit",
+                    "edited_action": {"name": "write_file", "args": edited},
+                }
+            ]
+        )
+
+        result = await runner.run_turn(agent, "write file", renderer, "thread-1")
+
+        self.assertEqual(result.tool_calls, ["write_file"])
+        self.assertIn(("tool_call", "write_file", original, "call-write"), renderer.events)
+        self.assertIn(("tool_call_updated", "write_file", edited, "call-write"), renderer.events)
+        self.assertEqual(agent.payloads[1].resume, {"decisions": renderer.decisions})
+
+    async def test_run_turn_updates_idless_approval_call_by_order(self) -> None:
+        interrupt = {
+            "action_requests": [
+                {"name": "write_file", "args": {"file_path": "/one", "content": "one"}},
+                {"name": "write_file", "args": {"file_path": "/two", "content": "two"}},
+            ]
+        }
+        decisions = [
+            {"type": "approve"},
+            {
+                "type": "edit",
+                "edited_action": {
+                    "name": "write_file",
+                    "args": {"file_path": "/two", "content": "changed"},
+                },
+            },
+        ]
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(decisions=decisions)
+
+        await runner.run_turn(agent, "write files", renderer, "thread-1")
+
+        self.assertIn(("tool_call_approval_resolved", "write_file", ""), renderer.events)
+        self.assertEqual(
+            [event for event in renderer.events if event[0] == "tool_call_updated"],
+            [
+                (
+                    "tool_call_updated",
+                    "write_file",
+                    {"file_path": "/two", "content": "changed"},
+                    "",
+                )
+            ],
+        )
+
+    async def test_run_turn_skips_amendment_for_unchanged_edit(self) -> None:
+        args = {"file_path": "/same", "content": "same"}
+        interrupt = {"action_requests": [{"name": "write_file", "args": args}]}
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(
+            decisions=[
+                {
+                    "type": "edit",
+                    "edited_action": {"name": "write_file", "args": dict(args)},
+                }
+            ]
+        )
+
+        await runner.run_turn(agent, "keep it", renderer, "thread-1")
+
+        self.assertFalse(any(event[0] == "tool_call_updated" for event in renderer.events))
+        self.assertIn(("tool_call_approval_resolved", "write_file", ""), renderer.events)
 
     async def test_run_turn_resumes_ask_user_interrupt_with_answer(self) -> None:
         interrupt = {

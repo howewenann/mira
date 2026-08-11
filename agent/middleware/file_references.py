@@ -49,16 +49,18 @@ class FileReferenceMiddleware(AgentMiddleware):
 
 
 def file_reference_guidance(references: list[str]) -> str:
-    """Build concise read_file guidance for normalized paths."""
+    """Build tool-neutral guidance for normalized local-file paths."""
     lines = [
         "## User-referenced files",
         "",
-        "The user explicitly referenced these local files. Inspect them with read_file",
-        "before relying on their contents. If a file is unavailable, handle the normal",
-        "read_file error accurately.",
+        "The user explicitly referenced these local files. Their contents were not",
+        "included automatically. Follow any file-reading tool explicitly requested by",
+        "the user; otherwise choose an appropriate available read-only file-reading",
+        "tool. Use the exact normalized paths below and handle unavailable paths or",
+        "tool errors accurately.",
     ]
     for path in references:
-        lines.extend(("", f"- {path}", f'  Use read_file(file_path="{path}").'))
+        lines.extend(("", f"- {path}"))
     return "\n".join(lines)
 
 

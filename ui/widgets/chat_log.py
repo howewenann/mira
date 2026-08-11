@@ -403,6 +403,40 @@ class ChatLog(VerticalScroll):
             block["is_error"] = pending_is_error
         self._update_tool_block(key)
 
+    def tool_call_updated(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        *,
+        created_at: str = "",  # noqa: ARG002
+    ) -> None:
+        """Replace the args on an existing edited approval call."""
+        key = f"id:{call_id}" if call_id else self._next_open_tool_key(name)
+        if key is None or key not in self._tool_blocks:
+            self.tool_call(name, args, call_id=call_id)
+            return
+        block = self._tool_blocks[key]
+        original_name = str(block.get("name") or "tool")
+        if original_name != name:
+            original_queue = self._tool_name_queues.get(original_name)
+            if original_queue and key in original_queue:
+                original_queue.remove(key)
+            self._tool_name_queues.setdefault(name, []).append(key)
+        block["name"] = name
+        block["args"] = args
+        block["draft"] = False
+        self._update_tool_block(key)
+
+    def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
+        """Mark an unchanged approval as consumed for idless edit matching."""
+        if call_id:
+            block = self._tool_blocks.get(f"id:{call_id}")
+            if block is not None:
+                block["approval_updated"] = True
+            return
+        self._next_open_tool_key(name)
+
     def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
         """Create or update a live draft of a streamed tool call."""
         self.hide_waiting()
@@ -1269,6 +1303,25 @@ class ChatLog(VerticalScroll):
             block = self._tool_blocks.get(key)
             if block is not None and block.get("draft") and not block.get("result"):
                 return key
+        return None
+
+    def _next_open_tool_key(self, name: str) -> str | None:
+        candidates = [
+            key
+            for key, block in self._tool_blocks.items()
+            if key.startswith("name:")
+            and not block.get("draft")
+            and not block.get("result")
+            and not block.get("approval_updated")
+        ]
+        for key in candidates:
+            block = self._tool_blocks[key]
+            if str(block.get("name") or "tool") == name:
+                block["approval_updated"] = True
+                return key
+        if candidates:
+            self._tool_blocks[candidates[0]]["approval_updated"] = True
+            return candidates[0]
         return None
 
     def _resolve_tool_key(self, name: str, call_id: str = "") -> str | None:

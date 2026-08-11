@@ -143,6 +143,11 @@ class TurnResult:
         self._tool_call_ids.append(call_id)
         return True
 
+    def update_tool_call_name(self, index: int, name: str) -> None:
+        """Keep the turn summary aligned with an edited approval action."""
+        if 0 <= index < len(self.tool_calls):
+            self.tool_calls[index] = name
+
     def observe_tool_call(self, call_id: str = "") -> None:
         """Mark a baseline call as historical without adding it to this turn."""
         if call_id:
@@ -570,7 +575,7 @@ async def run_turn(
                 rubric_renderer.finalize(result.rubric_status)
             return result
 
-        render_interrupt_tool_calls(
+        approval_bindings = render_interrupt_tool_calls(
             interrupts,
             output.get("value"),
             event_renderer,
@@ -731,6 +736,12 @@ async def run_turn(
         else:
             annotate_filesystem_approvals(interrupts, getattr(agent, "mira_backend", None))
             decisions = await renderer.ask_approvals(interrupts)
+            render_edited_tool_calls(
+                decisions,
+                approval_bindings,
+                event_renderer,
+                result,
+            )
             payload = Command(resume={"decisions": decisions})
 
 
@@ -842,7 +853,7 @@ def render_interrupt_tool_calls(
     renderer: Any,
     result: TurnResult,
     tool_call_start: int,
-) -> None:
+) -> list[dict[str, Any]]:
     """Recover interrupting calls before opening their dedicated surfaces."""
     for raw_call in output_tool_calls(output):
         call = normalized_call(raw_call)
@@ -879,6 +890,85 @@ def render_interrupt_tool_calls(
                 action.get("args", {}),
                 call_id=call_id,
             )
+
+    return approval_call_bindings(interrupts, result, tool_call_start)
+
+
+def approval_call_bindings(
+    interrupts: list[Any],
+    result: TurnResult,
+    tool_call_start: int,
+) -> list[dict[str, Any]]:
+    """Pair approval actions with current-loop calls in prompt order."""
+    available = list(range(tool_call_start, len(result.tool_calls)))
+    used: set[int] = set()
+    bindings: list[dict[str, Any]] = []
+    for interrupt in interrupts:
+        value = interrupt_value(interrupt)
+        actions = value.get("action_requests") if isinstance(value, dict) else None
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            name = str(action.get("name") or "tool") if isinstance(action, dict) else "tool"
+            match = next(
+                (
+                    index
+                    for index in available
+                    if index not in used and result.tool_calls[index] == name
+                ),
+                None,
+            )
+            if match is not None:
+                used.add(match)
+            bindings.append(
+                {
+                    "name": name,
+                    "args": action.get("args", {}) if isinstance(action, dict) else {},
+                    "call_id": result._tool_call_ids[match] if match is not None else "",
+                    "result_index": match,
+                }
+            )
+    return bindings
+
+
+def render_edited_tool_calls(
+    decisions: list[dict[str, Any]],
+    bindings: list[dict[str, Any]],
+    renderer: Any,
+    result: TurnResult,
+) -> None:
+    """Replace proposed call args with the action selected for execution."""
+    callback = getattr(renderer, "tool_call_updated", None)
+    for decision, binding in zip(decisions, bindings, strict=False):
+        if not isinstance(decision, dict) or decision.get("type") != "edit":
+            resolve_unedited_tool_call(renderer, binding)
+            continue
+        edited = decision.get("edited_action")
+        if not isinstance(edited, dict) or not isinstance(edited.get("args"), dict):
+            resolve_unedited_tool_call(renderer, binding)
+            continue
+        name = str(edited.get("name") or binding["name"])
+        args = edited["args"]
+        if name == binding["name"] and args == binding["args"]:
+            resolve_unedited_tool_call(renderer, binding)
+            continue
+        result_index = binding.get("result_index")
+        if isinstance(result_index, int):
+            result.update_tool_call_name(result_index, name)
+        if callable(callback):
+            callback(name, args, call_id=str(binding.get("call_id") or ""))
+        else:
+            renderer.tool_call(name, args, call_id=str(binding.get("call_id") or ""))
+
+
+def resolve_unedited_tool_call(renderer: Any, binding: dict[str, Any]) -> None:
+    """Advance renderer idless matching past an approval without an amendment."""
+    callback = getattr(renderer, "tool_call_approval_resolved", None)
+    if callable(callback):
+        callback(
+            str(binding.get("name") or "tool"),
+            call_id=str(binding.get("call_id") or ""),
+        )
 
 
 def ensure_control_tool_call(

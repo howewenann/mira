@@ -16,6 +16,7 @@ from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware import (
     ExecuteToolDescriptionRewriteMiddleware,
     FileReferenceMiddleware,
+    ProjectToolErrorMiddleware,
     QUICKJS_MEMORY_LIMIT,
     QUICKJS_PERSISTENCE_MODE,
     QUICKJS_PTC_TOOLS,
@@ -808,6 +809,49 @@ def get_tools(project_backend):
         self.assertNotIn("execute", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertNotIn("finalize_plan", [tool["name"] for tool in agent.mira_tool_specs])
         self.assertIs(agent.mira_project_backend, kwargs["backend"].default)
+
+    def test_factory_scopes_project_tool_error_middleware_to_enabled_workspace_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "reader.py").write_text(
+                '''from langchain.tools import tool
+
+
+@tool
+def read_file_as_bytes(path: str) -> str:
+    """Read a file as bytes."""
+    raise FileNotFoundError(path)
+''',
+                encoding="utf-8",
+            )
+            config = {
+                "settings": {
+                    "hitl": {
+                        "tools": {
+                            "read_file_as_bytes": {"enabled": True, "always_allow": True}
+                        }
+                    }
+                }
+            }
+            agent = type("Agent", (), {})()
+            with (
+                patch("agent.factory.get_llm", return_value="model"),
+                patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+                patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch("agent.factory.create_deep_agent", return_value=agent) as create,
+            ):
+                factory.build_agent(config, workspace, "checkpointer")
+
+        middleware = [
+            item
+            for item in create.call_args.kwargs["middleware"]
+            if isinstance(item, ProjectToolErrorMiddleware)
+        ]
+        self.assertEqual(len(middleware), 1)
+        self.assertEqual(middleware[0].tool_names, frozenset({"read_file_as_bytes"}))
 
     def test_action_and_plan_agents_share_ordered_opaque_memory_resources(self) -> None:
         """Memory filenames should only determine stable ordering, not agent roles."""

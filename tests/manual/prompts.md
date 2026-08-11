@@ -12,6 +12,7 @@ Submit multiple references, then a manually edited missing reference:
 
 ```text
 Compare @README.md with @tests/test_textual_app.py
+Use read_file to inspect @README.md
 Inspect @does/not/exist.py and report what happens
 ```
 
@@ -23,9 +24,10 @@ Expected:
 - Paths containing spaces are inserted as `@"path with spaces"`.
 - Changing the query at the same `@` reuses its candidate list; a new or
   dismissed interaction performs fresh discovery and stale results stay hidden.
-- Multiple visible references guide normal `read_file` calls.
-- A missing path is submitted normally and fails only through the agent's
-  ordinary `read_file` result.
+- Multiple visible references supply exact normalized paths without embedding
+  their contents or forcing a particular reader.
+- An explicitly named reader is used when available; a missing path fails only
+  through that reader's ordinary tool result.
 
 ## HITL File Write
 
@@ -38,6 +40,8 @@ Expected:
 - MIRA shows a `write_file` tool call.
 - MIRA shows an approval prompt.
 - Approving the action writes `test.txt` with `hello world`.
+- Editing the content before approval updates the existing tool bubble and the
+  saved session event to the edited content; it does not leave a second call.
 
 ## Subagent Delegation
 
@@ -964,9 +968,17 @@ project environment needs neither LangChain nor MIRA. Move the project-only
 import to module scope where it is unavailable to MIRA: discovery then fails
 and Issues explains the inside-function rule and example path.
 
-### 7. Project tool exception
+### 7. Workspace tool exceptions
 
-Change that function body to `raise RuntimeError("manual project failure")`.
+Create a normal LangChain `@tool` named `read_file_as_bytes` that raises
+`FileNotFoundError(path)`, reload, and ask it to read a missing `@file`.
+
+Expected: the call receives one red `status: error` result with the same call
+id, the model explains or repairs the failure in the same turn, and no
+turn-level error report or next-turn synthetic cancellation appears.
+
+Then change the project-runtime function above to
+`raise RuntimeError("manual project failure")`.
 
 Expected: the tool remains available, invocation becomes a normal tool error
 identifying Runtime `Project`, MIRA stays open, and no MIRA package install is

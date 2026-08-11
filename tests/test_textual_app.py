@@ -5473,6 +5473,50 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("draft:", final)
             self.assertIn("README.md", final)
 
+    async def test_edited_tool_call_updates_existing_block_in_place(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            app.tool_call(
+                "write_file",
+                {"file_path": "/story.txt", "content": "draft"},
+                call_id="call-write",
+            )
+            app.tool_call_updated(
+                "write_file",
+                {"file_path": "/story.txt", "content": "final"},
+                call_id="call-write",
+            )
+            await pilot.pause()
+
+            tools = [block for block in chat.children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 1)
+            rendered = renderable_plain(tools[0])
+            self.assertIn("final", rendered)
+            self.assertNotIn("draft", rendered)
+
+    async def test_idless_edit_updates_ordered_call_after_unchanged_approval(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            app.tool_call("write_file", {"file_path": "/one", "content": "one"})
+            app.tool_call("write_file", {"file_path": "/two", "content": "two"})
+            app.tool_call_approval_resolved("write_file")
+            app.tool_call_updated(
+                "write_file",
+                {"file_path": "/two", "content": "changed"},
+            )
+            await pilot.pause()
+
+            tools = [block for block in chat.children if "tool-call" in block.classes]
+            self.assertEqual(len(tools), 2)
+            self.assertIn("one", renderable_plain(tools[0]))
+            self.assertIn("changed", renderable_plain(tools[1]))
+
     async def test_provisional_draft_promotes_to_stable_failed_call(self) -> None:
         app = make_app()
 

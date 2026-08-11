@@ -73,16 +73,25 @@ class FileReferenceMiddlewareTests(unittest.TestCase):
         self.middleware.wrap_model_call(request, lambda updated: captured.append(updated))
         self.assertIs(captured[0], request)
 
-    def test_one_and_multiple_references_use_exact_read_file_argument(self) -> None:
+    def test_one_and_multiple_references_use_tool_neutral_guidance(self) -> None:
         updated = self.capture(
             [HumanMessage(content='Compare @src/auth.py and @"docs/design notes.md"')],
             system="base",
         )
         text = str(updated.system_message.text)
         self.assertIn("base", text)
-        self.assertIn('read_file(file_path="/src/auth.py")', text)
-        self.assertIn('read_file(file_path="/docs/design notes.md")', text)
-        self.assertEqual(text.count("/src/auth.py"), 2)
+        self.assertIn("- /src/auth.py", text)
+        self.assertIn("- /docs/design notes.md", text)
+        self.assertIn("Follow any file-reading tool explicitly requested", text)
+        self.assertNotIn("read_file", text)
+
+    def test_explicit_specialized_reader_is_not_contradicted(self) -> None:
+        updated = self.capture(
+            [HumanMessage(content="Use read_file_as_bytes to read @asset.bin")]
+        )
+        text = str(updated.system_message.text)
+        self.assertIn("- /asset.bin", text)
+        self.assertNotIn("read_file", text)
 
     def test_duplicate_references_are_injected_once(self) -> None:
         updated = self.capture([HumanMessage(content="Use @README.md then @README.md")])
@@ -106,7 +115,8 @@ class FileReferenceMiddlewareTests(unittest.TestCase):
             return "ok"
 
         self.assertEqual(asyncio.run(self.middleware.awrap_model_call(request, handler)), "ok")
-        self.assertIn('read_file(file_path="/README.md")', str(captured[0].system_message.text))
+        self.assertIn("- /README.md", str(captured[0].system_message.text))
+        self.assertNotIn("read_file", str(captured[0].system_message.text))
 
 
 if __name__ == "__main__":
