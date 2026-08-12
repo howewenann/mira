@@ -668,7 +668,7 @@ Button.goal-action:focus {
 }
 
 #settings-window {
-    width: 96;
+    width: 110;
     max-width: 98%;
     height: auto;
     max-height: 92%;
@@ -806,7 +806,8 @@ Button.goal-action:focus {
 
 .settings-column-label.enabled,
 .settings-column-label.always,
-.settings-column-label.plan {
+.settings-column-label.plan,
+.settings-column-label.ptc {
     width: 12;
     min-width: 12;
     margin: 0 2 0 0;

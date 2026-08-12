@@ -31,7 +31,8 @@ RUBRIC_MODEL = "rubric"
 SUMMARIZATION_MODEL = "summarization"
 SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
-INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, "eval", "task", EXECUTE_TOOL)
+INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task")
+PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +42,7 @@ class ToolPolicy:
     enabled: bool = True
     always_allow: bool = False
     plan_access: bool = False
+    ptc: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,12 +88,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "allow": [],
         },
         "tools": {
-            "write_file": {"enabled": True, "always_allow": False},
-            "edit_file": {"enabled": True, "always_allow": False},
-            DELETE_TOOL: {"enabled": True, "always_allow": False},
+            "write_file": {"enabled": True, "always_allow": False, "ptc": False},
+            "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
+            DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
+            "execute": {"enabled": False, "always_allow": False, "ptc": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
-            "execute": {"enabled": False, "always_allow": False},
         },
     }
 }
@@ -220,7 +222,12 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 continue
             always_allow = spec.get("always_allow")
             enabled = spec.get("enabled")
-            current = dict(normalized_tools.get(name, {"enabled": True, "always_allow": False}))
+            current = dict(
+                normalized_tools.get(
+                    name,
+                    {"enabled": True, "always_allow": False, "ptc": False},
+                )
+            )
             if isinstance(enabled, bool):
                 current["enabled"] = enabled
             if isinstance(always_allow, bool):
@@ -228,6 +235,9 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
             plan_access = spec.get("plan_access")
             if name not in INBUILT_DANGEROUS_TOOLS and isinstance(plan_access, bool):
                 current["plan_access"] = plan_access
+            ptc = spec.get("ptc")
+            if name not in PTC_INAPPLICABLE_TOOLS and isinstance(ptc, bool):
+                current["ptc"] = ptc
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
 
@@ -251,7 +261,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                         continue
                     normalized_tool = {
                         key: tool_spec[key]
-                        for key in ("enabled", "always_allow", "plan_access")
+                        for key in ("enabled", "always_allow", "plan_access", "ptc")
                         if isinstance(tool_spec.get(key), bool)
                     }
                     if normalized_tool:
@@ -261,6 +271,12 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
             normalized_servers[name] = server
         if normalized_servers:
             settings["mcp"] = {"servers": normalized_servers}
+
+    normalized_tools = settings["hitl"]["tools"]
+    eval_enabled = bool(normalized_tools.get("eval", {}).get("enabled", True))
+    task_enabled = bool(normalized_tools.get("task", {}).get("enabled", True))
+    if not eval_enabled or not task_enabled:
+        settings["system"][DYNAMIC_SUBAGENTS]["enabled"] = False
 
     return settings
 
@@ -436,7 +452,7 @@ def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *
     if not isinstance(raw, dict):
         issues.append(_invalid_setting(path, "must be a mapping"))
         return
-    allowed = {"enabled", "always_allow"}
+    allowed = {"enabled", "always_allow", "ptc"}
     if include_plan:
         allowed.add("plan_access")
     for name, spec in raw.items():
@@ -592,13 +608,24 @@ def dynamic_subagents_enabled(config_or_settings: dict[str, Any] | None) -> bool
         return False
     settings = config_or_settings.get("settings", config_or_settings)
     normalized = normalize_settings(settings)
-    return bool(normalized.get("system", {}).get(DYNAMIC_SUBAGENTS, {}).get("enabled", False))
+    configured = bool(normalized.get("system", {}).get(DYNAMIC_SUBAGENTS, {}).get("enabled", False))
+    tools = normalized["hitl"]["tools"]
+    return (
+        configured
+        and bool(tools.get("eval", {}).get("enabled", True))
+        and bool(tools.get("task", {}).get("enabled", True))
+    )
 
 
 def set_dynamic_subagents(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
     """Return settings with dynamic eval subagents enabled or disabled."""
     updated = normalize_settings(settings)
-    updated["system"][DYNAMIC_SUBAGENTS]["enabled"] = bool(enabled)
+    tools = updated["hitl"]["tools"]
+    updated["system"][DYNAMIC_SUBAGENTS]["enabled"] = (
+        bool(enabled)
+        and bool(tools.get("eval", {}).get("enabled", True))
+        and bool(tools.get("task", {}).get("enabled", True))
+    )
     return updated
 
 
@@ -729,6 +756,7 @@ def tool_policy(config_or_settings: dict[str, Any] | None, tool_name: str) -> To
         enabled=tool_enabled(config_or_settings, tool_name),
         always_allow=tool_always_allow(config_or_settings, tool_name),
         plan_access=tool_plan_access(config_or_settings, tool_name),
+        ptc=tool_ptc(config_or_settings, tool_name),
     )
 
 
@@ -737,6 +765,16 @@ def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) 
     tools = hitl.get("tools", {})
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
     return bool(spec.get("plan_access", False)) if isinstance(spec, dict) else False
+
+
+def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
+    """Return whether an applicable local tool may be called from eval."""
+    if tool_name in PTC_INAPPLICABLE_TOOLS:
+        return False
+    hitl = hitl_settings(config_or_settings)
+    tools = hitl.get("tools", {})
+    spec = tools.get(tool_name) if isinstance(tools, dict) else None
+    return bool(spec.get("ptc", False)) if isinstance(spec, dict) else False
 
 
 def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
@@ -772,6 +810,8 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
     current["enabled"] = bool(enabled)
     current.setdefault("always_allow", False)
     updated["hitl"]["tools"][tool_name] = current
+    if tool_name in {"eval", "task"} and not enabled:
+        updated["system"][DYNAMIC_SUBAGENTS]["enabled"] = False
     return updated
 
 
@@ -782,6 +822,19 @@ def set_tool_plan_access(settings: dict[str, Any], tool_name: str, plan_access: 
     current.setdefault("enabled", True)
     current.setdefault("always_allow", False)
     current["plan_access"] = bool(plan_access)
+    updated["hitl"]["tools"][tool_name] = current
+    return updated
+
+
+def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[str, Any]:
+    """Return settings with explicit local-tool PTC access."""
+    updated = normalize_settings(settings)
+    if tool_name in PTC_INAPPLICABLE_TOOLS:
+        return updated
+    current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {}))
+    current.setdefault("enabled", True)
+    current.setdefault("always_allow", False)
+    current["ptc"] = bool(ptc)
     updated["hitl"]["tools"][tool_name] = current
     return updated
 
@@ -819,6 +872,7 @@ def mcp_tool_policy(
         enabled=bool(value.get("enabled", True)),
         always_allow=bool(value.get("always_allow", False)),
         plan_access=bool(value.get("plan_access", False)),
+        ptc=bool(value.get("ptc", False)),
     )
 
 
@@ -841,7 +895,7 @@ def set_mcp_tool_policy_value(
     key: str,
     value: bool,
 ) -> dict[str, Any]:
-    if key not in {"enabled", "always_allow", "plan_access"}:
+    if key not in {"enabled", "always_allow", "plan_access", "ptc"}:
         return normalize_settings(settings)
     updated = normalize_settings(settings)
     servers = updated.setdefault("mcp", {}).setdefault("servers", {})

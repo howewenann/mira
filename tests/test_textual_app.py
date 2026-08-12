@@ -46,9 +46,11 @@ from config.settings import (
     save_settings,
     set_model_assignment,
     set_dynamic_subagents,
+    set_tool_ptc,
     set_rubric_enabled,
     tool_always_allow,
     tool_enabled,
+    tool_ptc,
 )
 from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
@@ -4975,6 +4977,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("task", rendered)
                 self.assertIn("execute", rendered)
                 self.assertIn("delete", rendered)
+                self.assertEqual(
+                    [
+                        renderable_plain(row.query_one(".settings-label", Static))
+                        for row in panel.query(".settings-inbuilt-tool-row")
+                    ],
+                    ["write_file", "edit_file", "delete", "execute", "eval", "task"],
+                )
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
                 self.assertIn("settings-toggle-response_schema-response_schema", buttons)
@@ -4983,8 +4992,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
+                self.assertIn("settings-toggle-ptc-write_file", buttons)
                 self.assertIn("settings-toggle-enabled-execute", buttons)
                 self.assertIn("settings-toggle-always_allow-execute", buttons)
+                self.assertIn("settings-toggle-ptc-eval", buttons)
+                self.assertIn("settings-toggle-ptc-task", buttons)
                 self.assertIn("settings-close", buttons)
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 await wait_until(lambda: execute_env_select.value == "system")
@@ -5057,12 +5069,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(buttons["settings-toggle-enabled-edit_file"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "no")
                 self.assertFalse(buttons["settings-toggle-enabled-execute"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-always_allow-execute"].label), "-")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-execute"].label), "no")
                 self.assertTrue(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-ptc-write_file"].label), "no")
+                self.assertFalse(buttons["settings-toggle-ptc-write_file"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-ptc-eval"].label), "-")
+                self.assertTrue(buttons["settings-toggle-ptc-eval"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-ptc-task"].label), "-")
+                self.assertTrue(buttons["settings-toggle-ptc-task"].disabled)
                 self.assertNotIn("Adds write_todos", rendered)
                 self.assertNotIn("Enter a whole number", rendered)
                 self.assertNotIn("Press Enter/click", rendered)
@@ -5264,6 +5282,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 name="microsoft-learn-tools",
                 transport="http",
                 transient=False,
+                usable=True,
+                tools=[object(), object(), object()],
                 tool_metadata=[
                     {"original_name": "microsoft_code_sample_search"},
                     {"original_name": "query_docs_filesystem_docs_by_langchain_with_extra_context"},
@@ -5274,6 +5294,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 name="langchain-resources",
                 transport="http",
                 transient=False,
+                usable=True,
+                tools=[object()],
                 tool_metadata=[{"original_name": "search_docs_by_langchain"}],
             )
             manager = SimpleNamespace(
@@ -5282,7 +5304,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 shutdown=AsyncMock(),
             )
 
-            async with app.run_test(size=(100, 45)) as pilot:
+            async with app.run_test(size=(130, 45)) as pilot:
                 await pilot.pause()
                 app.mcp_manager = manager
                 app.mode.setdefault("resources", {})["tools"] = [
@@ -5348,7 +5370,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     [renderable_plain(label).strip() for label in tool_header.query(Static)],
-                    ["Tool", "enable", "always allow", "plan access"],
+                    ["Tool", "enable", "always allow", "plan access", "PTC"],
                 )
                 self.assertEqual(renderable_plain(server_row.query_one(".settings-label", Static)), "Server")
                 self.assertEqual(
@@ -5386,6 +5408,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         tool_header.query_one(".settings-column-label.enabled", Static).region.x,
                         tool_header.query_one(".settings-column-label.always", Static).region.x,
                         tool_header.query_one(".settings-column-label.plan", Static).region.x,
+                        tool_header.query_one(".settings-column-label.ptc", Static).region.x,
                     ],
                 )
                 self.assertEqual(
@@ -5404,12 +5427,62 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(server_header.region.y, title.region.bottom)
                 self.assertEqual(server_row.region.y, server_header.region.bottom)
                 self.assertEqual(second_title.region.y, tool_rows[-1].region.bottom + 1)
+                self.assertEqual(panel.query_one("#settings-window").region.width, 110)
 
-    async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
-        """Inbuilt tool enable buttons should save disabled state and lock approvals."""
+    async def test_settings_panel_dims_saved_mcp_policies_when_tool_is_unavailable(self) -> None:
+        """Unavailable MCP tools should show saved values instead of N/A placeholders."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
-            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            configured = load_settings(workspace)
+            configured["mcp"] = {
+                "servers": {
+                    "docs": {
+                        "enabled": True,
+                        "tools": {
+                            "search": {
+                                "enabled": True,
+                                "always_allow": True,
+                                "plan_access": True,
+                                "ptc": True,
+                            }
+                        },
+                    }
+                }
+            }
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
+            state = SimpleNamespace(
+                name="docs",
+                transport="http",
+                transient=False,
+                usable=False,
+                tools=[object()],
+                tool_metadata=[{"original_name": "search"}],
+            )
+            manager = SimpleNamespace(servers={"docs": state}, shutdown=AsyncMock())
+
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                app.mcp_manager = manager
+                app._handle_settings_command("mcp")
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-toggle-mcp_tool_ptc-docs-search")) == 1)
+                buttons = {button.id: button for button in panel.query(Button)}
+
+                for kind in ("mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc"):
+                    button = buttons[f"settings-toggle-{kind}-docs-search"]
+                    self.assertEqual(str(button.label), "yes")
+                    self.assertTrue(button.disabled)
+
+    async def test_settings_panel_can_disable_inbuilt_tools(self) -> None:
+        """Disabled inbuilt policies should retain their saved values while dimmed."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_tool_ptc(load_settings(workspace), "edit_file", True)
+            configured["hitl"]["tools"]["edit_file"]["always_allow"] = True
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
             calls = []
 
             async def rebuild() -> None:
@@ -5430,9 +5503,54 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 buttons = {button.id: button for button in panel.query(Button)}
                 self.assertFalse(tool_enabled(loaded, "edit_file"))
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "no")
-                self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "-")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-always_allow-edit_file"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-ptc-edit_file"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-ptc-edit_file"].disabled)
+                self.assertTrue(tool_ptc(loaded, "edit_file"))
                 self.assertEqual(len(calls), 1)
+
+    async def test_settings_panel_ptc_is_independent_and_eval_gates_controls(self) -> None:
+        """Eval availability should gate PTC without changing saved PTC preferences."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_dynamic_subagents(load_settings(workspace), True)
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
+
+            async def rebuild() -> None:
+                return None
+
+            async with app.run_test(size=(110, 35)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-toggle-ptc-write_file")) == 1)
+
+                panel.query_one("#settings-toggle-ptc-write_file", Button).press()
+                await wait_until(lambda: tool_ptc(load_settings(workspace), "write_file"))
+                self.assertFalse(tool_always_allow(load_settings(workspace), "write_file"))
+
+                panel.query_one("#settings-toggle-enabled-eval", Button).press()
+                await wait_until(lambda: not tool_enabled(load_settings(workspace), "eval"))
+                buttons = {button.id: button for button in panel.query(Button)}
+                loaded = load_settings(workspace)
+                self.assertTrue(tool_ptc(loaded, "write_file"))
+                self.assertFalse(dynamic_subagents_enabled(loaded))
+                self.assertEqual(str(buttons["settings-toggle-ptc-write_file"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-ptc-write_file"].disabled)
+                self.assertTrue(buttons["settings-toggle-system-dynamic_subagents"].disabled)
+                self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
+
+                panel.query_one("#settings-toggle-enabled-eval", Button).press()
+                await wait_until(lambda: tool_enabled(load_settings(workspace), "eval"))
+                buttons = {button.id: button for button in panel.query(Button)}
+                self.assertFalse(dynamic_subagents_enabled(load_settings(workspace)))
+                self.assertFalse(buttons["settings-toggle-ptc-write_file"].disabled)
+                self.assertFalse(buttons["settings-toggle-system-dynamic_subagents"].disabled)
+                self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
 
     async def test_settings_panel_toggles_dynamic_subagents(self) -> None:
         """Dynamic subagents should save as a system setting and rebuild agents."""
@@ -5667,10 +5785,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_can_disable_custom_tools(self) -> None:
-        """Custom tools should support enabled toggles and disabled approval cells."""
+        """Disabled custom tools should retain all saved policy values while dimmed."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
-            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            configured = load_settings(workspace)
+            configured["hitl"]["tools"]["project_status"] = {
+                "enabled": True,
+                "always_allow": True,
+                "plan_access": True,
+                "ptc": True,
+            }
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -5699,8 +5825,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 loaded = load_settings(workspace)
                 buttons = {button.id: button for button in panel.query(Button)}
                 self.assertFalse(tool_enabled(loaded, "project_status"))
-                self.assertEqual(str(buttons["settings-toggle-always_allow-project_status"].label), "-")
+                self.assertEqual(str(buttons["settings-toggle-always_allow-project_status"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-always_allow-project_status"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-plan_access-project_status"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-plan_access-project_status"].disabled)
+                self.assertEqual(str(buttons["settings-toggle-ptc-project_status"].label), "yes")
+                self.assertTrue(buttons["settings-toggle-ptc-project_status"].disabled)
+                self.assertTrue(tool_ptc(loaded, "project_status"))
                 self.assertEqual(len(calls), 1)
 
     def test_action_preview_shows_key_value_rows(self) -> None:

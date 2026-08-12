@@ -14,6 +14,7 @@ from agent.middleware import (
     ModelToolVisibilityMiddleware,
     PlanningStageEnforcementMiddleware,
     ProjectToolErrorMiddleware,
+    QUICKJS_PTC_TOOLS,
     build_agent_middleware,
 )
 from agent.planning.response_status import PlanningResponseStatusRule
@@ -33,6 +34,8 @@ from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_
 from config.metadata import ModelMetadata
 from config.settings import (
     EXECUTE_TOOL,
+    INBUILT_DANGEROUS_TOOLS,
+    PTC_INAPPLICABLE_TOOLS,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     hitl_settings,
@@ -43,6 +46,7 @@ from config.settings import (
     tool_always_allow,
     tool_enabled,
     tool_plan_access,
+    tool_ptc,
     mcp_tool_policy,
     RUBRIC_MODEL,
     SUMMARIZATION_MODEL,
@@ -201,13 +205,6 @@ def _build_agent(
         else model
     )
     _register_summarization_exclusion(config, summarization_model)
-    middleware_stack = build_agent_middleware(
-        model=summarization_model,
-        backend=backend,
-        workspace=Path(workspace),
-        settings=(config or {}).get("settings"),
-        extra_middleware=extra_middleware,
-    )
     mcp_tools: list[Any] = []
     mcp_metadata: list[dict[str, str]] = []
     if mcp_manager is not None:
@@ -244,6 +241,20 @@ def _build_agent(
             interrupt_on=resolved_interrupt_on,
             enable_todos=planning_todos_enabled(settings),
         )
+
+    middleware_stack = build_agent_middleware(
+        model=summarization_model,
+        backend=backend,
+        workspace=Path(workspace),
+        settings=settings,
+        ptc_tools=effective_ptc_tool_names(
+            config,
+            tools,
+            [*local_metadata, *mcp_metadata],
+            excluded_tools,
+        ),
+        extra_middleware=extra_middleware,
+    )
 
     agent = create_deep_agent(
         model=model,
@@ -445,6 +456,50 @@ def _local_tool_available_in_plan(
     if info is None or info.get("source") != "project":
         return True
     return tool_enabled(config, name) and tool_plan_access(config, name)
+
+
+def effective_ptc_tool_names(
+    config: dict[str, Any] | None,
+    tools: list[Any],
+    metadata: list[dict[str, str]],
+    excluded_tools: tuple[str, ...] = (),
+) -> list[str]:
+    """Resolve PTC names from tools available to this agent construction.
+
+    QuickJS applies its own final filter against each live model request, so
+    later middleware visibility changes remain authoritative.
+    """
+    excluded = set(excluded_tools)
+    names = [name for name in QUICKJS_PTC_TOOLS if name not in excluded]
+
+    for name in INBUILT_DANGEROUS_TOOLS:
+        if name in PTC_INAPPLICABLE_TOOLS or name in excluded:
+            continue
+        if tool_enabled(config, name) and tool_ptc(config, name):
+            names.append(name)
+
+    metadata_by_name = {
+        item.get("name", ""): item
+        for item in metadata
+        if item.get("name")
+    }
+    for tool in tools:
+        name = tool_name(tool)
+        if name in excluded or name in names:
+            continue
+        item = metadata_by_name.get(name, {})
+        source = item.get("source")
+        if source == "project" and tool_ptc(config, name):
+            names.append(name)
+        elif source == "mcp":
+            policy = mcp_tool_policy(
+                config,
+                item.get("server", ""),
+                item.get("original_name", ""),
+            )
+            if policy.ptc:
+                names.append(name)
+    return names
 
 
 def effective_excluded_tools(

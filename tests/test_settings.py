@@ -36,6 +36,8 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tool_enabled(loaded, "custom_search"))
         self.assertTrue(settings.tool_enabled(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "delete"))
+        self.assertFalse(settings.tool_ptc(loaded, "write_file"))
+        self.assertFalse(settings.tool_ptc(loaded, "custom_search"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
@@ -96,6 +98,75 @@ class SettingsTests(unittest.TestCase):
 
         updated = settings.set_dynamic_subagents(updated, False)
         self.assertFalse(settings.dynamic_subagents_enabled(updated))
+
+    def test_dynamic_subagents_require_eval_and_task_without_implicit_restore(self) -> None:
+        """Runtime and setters should enforce both QuickJS dependencies."""
+        configured = settings.normalize_settings(
+            {
+                "system": {"dynamic_subagents": {"enabled": True, "response_schema": False}},
+                "hitl": {"tools": {"eval": {"enabled": False}, "task": {"enabled": True}}},
+            }
+        )
+
+        self.assertFalse(settings.dynamic_subagents_enabled(configured))
+        self.assertFalse(configured["system"]["dynamic_subagents"]["enabled"])
+        self.assertFalse(settings.dynamic_subagent_response_schema_enabled(configured))
+
+        enabled = settings.set_dynamic_subagents(settings.DEFAULT_SETTINGS, True)
+        self.assertTrue(settings.dynamic_subagents_enabled(enabled))
+        disabled = settings.set_tool_enabled(enabled, "task", False)
+        self.assertFalse(settings.dynamic_subagents_enabled(disabled))
+        self.assertFalse(disabled["system"]["dynamic_subagents"]["enabled"])
+
+        restored_dependency = settings.set_tool_enabled(disabled, "task", True)
+        self.assertFalse(settings.dynamic_subagents_enabled(restored_dependency))
+        explicitly_restored = settings.set_dynamic_subagents(restored_dependency, True)
+        self.assertTrue(settings.dynamic_subagents_enabled(explicitly_restored))
+
+    def test_ptc_policy_round_trips_and_rejects_eval_and_task(self) -> None:
+        """PTC should persist independently while remaining N/A for bridge tools."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = settings.normalize_settings(
+                {
+                    "hitl": {
+                        "tools": {
+                            "write_file": {"always_allow": False, "ptc": True},
+                            "custom_search": {"always_allow": True, "ptc": True},
+                            "eval": {"ptc": True},
+                            "task": {"ptc": True},
+                        }
+                    },
+                    "mcp": {
+                        "servers": {
+                            "docs": {"tools": {"search": {"ptc": True}}},
+                        }
+                    },
+                }
+            )
+
+            self.assertTrue(settings.tool_ptc(configured, "write_file"))
+            self.assertFalse(settings.tool_always_allow(configured, "write_file"))
+            self.assertTrue(settings.tool_ptc(configured, "custom_search"))
+            self.assertTrue(settings.tool_always_allow(configured, "custom_search"))
+            self.assertFalse(settings.tool_ptc(configured, "eval"))
+            self.assertFalse(settings.tool_ptc(configured, "task"))
+            self.assertNotIn("ptc", configured["hitl"]["tools"]["eval"])
+            self.assertNotIn("ptc", configured["hitl"]["tools"]["task"])
+            self.assertTrue(settings.mcp_tool_policy(configured, "docs", "search").ptc)
+
+            rejected = settings.set_tool_ptc(configured, "eval", True)
+            self.assertFalse(settings.tool_ptc(rejected, "eval"))
+            independent = settings.set_tool_ptc(configured, "write_file", False)
+            self.assertFalse(settings.tool_ptc(independent, "write_file"))
+            self.assertFalse(settings.tool_always_allow(independent, "write_file"))
+
+            self.assertTrue(settings.save_settings(workspace, configured))
+            loaded = settings.load_settings(workspace)
+
+        self.assertTrue(settings.tool_ptc(loaded, "write_file"))
+        self.assertTrue(settings.tool_ptc(loaded, "custom_search"))
+        self.assertTrue(settings.mcp_tool_policy(loaded, "docs", "search").ptc)
 
     def test_planning_todos_default_off_and_can_toggle(self) -> None:
         """Planning todos should be an explicit, reversible opt-in."""

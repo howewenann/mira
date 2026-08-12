@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from deepagents.backends import FilesystemBackend, LocalShellBackend
@@ -916,6 +917,118 @@ def read_file_as_bytes(path: str) -> str:
 
         self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep"})
         self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
+
+    def test_effective_ptc_tools_use_only_resolved_tools_and_runtime_names(self) -> None:
+        """Saved PTC flags should not bypass effective local or MCP availability."""
+        config = {
+            "settings": {
+                "hitl": {
+                    "tools": {
+                        "write_file": {"enabled": True, "ptc": True},
+                        "edit_file": {"enabled": False, "ptc": True},
+                        "eval": {"enabled": True, "ptc": True},
+                        "task": {"enabled": True, "ptc": True},
+                        "available_custom": {"enabled": True, "ptc": True},
+                        "missing_custom": {"enabled": True, "ptc": True},
+                    }
+                },
+                "mcp": {
+                    "servers": {
+                        "docs": {
+                            "tools": {
+                                "search": {"enabled": True, "ptc": True},
+                                "missing": {"enabled": True, "ptc": True},
+                            }
+                        }
+                    }
+                },
+            }
+        }
+        tools = [
+            SimpleNamespace(name="available_custom"),
+            SimpleNamespace(name="mcp__docs__search"),
+        ]
+        metadata = [
+            {"name": "available_custom", "source": "project"},
+            {"name": "missing_custom", "source": "project"},
+            {
+                "name": "mcp__docs__search",
+                "original_name": "search",
+                "server": "docs",
+                "source": "mcp",
+            },
+            {
+                "name": "mcp__docs__missing",
+                "original_name": "missing",
+                "server": "docs",
+                "source": "mcp",
+            },
+        ]
+
+        resolved = factory.effective_ptc_tool_names(
+            config,
+            tools,
+            metadata,
+            excluded_tools=("edit_file",),
+        )
+
+        self.assertEqual(
+            resolved,
+            [*QUICKJS_PTC_TOOLS, "write_file", "available_custom", "mcp__docs__search"],
+        )
+        self.assertNotIn("search", resolved)
+        self.assertNotIn("missing_custom", resolved)
+        self.assertNotIn("mcp__docs__missing", resolved)
+        self.assertNotIn("eval", resolved)
+        self.assertNotIn("task", resolved)
+
+    def test_factory_passes_action_only_custom_ptc_access_to_quickjs(self) -> None:
+        """Plan filtering should happen before the effective PTC list is built."""
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "lookup.py").write_text(
+                '''from langchain.tools import tool
+
+
+@tool
+def project_lookup(query: str) -> str:
+    """Look up project information."""
+    return query
+''',
+                encoding="utf-8",
+            )
+            config = {
+                "settings": {
+                    "hitl": {
+                        "tools": {
+                            "project_lookup": {
+                                "enabled": True,
+                                "plan_access": False,
+                                "ptc": True,
+                            }
+                        }
+                    }
+                }
+            }
+            with (
+                patch("agent.factory.get_llm", return_value="model"),
+                patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code,
+                patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+                patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
+                patch(
+                    "agent.factory.create_deep_agent",
+                    side_effect=[type("Agent", (), {})(), type("Agent", (), {})()],
+                ),
+            ):
+                factory.build_agent(config, workspace, "checkpointer")
+                factory.build_plan_agent(config, workspace, "checkpointer")
+
+        action_ptc = code.call_args_list[0].kwargs["ptc"]
+        plan_ptc = code.call_args_list[1].kwargs["ptc"]
+        self.assertIn("project_lookup", action_ptc)
+        self.assertNotIn("project_lookup", plan_ptc)
 
     def test_factory_registers_specific_and_provider_summarization_exclusions(self) -> None:
         """DeepAgents should exclude its hidden default summarization for resolved models."""

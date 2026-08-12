@@ -287,6 +287,24 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("edit_file", interrupts)
         self.assertIn("web_search", interrupts)
 
+    def test_ptc_does_not_change_direct_tool_interrupts(self) -> None:
+        """PTC authorization should remain independent from direct-call HITL."""
+        config = {
+            "settings": {
+                "hitl": {
+                    "tools": {
+                        "write_file": {
+                            "enabled": True,
+                            "always_allow": False,
+                            "ptc": True,
+                        }
+                    }
+                }
+            }
+        }
+
+        self.assertIn("write_file", factory._write_interrupts(config))
+
     def test_action_agent_hides_delete_for_unsupported_backend(self) -> None:
         """Unsupported backends should expose neither delete nor a stale approval rule."""
         with (
@@ -334,6 +352,33 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             factory.build_agent(config, ".", "checkpointer")
 
         self.assertTrue(code_middleware.call_args.kwargs["subagents"])
+
+    def test_plan_ptc_does_not_restore_excluded_dangerous_tools(self) -> None:
+        """Plan's effective PTC list should retain only its permanent read tools."""
+        config = {
+            "settings": {
+                "hitl": {
+                    "tools": {
+                        name: {"enabled": True, "ptc": True}
+                        for name in ("write_file", "edit_file", "delete", "execute", "eval", "task")
+                    }
+                }
+            }
+        }
+        with (
+            patch("agent.factory.get_llm", return_value="model"),
+            patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
+            patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+            patch("agent.middleware.builder.create_mira_summarization_tool_middleware", return_value="summary"),
+            patch("agent.factory.create_deep_agent", return_value="agent"),
+        ):
+            factory.build_plan_agent(config, ".", "checkpointer")
+
+        self.assertEqual(
+            code_middleware.call_args.kwargs["ptc"],
+            ["ls", "read_file", "glob", "grep"],
+        )
+        self.assertFalse(code_middleware.call_args.kwargs["subagents"])
 
     def test_rubric_middleware_is_action_only_and_uses_configured_cap(self) -> None:
         """Enabled rubric grading should not leak into the planning agent."""

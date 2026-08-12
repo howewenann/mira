@@ -573,10 +573,12 @@ class MCPSettingsTests(unittest.TestCase):
             self.assertEqual(mcp_tool_policy(settings, "github", "search"), ToolPolicy())
             settings = set_mcp_server_enabled(settings, "github", False)
             settings = set_mcp_tool_policy_value(settings, "github", "search", "plan_access", True)
+            settings = set_mcp_tool_policy_value(settings, "github", "search", "ptc", True)
             self.assertTrue(save_settings(root, settings))
             loaded = load_settings(root)
             self.assertFalse(mcp_server_enabled(loaded, "github"))
             self.assertTrue(mcp_tool_policy(loaded, "github", "search").plan_access)
+            self.assertTrue(mcp_tool_policy(loaded, "github", "search").ptc)
 
     def test_custom_plan_access_defaults_no_and_can_be_explicit(self) -> None:
         settings = load_settings(Path("missing-workspace-for-defaults"))

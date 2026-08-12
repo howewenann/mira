@@ -42,6 +42,7 @@ def build_agent_middleware(
     backend: Any,
     workspace: Path,
     settings: dict[str, Any] | None = None,
+    ptc_tools: list[str] | None = None,
     extra_middleware: list[AgentMiddleware] | None = None,
 ) -> AgentMiddlewareBundle:
     """Build MIRA's ordered user middleware bundle for DeepAgents."""
@@ -56,7 +57,7 @@ def build_agent_middleware(
         CodeInterpreterMiddleware(
             memory_limit=QUICKJS_MEMORY_LIMIT,
             timeout=QUICKJS_TIMEOUT_SECONDS,
-            ptc=list(QUICKJS_PTC_TOOLS),
+            ptc=list(QUICKJS_PTC_TOOLS if ptc_tools is None else ptc_tools),
             subagents=dynamic_subagents_enabled(settings),
             mode=QUICKJS_PERSISTENCE_MODE,
         ),
