@@ -181,6 +181,7 @@ class MiraApp(App[None]):
         self._settings_panel: SettingsPanel | None = None
         self.mcp_manager: Any | None = None
         self._mcp_spinner = 0
+        self._reload_in_progress = False
         self.tool_failures: list[Any] = []
         self.issues: list[Any] = []
         self.agent_unavailable_message = "Main model is not configured. Run /models."
@@ -1809,6 +1810,20 @@ class MiraApp(App[None]):
 
     async def _run_reload(self, *, full_runtime: bool) -> None:
         """Run one reload scope with shared status and error handling."""
+        if self.query_one(PromptPanel).active:
+            if isinstance(self.screen, MCPPanelScreen):
+                self.screen.dismiss()
+            self.system_message("answer the current prompt before reloading", kind="warning")
+            return
+
+        if self._reload_in_progress:
+            self.system_message("reload already in progress", kind="warning")
+            return
+
+        prompt = self.query_one(PromptBox)
+        prompt_was_disabled = prompt.disabled
+        self._reload_in_progress = True
+        prompt.disabled = True
         try:
             if await self._handle_reload_command(full_runtime=full_runtime):
                 self._set_status(state="ready")
@@ -1822,7 +1837,11 @@ class MiraApp(App[None]):
                 self.system_message(f"reload error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.action_focus_prompt()
+            self._reload_in_progress = False
+            if self.is_mounted:
+                prompt.disabled = prompt_was_disabled
+                if not prompt.disabled:
+                    self.action_focus_prompt()
 
     async def _handle_reload_command(self, *, full_runtime: bool = False) -> bool:
         """Reload config, resources, and agents, optionally restarting MCP."""

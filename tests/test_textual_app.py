@@ -4211,6 +4211,37 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app._reload_agents.assert_awaited_once_with()
         app._reload_runtime.assert_awaited_once_with()
 
+    async def test_reload_disables_prompt_and_rejects_duplicate_reload(self) -> None:
+        """One reload should own the prompt lock until runtime replacement finishes."""
+        app = make_app()
+        reload_started = asyncio.Event()
+        release_reload = asyncio.Event()
+
+        async def reload_runtime() -> None:
+            reload_started.set()
+            await release_reload.wait()
+
+        app._reload_runtime = AsyncMock(side_effect=reload_runtime)  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 30)):
+            first_reload = asyncio.create_task(app._run_reload_runtime_command())
+            await wait_until(reload_started.is_set)
+            prompt = app.query_one(PromptBox)
+            self.assertTrue(prompt.disabled)
+
+            await app._run_reload_runtime_command()
+            app._reload_runtime.assert_awaited_once_with()
+            self.assertTrue(prompt.disabled)
+
+            release_reload.set()
+            await first_reload
+            self.assertFalse(prompt.disabled)
+            rendered = "\n".join(
+                renderable_plain(block) for block in app.query_one(ChatLog).children
+            )
+
+        self.assertIn("reload already in progress", rendered)
+
     async def test_reload_command_tokens_route_to_distinct_workers(self) -> None:
         """Each independent slash token should invoke only its matching worker."""
         app = make_app()

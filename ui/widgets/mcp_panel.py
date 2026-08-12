@@ -38,7 +38,6 @@ class MCPPanelScreen(ModalScreen[None]):
             with Horizontal(id="mcp-title-row"):
                 yield Static("MCP SERVERS", id="mcp-title")
                 title_close = Button("x", id="mcp-title-close", classes="mcp-close panel-close")
-                title_close.disabled = self.reloading
                 yield title_close
             with VerticalScroll(id="mcp-scroll"):
                 for state in self.manager.servers.values():
@@ -48,7 +47,6 @@ class MCPPanelScreen(ModalScreen[None]):
                 reload_button.disabled = self.reloading
                 yield reload_button
                 close_button = Button("Close", id="mcp-close", classes="mcp-close")
-                close_button.disabled = self.reloading
                 yield close_button
 
     def _server_widgets(self, state: Any) -> ComposeResult:
@@ -128,7 +126,7 @@ class MCPPanelScreen(ModalScreen[None]):
             return
         self.reloading = True
         self._sync_reload_controls()
-        self.run_worker(self._reload(), name="mcp-runtime-reload", exclusive=False)
+        self.app.run_worker(self._reload(), name="mcp-runtime-reload", exclusive=False)
 
     @on(Button.Pressed, ".mcp-close")
     def close_pressed(self, event: Button.Pressed) -> None:
@@ -145,12 +143,11 @@ class MCPPanelScreen(ModalScreen[None]):
                 await self.refresh_from_manager(preferred_focus_id="mcp-reload")
 
     def _sync_reload_controls(self) -> None:
-        """Prevent reload or dismissal while runtime replacement is in progress."""
-        for selector in ("#mcp-reload", "#mcp-close", "#mcp-title-close"):
-            try:
-                self.query_one(selector, Button).disabled = self.reloading
-            except NoMatches:
-                pass
+        """Prevent duplicate reloads while keeping every dismissal path available."""
+        try:
+            self.query_one("#mcp-reload", Button).disabled = self.reloading
+        except NoMatches:
+            pass
 
     async def _apply_control(self, name: str, action: str) -> None:
         if action == "enable":
@@ -258,8 +255,7 @@ class MCPPanelScreen(ModalScreen[None]):
         )
 
     def action_close(self) -> None:
-        if not self.reloading:
-            self.dismiss()
+        self.dismiss()
 
 
 def capability_counts(state: Any) -> tuple[tuple[str, str], ...]:

@@ -75,7 +75,7 @@ from ui.widgets.mcp_panel import (
     status_badge,
     status_class,
 )
-from ui.widgets import PromptBox
+from ui.widgets import PromptBox, PromptPanel
 
 
 def write_config(root: Path, servers: dict) -> None:
@@ -1669,7 +1669,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.click("#mcp-reload")
             await wait_until(lambda: app._reload_runtime.await_count == 1)
-            await wait_until(lambda: screen.query_one("#mcp-reload", Button).has_focus)
+            await wait_until(
+                lambda: bool(buttons := list(screen.query("#mcp-reload"))) and buttons[0].has_focus
+            )
             app._reload_runtime.assert_awaited_once_with()
             app._reload_agents.assert_not_awaited()
             rendered = "\n".join(
@@ -1681,6 +1683,124 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#mcp-close")
             await pilot.pause()
             self.assertNotIsInstance(app.screen, MCPPanelScreen)
+
+    async def test_closing_panel_reveals_approval_and_same_reload_completes(self) -> None:
+        """Closing MCP should expose its pending approval without cancelling reload."""
+        from tests.test_textual_app import make_app, wait_until
+
+        manager = PanelManager()
+        app = make_app(mcp_manager=manager)
+        decisions: list[str] = []
+        reload_completed = asyncio.Event()
+
+        async def reload_runtime() -> None:
+            decision = await app.approve_mcp_server(
+                SimpleNamespace(name="new-server"),
+                "command: example-mcp-server",
+            )
+            decisions.append(decision)
+            reload_completed.set()
+
+        app._reload_runtime = reload_runtime  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            screen = app.screen
+            self.assertIsInstance(screen, MCPPanelScreen)
+
+            await pilot.click("#mcp-reload")
+            prompt_panel = app.query_one(PromptPanel)
+            prompt = app.query_one(PromptBox)
+            await wait_until(lambda: prompt_panel.active)
+
+            self.assertTrue(screen.reloading)
+            self.assertTrue(screen.query_one("#mcp-reload", Button).disabled)
+            self.assertFalse(screen.query_one("#mcp-close", Button).disabled)
+            self.assertFalse(screen.query_one("#mcp-title-close", Button).disabled)
+            self.assertTrue(prompt.disabled)
+
+            await pilot.click("#mcp-close")
+            await wait_until(lambda: not isinstance(app.screen, MCPPanelScreen))
+            self.assertTrue(prompt_panel.active)
+            self.assertTrue(prompt_panel.display)
+
+            await pilot.click("#prompt-choice-0")
+            await wait_until(reload_completed.is_set)
+            await wait_until(lambda: not app._reload_in_progress)
+
+            self.assertEqual(decisions, ["allow"])
+            self.assertFalse(prompt.disabled)
+            self.assertNotIsInstance(app.screen, MCPPanelScreen)
+
+    async def test_reload_during_existing_approval_reveals_prompt_without_reloading(self) -> None:
+        """Reload should not create a second prompt over an existing MCP approval."""
+        from tests.test_textual_app import make_app, renderable_plain, wait_until
+        from ui.widgets import ChatLog
+
+        manager = PanelManager()
+        app = make_app(mcp_manager=manager)
+        app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            approval = asyncio.create_task(
+                app.approve_mcp_server(
+                    SimpleNamespace(name="existing-server"),
+                    "command: existing-mcp-server",
+                )
+            )
+            prompt_panel = app.query_one(PromptPanel)
+            await wait_until(lambda: prompt_panel.active)
+
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, MCPPanelScreen)
+
+            await pilot.click("#mcp-reload")
+            await wait_until(lambda: not isinstance(app.screen, MCPPanelScreen))
+
+            app._reload_runtime.assert_not_awaited()
+            self.assertTrue(prompt_panel.active)
+            self.assertTrue(prompt_panel.display)
+            await pilot.click("#prompt-choice-0")
+            self.assertEqual(await approval, "allow")
+            rendered = "\n".join(
+                renderable_plain(block) for block in app.query_one(ChatLog).children
+            )
+            self.assertIn("answer the current prompt before reloading", rendered)
+
+    async def test_escape_dismisses_panel_while_app_owned_reload_continues(self) -> None:
+        """Every panel dismissal path should remain available during reload."""
+        from tests.test_textual_app import make_app, wait_until
+
+        manager = PanelManager()
+        app = make_app(mcp_manager=manager)
+        reload_started = asyncio.Event()
+        release_reload = asyncio.Event()
+
+        async def reload_runtime() -> None:
+            reload_started.set()
+            await release_reload.wait()
+
+        app._reload_runtime = reload_runtime  # type: ignore[method-assign]
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            screen = app.screen
+            self.assertIsInstance(screen, MCPPanelScreen)
+
+            await pilot.click("#mcp-reload")
+            await wait_until(reload_started.is_set)
+            self.assertFalse(screen.query_one("#mcp-close", Button).disabled)
+            self.assertFalse(screen.query_one("#mcp-title-close", Button).disabled)
+
+            await pilot.press("escape")
+            await wait_until(lambda: not isinstance(app.screen, MCPPanelScreen))
+            self.assertTrue(app._reload_in_progress)
+
+            release_reload.set()
+            await wait_until(lambda: not app._reload_in_progress)
 
 
 if __name__ == "__main__":
