@@ -14,7 +14,8 @@ from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.events import Click, DescendantFocus, Key
+from textual.events import Click, DescendantFocus, Key, Resize
+from textual.geometry import Size
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
@@ -44,6 +45,7 @@ class ChatLog(VerticalScroll):
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS, **kwargs: Any) -> None:
         self.follow_tail = True
         self._programmatic_tail_scroll = False
+        self._last_region_size: Size | None = None
         super().__init__(**kwargs)
         self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
@@ -106,19 +108,35 @@ class ChatLog(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Pause or resume tail-following when the user moves the viewport."""
         super().watch_scroll_y(old_value, new_value)
-        if not self._programmatic_tail_scroll:
+        if not self._programmatic_tail_scroll and not self._layout_resize_pending():
             self.follow_tail = self.is_vertical_scroll_end
 
     def watch_scroll_target_y(self, old_value: float, new_value: float) -> None:
         """Pause before an animated manual scroll starts moving the viewport."""
-        if not self._programmatic_tail_scroll and new_value < self.max_scroll_y:
+        if (
+            not self._programmatic_tail_scroll
+            and not self._layout_resize_pending()
+            and new_value < self.max_scroll_y
+        ):
             self.follow_tail = False
+
+    def on_resize(self, event: Resize) -> None:
+        """Preserve tail anchoring when surrounding panels resize the transcript."""
+        self._last_region_size = event.size
+        if self.follow_tail:
+            self._scroll_to_end()
+            return
+        self.scroll_to(y=self.scroll_y, animate=False, force=True, immediate=True)
 
     def resume_tail_following(self) -> None:
         """Resume following new output and move to the current transcript end."""
         self.follow_tail = True
         self._apply_tail_scroll()
         self._scroll_to_end()
+
+    def _layout_resize_pending(self) -> bool:
+        """Return whether Textual is applying a new outer size to the transcript."""
+        return self._last_region_size is not None and self.region.size != self._last_region_size
 
     def startup(self, *, model_name: str, session_id: str, workspace: str) -> None:
         """Show session metadata when the app opens."""

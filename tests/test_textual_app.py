@@ -1278,6 +1278,87 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(lambda: chat.is_vertical_scroll_end)
             self.assertTrue(chat.is_vertical_scroll_end)
 
+    async def test_subagent_panel_growth_preserves_chat_tail_scroll(self) -> None:
+        """Growing task rows should resize an active transcript without losing its tail."""
+        app = make_app()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            panel = app.query_one(SubagentsPanel)
+            fill_scrollable_chat(chat)
+            await wait_until(lambda: chat.max_scroll_y > 0 and chat.is_vertical_scroll_end)
+            initial_height = chat.region.height
+
+            heights: list[int] = []
+            for index in range(8):
+                app.eval_subagent_started(
+                    f"general-purpose [task-{index}]",
+                    f"task {index}",
+                    eval_id="eval-resize",
+                    row_id=f"row-{index}",
+                )
+                await pilot.pause(0.1)
+                heights.append(chat.region.height)
+                self.assertTrue(chat.follow_tail)
+                self.assertTrue(chat.is_vertical_scroll_end)
+                self.assertEqual(chat.scroll_y, chat.max_scroll_y)
+
+            self.assertTrue(panel.display)
+            self.assertLess(heights[-1], initial_height)
+            self.assertGreater(len(set(heights)), 1)
+
+    async def test_subagent_panel_resize_preserves_paused_chat_scroll(self) -> None:
+        """Panel layout changes should not override an intentional scroll pause."""
+        app = make_app()
+
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            panel = app.query_one(SubagentsPanel)
+            fill_scrollable_chat(chat)
+            await wait_until(lambda: chat.max_scroll_y > 0 and chat.is_vertical_scroll_end)
+
+            for index in range(2):
+                app.eval_subagent_started(
+                    f"general-purpose [task-{index}]",
+                    f"task {index}",
+                    eval_id="eval-paused",
+                    row_id=f"row-{index}",
+                )
+            await pilot.pause(0.1)
+            await wait_until(lambda: chat.is_vertical_scroll_end)
+
+            chat.focus()
+            await pilot.press("up")
+            await wait_until(lambda: not chat.follow_tail and not chat.is_vertical_scroll_end)
+            await pilot.pause(0.2)
+            paused_scroll_y = chat.scroll_y
+            initial_height = chat.region.height
+
+            for index in range(2, 8):
+                app.eval_subagent_started(
+                    f"general-purpose [task-{index}]",
+                    f"task {index}",
+                    eval_id="eval-paused",
+                    row_id=f"row-{index}",
+                )
+                await pilot.pause(0.1)
+
+            self.assertLess(chat.region.height, initial_height)
+            self.assertFalse(chat.follow_tail)
+            self.assertEqual(chat.scroll_y, paused_scroll_y)
+
+            panel.set_expanded(False)
+            await pilot.pause(0.1)
+            collapsed_scroll_y = chat.scroll_y
+            self.assertFalse(chat.follow_tail)
+
+            panel.set_expanded(True)
+            await pilot.pause(0.1)
+            self.assertFalse(chat.follow_tail)
+            self.assertEqual(chat.scroll_y, collapsed_scroll_y)
+
     async def test_chat_log_pauses_active_updates_until_user_returns_to_bottom(self) -> None:
         """Manual scrolling should pause every routine transcript scroll until End."""
         app = make_app()
