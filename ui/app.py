@@ -2227,6 +2227,7 @@ class MiraApp(App[None]):
     ) -> None:
         """Update a finished ordinary tool without closing active model output."""
         self.trace.completed_tool_result(name, result)
+        self._finish_eval_group(name, call_id, failed=False)
         self.query_one(ChatLog).completed_tool_result(
             name,
             result,
@@ -2246,6 +2247,7 @@ class MiraApp(App[None]):
     ) -> None:
         """Update a failed ordinary tool without closing active model output."""
         self.trace.completed_tool_error(name, error)
+        self._finish_eval_group(name, call_id, failed=True)
         self.query_one(ChatLog).completed_tool_error(
             name,
             error,
@@ -2267,6 +2269,7 @@ class MiraApp(App[None]):
         self.trace.recovered_tool_result(name, result)
         self._finish_main_stream_activity()
         self.waiting_finished()
+        self._finish_eval_group(name, call_id, failed=False)
         self.query_one(ChatLog).tool_result(
             name,
             result,
@@ -2289,6 +2292,7 @@ class MiraApp(App[None]):
         self.trace.recovered_tool_error(name, error)
         self._finish_main_stream_activity()
         self.waiting_finished()
+        self._finish_eval_group(name, call_id, failed=True)
         self.query_one(ChatLog).tool_error(
             name,
             error,
@@ -2297,6 +2301,11 @@ class MiraApp(App[None]):
             duration_ms=duration_ms,
         )
         self._rearm_waiting_if_busy()
+
+    def _finish_eval_group(self, name: str, call_id: str, *, failed: bool) -> None:
+        """Reconcile eval subagent rows from the parent tool lifecycle."""
+        if name == "eval" and call_id:
+            self.query_one(SubagentsPanel).finish_eval_group(call_id, failed=failed)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Render task delegation summary."""

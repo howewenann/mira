@@ -60,6 +60,7 @@ class SubagentGroup:
     key: str
     index: int
     order: list[str] = field(default_factory=list)
+    terminal_status: str = ""
 
 
 class SubagentsPanel(Vertical):
@@ -76,6 +77,8 @@ class SubagentsPanel(Vertical):
         self._groups: dict[str, SubagentGroup] = {}
         self._group_order: list[str] = []
         self._eval_groups: dict[str, str] = {}
+        self._eval_outcomes: dict[str, str] = {}
+        self._retired_eval_ids: set[str] = set()
         self._selected_group: str = ""
         self._active_group: str = ""
         self._aliases: dict[str, deque[str]] = {}
@@ -113,6 +116,8 @@ class SubagentsPanel(Vertical):
         self._groups = {}
         self._group_order = []
         self._eval_groups = {}
+        self._eval_outcomes = {}
+        self._retired_eval_ids = set()
         self._selected_group = ""
         self._active_group = ""
         self._aliases = {}
@@ -156,6 +161,8 @@ class SubagentsPanel(Vertical):
             self.reset()
 
         eval_key = str(eval_id or "")
+        if eval_key in self._retired_eval_ids:
+            return
         group_key = self._group_key_for_eval(eval_key) if eval_key else ""
         key = str(row_id or "")
         display_name = self._display_name(name, key=key, track=not bool(eval_key), force=bool(eval_key))
@@ -175,12 +182,15 @@ class SubagentsPanel(Vertical):
             else:
                 self._regular_order.append(key)
 
-        self._records[key] = SubagentRecord(
+        record = SubagentRecord(
             key=key,
             name=sanitize(display_name, max_chars=MAX_LABEL_CHARS),
             hint=compact_subagent_hint(label, task),
             group_key=group_key,
         )
+        self._records[key] = record
+        if group_key and self._groups[group_key].terminal_status:
+            self._cancel_record(record, time.monotonic())
         self._show()
 
     def update_subagent_request(self, name: str, task: str) -> None:
@@ -218,14 +228,42 @@ class SubagentsPanel(Vertical):
                 record = self._records[key]
             else:
                 return
+        replaces_fallback = record.status == STATUS_CANCELLED and status != STATUS_CANCELLED
         record.status = status
         record.output = sanitize(result, max_chars=MAX_HINT_CHARS)
-        if record.finished_at is None:
-            record.finished_at = time.monotonic()
+        if record.finished_at is None or replaces_fallback:
+            record.finished_at = (
+                record.started + duration_ms / 1000
+                if duration_ms is not None
+                else time.monotonic()
+            )
         record.duration_ms = (
             duration_ms if duration_ms is not None else int(max(0.0, record.finished_at - record.started) * 1000)
         )
         self._refresh()
+
+    def finish_eval_group(self, eval_id: str, *, failed: bool = False) -> None:
+        """Reconcile running rows after their parent eval becomes terminal."""
+        eval_key = str(eval_id or "")
+        if not eval_key or eval_key in self._retired_eval_ids:
+            return
+        terminal_status = STATUS_ERROR if failed else STATUS_DONE
+        self._eval_outcomes[eval_key] = terminal_status
+        group_key = self._eval_groups.get(eval_key)
+        group = self._groups.get(group_key or "")
+        if group is None:
+            return
+
+        group.terminal_status = terminal_status
+        finished_at = time.monotonic()
+        changed = False
+        for key in group.order:
+            record = self._records.get(key)
+            if record is not None and record.status == STATUS_RUNNING:
+                self._cancel_record(record, finished_at)
+                changed = True
+        if changed or failed:
+            self._refresh()
 
     def cancel_running(self) -> None:
         """Mark all running rows as cancelled."""
@@ -233,9 +271,7 @@ class SubagentsPanel(Vertical):
         finished_at = time.monotonic()
         for record in self._records.values():
             if record.status == STATUS_RUNNING:
-                record.status = STATUS_CANCELLED
-                record.finished_at = finished_at
-                record.duration_ms = int(max(0.0, finished_at - record.started) * 1000)
+                self._cancel_record(record, finished_at)
                 changed = True
         if changed:
             self._refresh()
@@ -279,16 +315,17 @@ class SubagentsPanel(Vertical):
         group_key = eval_id or f"eval-{len(self._group_order) + 1}"
         self._ensure_group(group_key)
         self._eval_groups[eval_id] = group_key
+        self._groups[group_key].terminal_status = self._eval_outcomes.get(eval_id, "")
         return group_key
 
     def _retry_group_key(self) -> str:
         if not self._group_order:
             return ""
         group_key = self._active_group or self._group_order[-1]
-        records = [self._records[key] for key in self._groups[group_key].order if key in self._records]
-        if records and any(record.status == STATUS_ERROR for record in records) and not any(
-            record.status == STATUS_RUNNING for record in records
-        ):
+        group = self._groups[group_key]
+        records = [self._records[key] for key in group.order if key in self._records]
+        failed = group.terminal_status == STATUS_ERROR or any(record.status == STATUS_ERROR for record in records)
+        if records and failed and not any(record.status == STATUS_RUNNING for record in records):
             return group_key
         return ""
 
@@ -301,8 +338,16 @@ class SubagentsPanel(Vertical):
         for key in remove:
             self._records.pop(key, None)
         group.order = []
+        group.terminal_status = ""
+        retired = [eval_id for eval_id, key in self._eval_groups.items() if key == group_key]
+        for eval_id in retired:
+            self._eval_groups.pop(eval_id, None)
+            self._eval_outcomes.pop(eval_id, None)
+            self._retired_eval_ids.add(eval_id)
 
     def _orphan_error_group_key(self, eval_id: str) -> str:
+        if eval_id in self._retired_eval_ids:
+            return ""
         if eval_id and eval_id in self._eval_groups:
             return self._eval_groups[eval_id]
         if self._active_group:
@@ -332,6 +377,12 @@ class SubagentsPanel(Vertical):
 
     def _next_suffix(self) -> str:
         return generate_slug(fallback=self._fallback_suffixes)
+
+    @staticmethod
+    def _cancel_record(record: SubagentRecord, finished_at: float) -> None:
+        record.status = STATUS_CANCELLED
+        record.finished_at = finished_at
+        record.duration_ms = int(max(0.0, finished_at - record.started) * 1000)
 
     def _record_for_name(self, name: str) -> SubagentRecord | None:
         record = self._records.get(name)
@@ -420,6 +471,8 @@ class SubagentsPanel(Vertical):
         for group_key in keys:
             records = self._records_for_group_key(group_key)
             done, total, failed, cancelled = self._counts(records)
+            if group_key != TASKS_GROUP and self._groups[group_key].terminal_status == STATUS_ERROR:
+                failed = max(1, failed)
             marker = ">" if group_key == selected else " "
             status, style = group_status_icon(done=done, total=total, failed=failed, cancelled=cancelled)
             elapsed = group_elapsed_seconds(records)

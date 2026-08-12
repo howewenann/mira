@@ -744,6 +744,9 @@ surface. The status line may briefly report delegation setup, but the task rows
 belong in the panel.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
+When a parent eval result arrives, the panel reconciles any child rows that did
+not receive a terminal event as cancelled, freezing their clocks and restoring
+the close control without changing the reported outcome of completed children.
 
 **Where to check:** `ui/app.py`, `ui/widgets/issues.py`, `ui/windows_input.py`,
 `ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,

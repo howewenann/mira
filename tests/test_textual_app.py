@@ -6709,6 +6709,59 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
             self.assertIn("Group 1 1/1  7.0s", cancelled_panel._render_groups().plain)
 
+    def test_eval_group_completion_reconciles_only_matching_orphans(self) -> None:
+        """A parent eval completion should freeze only its own unfinished rows."""
+        panel = SubagentsPanel()
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            panel.start_subagent("general-purpose [a-one]", "one", eval_id="eval-a", row_id="a-one")
+            panel.start_subagent("general-purpose [a-two]", "two", eval_id="eval-a", row_id="a-two")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=11.0):
+            panel.start_subagent("general-purpose [b-one]", "other", eval_id="eval-b", row_id="b-one")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=12.0):
+            panel.finish_subagent("general-purpose [a-one]", eval_id="eval-a", row_id="a-one")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+            panel.finish_eval_group("eval-a")
+
+        self.assertEqual(panel._records["a-one"].status, "DONE")
+        self.assertEqual(panel._records["a-two"].status, "CANCELLED")
+        self.assertEqual(panel._records["b-one"].status, "RUNNING")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+            groups = panel._render_groups().plain
+        self.assertIn("Group 1 2/2  5.0s", groups)
+        self.assertIn("Group 2 0/1  1m29s", groups)
+
+    def test_terminal_eval_handles_late_events_and_retired_retry_events(self) -> None:
+        """Late lifecycle events should refine fallbacks without corrupting a retry."""
+        panel = SubagentsPanel()
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=5.0):
+            panel.finish_eval_group("eval-old", failed=True)
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            panel.start_subagent("general-purpose [old]", "late start", eval_id="eval-old", row_id="old")
+
+        self.assertEqual(panel._records["old"].status, "CANCELLED")
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+            panel.finish_subagent(
+                "general-purpose [old]",
+                eval_id="eval-old",
+                row_id="old",
+                duration_ms=2_500,
+            )
+        self.assertEqual(panel._records["old"].status, "DONE")
+        self.assertEqual(panel._records["old"].finished_at, 12.5)
+
+        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+            panel.start_subagent("general-purpose [retry]", "retry", eval_id="eval-retry", row_id="retry")
+        panel.finish_subagent(
+            "general-purpose [old]",
+            "late failure",
+            eval_id="eval-old",
+            row_id="old-error",
+            status="ERROR",
+        )
+
+        self.assertEqual(list(panel._records), ["retry"])
+        self.assertEqual(panel._records["retry"].status, "RUNNING")
+
     def test_mixed_panel_tasks_group_uses_batch_wall_time(self) -> None:
         """The regular Tasks aggregate should use the same first-start-to-last-finish clock."""
         panel = SubagentsPanel()
@@ -6921,6 +6974,75 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("draft]", tasks)
             self.assertNotIn("eval-", groups)
             self.assertNotIn("eval-", tasks)
+
+    async def test_failed_eval_reconciles_orphans_and_enables_close(self) -> None:
+        """A failed parent eval should cancel orphan rows and unlock the panel."""
+        app = make_app()
+
+        async with app.run_test(size=(160, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call("eval", {"code": "Promise.all(...)"}, call_id="eval-failed")
+            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+                for index in range(8):
+                    app.eval_subagent_started(
+                        f"general-purpose [task-{index}]",
+                        f"task {index}",
+                        eval_id="eval-failed",
+                        row_id=f"row-{index}",
+                    )
+            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+                app.eval_subagent_cancelled(
+                    "general-purpose [task-0]",
+                    "context size exceeded",
+                    eval_id="eval-failed",
+                    row_id="row-0",
+                )
+            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+                app.completed_tool_error("eval", "context size exceeded", call_id="eval-failed")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            statuses = [record.status for record in panel._records.values()]
+            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            close = panel.query_one("#subagents-panel-close", Static)
+
+            self.assertEqual(statuses.count("ERROR"), 1)
+            self.assertEqual(statuses.count("CANCELLED"), 7)
+            self.assertNotIn("RUNNING", tasks)
+            self.assertIn("8/8 done", header)
+            self.assertIn("1 failed", header)
+            self.assertIn("7 cancelled", header)
+            self.assertTrue(close.display)
+            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+                self.assertIn("Group 1 8/8  10.0s", panel._render_groups().plain)
+
+            panel.close()
+            await pilot.pause()
+            self.assertFalse(panel.display)
+
+    async def test_only_eval_tool_completion_reconciles_panel_group(self) -> None:
+        """Unrelated tools should not finish eval rows; recovered eval results should."""
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.eval_subagent_started(
+                "general-purpose [worker]",
+                "work",
+                eval_id="eval-worker",
+                row_id="worker",
+            )
+            app.completed_tool_result("read_file", "done", call_id="eval-worker")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            self.assertEqual(panel._records["worker"].status, "RUNNING")
+
+            app.recovered_tool_result("eval", "done", call_id="eval-worker")
+            await pilot.pause()
+            self.assertEqual(panel._records["worker"].status, "CANCELLED")
+            self.assertTrue(panel.query_one("#subagents-panel-close", Static).display)
 
     async def test_mixed_regular_and_eval_subagents_share_panel_sections(self) -> None:
         """Mixed workflows should show regular tasks plus eval groups in one panel."""
