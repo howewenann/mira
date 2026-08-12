@@ -183,11 +183,13 @@ IssuesScreen {
     text-overflow: ellipsis;
     background: #8897E8;
     color: #0C0F10;
+    text-style: bold;
 }
 
 #model-settings-button:focus {
     background: #A8B3FF;
     color: #0C0F10;
+    text-style: bold;
 }
 
 #telemetry-values {
@@ -501,6 +503,46 @@ Button.prompt-panel-button:focus {
 .message.assistant,
 .message.startup {
     border: solid #5BB8B1;
+}
+
+.message.assistant {
+    height: auto;
+}
+
+.assistant-body {
+    height: auto;
+}
+
+.assistant-actions {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    margin-top: 1;
+    align-horizontal: left;
+}
+
+Button.assistant-copy {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    height: 1;
+    min-height: 1;
+    margin: 0;
+    padding: 0 1;
+    border: none;
+    content-align: center middle;
+    text-align: center;
+    background: #151f22;
+    color: #b8d6d5;
+    text-style: none;
+}
+
+Button.assistant-copy:focus,
+Button.assistant-copy:hover {
+    border: none;
+    background: #1b3036;
+    color: #eef7f8;
+    text-style: none;
 }
 
 .message.reasoning {

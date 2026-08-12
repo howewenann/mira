@@ -2890,7 +2890,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.select_all()
             prompt.focus()
             user_block = chat.query_one(".message.user", Static)
-            assistant_block = chat.query_one(".message.assistant", Static)
+            assistant_block = chat.query_one(".message.assistant .assistant-body", Static)
 
             for block, expected in (
                 (user_block, "selected user text"),
@@ -2911,7 +2911,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             chat.assistant_message("clicked assistant text")
             await pilot.pause()
             prompt = app.query_one(PromptBox)
-            assistant_block = chat.query_one(".message.assistant", Static)
+            assistant_block = chat.query_one(".message.assistant .assistant-body", Static)
             await wait_until(lambda: assistant_block.region.bottom <= chat.region.bottom)
 
             prompt.focus()
@@ -2925,6 +2925,45 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
             copy.assert_called_once_with("clicked assistant text")
+
+    async def test_assistant_copy_button_copies_text_and_restarts_feedback(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.assistant_message("copy the complete assistant response")
+            await pilot.pause()
+            bubble = chat.query_one(".message.assistant")
+            button = bubble.query_one(".assistant-copy", Button)
+            bubble.FEEDBACK_SECONDS = 0.05
+
+            with patch.object(app, "copy_to_clipboard") as copy:
+                button.press()
+                await pilot.pause(0.03)
+                button.press()
+                await pilot.pause(0.03)
+
+                self.assertEqual(button.label.plain, "Copied")
+                self.assertEqual(copy.call_count, 2)
+                self.assertEqual(copy.call_args_list[0].args, ("copy the complete assistant response",))
+                self.assertEqual(copy.call_args_list[1].args, ("copy the complete assistant response",))
+
+                await wait_until(lambda: button.label.plain == "Copy")
+
+            self.assertEqual(button.label.plain, "Copy")
+            self.assertEqual(button.region.width, 10)
+            self.assertEqual(button.region.height, 1)
+            self.assertEqual(button.styles.background, Color.parse("#151f22"))
+
+            button.focus()
+            await pilot.pause()
+            self.assertEqual(str(button.styles.text_style), "none")
+
+            model_button = app.query_one("#model-settings-button", Button)
+            model_button.focus()
+            await pilot.pause()
+            self.assertEqual(str(model_button.styles.text_style), "bold")
 
     async def test_correction_bubble_keeps_rejected_prose_and_shows_retry_prompt(self) -> None:
         app = make_app()
@@ -3003,7 +3042,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             chat.assistant_message("second selected block")
             await pilot.pause()
             user_block = chat.query_one(".message.user", Static)
-            assistant_block = chat.query_one(".message.assistant", Static)
+            assistant_block = chat.query_one(".message.assistant .assistant-body", Static)
             app.screen.selections = {
                 user_block: SELECT_ALL,
                 assistant_block: SELECT_ALL,

@@ -48,7 +48,7 @@ class ChatLog(VerticalScroll):
         self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
         self._assistant_text = ""
-        self._assistant_block: Static | None = None
+        self._assistant_block: AssistantBubble | None = None
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
@@ -89,6 +89,19 @@ class ChatLog(VerticalScroll):
         """Move keyboard focus to the transcript when its content is clicked."""
         if not isinstance(event.widget, Button):
             self.focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Copy the response owned by an assistant-bubble footer button."""
+        if not event.button.has_class("assistant-copy"):
+            return
+        bubble = event.button.parent
+        while bubble is not None and not isinstance(bubble, AssistantBubble):
+            bubble = bubble.parent
+        if bubble is None:
+            return
+        event.stop()
+        self.app.copy_to_clipboard(bubble.text)
+        bubble.show_copied()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Pause or resume tail-following when the user moves the viewport."""
@@ -162,9 +175,7 @@ class ChatLog(VerticalScroll):
 
     def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
-        self._add_block(
-            "mira", Text(text), "message assistant", created_at=created_at
-        )
+        self._add_assistant_block(text, created_at=created_at)
 
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""
@@ -305,7 +316,7 @@ class ChatLog(VerticalScroll):
 
         if self._assistant_block is None:
             self._assistant_text = ""
-            self._assistant_block = self._add_block("mira", Text(""), "message assistant", created_at=created_at)
+            self._assistant_block = self._add_assistant_block("", created_at=created_at)
 
         self._assistant_text += delta
         self._assistant_block.update(Text(self._assistant_text))
@@ -1108,6 +1119,15 @@ class ChatLog(VerticalScroll):
         self._scroll_to_end()
         return block
 
+    def _add_assistant_block(self, text: str, *, created_at: str = "") -> AssistantBubble:
+        """Mount an assistant response with its compact Copy footer."""
+        block = AssistantBubble(text)
+        if timestamp := timestamp_text(created_at):
+            block.border_subtitle = escape(timestamp)
+        self.mount(block)
+        self._scroll_to_end()
+        return block
+
     def _style_block(self, block: Static, *, title: str, classes: str, created_at: str = "") -> None:
         """Update a transcript block's title and style classes in place."""
         block.border_title = escape(title)
@@ -1585,6 +1605,50 @@ def pending_result(value: str) -> tuple[str, bool, int | None]:
         )
         return str(payload.get("result") or ""), bool(payload.get("is_error")), duration
     return value, False, None
+
+
+class AssistantBubble(Vertical):
+    """Assistant response text with a compact clipboard footer action."""
+
+    FEEDBACK_SECONDS = 1.5
+
+    def __init__(self, text: str) -> None:
+        super().__init__(classes="message assistant")
+        self.text = text
+        self.border_title = "mira"
+        self._body = Static(Text(text), classes="assistant-body")
+        self._copy_button = Button(
+            "Copy",
+            classes="assistant-copy",
+            compact=True,
+        )
+        self._feedback_version = 0
+
+    @property
+    def renderable(self) -> Any:
+        """Expose the body renderable for transcript consumers and tests."""
+        return Text(self.text)
+
+    def compose(self) -> Any:
+        yield self._body
+        with Horizontal(classes="assistant-actions"):
+            yield self._copy_button
+
+    def update(self, renderable: Text) -> None:
+        """Update streamed assistant text without replacing the footer."""
+        self.text = renderable.plain
+        self._body.update(renderable)
+
+    def show_copied(self) -> None:
+        """Show transient feedback, restarting its timer on every click."""
+        self._feedback_version += 1
+        version = self._feedback_version
+        self._copy_button.label = "Copied"
+        self.set_timer(self.FEEDBACK_SECONDS, lambda: self._restore_copy_label(version))
+
+    def _restore_copy_label(self, version: int) -> None:
+        if self._feedback_version == version and self._copy_button.is_mounted:
+            self._copy_button.label = "Copy"
 
 
 class PlanActionButton(Button):
