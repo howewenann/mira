@@ -5964,6 +5964,85 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assert_styled_text(tools[0], "Completed in", TOOL_COMPLETED_COLOR)
             self.assert_styled_text(tools[0], " 00:31", TOOL_DURATION_COLOR)
 
+    async def test_cancel_turn_freezes_all_running_tool_clocks(self) -> None:
+        """Eval and ordinary tools should become terminal at the cancellation instant."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+                app.tool_call("eval", {"code": "while (true) {}"}, call_id="call-eval")
+                app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=17.0):
+                app.finish_turn(cancelled=True)
+            await pilot.pause()
+
+            tools = [block for block in chat.children if "tool-call" in block.classes]
+            frozen = [renderable_plain(block) for block in tools]
+            self.assertEqual(len(tools), 2)
+            self.assertTrue(all("Cancelled after 00:07" in value for value in frozen))
+            self.assertFalse(chat.has_live_tools())
+            self.assertTrue(all(not queue for queue in chat._tool_name_queues.values()))
+
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=70.0):
+                chat.tick_tools()
+            self.assertEqual([renderable_plain(block) for block in tools], frozen)
+
+            app.completed_tool_result("eval", "late result", call_id="call-eval", duration_ms=9_000)
+            updated = renderable_plain(tools[0])
+            self.assertIn("late result", updated)
+            self.assertIn("Completed in 00:09", updated)
+            self.assertNotIn("Cancelled after", updated)
+
+    async def test_failed_turn_interrupts_running_tool_clock(self) -> None:
+        """Non-cancellation turn endings should use an interrupted terminal state."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=20.0):
+                app.tool_call("execute", {"command": "slow"}, call_id="call-execute")
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=32.0):
+                app.finish_turn(cancelled=True, tool_status="interrupted")
+            await pilot.pause()
+
+            tool = [
+                block for block in app.query_one(ChatLog).children if "tool-call" in block.classes
+            ][-1]
+            self.assertIn("Interrupted after 00:12", renderable_plain(tool))
+
+    async def test_stopped_tool_timing_replays_from_session(self) -> None:
+        """Persisted cancellation metadata should restore without restarting a clock."""
+        app = make_app()
+        session = {
+            "events": [
+                {
+                    "id": 1,
+                    "type": "tool_call",
+                    "name": "eval",
+                    "args": {"code": "slow()"},
+                    "call_id": "call-eval",
+                    "status": "cancelled",
+                    "duration_ms": 14_000,
+                }
+            ]
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.clear_log()
+            chat.restore_session(session)
+            await pilot.pause()
+
+            tool = [block for block in chat.children if "tool-call" in block.classes][-1]
+            before = renderable_plain(tool)
+            self.assertIn("Cancelled after 00:14", before)
+            with patch("ui.widgets.chat_log.time.monotonic", return_value=1000.0):
+                chat.tick_tools()
+            self.assertEqual(renderable_plain(tool), before)
+
     async def test_tool_without_draft_starts_running_and_failed_duration(self) -> None:
         """Providers without draft chunks should begin cleanly at execution."""
         app = make_app()

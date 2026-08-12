@@ -1033,6 +1033,58 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         events = context.normalize_events(record["events"])
         self.assertEqual(events[1]["duration_ms"], 31_000)
 
+    def test_stopped_tool_timers_persist_and_retire_without_drafts(self) -> None:
+        """Abnormal turn cleanup should save invoked tools and discard draft-only clocks."""
+        record = {"events": []}
+        now = [10.0]
+        recorder = SessionRecorder(record, Store(), "action")
+        recording = SessionRecordingRenderer(
+            RunTurnRenderer(),
+            recorder,
+            clock=lambda: now[0],
+        )
+
+        recording.tool_call_delta("eval", {"code": "partial"}, call_id="draft-only")
+        recording.tool_call("eval", {"code": "slow()"}, call_id="call-eval")
+        recording.tool_call("read_file", {"path": "README.md"})
+        recording.tool_call_delta("write_file", {"path": "partial"}, call_id="unpromoted-draft")
+        now[0] = 18.0
+        recording.stop_active_tools("cancelled")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_call"])
+        self.assertTrue(all(event["status"] == "cancelled" for event in events))
+        self.assertTrue(all(event["duration_ms"] == 8_000 for event in events))
+        self.assertEqual(recording._tool_timers, {})
+        self.assertEqual(recording._tool_timer_ids, {})
+        self.assertTrue(all(not queue for queue in recording._tool_timer_queues.values()))
+        self.assertEqual(recording._open_idless_tool_calls, [])
+
+        recording.stop_active_tools("cancelled")
+        self.assertEqual(len(record["events"]), 2)
+
+    def test_real_result_supersedes_persisted_stopped_tool_state(self) -> None:
+        """A late result should remove cancellation metadata from the durable call."""
+        record = {"events": []}
+        now = [2.0]
+        recorder = SessionRecorder(record, Store(), "action")
+        recording = SessionRecordingRenderer(
+            RunTurnRenderer(),
+            recorder,
+            clock=lambda: now[0],
+        )
+
+        recording.tool_call("eval", {"code": "slow()"}, call_id="call-eval")
+        now[0] = 7.0
+        recording.stop_active_tools("interrupted")
+        recording.recovered_tool_result("eval", "finished", call_id="call-eval")
+
+        events = context.normalize_events(record["events"])
+        self.assertEqual([event["type"] for event in events], ["tool_call", "tool_result"])
+        self.assertNotIn("status", events[0])
+        self.assertNotIn("duration_ms", events[0])
+        self.assertEqual(events[1]["output"], "finished")
+
     def test_historical_tool_result_without_duration_still_normalizes(self) -> None:
         events = context.normalize_events(
             [

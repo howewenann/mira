@@ -305,7 +305,11 @@ async def _run_one_shot(
                 thread_id=app["session"]["id"],
                 **turn_kwargs,
             )
+    except asyncio.CancelledError:
+        renderer.stop_active_tools("cancelled")
+        raise
     except ContextOverflowError as exc:
+        renderer.stop_active_tools("interrupted")
         with suppress(Exception):
             await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"])
         notice = pop_context_overflow_notice(exc)
@@ -319,6 +323,7 @@ async def _run_one_shot(
         app["store"].save(app["session"])
         raise typer.Exit(code=1) from exc
     except Exception as exc:
+        renderer.stop_active_tools("interrupted")
         report_workspace = Path(app.get("workspace") or app["session"].get("workspace") or ".")
         error_path = write_error_report(
             exc,

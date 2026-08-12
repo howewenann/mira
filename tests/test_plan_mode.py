@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import unittest
 from io import StringIO
@@ -1417,6 +1418,48 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.saves[-1]["events"][3]["status"], "error")
         self.assertIn("file not found", store.saves[-1]["events"][3]["output"])
         self.assertIn("model stopped", store.saves[-1]["events"][4]["text"])
+
+    async def test_run_user_turn_persists_cancelled_tool_duration(self) -> None:
+        """Cancelling the invocation should terminalize its outstanding tool call."""
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
+        store = CapturingStore()
+        mode = repl.initial_mode("action-agent", "plan-agent")
+        tool_started = asyncio.Event()
+
+        async def fake_run_turn(
+            agent: Any,
+            text: str,
+            renderer: Any,
+            thread_id: str,
+            **kwargs: Any,
+        ) -> runner.TurnResult:
+            renderer.tool_call("eval", {"code": "slow()"}, call_id="call-eval")
+            tool_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        with patch("ui.repl.run_turn", fake_run_turn):
+            turn = asyncio.create_task(
+                repl.run_user_turn(
+                    agent="action-agent",
+                    plan_agent="plan-agent",
+                    renderer=renderer,
+                    store=store,
+                    session=session,
+                    mode=mode,
+                    text="run eval",
+                )
+            )
+            await tool_started.wait()
+            turn.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await turn
+
+        events = session["events"]
+        self.assertEqual([event["type"] for event in events], ["user", "tool_call", "interrupted"])
+        self.assertEqual(events[1]["status"], "cancelled")
+        self.assertIsInstance(events[1]["duration_ms"], int)
 
     async def test_run_user_turn_records_context_overflow_as_info(self) -> None:
         """Escaped context overflow should persist as info instead of system_error."""

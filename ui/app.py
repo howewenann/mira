@@ -576,7 +576,7 @@ class MiraApp(App[None]):
             self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             if not context_notice_rendered(exc):
                 self.system_message(pop_context_overflow_notice(exc), kind="info")
             self._set_status(state="ready")
@@ -595,7 +595,7 @@ class MiraApp(App[None]):
             self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             error_path = self._write_error_report(exc, source="tui.turn")
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
@@ -994,7 +994,7 @@ class MiraApp(App[None]):
             self.mode["executing_goal"] = False
             self.store.save(self.session)
             self._resolve_goal_attempt_status()
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             error_path = self._write_error_report(exc, source="tui.goal_turn", context={"goal": goal_title(value)})
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
@@ -1043,7 +1043,7 @@ class MiraApp(App[None]):
             self.system_message("revision cancelled", kind="warning")
             raise
         except Exception as exc:
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             error_path = self._write_error_report(exc, source="tui.goal_revision")
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
@@ -1090,7 +1090,7 @@ class MiraApp(App[None]):
             self.mode["current_plan"] = current_plan(self.session)
             self.mode["executing_plan"] = False
             self.store.save(self.session)
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             error_path = self._write_error_report(
                 exc,
                 source="tui.plan_turn",
@@ -1138,7 +1138,7 @@ class MiraApp(App[None]):
             self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True)
+            self.finish_turn(cancelled=True, tool_status="interrupted")
             error_path = self._write_error_report(
                 exc,
                 source="tui.plan_revision",
@@ -2275,6 +2275,22 @@ class MiraApp(App[None]):
             duration_ms=duration_ms,
         )
 
+    def tool_call_stopped(
+        self,
+        name: str,
+        call_id: str = "",
+        *,
+        status: str = "cancelled",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Freeze an invoked tool that ended with its parent turn."""
+        self.query_one(ChatLog).tool_call_stopped(
+            name,
+            call_id=call_id,
+            status=status,
+            duration_ms=duration_ms,
+        )
+
     def recovered_tool_result(
         self,
         name: str,
@@ -2581,13 +2597,13 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
-    def finish_turn(self, *, cancelled: bool = False) -> None:
+    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled") -> None:
         """Close live turn widgets without clearing visible transcript history."""
         self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
         self._waiting_label = "working..."
-        self.query_one(ChatLog).finish_turn(cancelled=cancelled)
+        self.query_one(ChatLog).finish_turn(cancelled=cancelled, tool_status=tool_status)
         if cancelled:
             self.query_one(SubagentsPanel).cancel_running()
             self._subagent_live_active = False

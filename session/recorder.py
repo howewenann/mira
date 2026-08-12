@@ -105,6 +105,7 @@ class SessionRecorder:
         duration_ms: int | None = None,
     ) -> dict[str, Any]:
         self.finish_main()
+        self._clear_stopped_tool_call(name, call_id)
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if call_id:
             event["call_id"] = call_id
@@ -144,6 +145,7 @@ class SessionRecorder:
         duration_ms: int | None = None,
     ) -> dict[str, Any]:
         """Persist a live completion beside its call without closing model output."""
+        self._clear_stopped_tool_call(name, call_id)
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if status == "error":
             event["status"] = "error"
@@ -182,6 +184,7 @@ class SessionRecorder:
         status: str = "success",
     ) -> dict[str, Any]:
         """Persist a late-discovered tool result before the last assistant reply."""
+        self._clear_stopped_tool_call(name, call_id)
         event = {"type": "tool_result", "mode": self.mode, "name": name, "output": str(output)}
         if status == "error":
             event["status"] = "error"
@@ -339,6 +342,21 @@ class SessionRecorder:
         self.save()
         return stored
 
+    def stop_tool_call(self, event_id: int, status: str, duration_ms: int) -> dict[str, Any] | None:
+        """Persist terminal timing on an invoked tool that produced no result."""
+        if status not in {"cancelled", "interrupted"}:
+            raise ValueError(f"unsupported stopped tool status: {status}")
+        for event in self.record.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") != "tool_call" or int(event.get("id") or 0) != event_id:
+                continue
+            event["status"] = status
+            event["duration_ms"] = max(0, int(duration_ms))
+            self.save()
+            return event
+        return None
+
     def tool_call_updated(
         self,
         name: str,
@@ -457,6 +475,21 @@ class SessionRecorder:
             events.append(event)
         else:
             events.insert(target_index + 1, event)
+
+    def _clear_stopped_tool_call(self, name: str, call_id: str) -> None:
+        """Let a real result replace earlier cancellation-only metadata."""
+        for event in self.record.get("events", []):
+            if not isinstance(event, dict) or event.get("type") != "tool_call":
+                continue
+            if call_id:
+                matches = str(event.get("call_id") or "") == call_id
+            else:
+                matches = not event.get("call_id") and str(event.get("name") or "") == name
+            if not matches or event.get("status") not in {"cancelled", "interrupted"}:
+                continue
+            event.pop("status", None)
+            event.pop("duration_ms", None)
+            return
 
     def discard_reasoning(self) -> None:
         """Remove the currently streamed reasoning block."""
@@ -579,8 +612,9 @@ class RecordingRenderer:
         call_renderer(self.renderer.text_delta, delta, created_at=event_created_at(event))
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
-        self._start_tool_timer(name, call_id, preparing=False)
+        timer_token = self._start_tool_timer(name, call_id, preparing=False)
         event = self.recorder.tool_call(name, args, call_id=call_id)
+        self._tool_timers[timer_token]["event_id"] = int(event["id"])
         if not call_id:
             self._open_idless_tool_calls.append((int(event["id"]), name))
         call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
@@ -759,7 +793,7 @@ class RecordingRenderer:
         if callable(callback):
             callback(name, args, call_id=call_id)
 
-    def _start_tool_timer(self, name: str, call_id: str, *, preparing: bool) -> None:
+    def _start_tool_timer(self, name: str, call_id: str, *, preparing: bool) -> int:
         """Start or promote one independently keyed tool interaction clock."""
         token = self._tool_timer_ids.get(call_id) if call_id else None
         if token is None and not preparing:
@@ -785,6 +819,7 @@ class RecordingRenderer:
                 self._tool_timer_ids.pop(previous_id, None)
             timer["call_id"] = call_id
             self._tool_timer_ids[call_id] = token
+        return token
 
     def _finish_tool_timer(self, name: str, call_id: str) -> int | None:
         """Freeze and forget the matching tool clock at terminal completion."""
@@ -796,16 +831,54 @@ class RecordingRenderer:
         if token is None:
             return None
 
-        timer = self._tool_timers.pop(token)
+        timer = self._discard_tool_timer(token)
+        if timer is None:
+            return None
+        return elapsed_ms(float(timer["started_at"]), clock=self._clock)
+
+    def stop_active_tools(self, status: str) -> None:
+        """Freeze, persist, and retire every invoked tool lacking a result."""
+        if status not in {"cancelled", "interrupted"}:
+            raise ValueError(f"unsupported stopped tool status: {status}")
+        callback = getattr(self.renderer, "tool_call_stopped", None)
+        stopped_event_ids: set[int] = set()
+        for token, timer in list(self._tool_timers.items()):
+            event_id = int(timer.get("event_id") or 0)
+            if bool(timer.get("preparing")) or not event_id:
+                self._discard_tool_timer(token)
+                continue
+            duration_ms = elapsed_ms(float(timer["started_at"]), clock=self._clock)
+            name = str(timer.get("name") or "tool")
+            call_id = str(timer.get("call_id") or "")
+            self.recorder.stop_tool_call(event_id, status, duration_ms)
+            stopped_event_ids.add(event_id)
+            self._discard_tool_timer(token)
+            if callable(callback):
+                call_renderer(
+                    callback,
+                    name,
+                    call_id=call_id,
+                    status=status,
+                    duration_ms=duration_ms,
+                )
+        if stopped_event_ids:
+            self._open_idless_tool_calls = [
+                item for item in self._open_idless_tool_calls if item[0] not in stopped_event_ids
+            ]
+
+    def _discard_tool_timer(self, token: int) -> dict[str, Any] | None:
+        """Remove one timer from every matching index without computing a duration."""
+        timer = self._tool_timers.pop(token, None)
+        if timer is None:
+            return None
         timer_id = str(timer.get("call_id") or "")
         if timer_id:
             self._tool_timer_ids.pop(timer_id, None)
-        queue = self._tool_timer_queues.get(str(timer.get("name") or name))
+        name = str(timer.get("name") or "tool")
+        queue = self._tool_timer_queues.get(name)
         if queue:
-            self._tool_timer_queues[str(timer.get("name") or name)] = deque(
-                item for item in queue if item != token
-            )
-        return elapsed_ms(float(timer["started_at"]), clock=self._clock)
+            self._tool_timer_queues[name] = deque(item for item in queue if item != token)
+        return timer
 
     def _oldest_tool_timer(self, name: str, *, preparing: bool | None = None) -> int | None:
         """Return the oldest live timer for a tool name and optional phase."""

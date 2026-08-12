@@ -1296,6 +1296,10 @@ seconds, then create both a Plan and a Goal.
   draft is available, `Running · MM:SS elapsed` when execution begins, and
   `Completed in MM:SS` or `Failed after MM:SS` with the final output. The clock
   does not reset, and the normal bottom-right timestamp remains unchanged.
+- Cancel a turn while the parent `eval` bubble says `Running`. Its clock freezes
+  as `Cancelled after MM:SS`; every eval-subagent row and Group clock freezes at
+  the same cancellation boundary. Reopen the session and confirm the parent
+  tool still shows the frozen status and duration.
 - No standalone `Preparing tool call...` bubble appears during a text-only turn
   or after the final response.
 - Success Criteria generation and Plan/Goal creation show temporary spinner

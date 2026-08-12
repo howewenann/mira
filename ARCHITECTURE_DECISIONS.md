@@ -677,7 +677,11 @@ watchers get a bounded chance to publish an already-observed error before an
 overall stream failure propagates, and saved sessions replay the result with an
 inline error label. Provider drafts without their final call id are promoted
 FIFO by tool name when the stable id arrives, while distinct stable ids remain
-separate retry attempts.
+separate retry attempts. If a turn ends before an invoked tool publishes a
+result, MIRA freezes the tool's monotonic clock as cancelled or interrupted,
+retires its live matching state, and stores that terminal status and duration
+on the call event. Draft-only calls remain transient. A later authoritative
+result clears the stop marker and becomes the durable terminal outcome.
 
 Harness response checks use the system/status blue palette in both Textual and
 terminal traces. Warnings use a distinct orange palette rather than the user's

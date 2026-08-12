@@ -371,10 +371,12 @@ async def run_user_turn(
                 messages=invocation_messages,
             )
     except asyncio.CancelledError:
+        wrapped_renderer.stop_active_tools("cancelled")
         await sync_compaction_safely(recorder, active_agent, thread_id)
         recorder.interrupted("turn interrupted before completion")
         raise
     except ContextOverflowError as exc:
+        wrapped_renderer.stop_active_tools("interrupted")
         await sync_compaction_safely(recorder, active_agent, thread_id)
         notice = pop_context_overflow_notice(exc)
         if notice and not wrapped_renderer.context_notice_rendered():
@@ -384,6 +386,7 @@ async def run_user_turn(
         mark_context_notice_rendered(exc)
         raise
     except Exception as exc:
+        wrapped_renderer.stop_active_tools("interrupted")
         await sync_compaction_safely(recorder, active_agent, thread_id)
         recorder.system_error(f"turn error: {exc}")
         raise

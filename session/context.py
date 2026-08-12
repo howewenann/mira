@@ -114,6 +114,12 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
         elif event_type == "tool_call":
             event["name"] = compact_line(item.get("name") or "tool")
             event["args"] = item.get("args", {})
+            status = compact_line(item.get("status"))
+            if status in {"cancelled", "interrupted"}:
+                event["status"] = status
+                duration_ms = item.get("duration_ms")
+                if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+                    event["duration_ms"] = max(0, round(duration_ms))
             call_id = compact_line(item.get("call_id"))
             if call_id:
                 event["call_id"] = call_id

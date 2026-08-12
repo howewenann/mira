@@ -220,6 +220,8 @@ class ChatLog(VerticalScroll):
                     call_id=str(event.get("call_id") or ""),
                     created_at=created_at,
                     start_timing=False,
+                    terminal_status=str(event.get("status") or ""),
+                    duration_ms=event.get("duration_ms"),
                 )
             elif event_type == "tool_result":
                 callback = self.tool_error if event.get("status") == "error" else self.tool_result
@@ -370,7 +372,7 @@ class ChatLog(VerticalScroll):
         self._reasoning_block = None
         self._reasoning_text = ""
 
-    def finish_turn(self, *, cancelled: bool = False) -> None:
+    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled") -> None:
         """Close live turn state without clearing persisted transcript history."""
         self.finish_main()
         self.hide_waiting()
@@ -378,6 +380,7 @@ class ChatLog(VerticalScroll):
         if cancelled:
             self.subagents_cancelled()
             self._discard_tool_drafts()
+            self.stop_live_tools(tool_status)
             self._cancel_compaction()
             self._reset_delegation_group()
 
@@ -437,6 +440,8 @@ class ChatLog(VerticalScroll):
         *,
         created_at: str = "",
         start_timing: bool = True,
+        terminal_status: str = "",
+        duration_ms: int | None = None,
     ) -> None:
         """Append a coordinator-level tool call in transcript order."""
         self.hide_waiting()
@@ -453,7 +458,8 @@ class ChatLog(VerticalScroll):
                 "draft": False,
                 "is_error": False,
                 "started_at": time.monotonic() if start_timing else None,
-                "duration_ms": None,
+                "duration_ms": duration_ms,
+                "terminal_status": terminal_status,
                 "frame": 0,
                 "last_second": 0,
             }
@@ -463,6 +469,9 @@ class ChatLog(VerticalScroll):
             block["name"] = name
             block["args"] = args
             block["draft"] = False
+            if terminal_status in {"cancelled", "interrupted"}:
+                block["terminal_status"] = terminal_status
+                block["duration_ms"] = duration_ms
 
         pending_found, pending, pending_is_error, pending_duration_ms = self._take_pending_tool_result(
             name,
@@ -525,6 +534,7 @@ class ChatLog(VerticalScroll):
                 "is_error": False,
                 "started_at": time.monotonic(),
                 "duration_ms": None,
+                "terminal_status": "",
                 "frame": 0,
                 "last_second": 0,
             }
@@ -562,6 +572,7 @@ class ChatLog(VerticalScroll):
         block["result"] = result
         block["is_error"] = False
         block["draft"] = False
+        block["terminal_status"] = ""
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
@@ -592,6 +603,7 @@ class ChatLog(VerticalScroll):
         block["result"] = error
         block["is_error"] = True
         block["draft"] = False
+        block["terminal_status"] = ""
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
@@ -619,6 +631,7 @@ class ChatLog(VerticalScroll):
         block["result"] = result
         block["is_error"] = False
         block["draft"] = False
+        block["terminal_status"] = ""
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
 
@@ -647,8 +660,46 @@ class ChatLog(VerticalScroll):
         block["result"] = error
         block["is_error"] = True
         block["draft"] = False
+        block["terminal_status"] = ""
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
+
+    def tool_call_stopped(
+        self,
+        name: str,
+        call_id: str = "",
+        *,
+        status: str = "cancelled",
+        duration_ms: int | None = None,
+    ) -> None:
+        """Freeze one invoked tool that ended without a result."""
+        if status not in {"cancelled", "interrupted"}:
+            return
+        key = f"id:{call_id}" if call_id else self._next_live_tool_key(name)
+        if key is None or key not in self._tool_blocks:
+            return
+        block = self._tool_blocks[key]
+        if block.get("result"):
+            return
+        block["draft"] = False
+        block["terminal_status"] = status
+        self._finish_tool_timing(block, duration_ms)
+        self._remove_tool_queue_key(name, key)
+        self._update_tool_block(key, scroll=False)
+
+    def stop_live_tools(self, status: str = "cancelled") -> None:
+        """Freeze every promoted tool still owned by the ending turn."""
+        if status not in {"cancelled", "interrupted"}:
+            status = "interrupted"
+        for key, block in list(self._tool_blocks.items()):
+            if block.get("draft") or block.get("result") or block.get("duration_ms") is not None:
+                continue
+            if block.get("started_at") is None:
+                continue
+            block["terminal_status"] = status
+            self._finish_tool_timing(block, None)
+            self._remove_tool_queue_key(str(block.get("name") or "tool"), key)
+            self._update_tool_block(key, scroll=False)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
         """Append a compact task delegation summary."""
@@ -1551,6 +1602,15 @@ class ChatLog(VerticalScroll):
             return
         self._tool_name_queues[name] = deque(item for item in queue if item != key)
 
+    def _next_live_tool_key(self, name: str) -> str | None:
+        """Return the oldest invoked, unfinished tool for an idless stop event."""
+        for key, block in self._tool_blocks.items():
+            if block.get("name") != name or block.get("draft") or block.get("result"):
+                continue
+            if block.get("duration_ms") is None:
+                return key
+        return None
+
     def _update_tool_block(self, key: str, *, scroll: bool = True) -> None:
         block = self._tool_blocks[key]
         text = Text()
@@ -1568,8 +1628,16 @@ class ChatLog(VerticalScroll):
                 text.append(self.truncate_multiline(block["result"]), style="dim")
         duration_ms = block.get("duration_ms")
         if duration_ms is not None:
-            verb = "Failed after" if block.get("is_error") else "Completed in"
-            verb_color = TOOL_FAILED_COLOR if block.get("is_error") else TOOL_COMPLETED_COLOR
+            terminal_status = str(block.get("terminal_status") or "")
+            if terminal_status == "cancelled":
+                verb = "Cancelled after"
+                verb_color = TOOL_PREPARING_COLOR
+            elif terminal_status == "interrupted":
+                verb = "Interrupted after"
+                verb_color = TOOL_FAILED_COLOR
+            else:
+                verb = "Failed after" if block.get("is_error") else "Completed in"
+                verb_color = TOOL_FAILED_COLOR if block.get("is_error") else TOOL_COMPLETED_COLOR
             text.append("\n")
             text.append(verb, style=verb_color)
             text.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
