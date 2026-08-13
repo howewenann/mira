@@ -26,7 +26,7 @@ from mcp.types import (
     ToolsCapability,
 )
 from textual.app import App, ComposeResult
-from textual.widgets import Button, Static
+from textual.widgets import Button, Collapsible, Static
 
 from agent.mcp.configuration import (
     adapter_connection,
@@ -1409,16 +1409,17 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.query_one("#issues-button", Button).display)
                 self.assertEqual(app.issues, [])
 
-    async def test_expansion_is_presentation_only_and_preserves_clicked_focus(self) -> None:
+    async def test_native_expansion_is_presentation_only_and_preserves_focus(self) -> None:
         manager = PanelManager()
         app = PanelApp(manager)
         async with app.run_test(size=(100, 35)) as pilot:
             await pilot.pause()
             screen = app.screen
             self.assertIsInstance(screen, MCPPanelScreen)
-            first = screen.query_one("#mcp-header-one", Button)
-            second = screen.query_one("#mcp-header-two", Button)
-            self.assertTrue(first.has_focus)
+            first = screen.query_one("#mcp-details-one", Collapsible)
+            second = screen.query_one("#mcp-details-two", Collapsible)
+            first_title = first.query_one("CollapsibleTitle")
+            first_title.focus()
             state = manager.servers["one"]
             before = (
                 state.status,
@@ -1431,8 +1432,8 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.press("enter")
             await pilot.pause()
-            self.assertIn("one", screen.expanded)
-            self.assertNotIn("two", screen.expanded)
+            self.assertFalse(first.collapsed)
+            self.assertTrue(second.collapsed)
             self.assertEqual(manager.discovered, [])
             self.assertEqual(
                 (
@@ -1446,8 +1447,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 before,
             )
-            self.assertFalse(second.has_focus)
-            self.assertTrue(screen.query_one("#mcp-header-one", Button).has_focus)
+            self.assertTrue(first_title.has_focus)
 
     async def test_server_card_uses_header_counts_actions_structure(self) -> None:
         manager = PanelManager()
@@ -1456,29 +1456,31 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             screen = app.screen
             card = screen.query_one("#mcp-card-one")
-            header = screen.query_one("#mcp-header-one", Button)
+            header = screen.query_one("#mcp-header-one", Static)
             badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
-            counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
+            capabilities = screen.query_one("#mcp-details-one", Collapsible)
+            title = capabilities.query_one("CollapsibleTitle", Static)
             controls = screen.query_one("#mcp-card-one .mcp-controls")
             control_buttons = list(controls.query(Button))
 
             self.assertEqual(header.region.y, badge.region.y)
             self.assertEqual(header.region.height, 1)
             self.assertEqual(badge.region.height, 1)
-            self.assertIn("[STDIO]", str(header.label))
+            self.assertIn("[STDIO]", str(header.render()))
             self.assertEqual(
                 capability_summary(manager.servers["one"]).plain,
                 "Tools  0   ·   Prompts  0   ·   Resources  0",
             )
-            self.assertEqual(counts.styles.content_align[0], "left")
-            self.assertEqual(counts.region.height, 1)
-            self.assertEqual(counts.region.y, header.region.bottom)
+            self.assertIn("Tools  0", str(title.render()))
+            self.assertEqual(capabilities.region.height, 1)
+            self.assertEqual(capabilities.region.y, header.region.bottom)
             self.assertEqual(controls.region.height, 1)
-            self.assertEqual(controls.region.y, counts.region.bottom)
+            self.assertEqual(controls.region.y, capabilities.region.bottom)
             self.assertTrue(control_buttons)
             self.assertTrue(all(button.region.height == 1 for button in control_buttons))
             self.assertLessEqual(header.region.right, badge.region.x)
             self.assertLessEqual(card.region.right, screen.query_one("#mcp-scroll").region.right)
+            self.assertEqual(card.styles.margin.right, 1)
 
     async def test_available_server_without_capabilities_needs_no_attention(self) -> None:
         manager = PanelManager()
@@ -1486,7 +1488,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(62, 26)) as pilot:
             await pilot.pause()
             screen = app.screen
-            await pilot.click("#mcp-header-one", offset=(2, 0))
+            await pilot.click("#mcp-details-one > CollapsibleTitle", offset=(2, 0))
             await pilot.pause()
 
             badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
@@ -1495,8 +1497,48 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("No tools", details)
             self.assertIn("No prompts", details)
             self.assertIn("No resources", details)
-            self.assertEqual(len(screen.query(".mcp-error-block")), 0)
+            self.assertEqual(len(screen.query("#mcp-card-one .mcp-attention")), 0)
             self.assertEqual(mcp_summary_symbol([manager.servers["one"]]), "✓")
+
+    async def test_diagnostics_stay_visible_in_title_and_lead_expanded_details(self) -> None:
+        manager = PanelManager()
+        state = manager.servers["one"]
+        state.prompt_error = "Prompt discovery timed out."
+        app = PanelApp(manager)
+
+        async with app.run_test(size=(76, 30)) as pilot:
+            await pilot.pause()
+            screen = app.screen
+            card = screen.query_one("#mcp-card-one")
+            details = screen.query_one("#mcp-details-one", Collapsible)
+            title = details.query_one("CollapsibleTitle", Static)
+            attention = details.query_one(".mcp-attention", Static)
+
+            self.assertTrue(details.collapsed)
+            self.assertIn("▶ [!] Tools", str(title.render()))
+            self.assertNotIn("Needs attention", str(title.render()))
+            self.assertIn("available", card.classes)
+            self.assertIn("warning", attention.classes)
+            self.assertEqual(str(attention.render()), "Prompt discovery timed out.")
+
+            await pilot.click("#mcp-details-one > CollapsibleTitle", offset=(2, 0))
+            await pilot.pause()
+            first_section = details.query_one(".mcp-detail-section", Static)
+            self.assertLess(attention.region.y, first_section.region.y)
+
+    async def test_failed_diagnostic_uses_error_severity(self) -> None:
+        manager = PanelManager()
+        state = manager.servers["one"]
+        state.status = "Failed"
+        state.error = "Connection refused."
+        app = PanelApp(manager)
+
+        async with app.run_test(size=(76, 30)):
+            details = app.screen.query_one("#mcp-details-one", Collapsible)
+            attention = details.query_one(".mcp-attention", Static)
+            self.assertIn("failed", app.screen.query_one("#mcp-card-one").classes)
+            self.assertIn("failed", attention.classes)
+            self.assertIn("▶ [!] Tools", str(details.query_one("CollapsibleTitle", Static).render()))
 
     async def test_open_panel_refreshes_unnotified_startup_transitions(self) -> None:
         manager = PanelManager()
@@ -1516,9 +1558,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.25)
 
             badge = screen.query_one("#mcp-card-one .mcp-status-badge", Static)
-            counts = screen.query_one("#mcp-card-one .mcp-counts", Static)
+            title = screen.query_one("#mcp-details-one > CollapsibleTitle", Static)
             self.assertEqual(str(badge.render()), "Available")
-            self.assertIn("Tools  1", str(counts.render()))
+            self.assertIn("Tools  1", str(title.render()))
 
     def test_capability_metrics_colour_labels_and_keep_counts_bold_white(self) -> None:
         expected = {
@@ -1532,7 +1574,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(metric.spans[0].style), colour)
             self.assertEqual(str(metric.spans[-1].style), "bold #eef7f8")
 
-    async def test_expanding_scrolled_server_preserves_scroll_position(self) -> None:
+    async def test_expanding_scrolled_server_uses_native_collapsible_in_place(self) -> None:
         from tests.test_textual_app import make_app
 
         manager = PanelManager()
@@ -1558,19 +1600,16 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             scroll = screen.query_one("#mcp-scroll")
             scroll.scroll_to(y=scroll.max_scroll_y, animate=False, force=True, immediate=True)
             await pilot.pause()
-            before = scroll.scroll_y
-            self.assertGreater(before, 0)
+            self.assertGreater(scroll.scroll_y, 0)
 
-            await pilot.click("#mcp-header-server-7", offset=(2, 0))
-            manager.servers["server-0"].status = "Restarting"
-            manager.servers["server-0"].transient = True
-            for _ in range(5):
-                await pilot.pause()
+            details = screen.query_one("#mcp-details-server-7", Collapsible)
+            await pilot.click("#mcp-details-server-7 > CollapsibleTitle", offset=(2, 0))
+            await pilot.pause()
 
-            self.assertIn("server-7", screen.expanded)
+            self.assertFalse(details.collapsed)
+            self.assertIs(details, screen.query_one("#mcp-details-server-7", Collapsible))
             self.assertEqual(manager.discovered, [])
-            self.assertEqual(screen.query_one("#mcp-scroll").scroll_y, before)
-            self.assertTrue(screen.query_one("#mcp-header-server-7", Button).has_focus)
+            self.assertTrue(details.query_one("CollapsibleTitle").has_focus)
 
     def test_controls_status_colours_and_spinner_are_consistent(self) -> None:
         self.assertEqual(controls_for("Disabled"), ("Enable",))
@@ -1616,10 +1655,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             await app.screen.refresh_from_manager()
             login = app.screen.query_one("#mcp-login-two", Button)
             disable = app.screen.query_one("#mcp-disable-two", Button)
-            header = app.screen.query_one("#mcp-header-two", Button)
             self.assertTrue(login.disabled)
             self.assertTrue(disable.disabled)
-            self.assertIn("transient", header.classes)
+            self.assertIn("transient", app.screen.query_one("#mcp-card-two").classes)
             badge = app.screen.query_one("#mcp-card-two .mcp-status-badge", Static)
             self.assertIn("Authenticating", str(badge.render()))
 
@@ -1644,8 +1682,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             actions = list(app.screen.query_one("#mcp-actions").query(Button))
             self.assertEqual([button.id for button in actions], ["mcp-reload", "mcp-close"])
             self.assertEqual([str(button.label) for button in actions], ["Reload Runtime", "Close"])
-            self.assertIn("one", str(app.screen.query_one("#mcp-header-one", Button).label))
-            self.assertIn("[STDIO]", str(app.screen.query_one("#mcp-header-one", Button).label))
+            header = app.screen.query_one("#mcp-header-one", Static)
+            self.assertIn("one", str(header.render()))
+            self.assertIn("[STDIO]", str(header.render()))
             app.screen.dismiss()
             await pilot.pause()
             prompt = app.query_one(PromptBox)

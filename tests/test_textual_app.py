@@ -371,6 +371,28 @@ def fill_scrollable_chat(chat: ChatLog) -> None:
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
 
+    async def test_mcp_cards_use_native_disclosure_around_inventories_only(self) -> None:
+        from tests.test_mcp import PanelManager
+
+        app = make_app(mcp_manager=PanelManager())
+        async with app.run_test(size=(76, 28)) as pilot:
+            await pilot.click("#mcp-status-button")
+            await pilot.pause()
+            details = app.screen.query_one("#mcp-details-one", Collapsible)
+            controls = app.screen.query_one("#mcp-card-one .mcp-controls")
+            scroll = app.screen.query_one("#mcp-scroll", VerticalScroll)
+
+            self.assertTrue(details.collapsed)
+            self.assertIsNone(app.screen.focused)
+            self.assertEqual(scroll.styles.scrollbar_gutter, "stable")
+            self.assertEqual(len(details.query(Button)), 0)
+            self.assertTrue(all(button.display for button in controls.query(Button)))
+
+            details.query_one("CollapsibleTitle").focus()
+            await pilot.press("enter")
+            self.assertFalse(details.collapsed)
+            self.assertEqual(details.query_one("CollapsibleTitle").styles.background.a, 0)
+
     def assert_styled_char(self, text: Text, char: str, expected_style: str) -> None:
         """Assert that one character in a Rich Text object has a style."""
         matches = [

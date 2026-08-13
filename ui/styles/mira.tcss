@@ -215,7 +215,12 @@ MCPPanelScreen {
 
 #mcp-title-row { height: 3; }
 #mcp-title { width: 1fr; height: 3; content-align: left middle; color: #d6fff6; text-style: bold; }
-#mcp-scroll { height: 1fr; scrollbar-color: #5bb8b1; scrollbar-background: #122023; }
+#mcp-scroll {
+    height: 1fr;
+    scrollbar-gutter: stable;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
 
 #mcp-actions {
     height: 3;
@@ -230,12 +235,11 @@ MCPPanelScreen {
 .mcp-server-card {
     width: 1fr;
     height: auto;
-    margin: 0 0 1 0;
+    margin: 0 1 1 0;
     padding: 0 1;
     border: solid #3e5962;
     background: #151f22;
 }
-
 .mcp-server-top {
     width: 1fr;
     height: 1;
@@ -247,11 +251,9 @@ MCPPanelScreen {
     border: none;
     background: #1b3036;
     color: #eef7f8;
-    text-align: left;
     content-align: left middle;
     text-style: bold;
 }
-.mcp-server-header:focus { background: #25434b; }
 
 .mcp-status-badge {
     width: auto;
@@ -271,11 +273,31 @@ MCPPanelScreen {
 .mcp-status-badge.disabled { background: #30383d; color: #aeb8be; }
 .mcp-status-badge.transient { background: #263f60; color: #bcd1f5; }
 
-.mcp-counts {
+.mcp-capabilities {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    border: none;
+}
+.mcp-capabilities > CollapsibleTitle {
     width: 1fr;
     height: 1;
-    content-align: left middle;
+    padding: 0;
     color: #eef7f8;
+}
+.mcp-capabilities > CollapsibleTitle:focus {
+    background: transparent;
+    color: #eef7f8;
+    text-style: none;
+}
+.mcp-capabilities > CollapsibleTitle:hover,
+.mcp-capabilities > CollapsibleTitle:focus:hover {
+    background: #1b3036;
+    color: #eef7f8;
+}
+.mcp-capabilities > Contents {
+    padding: 1 1 0 1;
 }
 
 .mcp-controls { height: 1; align-horizontal: right; }
@@ -286,9 +308,10 @@ MCPPanelScreen {
     padding: 0 1;
     border: none;
 }
-.mcp-details { height: auto; margin-top: 1; padding: 0 1; color: #b8c1c7; }
 .mcp-detail-section { height: auto; padding: 1; margin-bottom: 1; background: #101719; color: #c4cdd2; }
-.mcp-error-block { height: auto; padding: 1; border-left: solid #d95757; background: #301d1f; color: #ffb3b3; }
+.mcp-attention { height: auto; padding: 0 1; margin-bottom: 1; }
+.mcp-attention.failed { border-left: solid #ff8f8f; background: #301d1f; color: #ffc2c2; }
+.mcp-attention.warning { border-left: solid #e2b44f; background: #332a18; color: #fff0ad; }
 
 #chat-log {
     width: 1fr;

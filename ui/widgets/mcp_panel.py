@@ -13,7 +13,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import Button, Static
+from textual.widgets import Button, Collapsible, Static
 
 from ui.spinners import SPINNER_FRAMES
 
@@ -21,13 +21,13 @@ from ui.spinners import SPINNER_FRAMES
 class MCPPanelScreen(ModalScreen[None]):
     """Render every configured server as a structured status card."""
 
+    AUTO_FOCUS = ""
     BINDINGS = [Binding("escape", "close", "Close")]
 
     def __init__(self, manager: Any, reload_runtime: Callable[[], Awaitable[None]]) -> None:
         super().__init__()
         self.manager = manager
         self.reload_runtime = reload_runtime
-        self.expanded: set[str] = set()
         self.reloading = False
         self._spinner = 0
         self._refresh_lock = asyncio.Lock()
@@ -50,26 +50,38 @@ class MCPPanelScreen(ModalScreen[None]):
                 yield close_button
 
     def _server_widgets(self, state: Any) -> ComposeResult:
-        expanded = state.name in self.expanded
-        marker = "-" if expanded else "+"
         status = status_badge(state.status, spinner=self._spinner)
+        diagnostics = server_diagnostics(state)
         with Vertical(
             id=f"mcp-card-{safe_id(state.name)}",
             classes=f"mcp-server-card {status_class(state.status)}",
         ):
             with Horizontal(classes="mcp-server-top"):
-                yield Button(
-                    Text(f"{marker} {state.name} [{state.transport.upper()}]"),
+                yield Static(
+                    Text(f"{state.name} [{state.transport.upper()}]"),
                     id=f"mcp-header-{safe_id(state.name)}",
-                    classes=f"mcp-server-header {status_class(state.status)}",
-                    name=state.name,
+                    classes="mcp-server-header",
+                    markup=False,
                 )
                 yield Static(
                     status,
                     classes=f"mcp-status-badge {status_class(state.status)}",
                     markup=False,
                 )
-            yield Static(capability_summary(state), classes="mcp-counts", markup=False)
+            with Collapsible(
+                title=capability_summary(state),  # type: ignore[arg-type]
+                collapsed=True,
+                id=f"mcp-details-{safe_id(state.name)}",
+                classes="mcp-capabilities",
+            ):
+                if diagnostics:
+                    yield Static(
+                        "\n".join(diagnostics),
+                        classes=f"mcp-attention {diagnostic_class(state)}",
+                        markup=False,
+                    )
+                for title, content in server_detail_sections(state):
+                    yield Static(f"{title}\n{content}", classes="mcp-detail-section", markup=False)
             with Horizontal(classes="mcp-controls"):
                 persisted_login = bool(
                     state.transport == "http"
@@ -84,32 +96,9 @@ class MCPPanelScreen(ModalScreen[None]):
                     )
                     button.disabled = state.transient
                     yield button
-            if expanded:
-                with Vertical(classes="mcp-details"):
-                    for title, content, error in server_detail_sections(state):
-                        yield Static(
-                            f"{title}\n{content}",
-                            classes="mcp-error-block" if error else "mcp-detail-section",
-                            markup=False,
-                        )
 
     def on_mount(self) -> None:
         self.set_interval(0.12, self._tick)
-        self.call_after_refresh(self._focus_first_header)
-
-    @on(Button.Pressed, ".mcp-server-header")
-    def toggle_server(self, event: Button.Pressed) -> None:
-        event.stop()
-        name = event.button.name or ""
-        if name in self.expanded:
-            self.expanded.remove(name)
-        else:
-            self.expanded.add(name)
-        self.run_worker(
-            self.refresh_from_manager(preferred_focus_id=event.button.id),
-            name="mcp-panel-refresh",
-            exclusive=False,
-        )
 
     @on(Button.Pressed, ".mcp-control")
     def control_server(self, event: Button.Pressed) -> None:
@@ -168,46 +157,14 @@ class MCPPanelScreen(ModalScreen[None]):
                 return
             self._presentation_signature = self._server_presentation_signature()
             focused_id = preferred_focus_id or (self.focused.id if self.focused is not None else None)
-            try:
-                scroll_y = self.query_one("#mcp-scroll", VerticalScroll).scroll_y
-            except NoMatches:
-                return
             await self.recompose()
             if not self.is_mounted:
                 return
-            restored = asyncio.get_running_loop().create_future()
-
-            def restore_presentation() -> None:
+            if focused_id:
                 try:
-                    restored_focus = False
-                    if focused_id:
-                        try:
-                            self.query_one(f"#{focused_id}").focus(scroll_visible=False)
-                            restored_focus = True
-                        except NoMatches:
-                            pass
-                    if not restored_focus:
-                        self._focus_first_header()
-                    scroll = self.query_one("#mcp-scroll", VerticalScroll)
-                    scroll.scroll_to(
-                        y=scroll_y,
-                        animate=False,
-                        force=True,
-                        immediate=True,
-                    )
+                    self.query_one(f"#{focused_id}").focus(scroll_visible=False)
                 except NoMatches:
                     pass
-                finally:
-                    if not restored.done():
-                        restored.set_result(None)
-
-            if self.call_after_refresh(restore_presentation):
-                await restored
-
-    def _focus_first_header(self) -> None:
-        headers = list(self.query(".mcp-server-header"))
-        if headers:
-            headers[0].focus(scroll_visible=False)
 
     def _tick(self) -> None:
         presentation_signature = self._server_presentation_signature()
@@ -229,12 +186,10 @@ class MCPPanelScreen(ModalScreen[None]):
             state_class = status_class(state.status)
             try:
                 card = self.query_one(f"#mcp-card-{server_id}")
-                header = self.query_one(f"#mcp-header-{server_id}", Button)
                 badge = card.query_one(".mcp-status-badge", Static)
             except NoMatches:
                 continue
             card.set_classes(f"mcp-server-card {state_class}")
-            header.set_classes(f"mcp-server-header {state_class}")
             badge.set_classes(f"mcp-status-badge {state_class}")
             badge.update(status_badge(state.status, spinner=self._spinner))
             for control in card.query(".mcp-control"):
@@ -283,6 +238,9 @@ def capability_metric(label: str, count: str) -> Text:
 
 def capability_summary(state: Any) -> Text:
     summary = Text()
+    if server_diagnostics(state):
+        colour = "#ff8f8f" if diagnostic_class(state) == "failed" else "#e2b44f"
+        summary.append("[!] ", style=f"bold {colour}")
     for index, (label, count) in enumerate(capability_counts(state)):
         if index:
             summary.append("   ·   ", style="#6f8389")
@@ -332,19 +290,30 @@ def mcp_summary_symbol(states: Iterable[Any], *, spinner: int = 0) -> str:
     return "✓"
 
 
-def server_detail_sections(state: Any) -> list[tuple[str, str, bool]]:
+def server_detail_sections(state: Any) -> list[tuple[str, str]]:
     tools = [f"  {item.get('original_name') or item.get('name')}" for item in state.tool_metadata]
     prompts = [f"  {item.command}    {item.description}" for item in (state.prompts or [])]
     resources = [f"  {item.uri}    {item.description or item.name}" for item in (state.resources or [])]
-    sections = [
-        ("Tools", "\n".join(tools) if tools else "  No tools", False),
-        ("Prompts", _discovery_content(prompts, state.prompts, "prompts"), False),
-        ("Fixed resources", _discovery_content(resources, state.resources, "resources"), False),
+    return [
+        ("Tools", "\n".join(tools) if tools else "  No tools"),
+        ("Prompts", _discovery_content(prompts, state.prompts, "prompts")),
+        ("Fixed resources", _discovery_content(resources, state.resources, "resources")),
     ]
-    errors = [error for error in (state.error, state.prompt_error, state.resource_error) if error]
-    if errors:
-        sections.append(("Needs attention", "\n".join(f"  {error}" for error in errors), True))
-    return sections
+
+
+def server_diagnostics(state: Any) -> tuple[str, ...]:
+    """Return current diagnostics without repeating discovery errors."""
+    diagnostics = [state.error] if state.error else []
+    diagnostics.extend(
+        error
+        for error in (state.prompt_error, state.resource_error)
+        if error and not any(error in diagnostic for diagnostic in diagnostics)
+    )
+    return tuple(diagnostics)
+
+
+def diagnostic_class(state: Any) -> str:
+    return "failed" if state.status == "Failed" else "warning"
 
 
 def _discovery_content(lines: list[str], values: list[Any] | None, noun: str) -> str:
