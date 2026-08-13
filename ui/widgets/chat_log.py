@@ -35,6 +35,7 @@ from ui.terminal_colors import (
     TOOL_RUNNING_COLOR,
 )
 from ui.splash import loading_splash_text, splash_text
+from ui.widgets.tool_bubble import ToolBubble
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -449,7 +450,7 @@ class ChatLog(VerticalScroll):
         key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
         if block is None:
-            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call", created_at=created_at)
+            widget = self._add_tool_block(name, args, created_at=created_at)
             block = {
                 "name": name,
                 "args": args,
@@ -524,7 +525,7 @@ class ChatLog(VerticalScroll):
         key = self._tool_update_key(name, call_id)
         block = self._tool_blocks.get(key)
         if block is None:
-            widget = self._add_block(f"tool - {name}", Text(""), "message tool-call")
+            widget = self._add_tool_block(name, args, draft=True)
             block = {
                 "name": name,
                 "args": args,
@@ -1197,6 +1198,22 @@ class ChatLog(VerticalScroll):
         self._scroll_to_end()
         return block
 
+    def _add_tool_block(
+        self,
+        name: str,
+        args: Any,
+        *,
+        draft: bool = False,
+        created_at: str = "",
+    ) -> ToolBubble:
+        """Mount one expandable tool-call transcript block."""
+        block = ToolBubble(name, args, draft=draft)
+        if timestamp := timestamp_text(created_at):
+            block.border_subtitle = escape(timestamp)
+        self.mount(block)
+        self._scroll_to_end()
+        return block
+
     def _style_block(self, block: Static, *, title: str, classes: str, created_at: str = "") -> None:
         """Update a transcript block's title and style classes in place."""
         block.border_title = escape(title)
@@ -1613,19 +1630,16 @@ class ChatLog(VerticalScroll):
 
     def _update_tool_block(self, key: str, *, scroll: bool = True) -> None:
         block = self._tool_blocks[key]
-        text = Text()
-        label = "draft" if block.get("draft") else "call"
-        text.append(f"{label}: ", style="bold cyan")
-        text.append(self.truncate(block["args"]))
+        output = Text()
         if block.get("result"):
-            text.append("\n")
-            text.append("-" * 12, style="dim")
+            output.append("-" * 12, style="dim")
             if block.get("is_error"):
-                text.append("\nerror:\n", style="bold red")
-                text.append(self.truncate_multiline(block["result"]), style="red")
+                output.append("\nerror:\n", style="bold red")
+                output.append(self.truncate_multiline(block["result"]), style="red")
             else:
-                text.append("\noutput:\n", style="bold cyan")
-                text.append(self.truncate_multiline(block["result"]), style="dim")
+                output.append("\noutput:\n", style="bold cyan")
+                output.append(self.truncate_multiline(block["result"]), style="dim")
+        status = Text()
         duration_ms = block.get("duration_ms")
         if duration_ms is not None:
             terminal_status = str(block.get("terminal_status") or "")
@@ -1638,20 +1652,21 @@ class ChatLog(VerticalScroll):
             else:
                 verb = "Failed after" if block.get("is_error") else "Completed in"
                 verb_color = TOOL_FAILED_COLOR if block.get("is_error") else TOOL_COMPLETED_COLOR
-            text.append("\n")
-            text.append(verb, style=verb_color)
-            text.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
+            status.append(verb, style=verb_color)
+            status.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
         elif block.get("started_at") is not None:
             state = "Preparing" if block.get("draft") else "Running"
             frame = SPINNER_FRAMES[int(block.get("frame") or 0) % len(SPINNER_FRAMES)]
             state_color = TOOL_PREPARING_COLOR if block.get("draft") else TOOL_RUNNING_COLOR
-            text.append(f"\n{frame} ", style=TOOL_DURATION_COLOR)
-            text.append(state, style=state_color)
-            text.append(
+            status.append(f"{frame} ", style=TOOL_DURATION_COLOR)
+            status.append(state, style=state_color)
+            status.append(
                 f" · {format_elapsed(elapsed_ms(block['started_at']))} elapsed",
                 style=TOOL_DURATION_COLOR,
             )
-        block["widget"].update(text)
+        widget: ToolBubble = block["widget"]
+        widget.update_call(block["name"], block["args"], draft=bool(block.get("draft")))
+        widget.update_details(output, status)
         if scroll:
             self._scroll_to_end()
 

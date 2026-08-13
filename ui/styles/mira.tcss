@@ -1046,7 +1046,77 @@ Button.goal-action:focus {
 }
 
 .message.tool-call {
+    height: auto;
     border: solid #8FA3B8;
+}
+
+.tool-args-collapsible {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+    border: none;
+}
+
+.tool-args-collapsible > CollapsibleTitle {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    color: #e8edef;
+    text-wrap: wrap;
+}
+
+.tool-args-collapsible > CollapsibleTitle:focus {
+    background: transparent;
+    color: #e8edef;
+    text-style: none;
+}
+
+.tool-args-collapsible > CollapsibleTitle:hover,
+.tool-args-collapsible > CollapsibleTitle:focus:hover {
+    background: #17313a;
+    color: #eef7f8;
+}
+
+.tool-args-collapsible > Contents {
+    padding: 0 0 0 3;
+}
+
+.tool-args-editor {
+    padding: 0 1;
+    margin: 0 0 0 2;
+    background: #101719;
+    border-left: solid #d2a957;
+    border-right: none;
+    border-top: none;
+    border-bottom: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-color: #d2a957;
+    scrollbar-background: #20272b;
+}
+
+.tool-args-editor:focus {
+    border-left: solid #7ce3dc;
+    border-right: none;
+    border-top: none;
+    border-bottom: none;
+}
+
+.tool-output {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    background: transparent;
+    color: #b8c1c7;
+}
+
+.tool-status {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+    color: #98a5ac;
 }
 
 .message.tool-result {

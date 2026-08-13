@@ -632,6 +632,13 @@ tools `ask_user`, `prepare_goal`, `prepare_plan`, `finalize_goal`, `finalize_pla
 no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
+TUI tool bubbles keep a compact, collapsed call preview in the transcript while
+their complete arguments remain available through a native Textual
+`Collapsible` and read-only `TextArea`. Expanded arguments soft-wrap, grow to
+their rendered content up to a bounded height, and then scroll internally so
+large file writes or eval programs remain selectable without dominating the
+chat. Tool output stays compact and non-expandable. One-shot rendering remains
+separate and unchanged.
 When HITL edits a call, MIRA binds the decision back to the current-loop call
 by stable id, with ordered tool-name matching only for idless compatibility.
 The TUI and saved event replace the proposed arguments in place; immutable

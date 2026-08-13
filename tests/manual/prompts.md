@@ -43,6 +43,39 @@ Expected:
 - Editing the content before approval updates the existing tool bubble and the
   saved session event to the edited content; it does not leave a second call.
 
+## Expandable Tool-Call Arguments
+
+Run the interactive TUI in a disposable workspace and exercise a short search,
+a long file write, eval, and formal Plan and Goal creation:
+
+```text
+Search for the latest Nvidia stock price.
+Write a Markdown summary containing the complete search result to nvda.md.
+Use eval to compare several nested candidate objects and return the winner.
+/plan
+Plan a small improvement to tool-call rendering.
+/goal
+Create a Goal to keep tool calls inspectable.
+```
+
+Expected:
+
+- Every ordinary tool bubble, including `prepare_plan`, `finalize_plan`,
+  `prepare_goal`, and `finalize_goal`, starts with a collapsed cyan `call:` row.
+- Expanding a short call shows complete pretty JSON and fits its actual lines;
+  there is no empty filler row.
+- Expanding long `write_file` or `eval` arguments grows to at most 12 rows,
+  soft-wraps without a horizontal scrollbar, and provides an internal vertical
+  scrollbar for the remaining text.
+- Mouse drag or Shift+arrows selects argument text and Ctrl+C copies it. Clicking
+  elsewhere does not leave a persistent title highlight; hover highlighting
+  remains.
+- Output stays truncated and non-expandable, while status, elapsed time, and the
+  bubble timestamp remain visible.
+- An approval edit updates the same bubble without collapsing it or creating a
+  duplicate. Reopening the session restores the same call/result content with
+  arguments collapsed initially.
+
 ## Subagent Delegation
 
 ```powershell

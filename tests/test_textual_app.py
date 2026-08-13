@@ -23,7 +23,7 @@ from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.selection import SELECT_ALL
-from textual.widgets import Button, Input, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Collapsible, Input, OptionList, Select, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -79,6 +79,7 @@ from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, Sessi
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
 from ui.widgets.session_history import session_label
+from ui.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
 
 PROMPT_BUTTON_FOCUS_BACKGROUND = Color.parse("#d2a957")
@@ -381,7 +382,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
     def assert_styled_text(self, widget: Any, value: str, expected_style: str) -> None:
         """Assert that an exact text span has the expected style."""
-        text = getattr(widget, "_renderable", None) or getattr(widget, "content", None)
+        text = (
+            getattr(widget, "renderable", None)
+            or getattr(widget, "_renderable", None)
+            or getattr(widget, "content", None)
+        )
         self.assertIsInstance(text, Text)
         matches = [
             span
@@ -2543,7 +2548,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause(0.08)
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            self.assertIn("draft: {'path': '/'}", rendered)
+            self.assertIn('draft: {"path": "/"}', rendered)
             self.assertIn("Preparing · 00:00 elapsed", rendered)
             self.assertNotIn("working...", rendered)
             self.assertNotIn("preparing tool call...", rendered.lower())
@@ -5972,6 +5977,132 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#prompt-cancel", Button).press()
             self.assertEqual(await asyncio.wait_for(task, timeout=2), {"type": "reject"})
 
+    async def test_tool_arguments_start_collapsed_and_expand_to_pretty_selectable_json(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call(
+                "mcp_Duckduckgo_Search",
+                {"query": "latest Nvidia stock price"},
+                call_id="call-search",
+            )
+            await pilot.pause()
+
+            bubble = app.query_one(ToolBubble)
+            collapsible = bubble.query_one(Collapsible)
+            editor = bubble.query_one(ToolArgumentTextArea)
+            self.assertTrue(collapsible.collapsed)
+            self.assertIn('call: {"query": "latest Nvidia stock price"}', renderable_plain(bubble))
+            self.assert_styled_text(bubble, "call: ", "cyan")
+            self.assertTrue(editor.read_only)
+            self.assertTrue(editor.soft_wrap)
+            self.assertFalse(editor.show_line_numbers)
+            self.assertFalse(editor.highlight_cursor_line)
+
+            collapsible.collapsed = False
+            await pilot.pause()
+
+            self.assertEqual(
+                editor.text,
+                '{\n  "query": "latest Nvidia stock price"\n}',
+            )
+            self.assertEqual(editor.size.height, 3)
+            self.assertFalse(editor.show_horizontal_scrollbar)
+
+    async def test_long_tool_arguments_cap_height_scroll_copy_and_refit_on_resize(self) -> None:
+        app = make_app()
+        code = "\n".join(f"const candidate_{index} = {index};" for index in range(40))
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call(
+                "eval",
+                {
+                    "code": code,
+                    "options": {"timeout": 30, "mode": "isolated"},
+                    "candidates": [
+                        {"name": f"candidate-{index}", "score": index}
+                        for index in range(20)
+                    ],
+                },
+                call_id="call-eval",
+            )
+            await pilot.pause()
+
+            bubble = app.query_one(ToolBubble)
+            bubble.args_collapsible.collapsed = False
+            await pilot.pause()
+            editor = bubble.args_editor
+
+            self.assertIn("…", renderable_plain(bubble))
+            self.assertNotIn("candidate_39", renderable_plain(bubble))
+            self.assertEqual(editor.size.height, TOOL_ARGS_MAX_ROWS)
+            self.assertTrue(editor.show_vertical_scrollbar)
+            self.assertFalse(editor.show_horizontal_scrollbar)
+            self.assertIn("candidate_39", editor.text)
+
+            click = SimpleNamespace(stop=Mock())
+            editor.on_click(click)
+            await pilot.pause()
+            self.assertIs(app.focused, editor)
+            click.stop.assert_called_once_with()
+            editor.select_all()
+            with patch.object(app, "copy_to_clipboard") as copy:
+                await pilot.press("ctrl+c")
+                await pilot.pause()
+            copy.assert_called_once_with(editor.text)
+
+            await pilot.resize_terminal(62, 24)
+            await pilot.pause()
+            self.assertEqual(editor.size.height, TOOL_ARGS_MAX_ROWS)
+            self.assertFalse(editor.show_horizontal_scrollbar)
+
+    async def test_streamed_and_edited_tool_args_update_one_expanded_bubble(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.tool_call_delta("eval", '{"code": "const x =', call_id="call-eval")
+            await pilot.pause()
+            bubble = app.query_one(ToolBubble)
+            bubble.args_collapsible.collapsed = False
+            await pilot.pause()
+
+            self.assertEqual(bubble.args_editor.text, '{"code": "const x =')
+            self.assertIn('draft: {"code": "const x =', renderable_plain(bubble))
+
+            app.tool_call("eval", {"code": "const x = 1;"}, call_id="call-eval")
+            app.tool_call_updated("eval", {"code": "const x = 2;"}, call_id="call-eval")
+            await pilot.pause()
+
+            self.assertIs(app.query_one(ToolBubble), bubble)
+            self.assertFalse(bubble.args_collapsible.collapsed)
+            self.assertIn('"code": "const x = 2;"', bubble.args_editor.text)
+            self.assertIn("call:", renderable_plain(bubble))
+            self.assertNotIn("draft:", renderable_plain(bubble))
+
+    async def test_plan_and_goal_control_calls_use_expandable_tool_bubbles(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            calls = (
+                ("prepare_plan", {"objective": "Ship the approved UI"}),
+                ("finalize_plan", {"summary": "Implement expandable arguments"}),
+                ("prepare_goal", {"objective": "Keep tool calls inspectable"}),
+                ("finalize_goal", {"success_criteria": ["Arguments can be copied"]}),
+            )
+            for index, (name, args) in enumerate(calls):
+                app.tool_call(name, args, call_id=f"control-{index}")
+            await pilot.pause()
+
+            bubbles = list(app.query(ToolBubble))
+            self.assertEqual(len(bubbles), len(calls))
+            self.assertTrue(all(bubble.args_collapsible.collapsed for bubble in bubbles))
+            for bubble, (name, _args) in zip(bubbles, calls, strict=True):
+                self.assertEqual(str(bubble.border_title).replace("\\", ""), f"tool - {name}")
+
     async def test_tool_result_attaches_to_existing_tool_call(self) -> None:
         """Tool results should update the existing tool block instead of adding a new panel."""
         app = make_app()
@@ -6654,6 +6785,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             tools = [block for block in app.query_one(ChatLog).children if "tool-call" in block.classes]
             self.assertEqual(len(tools), 1)
+            self.assertTrue(tools[0].args_collapsible.collapsed)
+            self.assertIn('"path": "README.md"', tools[0].args_editor.text)
             self.assertIn("contents", renderable_plain(tools[0]))
             self.assertIn("Completed in 00:31", renderable_plain(tools[0]))
 
