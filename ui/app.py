@@ -17,7 +17,6 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.events import Click
 from textual.widgets import Button, ListView, Static
 
 from agent.compaction import compact_after_turn
@@ -116,6 +115,23 @@ from ui.windows_scrollbars import configure_scrollbars_for_platform
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 GitGuard = Callable[[Path, Any], Any]
 DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
+STARTUP_RECOVERY_COMMANDS = {
+    "/settings",
+    "/models",
+    "/issues",
+    "/runtime",
+    "/reload-runtime",
+    "/exit",
+    "/quit",
+}
+ARTIFACT_STATUS_LABELS = {
+    "proposed": "Draft",
+    "active": "Active",
+    "paused": "Paused",
+    "max_iterations_reached": "Limit",
+    "completed": "Done",
+}
+OPERATIONAL_STATES = {"starting", "ready", "running", "cancelling", "error"}
 DESTRUCTIVE_CONFIRM_HINT = "Press O to confirm, C or Esc to cancel."
 DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
 
@@ -124,6 +140,7 @@ class MiraApp(App[None]):
     """Textual-first interactive MIRA UI."""
 
     CSS_PATH = "styles/mira.tcss"
+    manages_subagent_animation = True
     BINDINGS = [
         Binding("ctrl+c", "copy", "Copy", priority=True),
         Binding("alt+q", "interrupt_or_quit", "Cancel/Quit", priority=True),
@@ -199,6 +216,7 @@ class MiraApp(App[None]):
             with Vertical(id="main-panel"):
                 with Horizontal(id="status-row"):
                     yield StatusBar(id="status")
+                    yield Button("Artifact", id="artifact-status-button")
                     yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="issues-button")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
@@ -233,7 +251,6 @@ class MiraApp(App[None]):
         try:
             if self.ensure_git_repository is not None:
                 self.startup_progress("checking workspace...")
-                self._set_status(state="checking workspace")
                 if not await self.ensure_git_repository(self.workspace, self):
                     self.exit()
                     return
@@ -242,7 +259,6 @@ class MiraApp(App[None]):
                 raise RuntimeError("MIRA bootstrap function was not provided")
 
             self.startup_progress("loading model metadata...")
-            self._set_status(state="loading")
             state = await self.bootstrap(
                 self.workspace,
                 self.session_id,
@@ -255,7 +271,20 @@ class MiraApp(App[None]):
         except Exception as exc:
             error_path = self._write_error_report(exc, source="tui.startup")
             self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
+            self.busy = False
             self._set_status(state="error")
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _retry_startup(self) -> None:
+        """Retry the complete bootstrap after an initial startup failure."""
+        prompt = self.query_one(PromptBox)
+        self.busy = True
+        self._main_stream_active = False
+        prompt.disabled = True
+        self._set_status(state="running")
+        await self._startup()
 
     def _install_state(self, state: dict[str, Any]) -> None:
         """Install bootstrapped agents and session state into the app."""
@@ -356,9 +385,19 @@ class MiraApp(App[None]):
         text = event.value.strip()
         prompt = self.query_one(PromptBox)
         prompt.value = ""
-        if not text or not self.ready or self.busy:
+        if not text or self.busy:
             if text in DESTRUCTIVE_HISTORY_COMMANDS and self.busy:
                 self.system_message("finish the current turn before clearing history", kind="warning")
+            self.action_focus_prompt()
+            return
+        if not self.ready and not (
+            self.status_state == "error" and text in STARTUP_RECOVERY_COMMANDS
+        ):
+            self.system_message(
+                "MIRA has not finished starting. Use /settings, /models, /issues, "
+                "/runtime, or /reload-runtime to recover.",
+                kind="warning",
+            )
             self.action_focus_prompt()
             return
 
@@ -392,6 +431,13 @@ class MiraApp(App[None]):
             return
 
         if text == "/reload-runtime":
+            if not self.ready:
+                self.turn_worker = self.run_worker(
+                    self._retry_startup(),
+                    name="startup-retry",
+                    exclusive=True,
+                )
+                return
             self.run_worker(
                 self._run_reload_runtime_command(),
                 name="reload-runtime-command",
@@ -427,7 +473,7 @@ class MiraApp(App[None]):
         if plan_prompt is not None:
             await handle_command("/plan", self, self.session, self.model_name, self.mode)
             if not plan_prompt:
-                self._set_status(state="ready")
+                self._set_ready_unless_error()
                 self.action_focus_prompt()
                 return
             # `/plan <prompt>` is exactly `/plan` followed by the same normal
@@ -483,7 +529,7 @@ class MiraApp(App[None]):
 
         if prepared is None and await handle_command(text, self, self.session, self.model_name, self.mode):
             if not self.busy:
-                self._set_status(state="ready")
+                self._set_ready_unless_error()
             if text in {"/exit", "/quit"}:
                 self.exit()
             elif not self.busy:
@@ -656,7 +702,7 @@ class MiraApp(App[None]):
         """Handle structured plan bubble actions."""
         event.stop()
         button_id = event.button.id or ""
-        for action in ("implement", "revise", "close"):
+        for action in ("implement", "revise", "close", "clear"):
             prefix = f"plan-{action}-"
             if button_id.startswith(prefix):
                 self.run_worker(
@@ -671,7 +717,7 @@ class MiraApp(App[None]):
         """Handle Goal review actions."""
         event.stop()
         button_id = event.button.id or ""
-        for action in ("implement", "revise", "close"):
+        for action in ("implement", "revise", "close", "clear"):
             prefix = f"goal-{action}-"
             if button_id.startswith(prefix):
                 self.run_worker(
@@ -687,34 +733,11 @@ class MiraApp(App[None]):
         event.stop()
         self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
 
-    @on(Click, "#subagents-panel-toggle")
-    def click_subagent_panel_toggle(self, event: Click) -> None:
-        """Collapse or expand the live subagents panel."""
-        event.stop()
-        self.query_one(SubagentsPanel).toggle()
-
-    @on(Click, "#subagents-panel-header")
-    def click_subagent_panel_header(self, event: Click) -> None:
-        """Collapse or expand the live subagents panel from its header."""
-        event.stop()
-        self.query_one(SubagentsPanel).toggle()
-
-    @on(Click, "#subagents-panel-close")
-    def click_subagent_panel_close(self, event: Click) -> None:
-        """Hide the live subagents panel."""
-        event.stop()
-        self.query_one(SubagentsPanel).close()
-
-    @on(Click, "#subagents-groups")
-    def click_subagent_group(self, event: Click) -> None:
-        """Select a subagent group from the left group list."""
-        event.stop()
-        self.query_one(SubagentsPanel).select_group_line(event.y)
-
     async def _run_new_chat(self) -> None:
         """Create and switch to a fresh session outside event handlers."""
         try:
-            if self._handle_new_chat():
+            previous_session = self.session
+            if self._handle_new_chat() and self.session is not previous_session:
                 self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"new chat error: {exc}", kind="error")
@@ -782,8 +805,8 @@ class MiraApp(App[None]):
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
-        plan = self.mode.get("current_plan")
-        if not isinstance(plan, dict) or str(plan.get("id") or "") != plan_id:
+        plan = current_plan(self.session)
+        if plan is None or str(plan.get("id") or "") != plan_id:
             self.system_message("that plan is no longer active", kind="warning")
             return
         if self.busy:
@@ -795,6 +818,11 @@ class MiraApp(App[None]):
             update_plan_event_status(self.session, plan_id, "closed")
             self.store.save(self.session)
             self.system_message(f"closed plan \"{plan_title(plan)}\"", kind="muted")
+            self.action_focus_prompt()
+            return
+
+        if action == "clear":
+            self.clear_plan()
             self.action_focus_prompt()
             return
 
@@ -893,6 +921,8 @@ class MiraApp(App[None]):
             self._waiting_label = "working..."
             self.turn_worker = None
             self.busy = False
+            if self.status_state != "error":
+                self._set_status(state="ready")
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
@@ -912,6 +942,11 @@ class MiraApp(App[None]):
             update_goal_event_status(self.session, goal_id, "closed")
             self.store.save(self.session)
             self.system_message(f'closed Goal "{goal_title(value)}"', kind="muted")
+            self.action_focus_prompt()
+            return
+
+        if action == "clear":
+            self.clear_goal()
             self.action_focus_prompt()
             return
 
@@ -1002,6 +1037,8 @@ class MiraApp(App[None]):
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
+            if self.status_state != "error":
+                self._set_status(state="ready")
             self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
 
@@ -1053,6 +1090,8 @@ class MiraApp(App[None]):
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
+            if self.status_state != "error":
+                self._set_status(state="ready")
             self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
 
@@ -1237,7 +1276,7 @@ class MiraApp(App[None]):
     def action_clear_log(self) -> None:
         """Clear chat and tool output."""
         self.clear_log()
-        self._set_status(state="ready")
+        self._set_ready_unless_error()
 
     def action_copy(self) -> None:
         """Copy screen text first, then the focused widget selection."""
@@ -1271,6 +1310,7 @@ class MiraApp(App[None]):
         """Focus the prompt input."""
         if not self.is_mounted:
             return
+        self._sync_artifact_button()
         try:
             self.query_one(PromptBox).focus()
         except NoMatches:
@@ -1298,7 +1338,7 @@ class MiraApp(App[None]):
         if active is not None:
             return True
         self.system_message(self.agent_unavailable_message, kind="warning")
-        self._set_status(state="ready")
+        self._set_ready_unless_error()
         self.action_focus_prompt()
         return False
 
@@ -1316,12 +1356,9 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).timestamped_user_message(text, planning=planning, created_at=created_at)
 
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
-        """Write a command or status message to the chat log."""
+        """Write a presentation-only message to the trace and chat log."""
         self.trace.system_message(text, kind=kind)
-        self.waiting_finished()
         self.query_one(ChatLog).system_message(text, kind=kind, created_at=created_at)
-        detail = text if kind in {"status", "info", "warning"} else ""
-        self._set_status(state="ready" if not self.busy else "running", detail=detail)
 
     def command_output(self, renderable: Any) -> None:
         """Write command output to the chat log."""
@@ -1413,6 +1450,7 @@ class MiraApp(App[None]):
         self.mode["plan_staging"] = None
         self.mode["plan_revision"] = None
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
+        self._sync_artifact_button()
         event = append_event(
             self.session,
             {"type": "plan", "mode": "planning", "plan": artifact, "status": "proposed"},
@@ -1452,6 +1490,7 @@ class MiraApp(App[None]):
             return
         self.query_one(ChatLog).resolve_plan(str(value["id"]), "cleared")
         self.store.save(self.session)
+        self._sync_artifact_button()
         self.system_message(f'cleared current Plan "{plan_title(value)}"', kind="muted")
 
     async def resume_plan(self) -> None:
@@ -1571,6 +1610,7 @@ class MiraApp(App[None]):
         self.mode["goal_staging"] = None
         self.mode["goal_revision"] = None
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
+        self._sync_artifact_button()
         event = append_event(
             self.session,
             {"type": "goal", "mode": "planning" if self.mode.get("planning") else "action", "goal": artifact, "status": "proposed"},
@@ -1610,6 +1650,7 @@ class MiraApp(App[None]):
             return
         self.query_one(ChatLog).resolve_goal(str(value["id"]), "cleared")
         self.store.save(self.session)
+        self._sync_artifact_button()
         self.system_message(f'cleared current Goal "{goal_title(value)}"', kind="muted")
 
     async def resume_goal(self) -> None:
@@ -1683,7 +1724,7 @@ class MiraApp(App[None]):
         if notice:
             self.query_one(ChatLog).system_message(notice, kind="info")
         self.query_one(ChatLog).compaction_started()
-        self._set_status(state="running", detail="compacting context...")
+        self._set_status(state="running")
 
     def compaction_finished(
         self,
@@ -1708,7 +1749,7 @@ class MiraApp(App[None]):
         """Run a destructive history command outside the submit event handler."""
         try:
             await self._handle_history_command(text)
-            self._set_status(state="ready")
+            self._set_ready_unless_error()
         except Exception as exc:
             self.system_message(f"clear history error: {exc}", kind="error")
             self._set_status(state="error")
@@ -1795,7 +1836,7 @@ class MiraApp(App[None]):
             mounted = self._handle_settings_command(initial_tab)
             if mounted is not True:
                 await mounted
-            self._set_status(state="ready")
+            self._set_ready_unless_error()
         except Exception as exc:
             self.system_message(f"settings error: {exc}", kind="error")
             self._set_status(state="error")
@@ -1820,10 +1861,15 @@ class MiraApp(App[None]):
             self.system_message("reload already in progress", kind="warning")
             return
 
+        if self.busy:
+            await self._handle_reload_command(full_runtime=full_runtime)
+            return
+
         prompt = self.query_one(PromptBox)
         prompt_was_disabled = prompt.disabled
         self._reload_in_progress = True
         prompt.disabled = True
+        self._set_status(state="running")
         try:
             if await self._handle_reload_command(full_runtime=full_runtime):
                 self._set_status(state="ready")
@@ -2020,6 +2066,8 @@ class MiraApp(App[None]):
         old_config = self.config
         self.config = dict(old_config or {})
         self.config["settings"] = settings
+        if not self.ready:
+            return True, "settings saved; run /reload-runtime to retry startup"
         if new_git_enabled != old_git_enabled:
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
@@ -2043,6 +2091,7 @@ class MiraApp(App[None]):
             if not restored:
                 message += "; could not restore .mira/settings.yml"
             return False, message
+        self._set_status(state="ready")
         return True, "settings saved; agents rebuilt"
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
@@ -2179,17 +2228,17 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self._mark_main_stream_active()
         self.query_one(ChatLog).tool_call_delta(name, args, call_id=call_id)
-        self._set_status(state="running", detail="preparing arguments...")
+        self._set_status(state="running")
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
         """Render a live draft of streamed task delegation input."""
         self.waiting_finished()
         self._mark_main_stream_active()
         if self._subagent_panel_is_live():
-            self._set_status(state="running", detail="preparing subagent request...")
+            self._set_status(state="running")
             return
         self.query_one(ChatLog).delegation_delta(calls)
-        self._set_status(state="running", detail="preparing subagent request...")
+        self._set_status(state="running")
 
     def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Render a tool call in transcript order."""
@@ -2254,6 +2303,7 @@ class MiraApp(App[None]):
             created_at=created_at,
             duration_ms=duration_ms,
         )
+        self._rearm_waiting_if_busy()
 
     def completed_tool_error(
         self,
@@ -2274,6 +2324,7 @@ class MiraApp(App[None]):
             created_at=created_at,
             duration_ms=duration_ms,
         )
+        self._rearm_waiting_if_busy()
 
     def tool_call_stopped(
         self,
@@ -2348,7 +2399,7 @@ class MiraApp(App[None]):
         self._finish_main_stream_activity()
         self.waiting_finished()
         if self._subagent_panel_is_live():
-            self._set_status(state="running", detail="delegating to subagents...")
+            self._set_status(state="running")
             self._rearm_waiting_if_busy()
             return
         self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
@@ -2720,11 +2771,13 @@ class MiraApp(App[None]):
         label: str | None = None,
         *,
         immediate: bool = False,
-        elapsed: bool = False,
+        elapsed: bool | None = None,
     ) -> None:
         """Arm the transient working indicator while the turn is silent."""
         if label is not None:
             self._waiting_label = label
+        if elapsed is None:
+            elapsed = True
         self._waiting_generation += 1
         self._cancel_waiting_task()
         if not self.is_mounted or not self.busy or self._main_stream_active:
@@ -2739,7 +2792,7 @@ class MiraApp(App[None]):
             return
         generation = self._waiting_generation
         self._waiting_task = self.run_worker(
-            self._show_waiting_after_delay(generation),
+            self._show_waiting_after_delay(generation, elapsed=elapsed),
             name=f"waiting-{generation}",
             exclusive=False,
         )
@@ -2750,7 +2803,12 @@ class MiraApp(App[None]):
         if self.is_mounted:
             self.query_one(ChatLog).hide_waiting()
 
-    async def _show_waiting_after_delay(self, generation: int) -> None:
+    async def _show_waiting_after_delay(
+        self,
+        generation: int,
+        *,
+        elapsed: bool | None = None,
+    ) -> None:
         """Show working only if the current wait survives the grace period."""
         try:
             await asyncio.sleep(self._waiting_delay_seconds)
@@ -2758,7 +2816,7 @@ class MiraApp(App[None]):
             return
         if generation != self._waiting_generation or not self.busy or not self.is_mounted or self._main_stream_active:
             return
-        self.query_one(ChatLog).show_waiting(self._waiting_label)
+        self.query_one(ChatLog).show_waiting(self._waiting_label, elapsed=elapsed)
 
     def _cancel_waiting_task(self) -> None:
         """Cancel the pending delayed thinking task if one exists."""
@@ -2786,7 +2844,7 @@ class MiraApp(App[None]):
             self.waiting_started()
 
     def startup_progress(self, state: str) -> None:
-        """Update startup splash and status while bootstrap is running."""
+        """Update startup details without changing the operational lifecycle."""
         self.trace.startup(state)
         if not self.is_mounted:
             return
@@ -2794,10 +2852,11 @@ class MiraApp(App[None]):
             self.query_one(ChatLog).startup_progress(state)
         except NoMatches:
             return
-        self._set_status(state="loading", detail=state)
 
-    def _set_status(self, *, state: str, detail: str = "") -> None:
+    def _set_status(self, *, state: str) -> None:
         """Update the status bar if it has been mounted."""
+        if state not in OPERATIONAL_STATES:
+            state = "running" if self.busy else "starting" if not self.ready else "ready"
         self.status_state = state
         if not self.is_mounted:
             return
@@ -2813,15 +2872,20 @@ class MiraApp(App[None]):
             state=state,
             dashboard=self.session.get("dashboard"),
             turns=int(self.session.get("turns") or 0),
-            detail=detail,
         )
         self.query_one(TelemetryBar).set_state(
             model_name=self.model_name or "loading",
             dashboard=self.session.get("dashboard"),
             turns=int(self.session.get("turns") or 0),
         )
+        self._sync_artifact_button()
         self._sync_mcp_button()
         self._sync_issues_button()
+
+    def _set_ready_unless_error(self) -> None:
+        """Return passive work to Ready without clearing a sticky Error."""
+        if not self.busy and self.status_state != "error":
+            self._set_status(state="ready")
 
     @on(Button.Pressed, "#mcp-status-button")
     def press_mcp_status(self, event: Button.Pressed) -> None:
@@ -2843,16 +2907,50 @@ class MiraApp(App[None]):
             return
         self.push_screen(MCPPanelScreen(self.mcp_manager, self._run_reload_runtime_command))
 
+    @on(Button.Pressed, "#artifact-status-button")
+    async def press_artifact_status(self, event: Button.Pressed) -> None:
+        """Reopen the exact retained Goal or Plan from the header."""
+        event.stop()
+        if self.busy:
+            return
+        if current_plan(self.session) is not None:
+            await self.show_plan()
+        elif current_goal(self.session) is not None:
+            await self.show_goal()
+        self.action_focus_prompt()
+
+    def _sync_artifact_button(self) -> None:
+        """Project the canonical retained artifact into one header control."""
+        try:
+            button = self.query_one("#artifact-status-button", Button)
+        except NoMatches:
+            return
+        plan = current_plan(self.session)
+        goal = current_goal(self.session)
+        artifact = plan or goal
+        if artifact is None:
+            button.disabled = True
+            button.remove_class("plan-artifact", "goal-artifact")
+            self._sync_header_control_visibility()
+            return
+        kind = "Plan" if plan is not None else "Goal"
+        state = ARTIFACT_STATUS_LABELS.get(str(artifact.get("status") or ""), "Draft")
+        button.label = f"{kind} {state}"
+        button.disabled = self.busy
+        button.set_class(plan is not None, "plan-artifact")
+        button.set_class(goal is not None, "goal-artifact")
+        self._sync_header_control_visibility()
+
     def _sync_mcp_button(self) -> None:
         try:
             button = self.query_one("#mcp-status-button", Button)
         except NoMatches:
             return
         visible = self.mcp_manager is not None and self.mcp_manager.show_status
-        button.display = visible
         if visible:
             symbol = mcp_summary_symbol(self.mcp_manager.servers.values(), spinner=self._mcp_spinner)
             button.label = f"{symbol} MCP {self.mcp_manager.usable_count}/{self.mcp_manager.configured_count}"
+        self._sync_header_control_visibility()
 
     @on(Button.Pressed, "#issues-button")
     def press_issues(self, event: Button.Pressed) -> None:
@@ -2908,7 +3006,35 @@ class MiraApp(App[None]):
             return
         count = len(self.issues)
         button.label = f"Issues {count}"
-        button.display = count > 0
+        self._sync_header_control_visibility()
+
+    def _sync_header_control_visibility(self) -> None:
+        """Yield narrow header width to status, then artifact, MCP, and Issues."""
+        if not self.is_mounted:
+            return
+        try:
+            sidebar = self.query_one("#session-sidebar")
+            controls = (
+                (
+                    self.query_one("#artifact-status-button", Button),
+                    current_plan(self.session) is not None or current_goal(self.session) is not None,
+                ),
+                (
+                    self.query_one("#mcp-status-button", Button),
+                    self.mcp_manager is not None and self.mcp_manager.show_status,
+                ),
+                (self.query_one("#issues-button", Button), bool(self.issues)),
+            )
+        except NoMatches:
+            return
+        has_controls = any(wanted for _button, wanted in controls)
+        sidebar.display = self.size.width >= (90 if has_controls else 72)
+        main_width = self.size.width - 42 if sidebar.display else self.size.width
+        slots = max(0, (main_width - 40) // 13)
+        for button, wanted in controls:
+            button.display = bool(wanted and slots > 0)
+            if wanted and slots > 0:
+                slots -= 1
 
     @on(ListView.Selected, "#sessions")
     def select_session(self, event: ListView.Selected) -> None:
@@ -2932,7 +3058,7 @@ class MiraApp(App[None]):
         prompt = self.query_one(PromptBox)
         prompt.disabled = True
         self.busy = True
-        self._set_status(state="loading")
+        self._set_status(state="running")
         try:
             state = await self.bootstrap(
                 self.workspace,
@@ -3049,7 +3175,7 @@ class MiraApp(App[None]):
             context_limit_source=self.context_limit_source,
         )
         self.store.save(self.session)
-        self._set_status(state=self.status_state, detail=f"context window: {metadata.context_tokens}")
+        self._set_status(state=self.status_state)
 
     async def _rebuild_agents(self, metadata: Any | None = None) -> None:
         """Rebuild action and planning agents after settings or metadata changes."""
@@ -3218,6 +3344,10 @@ class MiraApp(App[None]):
         chat.tick_compaction()
         chat.tick_rubrics()
         chat.tick_tools()
+        try:
+            self.query_one(StatusBar).tick()
+        except NoMatches:
+            pass
         if self.mcp_manager is not None and any(state.transient for state in self.mcp_manager.servers.values()):
             self._mcp_spinner += 1
             self._sync_mcp_button()
@@ -3234,21 +3364,11 @@ class MiraApp(App[None]):
         """Hide history before the fixed sidebar can squeeze chat to zero width."""
         if not self.is_mounted:
             return
-        try:
-            sidebar = self.query_one("#session-sidebar")
-        except NoMatches:
-            return
-        sidebar.display = self.size.width >= 72
+        self._sync_header_control_visibility()
 
     def _mode_label(self) -> str:
         """Return the compact mode label shown in the status line."""
-        if self.mode.get("planning"):
-            return "Plan"
-        if self.mode.get("current_plan"):
-            return "Plan Ready"
-        if self.mode.get("current_goal"):
-            return "Goal Ready"
-        return "Act"
+        return "PLAN" if self.mode.get("planning") else "ACT"
 
     def _record_prompt_history(self, text: str) -> None:
         """Remember submitted prompt text and persist it for normal app runs."""

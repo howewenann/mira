@@ -17,7 +17,9 @@ async def consume_subagents(subagents: Any, renderer: Any) -> None:
     """Consume subagent streams while the status animation is active."""
     if hasattr(renderer, "start_subagent_live"):
         renderer.start_subagent_live()
-    animation = asyncio.create_task(animate_subagents(renderer))
+    animation = None
+    if not getattr(renderer, "manages_subagent_animation", False):
+        animation = asyncio.create_task(animate_subagents(renderer))
     tasks: list[asyncio.Task[None]] = []
     cancelled = False
 
@@ -40,9 +42,10 @@ async def consume_subagents(subagents: Any, renderer: Any) -> None:
         call_renderer(renderer, "subagents_cancelled")
         raise
     finally:
-        animation.cancel()
-        with suppress(asyncio.CancelledError):
-            await animation
+        if animation is not None:
+            animation.cancel()
+            with suppress(asyncio.CancelledError):
+                await animation
         if not cancelled and hasattr(renderer, "stop_subagent_live"):
             renderer.stop_subagent_live()
 

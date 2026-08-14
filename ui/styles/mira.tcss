@@ -100,6 +100,7 @@ Screen {
     height: 1;
 }
 
+#artifact-status-button,
 #mcp-status-button,
 #issues-button {
     width: 13;
@@ -109,6 +110,40 @@ Screen {
     padding: 0;
     border: none;
     text-style: bold;
+}
+
+#artifact-status-button {
+    display: none;
+}
+
+#artifact-status-button.plan-artifact {
+    background: #394329;
+    color: #D0E19A;
+}
+
+#artifact-status-button.goal-artifact {
+    background: #46354D;
+    color: #E0B5EA;
+}
+
+#artifact-status-button.plan-artifact:hover,
+#artifact-status-button.plan-artifact:focus,
+#artifact-status-button.plan-artifact.-active {
+    background: #394329;
+    color: #D0E19A;
+    tint: transparent;
+}
+
+#artifact-status-button.goal-artifact:hover,
+#artifact-status-button.goal-artifact:focus,
+#artifact-status-button.goal-artifact.-active {
+    background: #46354D;
+    color: #E0B5EA;
+    tint: transparent;
+}
+
+#artifact-status-button:disabled {
+    opacity: 45%;
 }
 
 #issues-button {
@@ -153,13 +188,16 @@ IssuesScreen {
 
 #mcp-status-button {
     display: none;
-    background: #5bb8b1;
-    color: #081112;
+    background: #386B69;
+    color: #D2F0ED;
 }
 
-#mcp-status-button:focus {
-    background: #7ce3dc;
-    color: #081112;
+#mcp-status-button:hover,
+#mcp-status-button:focus,
+#mcp-status-button.-active {
+    background: #386B69;
+    color: #D2F0ED;
+    tint: transparent;
 }
 
 #telemetry-row {
@@ -358,69 +396,174 @@ MCPPanelScreen {
     display: none;
     height: auto;
     max-height: 14;
-    padding: 0 1 1 1;
-    border-top: solid #B7A4E8;
+    padding: 0;
+    border: none;
     background: #101516;
     color: #ECE7FF;
 }
 
-#subagents-panel-header-row {
-    height: 1;
-    width: 1fr;
+#subagents-panel-row {
+    height: auto;
 }
 
-#subagents-panel-header {
-    width: 1fr;
-    height: 1fr;
-    content-align: left middle;
-}
-
-.subagents-panel-action {
-    width: 5;
-    min-width: 3;
-    height: 1;
-    margin: 0;
+#subagents-collapsible,
+#subagents-groups,
+#subagents-tasks,
+#subagents-tasks-column {
     border: none;
-    background: #101516;
+    background: transparent;
+}
+
+#subagents-collapsible {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+}
+
+#subagents-collapsible:focus-within,
+#subagents-groups:focus,
+#subagents-tasks:focus {
+    background-tint: transparent;
+}
+
+#subagents-collapsible > CollapsibleTitle {
+    width: 1fr;
+    padding: 0 1;
+    border-top: solid #B7A4E8;
+    border-left: solid #B7A4E8;
+    border-bottom: solid #B7A4E8;
+    color: #ECE7FF;
+    text-style: bold;
+}
+
+#subagents-collapsible > CollapsibleTitle:focus {
+    background: transparent;
+}
+
+#subagents-collapsible > CollapsibleTitle:hover,
+#subagents-collapsible > CollapsibleTitle:focus:hover {
+    background: transparent;
+    color: #ECE7FF;
+}
+
+#subagents-collapsible > Contents {
+    padding: 0;
+}
+
+#subagents-close-cell {
+    width: 5;
+    min-width: 5;
+    height: 3;
+    min-height: 3;
+    padding: 0;
+    border-top: solid #B7A4E8;
+    border-right: solid #B7A4E8;
+    border-bottom: solid #B7A4E8 !important;
+    background: transparent;
+}
+
+#subagents-panel-close {
+    width: 1fr;
+    min-width: 1;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
     color: #d2d8dc;
 }
 
-.subagents-panel-action:focus {
-    color: #eef7f8;
+#subagents-panel-close:focus {
+    background: transparent;
+    color: #d2d8dc;
+}
+
+#subagents-panel-close:hover,
+#subagents-panel-close:focus:hover,
+#subagents-panel-close.-active {
+    background: transparent;
+    color: #d2d8dc;
+    tint: transparent;
 }
 
 #subagents-panel-body {
-    height: auto;
-    max-height: 11;
-    width: 1fr;
+    padding: 0 1;
+    overflow-x: hidden;
 }
 
-#subagents-groups-scroll {
+#subagents-groups-column {
     width: 25%;
-    min-width: 15;
+    min-width: 10;
     max-width: 28;
-    height: auto;
-    max-height: 11;
     padding: 0 1 0 0;
     margin: 0 1 0 0;
     border-right: solid #4a5360;
+}
+
+#subagents-groups-label {
+    width: 1fr;
+    text-align: left;
+    color: #b8c1c7;
+    text-style: bold;
+}
+
+#subagents-groups,
+#subagents-tasks {
+    height: 1fr;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
 
-#subagents-tasks-scroll {
+#subagents-tasks-column {
     width: 1fr;
-    height: auto;
-    max-height: 11;
-    overflow-x: hidden;
-    scrollbar-color: #5bb8b1;
-    scrollbar-background: #122023;
+    height: 1fr;
+}
+
+#subagents-tasks-header {
+    width: 1fr;
+    height: 1;
+    grid-size: 3 1;
+    grid-columns: 1fr 11 7;
+    grid-rows: 1;
+    padding-right: 1;
+    color: #b8c1c7;
+    text-style: bold;
+}
+
+#subagents-task-heading,
+#subagents-status-heading {
+    padding-left: 1;
+}
+
+#subagents-time-heading {
+    text-align: center;
+}
+
+#subagents-groups > .option-list--option-highlighted,
+#subagents-groups:focus > .option-list--option-highlighted {
+    background: transparent;
+    color: #b8c1c7;
+    text-style: none;
+}
+
+#subagents-groups > .option-list--option-hover,
+#subagents-groups:focus > .option-list--option-hover {
+    background: transparent;
+    color: #b8c1c7;
+    text-style: none;
 }
 
 #subagents-tasks {
-    width: 100%;
-    text-wrap: nowrap;
-    text-overflow: clip;
+    width: 1fr;
+    overflow-x: hidden;
+    scrollbar-size-horizontal: 0;
+}
+
+#subagents-tasks > .datatable--hover,
+#subagents-tasks > .datatable--header-hover,
+#subagents-tasks > .datatable--cursor,
+#subagents-tasks > .datatable--header-cursor {
+    background: transparent;
 }
 
 #prompt-panel {

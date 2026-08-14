@@ -132,12 +132,26 @@ Expected:
 
 - A bottom `dynamic subagents` panel opens while eval-created subagents run.
 - The left list shows `Group 1`, `Group 2`, and so on for eval batches; raw
-  eval ids are not displayed.
+  eval ids are not displayed. `GROUPS` is left-aligned, `>` marks the selected
+  group, and hover highlighting disappears after the pointer leaves. Selecting
+  a group switches the task table immediately.
 - Each group clock starts with its first visible subagent, continues through
   staggered launches, and freezes only after the final row finishes, fails, or
   is cancelled. Concurrent row times are not summed.
 - The right task table follows the active group and shows generated subagent
-  names, compact inline hints, status, and elapsed time.
+  names, compact inline hints, status, and elapsed time. The expanded body stays
+  fixed at eight rows (one header plus seven items); larger lists scroll inside it.
+- Group and task scrollbars begin below their headings rather than alongside
+  `GROUPS` or `TASK / STATUS / TIME`.
+- A divider matching the panel's top border separates the title row from the
+  groups and task table and reaches the same left and right edges.
+- Matching purple side borders frame only the title row and join its top and
+  bottom lines without corner gaps; the task body has no outer side borders.
+- Hover, focus, and group selection do not add background highlights; `>` alone
+  identifies the selected group.
+- Manually collapsing a visible panel remains respected as more subagents join;
+  closing a completed panel hides it, and later activity in the same turn reopens
+  it with its prior rows intact.
 - The durable session history contains the eval tool call/result and assistant
   summary, not separate replayed panel rows for each eval-created subagent.
 
@@ -1335,9 +1349,29 @@ seconds, then create both a Plan and a Goal.
   tool still shows the frozen status and duration.
 - No standalone `Preparing tool call...` bubble appears during a text-only turn
   or after the final response.
+- After the final active tool or `eval` call completes, `working...` returns
+  after the normal grace period if the coordinator is still silently processing.
+- The fixed header shows only `STARTING`, `READY`, `RUNNING`, `CANCELLING`, or
+  `ERROR`. Starting, Running, and Cancelling animate at 120 ms; Ready and Error
+  use static colored symbols. Startup detail stays in the main splash and never
+  adds a Loading state or detail phrase to the header.
+- While `working...` is visible, try opening Settings or Reload. The warning
+  bubble appears without stopping or resetting the working spinner or elapsed
+  clock, and the header remains Running.
+- Force a recoverable runtime error, then show a missing Goal or open and close
+  Settings without applying changes. The transcript updates but the header
+  remains Error. A successful new turn or runtime reload changes it through
+  Running to Ready.
+- Retain a Goal and a Plan in separate sessions. The header mode remains only
+  ACT or PLAN, while a separate purple Goal or green Plan button shows Draft,
+  Active, Paused, Limit, or Done. Close retains that button; Clear removes it;
+  clicking it reopens the exact artifact. It dims while a turn is busy.
+- Start MIRA with a fixable configuration failure. Error leaves the prompt
+  usable for Settings, Models, Issues, Runtime, Reload Runtime, and exit. Normal
+  model work is rejected until `/reload-runtime` completes a full bootstrap.
 - Success Criteria generation and Plan/Goal creation show temporary spinner
-  bubbles with elapsed time; those bubbles disappear when the existing final
-  Plan or Goal UI takes over.
+  bubbles with elapsed time. Their clocks survive the resumed model's prompt
+  processing and disappear when the existing final Plan or Goal UI takes over.
 - Resume the session and confirm completed tool durations remain visible.
 
 ## Rubric Model Profiles And Live Progress

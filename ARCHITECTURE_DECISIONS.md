@@ -414,11 +414,13 @@ not projected as Plan events.
 
 The Plan bubble uses Plan colours for Plan content, rubric colours for Success
 Criteria, and muted text for automatic-evaluation policy and status. Its actions
-are Implement, Revise, and Close. Implement starts or restarts the exact Plan in
-Act mode. Revise stays in the persistent Plan conversation, creates a complete
-replacement, and calls `SuccessCriteriaService.revise()` for both rubric
-settings; approach-only feedback preserves criteria. Close hides controls
-without changing or deleting `current_plan`.
+are a status-aware primary action, Revise, Close, and Clear. Draft work says
+Implement, incomplete attempted work says Resume, and completed work says Run
+again. The primary action starts or restarts the exact Plan in Act mode. Revise
+stays in the persistent Plan conversation, creates a complete replacement, and
+calls `SuccessCriteriaService.revise()` for both rubric settings; approach-only
+feedback preserves criteria. Close hides controls without changing
+`current_plan`; Clear alone removes it.
 
 `/plan-show` and the read-only `show_plan` control tool call the same renderer
 and make no Plan-generating model call. `/plan-clear` removes only
@@ -494,12 +496,13 @@ current `current_goal` fields and types; a populated malformed or retired Goal
 artifact rejects the session. Retired proposal events are not projected as
 Goal events.
 
-`GoalBubble` shows Objective and Success Criteria with Implement, Revise, and
-Close actions. A newly finalized `proposed` Goal remains active through the
-post-command refresh so all three review actions stay available. Implement
-starts or restarts one explicit Act attempt. Revise uses the read-only Goal
-pipeline and `SuccessCriteriaService.revise()` to create a complete replacement.
-Close hides controls without changing `current_goal`.
+`GoalBubble` shows Objective and Success Criteria with the same status-aware
+primary action, Revise, Close, and Clear controls as a Plan. A newly finalized
+`proposed` Goal remains active through the post-command refresh so all four
+review actions stay available. The primary action starts or restarts one
+explicit Act attempt. Revise uses the read-only Goal pipeline and
+`SuccessCriteriaService.revise()` to create a complete replacement. Close hides
+controls without changing `current_goal`; Clear alone removes it.
 `/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
 incomplete states, and `/goal-clear` removes only the current Goal.
 Explicit Goal recall always reopens the retained artifact for review, including
@@ -741,25 +744,34 @@ is empty. Closing the screen never changes settings, resources, or sessions.
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
+Its presentation uses Textual's native `Collapsible`, `OptionList`, and
+`DataTable`: regular-only work gives the table the full width, while eval and
+mixed work add a selectable group column and keep overflow inside the bounded
+body. The expanded body reserves eight rows: one column header plus seven visible
+items, then scrolls below fixed group/task headings. The selected group is
+identified only by MIRA's `>` marker; the panel adds no hover, focus, or selection
+backgrounds.
 Each row keeps its own reported runtime. Group time is event-observed wall time
 from that group's first row start through its last terminal row, so staggered
 launches remain part of the batch clock while overlapping row runtimes are not
 summed.
-While work is active, `[-]`/`[+]` collapses the panel to an animated summary and
-the close control is hidden. New subagent activity reopens the panel. Once all
-rows are terminal, `x` becomes available; completed state collapses before the
-next prompt and is reset by later subagent activity.
+While work is active, the native disclosure control collapses the panel to an
+animated summary and the close control is hidden. Runtime updates never override
+the collapse choice of an already-visible panel. Hidden or reset state opens for
+new subagent activity. Once all rows are terminal, `x` becomes available;
+closing it hides but retains the current turn's rows, while the next prompt marks
+completed state for reset by later activity.
 While the panel owns live subagent progress, the chat log suppresses separate
 task delegation and subagent bubbles so the running turn has one live progress
-surface. The status line may briefly report delegation setup, but the task rows
-belong in the panel.
+surface. The task rows belong in the panel, and delegation detail stays out of
+the fixed operational header entirely.
 Eval-created subagents are grouped in that panel by internal `eval_id`, but the
 UI labels them as `Group 1`, `Group 2`, and so on.
 When a parent eval result arrives, the panel reconciles any child rows that did
 not receive a terminal event as cancelled, freezing their clocks and restoring
 the close control without changing the reported outcome of completed children.
-As the panel grows or collapses, a tail-following transcript reanchors after
-layout while a transcript that the user scrolled upward remains paused.
+As the fixed panel opens or collapses, a tail-following transcript reanchors
+after layout while a transcript that the user scrolled upward remains paused.
 
 **Where to check:** `ui/app.py`, `ui/widgets/issues.py`, `ui/windows_input.py`,
 `ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
@@ -824,9 +836,19 @@ summarization defaults, then observes that middleware's `_count_tokens` result
 so the UI can show context pressure. MIRA does not run a parallel dashboard
 counter or compute provider prompt tokens. Context pressure belongs to the top
 operational status row; model identity, cumulative token totals, turn count,
-and elapsed time remain in the bottom passive telemetry row. Automatic and
-agent-selected eligibility remain DeepAgents decisions. The explicit TUI
-`/compact` command is
+and elapsed time remain in the bottom passive telemetry row. The operational
+state is a fixed, bold badge with only Starting, Ready, Running, Cancelling, and
+Error. Ready and Error use static terminal symbols; the other states share the
+120 ms spinner. Startup detail remains in the main splash instead of introducing
+a separate Loading state. Transcript bubbles are presentation-only and cannot
+stop the working clock or change lifecycle state. Error remains sticky until a
+real user-initiated recovery succeeds. If initial bootstrap fails, the prompt
+admits a small local recovery command set and `/reload-runtime` retries the full
+bootstrap path. A separate Goal/Plan button projects the retained artifact's
+canonical status and reopens its exact bubble; it is disabled while runtime work
+is busy. The badge and tool lifecycle text share muted semantic colors without
+recoloring the entire header. Automatic and agent-selected eligibility remain
+DeepAgents decisions. The explicit TUI `/compact` command is
 the narrow exception: it reuses the attached summarization middleware to apply
 the normal retention policy immediately, then writes the same
 `_summarization_event` consumed by subsequent DeepAgents model calls. Provider

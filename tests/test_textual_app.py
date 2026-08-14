@@ -23,7 +23,7 @@ from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.selection import SELECT_ALL
-from textual.widgets import Button, Collapsible, Input, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Collapsible, DataTable, Input, OptionList, Select, Static, TextArea
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -68,6 +68,7 @@ from ui.renderer import Renderer
 from ui.runtime_snapshot import runtime_report
 from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
 from ui.terminal_colors import (
+    TOOL_CANCELLED_COLOR,
     TOOL_COMPLETED_COLOR,
     TOOL_DURATION_COLOR,
     TOOL_FAILED_COLOR,
@@ -77,7 +78,16 @@ from ui.terminal_colors import (
 )
 from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.settings_panel import SettingsHeaderRow
-from ui.widgets.subagent_panel import SubagentRecord, append_task_cell, group_status_icon, truncate_cells
+from ui.widgets.status_bar import STATUS_STARTING_COLOR
+from ui.widgets.subagent_panel import (
+    PANEL_BODY_ROWS,
+    STATUS_COL,
+    TIME_COL,
+    SubagentRecord,
+    append_task_cell,
+    group_status_icon,
+    truncate_cells,
+)
 from ui.widgets.session_history import session_label
 from ui.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
@@ -247,6 +257,34 @@ def renderable_plain(widget: Any) -> str:
     output = StringIO()
     Console(file=output, force_terminal=False, width=120).print(renderable)
     return output.getvalue()
+
+
+def visual_plain(value: Any) -> str:
+    """Return plain text from a native widget cell or option prompt."""
+    return str(getattr(value, "plain", value))
+
+
+def data_table_plain(table: DataTable) -> str:
+    """Return native DataTable headers and cells as searchable plain text."""
+    lines = ["  ".join(column.label.plain for column in table.ordered_columns)]
+    for row_key in table.rows:
+        lines.append("  ".join(visual_plain(cell) for cell in table.get_row(row_key)))
+    return "\n".join(lines)
+
+
+def option_list_plain(options: OptionList) -> str:
+    """Return native OptionList prompts as searchable plain text."""
+    return "\n".join(visual_plain(option.prompt) for option in options.options)
+
+
+def subagent_title_plain(panel: SubagentsPanel) -> str:
+    """Return the native Collapsible title without its disclosure symbol."""
+    return visual_plain(panel.query_one("#subagents-collapsible", Collapsible).title)
+
+
+def subagent_groups_plain(panel: SubagentsPanel) -> str:
+    """Render the production group prompts for unmounted state-model tests."""
+    return "\n".join(panel._group_prompt(key).plain for key in panel._display_group_keys())
 
 
 async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
@@ -1262,6 +1300,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(app.query_one("#session-sidebar").display)
             self.assertGreater(app.query_one(PromptBox).region.width, 0)
+            goal = goal_artifact(
+                goal_id="goal-narrow",
+                title="Narrow Goal",
+                objective="Keep status visible.",
+                success_criteria="- Status remains visible.",
+                rubric_enabled=False,
+                rubric_iterations=3,
+            )
+            app.session["current_goal"] = goal
+            app.mode["current_goal"] = goal
+            app._sync_artifact_button()
+            await pilot.pause()
+
+            self.assertFalse(app.query_one("#artifact-status-button", Button).display)
+            status = renderable_plain(app.query_one(StatusBar))
+            self.assertIn("MIRA | ACT |", status)
+            self.assertIn("Ctx", status)
 
     async def test_prompt_submission_runs_turn_and_restores_focus(self) -> None:
         """Submitting prompt text should run the turn helper and refocus input."""
@@ -1307,8 +1362,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(lambda: chat.is_vertical_scroll_end)
             self.assertTrue(chat.is_vertical_scroll_end)
 
-    async def test_subagent_panel_growth_preserves_chat_tail_scroll(self) -> None:
-        """Growing task rows should resize an active transcript without losing its tail."""
+    async def test_fixed_subagent_panel_preserves_chat_tail_scroll(self) -> None:
+        """Showing and updating the fixed panel should preserve the transcript tail."""
         app = make_app()
 
         async with app.run_test(size=(80, 24)) as pilot:
@@ -1328,6 +1383,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     row_id=f"row-{index}",
                 )
                 await pilot.pause(0.1)
+                await wait_until(lambda: chat.is_vertical_scroll_end)
                 heights.append(chat.region.height)
                 self.assertTrue(chat.follow_tail)
                 self.assertTrue(chat.is_vertical_scroll_end)
@@ -1335,7 +1391,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(panel.display)
             self.assertLess(heights[-1], initial_height)
-            self.assertGreater(len(set(heights)), 1)
+            self.assertEqual(len(set(heights)), 1)
 
     async def test_subagent_panel_resize_preserves_paused_chat_scroll(self) -> None:
         """Panel layout changes should not override an intentional scroll pause."""
@@ -1374,7 +1430,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await pilot.pause(0.1)
 
-            self.assertLess(chat.region.height, initial_height)
+            self.assertEqual(chat.region.height, initial_height)
             self.assertFalse(chat.follow_tail)
             self.assertEqual(chat.scroll_y, paused_scroll_y)
 
@@ -1568,6 +1624,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("error report: startup-report.txt", rendered)
                 self.assertEqual(report.call_args.kwargs["source"], "tui.startup")
                 self.assertIsNone(report.call_args.kwargs["session_id"])
+                self.assertFalse(app.ready)
+                self.assertFalse(app.query_one(PromptBox).disabled)
+
+    async def test_startup_error_accepts_full_runtime_retry_but_rejects_model_work(self) -> None:
+        """Startup Error should expose recovery without pretending the runtime is installed."""
+        attempts = 0
+        session = {
+            "id": "thread-recovered",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "events": [],
+        }
+
+        async def bootstrap(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("startup boom")
+            return {
+                "agent": "agent",
+                "plan_agent": "plan-agent",
+                "config": managed_model_config(),
+                "store": FakeStore(),
+                "session": session,
+                "model_name": "recovered-model",
+                "context_limit_tokens": 8192,
+                "context_limit_source": "test",
+                "checkpointer": "checkpointer",
+            }
+
+        app = MiraApp(workspace=Path("."), config={}, bootstrap=bootstrap)
+        with patch("ui.app.write_error_report", return_value=Path("startup-report.txt")):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await wait_until(lambda: app.status_state == "error")
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "do model work"))
+                await pilot.pause()
+                self.assertFalse(app.ready)
+                self.assertEqual(app.status_state, "error")
+                self.assertIn(
+                    "Use /settings, /models, /issues, /runtime, or /reload-runtime",
+                    renderable_plain(app.query_one(ChatLog).children[-1]),
+                )
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/reload-runtime"))
+                await wait_until(lambda: app.ready)
+
+                self.assertEqual(attempts, 2)
+                self.assertEqual(app.status_state, "ready")
+                self.assertEqual(app.session["id"], "thread-recovered")
+                self.assertEqual(app.checkpointer, "checkpointer")
+                self.assertFalse(prompt.disabled)
 
     async def test_session_load_failure_shows_error_report_path(self) -> None:
         """Session-switch failures should show the generated report path."""
@@ -1717,6 +1828,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.waiting_finished()
             await pilot.pause()
             self.assertFalse(any("working..." in renderable_plain(block) for block in app.query_one(ChatLog).children))
+            app.busy = False
+
+    async def test_generic_rearm_preserves_explicit_elapsed_activity(self) -> None:
+        """Resuming a formal model stage should not discard its elapsed clock."""
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            app.waiting_started("Creating plan", immediate=True, elapsed=True)
+            chat = app.query_one(ChatLog)
+            started_at = chat._waiting_started_at
+
+            app.waiting_started()
+            await pilot.pause(0.08)
+
+            activity = renderable_plain(chat.children[-1])
+            self.assertIn("Creating plan", activity)
+            self.assertIn("elapsed", activity)
+            self.assertTrue(chat._waiting_elapsed)
+            self.assertEqual(chat._waiting_started_at, started_at)
+            app.busy = False
+
+    async def test_delayed_working_uses_elapsed_clock(self) -> None:
+        """Ordinary silent model work should expose how long MIRA has waited."""
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            app.waiting_started()
+            await pilot.pause(0.08)
+
+            activity = renderable_plain(app.query_one(ChatLog).children[-1])
+            self.assertIn("working...", activity)
+            self.assertIn("00:00 elapsed", activity)
             app.busy = False
 
     async def test_slow_token_generation_does_not_show_working_between_chunks(self) -> None:
@@ -1871,7 +2020,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Objective", goal_text)
             self.assertIn("Success Criteria", goal_text)
             self.assertNotIn("PLAN", goal_text)
-            self.assertEqual(len(goal_blocks[0].query(".goal-action")), 3)
+            self.assertEqual(len(goal_blocks[0].query(".goal-action")), 4)
 
             initial_children = len(chat.children)
             app.rubric_evaluation_started(
@@ -2171,6 +2320,29 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.await_args.kwargs["plan_agent"], app.plan_agent)
         self.assertEqual(run.await_args.kwargs["display_text"], "/goal Write a professional announcement.")
 
+    async def test_cancelled_goal_generation_restores_ready_header(self) -> None:
+        """Goal cancellation should not leave the operational header running."""
+        app = make_app()
+
+        async def cancel_goal(**_kwargs: Any) -> None:
+            raise asyncio.CancelledError
+
+        with patch("ui.app.run_user_turn", side_effect=cancel_goal):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.busy = True
+                app._set_status(state="cancelling")
+
+                with self.assertRaises(asyncio.CancelledError):
+                    await app._run_goal_command("Write a palindrome function.")
+                await pilot.pause()
+
+                self.assertFalse(app.busy)
+                self.assertEqual(app.status_state, "ready")
+                self.assertIn("● READY", renderable_plain(app.query_one(StatusBar)))
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("Goal generation cancelled", rendered)
+
     async def test_goal_command_keeps_new_proposed_goal_actions_after_refresh(self) -> None:
         app = make_app()
         raw_request = "write me a story of about 20 words. save it to story.md in the root directory"
@@ -2204,7 +2376,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(goal["objective"], polished_objective)
                 goal_bubble = list(app.query_one(ChatLog).query(".goal"))[-1]
                 actions = list(goal_bubble.query(".goal-action"))
-                self.assertEqual(len(actions), 3)
+                self.assertEqual(len(actions), 4)
                 self.assertTrue(all(not button.disabled and button.display for button in actions))
 
         self.assertEqual(
@@ -2246,11 +2418,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.mode["current_goal"] = value
             app.session.setdefault("events", []).append({"id": 1, "type": "goal", "created_at": "now", "goal": value, "status": "proposed"})
             app.query_one(ChatLog).present_goal(value, active=True)
+            app._sync_artifact_button()
             await pilot.pause()
-            app.clear_goal()
+            artifact_button = app.query_one("#artifact-status-button", Button)
+            self.assertTrue(artifact_button.display)
+            self.assertEqual(artifact_button.label.plain, "Goal Draft")
+            await app._handle_goal_action("clear", "goal-1")
 
         self.assertIsNone(app.session["current_goal"])
         self.assertTrue(any(event.get("type") == "goal" for event in app.session["events"]))
+        self.assertFalse(artifact_button.display)
 
     async def test_goal_close_retains_lifecycle_and_current_goal(self) -> None:
         app = make_app()
@@ -2260,16 +2437,181 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.session["current_goal"] = value
             app.mode["current_goal"] = value
             app.query_one(ChatLog).present_goal(value, active=True)
+            app._sync_artifact_button()
             await pilot.pause()
             await app._handle_goal_action("close", "goal-1")
             self.assertEqual(app.session["current_goal"]["id"], "goal-1")
             self.assertEqual(app.session["current_goal"]["status"], "proposed")
             closed_actions = list(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action"))
             self.assertTrue(all(button.disabled and not button.display for button in closed_actions))
+            artifact_button = app.query_one("#artifact-status-button", Button)
+            self.assertTrue(artifact_button.display)
+            self.assertEqual(artifact_button.label.plain, "Goal Draft")
 
-            await app.show_goal()
+            with patch.object(app, "show_goal", wraps=app.show_goal) as show_goal:
+                await pilot.click("#artifact-status-button")
+                await wait_until(lambda: show_goal.await_count == 1)
             await pilot.pause()
-            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action")), 3)
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action")), 4)
+
+    async def test_artifact_header_and_primary_actions_follow_canonical_status(self) -> None:
+        """The retained control and bubble wording should share the durable status."""
+        app = make_app()
+        goal = goal_artifact(
+            goal_id="goal-status",
+            title="Status Goal",
+            objective="Exercise every status.",
+            success_criteria="- Every status is visible.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        plan = plan_artifact(
+            plan_id="plan-status",
+            title="Status Plan",
+            objective="Exercise every status.",
+            context_and_constraints="Keep the mapping exact.",
+            key_changes=["Render the mapping."],
+            test_plan=["Check every label."],
+            assumptions=["The artifact is retained."],
+            success_criteria="- Every status is visible.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        expected = {
+            "proposed": ("Draft", "Implement"),
+            "active": ("Active", "Resume"),
+            "paused": ("Paused", "Resume"),
+            "max_iterations_reached": ("Limit", "Resume"),
+            "completed": ("Done", "Run again"),
+        }
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            await pilot.pause()
+            button = app.query_one("#artifact-status-button", Button)
+            chat = app.query_one(ChatLog)
+            self.assertFalse(button.display)
+
+            for status, (suffix, primary) in expected.items():
+                goal["status"] = status
+                app.session["current_goal"] = goal
+                app.session["current_plan"] = None
+                app.mode["current_goal"] = goal
+                app.mode["current_plan"] = None
+                app._sync_artifact_button()
+                app._set_status(state="ready")
+                chat.present_goal(goal, active=True, status=status)
+                await pilot.pause()
+
+                self.assertEqual(button.label.plain, f"Goal {suffix}")
+                self.assertTrue(button.has_class("goal-artifact"))
+                self.assertIn("MIRA | ACT |", renderable_plain(app.query_one(StatusBar)))
+                self.assertNotIn("Goal Ready", renderable_plain(app.query_one(StatusBar)))
+                bubble = list(chat.query(".goal"))[-1]
+                self.assertEqual(
+                    bubble.query_one(f"#goal-implement-{goal['id']}", Button).label.plain,
+                    primary,
+                )
+
+            plan["status"] = "completed"
+            app.session["current_goal"] = None
+            app.session["current_plan"] = plan
+            app.mode["current_goal"] = None
+            app.mode["current_plan"] = plan
+            app._sync_artifact_button()
+            chat.present_plan(plan, active=True, status="completed")
+            await pilot.pause()
+
+            self.assertEqual(button.label.plain, "Plan Done")
+            self.assertTrue(button.has_class("plan-artifact"))
+            self.assertEqual(
+                list(chat.query(".plan"))[-1].query_one(
+                    f"#plan-implement-{plan['id']}", Button
+                ).label.plain,
+                "Run again",
+            )
+
+            app.busy = True
+            app._sync_artifact_button()
+            self.assertTrue(button.disabled)
+            app.busy = False
+            app._sync_artifact_button()
+            self.assertFalse(button.disabled)
+
+    async def test_header_controls_use_stable_muted_button_surfaces(self) -> None:
+        """Goal, Plan, and MCP should remain filled without hover or focus shifts."""
+        from tests.test_mcp import PanelManager
+
+        app = make_app(mcp_manager=PanelManager())
+        goal = goal_artifact(
+            goal_id="goal-colour",
+            title="Goal colour",
+            objective="Check the Goal control.",
+            success_criteria="- The Goal control is readable.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        plan = plan_artifact(
+            plan_id="plan-colour",
+            title="Plan colour",
+            objective="Check the Plan control.",
+            context_and_constraints="Use the approved palette.",
+            key_changes=["Render a filled control."],
+            test_plan=["Check computed styles."],
+            assumptions=["The header uses MIRA's dark palette."],
+            success_criteria="- The Plan control is readable.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+
+        async with app.run_test(size=(140, 35)) as pilot:
+            await pilot.pause()
+            artifact = app.query_one("#artifact-status-button", Button)
+            mcp = app.query_one("#mcp-status-button", Button)
+
+            app.session["current_goal"] = goal
+            app.session["current_plan"] = None
+            app._sync_artifact_button()
+            await pilot.pause()
+
+            goal_surface = Color.parse("#46354D")
+            goal_text = Color.parse("#E0B5EA")
+            self.assertEqual(artifact.styles.background, goal_surface)
+            self.assertEqual(artifact.styles.color, goal_text)
+            artifact.focus()
+            await pilot.pause()
+            self.assertEqual(artifact.styles.background, goal_surface)
+            self.assertEqual(artifact.styles.color, goal_text)
+            await pilot.hover("#artifact-status-button")
+            self.assertEqual(artifact.styles.background, goal_surface)
+            self.assertEqual(artifact.styles.color, goal_text)
+
+            app.session["current_goal"] = None
+            app.session["current_plan"] = plan
+            app._sync_artifact_button()
+            await pilot.pause()
+
+            plan_surface = Color.parse("#394329")
+            plan_text = Color.parse("#D0E19A")
+            self.assertEqual(artifact.styles.background, plan_surface)
+            self.assertEqual(artifact.styles.color, plan_text)
+            artifact.focus()
+            await pilot.pause()
+            self.assertEqual(artifact.styles.background, plan_surface)
+            self.assertEqual(artifact.styles.color, plan_text)
+
+            mcp_surface = Color.parse("#386B69")
+            mcp_text = Color.parse("#D2F0ED")
+            self.assertTrue(mcp.display)
+            self.assertEqual(artifact.region.right, mcp.region.x)
+            self.assertEqual(mcp.styles.background, mcp_surface)
+            self.assertEqual(mcp.styles.color, mcp_text)
+            mcp.focus()
+            await pilot.pause()
+            self.assertEqual(mcp.styles.background, mcp_surface)
+            self.assertEqual(mcp.styles.color, mcp_text)
+            await pilot.hover("#mcp-status-button")
+            self.assertEqual(mcp.styles.background, mcp_surface)
+            self.assertEqual(mcp.styles.color, mcp_text)
 
     async def test_natural_language_goal_recall_matches_direct_show_for_retained_statuses(self) -> None:
         for status in ("paused", "max_iterations_reached", "completed"):
@@ -2306,8 +2648,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         natural = list(app.query_one(ChatLog).query(".goal"))[-1]
                         natural_actions = list(natural.query(".goal-action"))
 
-                        self.assertEqual(len(direct_actions), 3)
-                        self.assertEqual(len(natural_actions), 3)
+                        self.assertEqual(len(direct_actions), 4)
+                        self.assertEqual(len(natural_actions), 4)
                         self.assertTrue(
                             all(not button.disabled and button.display for button in direct_actions)
                         )
@@ -2583,6 +2925,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Running · 00:00 elapsed", rendered)
             app.busy = False
 
+    async def test_completed_eval_rearms_working_during_model_silence(self) -> None:
+        """The quiet model phase after eval completion should remain visibly active."""
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            app.tool_call("eval", {"code": "1 + 1"}, call_id="call-eval")
+            app.completed_tool_result("eval", "2", call_id="call-eval")
+
+            await pilot.pause(0.08)
+
+            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+            self.assertIn("Completed in", rendered)
+            self.assertIn("working...", rendered)
+            app.busy = False
+
     async def test_cancel_turn_removes_waiting_and_tool_draft(self) -> None:
         """Cancellation should clear transient waiting and incomplete draft bubbles."""
         app = make_app()
@@ -2598,9 +2958,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.turn_worker = FakeWorker()
             app._cancel_turn()
             await pilot.pause()
+            app.system_message("turn cancelled", kind="warning")
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertNotIn("working...", rendered)
+            self.assertEqual(app.status_state, "cancelling")
 
             app.busy = True
             app.turn_worker = FakeWorker()
@@ -2639,6 +3001,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("?/10.0k", status)
             self.assertNotIn("14/10.0k", status)
             self.assertNotIn("Ctx", telemetry)
+
+    async def test_header_badge_colours_terminal_states_and_animates_active_states(self) -> None:
+        """The fixed operational badge should make every state immediately visible."""
+        self.assertEqual(STATUS_STARTING_COLOR, "#9B91B8")
+        self.assertEqual(TOOL_RUNNING_COLOR, "#5F9FC7")
+        self.assertEqual(TOOL_COMPLETED_COLOR, "#6FA884")
+        self.assertEqual(TOOL_CANCELLED_COLOR, "#B89B59")
+        self.assertEqual(TOOL_FAILED_COLOR, "#D77D79")
+        self.assertEqual(TOOL_DURATION_COLOR, "#98A5AC")
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            status = app.query_one(StatusBar)
+
+            for state, label, colour in (
+                ("ready", "● READY", TOOL_COMPLETED_COLOR),
+                ("error", "× ERROR", TOOL_FAILED_COLOR),
+            ):
+                app._set_status(state=state)
+                self.assertIn(label, renderable_plain(status))
+                self.assert_styled_text(status, label, colour)
+
+            for state, colour in (
+                ("starting", STATUS_STARTING_COLOR),
+                ("running", TOOL_RUNNING_COLOR),
+                ("cancelling", TOOL_CANCELLED_COLOR),
+            ):
+                app._set_status(state=state)
+                first = renderable_plain(status)
+                app._tick_animations()
+                second = renderable_plain(status)
+                self.assertNotEqual(first, second)
+                label = second.split(" | ")[2]
+                self.assertTrue(label.endswith(state.upper()))
+                self.assert_styled_text(status, label, colour)
+
+            app._set_status(state="loading")
+            self.assertIn("READY", renderable_plain(status))
+            self.assertNotIn("LOADING", renderable_plain(status))
 
     async def test_blank_leading_assistant_text_does_not_create_empty_block(self) -> None:
         """Leading blank assistant deltas should be ignored until real text arrives."""
@@ -2777,6 +3179,59 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("info", block.classes)
             self.assertIn("context notice", renderable_plain(block))
 
+    async def test_system_messages_do_not_change_lifecycle_or_stop_working(self) -> None:
+        """Transcript presentation must not own the operational state machine."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            app.busy = True
+            app._set_status(state="running")
+            chat.show_waiting("working...", elapsed=True)
+            started_at = chat._waiting_started_at
+
+            app.system_message("finish the current turn before changing settings", kind="warning")
+            await pilot.pause()
+
+            self.assertEqual(app.status_state, "running")
+            self.assertIsNotNone(chat._waiting_block)
+            self.assertEqual(chat._waiting_started_at, started_at)
+
+            app.busy = False
+            app._set_status(state="error")
+            app.system_message("no current Goal", kind="muted")
+            await pilot.pause()
+            self.assertEqual(app.status_state, "error")
+
+    async def test_settings_close_is_passive_and_prebootstrap_save_requires_retry(self) -> None:
+        """Settings should clear Error only after a real installed-runtime rebuild."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            app = make_app(workspace=Path(directory))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.busy = True
+                app._set_status(state="running")
+                await app._run_settings_command()
+                self.assertEqual(app.status_state, "running")
+
+                app.busy = False
+                app._set_status(state="error")
+                with patch.object(app, "_handle_settings_command", return_value=True):
+                    await app._run_settings_command()
+                self.assertEqual(app.status_state, "error")
+
+                app.ready = False
+                updated = set_rubric_enabled(
+                    deepcopy(app.config["settings"]),
+                    not rubric_enabled(app.config),
+                )
+                saved, message = await app._apply_settings(updated)
+
+                self.assertTrue(saved)
+                self.assertEqual(message, "settings saved; run /reload-runtime to retry startup")
+                self.assertEqual(app.status_state, "error")
+
     async def test_context_overflow_notice_stays_separate_from_compaction_block(self) -> None:
         """Context-overflow copy should render as info, not inside compacting status."""
         app = make_app()
@@ -2905,6 +3360,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(VERSION, loading_text)
             self.assertIn("loading", loading_text)
             self.assertIn("loading model metadata", loading_text)
+            status_text = renderable_plain(app.query_one(StatusBar))
+            self.assertIn("STARTING", status_text)
+            self.assertNotIn("LOADING", status_text)
+            self.assertNotIn("loading model metadata", status_text)
 
             release.set()
             await pilot.pause()
@@ -4389,15 +4848,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app._reload_agents = AsyncMock()  # type: ignore[method-assign]
             app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
             app.busy = True
+            app._set_status(state="running")
 
             handled_agent = await app._handle_reload_command()
             handled_runtime = await app._handle_reload_command(full_runtime=True)
+            await app._run_reload_command()
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
         self.assertTrue(handled_agent)
         self.assertTrue(handled_runtime)
         app._reload_agents.assert_not_awaited()
         app._reload_runtime.assert_not_awaited()
+        self.assertEqual(app.status_state, "running")
         self.assertIn("finish the current turn before reloading agents", rendered)
 
     async def test_approval_prompt_uses_in_window_panel_with_arrow_keys(self) -> None:
@@ -6266,6 +6728,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             frozen = [renderable_plain(block) for block in tools]
             self.assertEqual(len(tools), 2)
             self.assertTrue(all("Cancelled after 00:07" in value for value in frozen))
+            for tool in tools:
+                self.assert_styled_text(tool, "Cancelled after", TOOL_CANCELLED_COLOR)
             self.assertFalse(chat.has_live_tools())
             self.assertTrue(all(not queue for queue in chat._tool_name_queues.values()))
 
@@ -6628,12 +7092,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
-            panel_text = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+            panel_text = data_table_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", DataTable))
 
             self.assertNotIn(draft, list(app.query_one(ChatLog).children))
             self.assertEqual(delegation_blocks, [])
             self.assertIn("general-purpose [one]", panel_text)
-            self.assertIn("judge haiku", panel_text)
 
     async def test_live_subagent_panel_suppresses_sequential_delegation_bubbles(self) -> None:
         """Sequential task starts should update the panel instead of stacking task bubbles."""
@@ -6657,7 +7120,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
             delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
-            panel_text = renderable_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", Static))
+            panel_text = data_table_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", DataTable))
 
             self.assertEqual(delegation_blocks, [])
             self.assertEqual(panel_text.count("RUNNING"), 3)
@@ -6952,7 +7415,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
-            rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            rendered = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             chat_blocks = [block for block in app.query_one(ChatLog).children if "subagent" in block.classes]
 
             self.assertTrue(panel.display)
@@ -6960,12 +7423,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rendered.count("RUNNING"), 2)
             self.assertGreaterEqual(rendered.count("["), 2)
             self.assertIn("inspect README", rendered)
-            self.assertIn("inspect pyproject", rendered)
+            self.assertIn("inspect pyp", rendered)
             self.assertNotIn("MODEL", rendered)
-            self.assertNotIn("Group", renderable_plain(panel.query_one("#subagents-groups", Static)))
+            self.assertFalse(panel.query_one("#subagents-groups-column").display)
 
-    async def test_subagent_panel_uses_symbol_controls_without_ctrl_g(self) -> None:
-        """The panel should use compact visible controls only."""
+    async def test_subagent_panel_uses_native_collapsible_without_ctrl_g(self) -> None:
+        """The panel should use Textual's native collapsible interaction."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -6976,43 +7439,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
-            toggle = panel.query_one("#subagents-panel-toggle", Static)
-            close = panel.query_one("#subagents-panel-close", Static)
-            self.assertEqual(renderable_plain(toggle), "[-]")
-            self.assertEqual(renderable_plain(close), "x")
+            collapsible = panel.query_one("#subagents-collapsible", Collapsible)
+            close = panel.query_one("#subagents-panel-close", Button)
+            self.assertIsNone(close.tooltip)
+            self.assertIn("▼", renderable_plain(collapsible._title))
+            self.assertEqual(str(close.label), "x")
             self.assertFalse(close.display)
             self.assertFalse(any(binding.key == "ctrl+g" for binding in app.BINDINGS))
 
-            panel.toggle()
+            await pilot.click("#subagents-collapsible > CollapsibleTitle")
             await pilot.pause()
-            self.assertEqual(renderable_plain(toggle), "[+]")
-            self.assertFalse(panel.query_one("#subagents-panel-body").display)
-            first_header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            self.assertTrue(collapsible.collapsed)
+            self.assertIn("▶", renderable_plain(collapsible._title))
+            self.assertEqual(panel.region.bottom, app.query_one("#autocomplete-input").region.y)
+            first_header = subagent_title_plain(panel)
             panel.tick()
             await pilot.pause()
-            second_header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
+            second_header = subagent_title_plain(panel)
             self.assertNotEqual(first_header[0], second_header[0])
             self.assertIn("subagents", second_header)
 
             app.subagent_started("general-purpose [two]", "inspect pyproject")
             await pilot.pause()
-            self.assertEqual(renderable_plain(toggle), "[-]")
-            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+            self.assertTrue(collapsible.collapsed)
 
-            panel.toggle()
+            await pilot.click("#subagents-collapsible > CollapsibleTitle")
             await pilot.pause()
-            self.assertEqual(renderable_plain(toggle), "[+]")
-            self.assertFalse(panel.query_one("#subagents-panel-body").display)
-
-            await pilot.click("#subagents-panel-header")
-            await pilot.pause()
-            self.assertEqual(renderable_plain(toggle), "[-]")
-            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+            self.assertFalse(collapsible.collapsed)
 
             app.subagent_finished("general-purpose [one]", "README summary")
             app.subagent_finished("general-purpose [two]", "pyproject summary")
             await pilot.pause()
             self.assertTrue(close.display)
+            close_cell = panel.query_one("#subagents-close-cell")
+            self.assertEqual(collapsible._title.region.y, close_cell.region.y)
+            self.assertEqual(collapsible._title.region.bottom, close_cell.region.bottom)
+            self.assertEqual(collapsible._title.region.x, panel.content_region.x)
+            self.assertEqual(collapsible._title.region.right, close_cell.region.x)
+            self.assertEqual(close_cell.region.right, panel.content_region.right)
 
     async def test_subagent_panel_keeps_fixed_columns_across_terminal_widths(self) -> None:
         """Task truncation should preserve one-line status and time columns."""
@@ -7039,18 +7503,109 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
 
                     panel = app.query_one(SubagentsPanel)
-                    rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
-                    self.assertIn("Group 1", renderable_plain(panel.query_one("#subagents-groups", Static)))
-                    lines = rendered.rstrip("\n").splitlines()
-                    self.assertEqual(len(lines), 3)
-                    status_col = lines[0].index("STATUS")
-                    time_col = lines[0].index("TIME")
+                    table = panel.query_one("#subagents-tasks", DataTable)
+                    self.assertIn("Group 1", option_list_plain(panel.query_one("#subagents-groups", OptionList)))
+                    self.assertEqual(table.cell_padding, 1)
+                    self.assertEqual(table.ordered_columns[1].width, STATUS_COL - 2 * table.cell_padding)
+                    self.assertEqual(table.ordered_columns[2].width, TIME_COL - 2 * table.cell_padding)
 
-                    for row in lines[1:]:
-                        self.assertEqual(row[status_col : status_col + 11].strip(), "RUNNING")
-                        self.assertTrue(row[time_col:].strip().endswith("s"))
-                        task_cell = row[3:status_col].rstrip()
-                        self.assertTrue(task_cell.endswith("..."))
+                    for row_key in table.rows:
+                        task_cell, status_cell, time_cell = table.get_row(row_key)
+                        self.assertEqual(status_cell.plain, "RUNNING")
+                        self.assertTrue(time_cell.plain.endswith("s"))
+                        self.assertEqual(time_cell.justify, "center")
+                        marker = "..." if table.ordered_columns[0].width >= 6 else "."
+                        self.assertTrue(task_cell.plain.rstrip().endswith(marker))
+                        self.assertLessEqual(cell_len(task_cell.plain), table.ordered_columns[0].width)
+
+    async def test_subagent_task_text_expands_when_terminal_widens(self) -> None:
+        """A wider task column should reveal text hidden at a narrow width."""
+        task = "Inspect the implementation carefully and include the unique responsive tail marker"
+        app = make_app()
+
+        async with app.run_test(size=(70, 24)) as pilot:
+            await pilot.pause()
+            app.subagent_started("general-purpose [responsive]", task)
+            await pilot.pause()
+
+            table = app.query_one(SubagentsPanel).query_one("#subagents-tasks", DataTable)
+            narrow = visual_plain(table.get_row_at(0)[0])
+            self.assertNotIn("responsive tail marker", narrow)
+
+            await pilot.resize_terminal(180, 24)
+            await pilot.pause()
+            wide = visual_plain(table.get_row_at(0)[0])
+
+            self.assertGreater(table.ordered_columns[0].width, 100)
+            self.assertIn("responsive tail marker", wide)
+
+    async def test_subagent_panel_caps_height_with_internal_scrolling(self) -> None:
+        """The expanded body should cap at eight rows and scroll overflowing tasks."""
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            for index in range(14):
+                app.eval_subagent_started(
+                    f"general-purpose [task-{index}]",
+                    f"inspect item {index}",
+                    eval_id="eval-large",
+                    row_id=f"row-{index}",
+                )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            body = panel.query_one("#subagents-panel-body")
+            table = panel.query_one("#subagents-tasks", DataTable)
+            task_header = panel.query_one("#subagents-tasks-header")
+
+            self.assertEqual(body.styles.height.value, PANEL_BODY_ROWS)
+            self.assertGreater(table.max_scroll_y, 0)
+            self.assertEqual(len(table.rows), 14)
+            self.assertFalse(table.show_header)
+            self.assertEqual(table.region.y, task_header.region.bottom)
+            self.assertEqual(table.vertical_scrollbar.region.y, table.region.y)
+
+            for index in range(1, 10):
+                app.eval_subagent_started(
+                    f"general-purpose [group-{index}]",
+                    f"inspect group {index}",
+                    eval_id=f"eval-{index}",
+                    row_id=f"group-row-{index}",
+                )
+            await pilot.pause()
+
+            groups = panel.query_one("#subagents-groups", OptionList)
+            groups_label = panel.query_one("#subagents-groups-label")
+            self.assertGreater(groups.max_scroll_y, 0)
+            self.assertEqual(groups.region.y, groups_label.region.bottom)
+            self.assertEqual(groups.vertical_scrollbar.region.y, groups.region.y)
+
+    async def test_subagent_panel_starts_at_fixed_eight_row_height(self) -> None:
+        """Small workloads should still reserve the full eight-row body."""
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.subagent_started("general-purpose [one]", "inspect README")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            body = panel.query_one("#subagents-panel-body")
+            title = panel.query_one("#subagents-collapsible", Collapsible)._title
+            close_cell = panel.query_one("#subagents-close-cell")
+
+            self.assertEqual(body.styles.height.value, PANEL_BODY_ROWS)
+            self.assertEqual(title.styles.border_bottom, title.styles.border_top)
+            self.assertEqual(title.styles.border_left, title.styles.border_top)
+            self.assertEqual(close_cell.styles.border_top, title.styles.border_top)
+            self.assertEqual(close_cell.styles.border_bottom, title.styles.border_top)
+            self.assertEqual(close_cell.styles.border_right, title.styles.border_top)
+            self.assertEqual(panel.styles.border_left[0], "")
+            self.assertEqual(panel.styles.border_right[0], "")
+            await pilot.hover("#subagents-collapsible > CollapsibleTitle")
+            await pilot.pause()
+            self.assertEqual(title.styles.background.a, 0)
 
     async def test_subagent_panel_styles_identity_with_purple_type_colour(self) -> None:
         """The subagent type and coolname should use MIRA's purple identity colour."""
@@ -7065,6 +7620,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(matching)
 
+    def test_subagent_task_status_colour_does_not_tint_task_text(self) -> None:
+        """Status colour should stay on the icon and word; task prose inherits MIRA white."""
+        panel = SubagentsPanel()
+        for value, colour in (("RUNNING", "yellow"), ("DONE", "green"), ("ERROR", "red"), ("CANCELLED", "yellow")):
+            with self.subTest(status=value):
+                record = SubagentRecord(
+                    key="one",
+                    name="general-purpose [one]",
+                    hint="inspect README",
+                    status=value,
+                )
+                task, status, _ = panel._row_cells(record, 80)
+
+                self.assertIn(colour, str(task.spans[0].style))
+                self.assertIn(colour, str(status.style))
+                hint_start = task.plain.index("inspect README")
+                self.assertFalse(
+                    [
+                        span
+                        for span in task.spans
+                        if span.start <= hint_start < span.end
+                        and any(status_colour in str(span.style) for status_colour in ("yellow", "green", "red"))
+                    ]
+                )
+
     def test_subagent_task_truncation_uses_terminal_cell_width(self) -> None:
         """Wide task characters should retain exact table width and ellipsis."""
         value = truncate_cells("任务说明 with extra detail", 12)
@@ -7072,8 +7652,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cell_len(value), 12)
         self.assertTrue(value.endswith("..."))
 
-    def test_dynamic_subagent_truncated_fallback_label_keeps_ellipsis(self) -> None:
-        """A capped event label should still advertise its missing task text."""
+    def test_dynamic_subagent_truncated_fallback_label_keeps_full_task(self) -> None:
+        """A capped event label should not discard task text needed at wide widths."""
         panel = SubagentsPanel()
         task = "Write a high-quality haiku about pancakes. A haiku is a 3-line poem."
 
@@ -7085,10 +7665,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             label=task[:60],
         )
 
-        self.assertEqual(panel._records["row-haiku"].hint, f"{task[:60]}...")
+        self.assertEqual(panel._records["row-haiku"].hint, task)
 
-    def test_normal_subagent_truncated_task_keeps_ellipsis(self) -> None:
-        """An ordinary task row should advertise task text beyond its cap."""
+    def test_normal_subagent_keeps_task_for_width_aware_truncation(self) -> None:
+        """An ordinary task row should retain text until the table renders it."""
         panel = SubagentsPanel()
         task = "Write a high-quality haiku about pancakes. A haiku is a 3-line poem."
 
@@ -7096,7 +7676,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         record = panel._record_for_name("general-purpose [haiku]")
         self.assertIsNotNone(record)
-        self.assertEqual(record.hint, f"{task[:60]}...")
+        self.assertEqual(record.hint, task)
 
     def test_subagent_group_status_icons_have_status_colours(self) -> None:
         """Group status icons should mirror task-row status colours."""
@@ -7121,7 +7701,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=26.0):
             panel.start_subagent("general-purpose [two]", "second", eval_id="eval-a", row_id="row-b")
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
-            self.assertIn("Group 1 1/2  20.0s", panel._render_groups().plain)
+            self.assertIn("Group 1 1/2  20.0s", subagent_groups_plain(panel))
 
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
             panel.finish_subagent(
@@ -7131,7 +7711,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 duration_ms=14_000,
             )
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
-            self.assertIn("Group 1 2/2  30.0s", panel._render_groups().plain)
+            self.assertIn("Group 1 2/2  30.0s", subagent_groups_plain(panel))
 
         self.assertEqual(panel._records["row-a"].elapsed_seconds(), 15.0)
         self.assertEqual(panel._records["row-b"].elapsed_seconds(), 14.0)
@@ -7148,7 +7728,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=22.0):
             panel.finish_subagent("general-purpose [two]", eval_id="eval-a", row_id="row-b", duration_ms=12_000)
 
-        self.assertIn("Group 1 2/2  12.0s", panel._render_groups().plain)
+        self.assertIn("Group 1 2/2  12.0s", subagent_groups_plain(panel))
 
     def test_subagent_group_time_freezes_for_error_and_cancel_and_resets_for_retry(self) -> None:
         """Terminal groups should stop ticking, and a reused retry group should start fresh."""
@@ -7164,12 +7744,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 status="ERROR",
             )
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
-            self.assertIn("Group 1 1/1  5.0s", error_panel._render_groups().plain)
+            self.assertIn("Group 1 1/1  5.0s", subagent_groups_plain(error_panel))
 
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
             error_panel.start_subagent("general-purpose [retry]", "retry", eval_id="eval-retry", row_id="row-retry")
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=105.0):
-            retry_groups = error_panel._render_groups().plain
+            retry_groups = subagent_groups_plain(error_panel)
         self.assertIn("Group 1 0/1  5.0s", retry_groups)
         self.assertNotIn("Group 2", retry_groups)
 
@@ -7184,7 +7764,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=37.0):
             cancelled_panel.cancel_running()
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
-            self.assertIn("Group 1 1/1  7.0s", cancelled_panel._render_groups().plain)
+            self.assertIn("Group 1 1/1  7.0s", subagent_groups_plain(cancelled_panel))
 
     def test_eval_group_completion_reconciles_only_matching_orphans(self) -> None:
         """A parent eval completion should freeze only its own unfinished rows."""
@@ -7203,7 +7783,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel._records["a-two"].status, "CANCELLED")
         self.assertEqual(panel._records["b-one"].status, "RUNNING")
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
-            groups = panel._render_groups().plain
+            groups = subagent_groups_plain(panel)
         self.assertIn("Group 1 2/2  5.0s", groups)
         self.assertIn("Group 2 0/1  1m29s", groups)
 
@@ -7248,14 +7828,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
             panel.start_subagent("general-purpose [eval]", "eval", eval_id="eval-a", row_id="row-eval")
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
-            groups = panel._render_groups().plain
+            groups = subagent_groups_plain(panel)
         self.assertIn("Tasks 0/1  20.0s", groups)
         self.assertIn("Group 1 0/1  10.0s", groups)
 
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
             panel.finish_subagent("general-purpose [regular]", duration_ms=30_000)
         with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
-            self.assertIn("Tasks 1/1  30.0s", panel._render_groups().plain)
+            self.assertIn("Tasks 1/1  30.0s", subagent_groups_plain(panel))
 
     def test_subagent_group_status_spans_colour_only_the_icon(self) -> None:
         """The left group list should colour v/x/- without tinting labels."""
@@ -7279,11 +7859,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             status="CANCELLED",
         )
 
-        text = panel._render_groups()
+        prompts = [panel._group_prompt(group_key) for group_key in panel._display_group_keys()]
+        text = Text("\n").join(prompts)
 
-        self.assert_styled_char(text, "v", "bold green")
-        self.assert_styled_char(text, "x", "bold red")
-        self.assert_styled_char(text, "-", "bold yellow")
+        self.assert_styled_char(prompts[0], "v", "bold green")
+        self.assert_styled_char(prompts[1], "x", "bold red")
+        self.assert_styled_char(prompts[2], "-", "bold yellow")
         self.assertFalse(
             [
                 span
@@ -7336,12 +7917,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             panel = app.query_one(SubagentsPanel)
             self.assertTrue(panel.display)
-            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+            collapsible = panel.query_one("#subagents-collapsible", Collapsible)
+            self.assertFalse(collapsible.collapsed)
 
             panel.prepare_turn()
             await pilot.pause()
             self.assertTrue(panel.display)
-            self.assertFalse(panel.query_one("#subagents-panel-body").display)
+            self.assertTrue(collapsible.collapsed)
 
             panel.close()
             await pilot.pause()
@@ -7351,11 +7933,58 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.subagent_started("general-purpose [two]", "py")
             await pilot.pause()
 
-            rendered = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            rendered = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             self.assertTrue(panel.display)
-            self.assertTrue(panel.query_one("#subagents-panel-body").display)
+            self.assertFalse(collapsible.collapsed)
             self.assertIn("py", rendered)
             self.assertNotIn("inspect README", rendered)
+
+    async def test_closed_eval_panel_reopens_without_closing_textual_widget(self) -> None:
+        """Dismissing completed eval rows must not trip Textual's internal closed state."""
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.eval_subagent_started(
+                "general-purpose [first]",
+                "first eval task",
+                eval_id="eval-first",
+                row_id="row-first",
+            )
+            app.eval_subagent_finished(
+                "general-purpose [first]",
+                eval_id="eval-first",
+                row_id="row-first",
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            first_rows = list(panel._records)
+            await pilot.click("#subagents-panel-close")
+            await pilot.pause()
+            self.assertFalse(panel.display)
+            self.assertFalse(panel._closed)
+            self.assertIs(app.query_one(SubagentsPanel), panel)
+            self.assertIsInstance(app.query_one(ChatLog), ChatLog)
+
+            app.eval_subagent_started(
+                "general-purpose [second]",
+                "second eval task",
+                eval_id="eval-second",
+                row_id="row-second",
+            )
+            await pilot.pause()
+
+            self.assertTrue(panel.display)
+            self.assertFalse(panel.query_one("#subagents-collapsible", Collapsible).collapsed)
+            self.assertEqual(list(panel._records), [*first_rows, "row-second"])
+            groups = option_list_plain(panel.query_one("#subagents-groups", OptionList))
+            self.assertIn("Group 1", groups)
+            self.assertIn("Group 2", groups)
+            self.assertEqual(
+                [key.value for key in panel.query_one("#subagents-tasks", DataTable).rows],
+                ["row-second"],
+            )
 
     async def test_eval_subagents_are_grouped_without_showing_eval_ids(self) -> None:
         """Eval-created subagents should use user-facing group labels."""
@@ -7389,11 +8018,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             panel = app.query_one(SubagentsPanel)
             await wait_until(
                 lambda: "judge"
-                in renderable_plain(panel.query_one("#subagents-tasks", Static))
+                in data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             )
-            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
-            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
-            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            header = subagent_title_plain(panel)
+            groups = option_list_plain(panel.query_one("#subagents-groups", OptionList))
+            tasks = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
 
             self.assertIn("dynamic subagents", header)
             self.assertIn("2 groups", header)
@@ -7440,10 +8069,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             panel = app.query_one(SubagentsPanel)
             await wait_until(
                 lambda: "retry"
-                in renderable_plain(panel.query_one("#subagents-tasks", Static))
+                in data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             )
-            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
-            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            groups = option_list_plain(panel.query_one("#subagents-groups", OptionList))
+            tasks = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
 
             self.assertIn("Group 1", groups)
             self.assertNotIn("Group 2", groups)
@@ -7480,9 +8109,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             panel = app.query_one(SubagentsPanel)
             statuses = [record.status for record in panel._records.values()]
-            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
-            tasks = renderable_plain(panel.query_one("#subagents-tasks", Static))
-            close = panel.query_one("#subagents-panel-close", Static)
+            header = subagent_title_plain(panel)
+            tasks = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
+            close = panel.query_one("#subagents-panel-close", Button)
 
             self.assertEqual(statuses.count("ERROR"), 1)
             self.assertEqual(statuses.count("CANCELLED"), 7)
@@ -7492,7 +8121,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("7 cancelled", header)
             self.assertTrue(close.display)
             with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
-                self.assertIn("Group 1 8/8  10.0s", panel._render_groups().plain)
+                self.assertIn("Group 1 8/8  10.0s", subagent_groups_plain(panel))
 
             panel.close()
             await pilot.pause()
@@ -7519,7 +8148,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.recovered_tool_result("eval", "done", call_id="eval-worker")
             await pilot.pause()
             self.assertEqual(panel._records["worker"].status, "CANCELLED")
-            self.assertTrue(panel.query_one("#subagents-panel-close", Static).display)
+            self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
 
     async def test_mixed_regular_and_eval_subagents_share_panel_sections(self) -> None:
         """Mixed workflows should show regular tasks plus eval groups in one panel."""
@@ -7540,8 +8169,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
-            header = renderable_plain(panel.query_one("#subagents-panel-header", Static))
-            groups = renderable_plain(panel.query_one("#subagents-groups", Static))
+            header = subagent_title_plain(panel)
+            groups = option_list_plain(panel.query_one("#subagents-groups", OptionList))
 
             self.assertIn("subagents", header)
             self.assertNotIn("dynamic subagents", header)
@@ -7567,42 +8196,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
-            tasks_widget = panel.query_one("#subagents-tasks", Static)
-            initial = renderable_plain(tasks_widget)
-            self.assertIn("judge", initial)
-            self.assertNotIn("general-purpose [regular]", initial)
+            groups_widget = panel.query_one("#subagents-groups", OptionList)
+            tasks_widget = panel.query_one("#subagents-tasks", DataTable)
+            self.assertEqual([key.value for key in tasks_widget.rows], ["judge-a"])
+            self.assertTrue(visual_plain(groups_widget.get_option_at_index(1).prompt).startswith("> "))
+            self.assertEqual(panel.query_one("#subagents-groups-label").styles.text_align, "left")
+
+            with patch.object(panel, "_refresh", wraps=panel._refresh) as full_refresh:
+                await pilot.click("#subagents-groups", offset=(1, 0))
+                await pilot.pause()
+                full_refresh.assert_not_called()
+            self.assertEqual([key.value for key in tasks_widget.rows], ["general-purpose [regular]"])
+            self.assertTrue(visual_plain(groups_widget.get_option_at_index(0).prompt).startswith("> "))
+            self.assertTrue(visual_plain(groups_widget.get_option_at_index(1).prompt).startswith("  "))
 
             await pilot.click("#subagents-groups", offset=(1, 1))
             await pilot.pause()
-            regular = renderable_plain(tasks_widget)
-            self.assertIn("general-purpose [regular]", regular)
-            self.assertNotIn("general-purpose [judge]", regular)
-
-            await pilot.click("#subagents-groups", offset=(1, 2))
-            await pilot.pause()
-            grouped = renderable_plain(tasks_widget)
-            self.assertIn("judge", grouped)
-            self.assertNotIn("general-purpose [regular]", grouped)
-
-    async def test_subagent_group_line_header_and_invalid_rows_do_not_change_selection(self) -> None:
-        """Header and invalid group lines should leave the selection alone."""
-        panel = SubagentsPanel()
-        panel.start_subagent("general-purpose [regular]", "inspect README")
-        panel.start_subagent(
-            "general-purpose [judge]",
-            "judge README summary",
-            eval_id="eval-judge",
-            row_id="judge-a",
-            label="judge",
-        )
-
-        before = [record.name for record in panel._displayed_records()]
-        panel.select_group_line(0)
-        self.assertEqual([record.name for record in panel._displayed_records()], before)
-        panel.select_group_line(99)
-        self.assertEqual([record.name for record in panel._displayed_records()], before)
-        panel.select_group_line(-1)
-        self.assertEqual([record.name for record in panel._displayed_records()], before)
+            self.assertEqual([key.value for key in tasks_widget.rows], ["judge-a"])
 
     async def test_live_subagent_panel_marks_running_rows_cancelled(self) -> None:
         """Cancelling a live turn should stop panel spinners and mark rows terminal."""
@@ -7616,7 +8226,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
-            running = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            running = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             self.assertIn("RUNNING", running)
 
             app.busy = True
@@ -7624,14 +8234,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app._cancel_turn()
             await pilot.pause()
 
-            cancelled = renderable_plain(panel.query_one("#subagents-tasks", Static))
+            cancelled = data_table_plain(panel.query_one("#subagents-tasks", DataTable))
             self.assertIn("CANCELLED", cancelled)
             self.assertNotIn("RUNNING", cancelled)
             self.assertFalse(panel.has_running_subagents())
 
             panel.tick()
             await pilot.pause()
-            self.assertEqual(renderable_plain(panel.query_one("#subagents-tasks", Static)), cancelled)
+            self.assertEqual(data_table_plain(panel.query_one("#subagents-tasks", DataTable)), cancelled)
 
     async def test_cancelled_subagent_blocks_stop_animating(self) -> None:
         """Cancelling a turn should leave active subagents in a terminal state."""
@@ -8025,10 +8635,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Assumptions", rendered)
             self.assertIn("Success Criteria", rendered)
             buttons = list(app.query(".plan-action"))
-            self.assertEqual(len(buttons), 3)
+            self.assertEqual(len(buttons), 4)
             self.assertEqual(
                 [button.label.plain for button in buttons],
-                ["Implement", "Revise", "Close"],
+                ["Implement", "Revise", "Close", "Clear"],
             )
             self.assertEqual(len(app.query(".plan-actions")), 1)
             self.assertTrue(all(button.compact for button in buttons))
@@ -8075,14 +8685,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             revise_button = app.query_one("#plan-revise-plan-1", Button)
             close_button = app.query_one("#plan-close-plan-1", Button)
+            clear_button = app.query_one("#plan-clear-plan-1", Button)
             await pilot.press("right")
             await wait_until(lambda: revise_button.has_focus)
             await pilot.press("right")
             await wait_until(lambda: close_button.has_focus)
             await pilot.press("right")
+            await wait_until(lambda: clear_button.has_focus)
+            await pilot.press("right")
             await wait_until(lambda: first_button.has_focus)
             await pilot.press("left")
-            await wait_until(lambda: close_button.has_focus)
+            await wait_until(lambda: clear_button.has_focus)
             await pilot.press("right")
             await wait_until(lambda: first_button.has_focus)
 
@@ -8143,7 +8756,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(app.session["events"]), event_count)
             self.assertEqual(
                 len([button for button in app.query(".plan-action") if button.display]),
-                3,
+                4,
             )
 
             app.clear_plan()
@@ -8168,7 +8781,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             stage_plan(app)
             await app.finalize_plan(interrupt)
             await pilot.pause()
-            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
 
             app.reasoning_delta("unrelated turn thinking")
             app.busy = True
@@ -8177,7 +8790,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertIsNotNone(app.mode["current_plan"])
-            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
             rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
             self.assertIn("Cancellation Plan", rendered)
             self.assertIn("Status: proposed", rendered)
@@ -8213,7 +8826,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 self.assertIsNotNone(app.mode["current_plan"])
-                self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 3)
+                self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
                 rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
                 self.assertNotIn("Status: revision requested", rendered)
 

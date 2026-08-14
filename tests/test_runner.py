@@ -4201,6 +4201,24 @@ Await further instructions.
         headers = [event for event in renderer.events if event[0] == "subagent_started"]
         self.assertEqual(len(headers), 2)
 
+    async def test_renderer_owned_subagent_animation_skips_runtime_ticker(self) -> None:
+        """A Textual-style renderer should not receive a duplicate runtime animation loop."""
+
+        class ManagedAnimationRenderer(RecordingRenderer):
+            manages_subagent_animation = True
+
+            def tick_subagents(self) -> None:
+                self.events.append(("tick_subagents",))
+
+        renderer = ManagedAnimationRenderer()
+
+        await consume_subagents(
+            AsyncItems([Subagent("general-purpose [one]", [ToolCall("grep", {}, "one")])]),
+            renderer,
+        )
+
+        self.assertNotIn(("tick_subagents",), renderer.events)
+
     async def test_subagent_stream_error_cancels_running_children(self) -> None:
         renderer = RecordingRenderer()
         subagent = HangingSubagent()

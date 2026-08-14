@@ -28,6 +28,7 @@ from ui.spinners import SPINNER_FRAMES
 from ui.terminal_colors import (
     RUBRIC_BODY_COLOR,
     RUBRIC_HEADER_COLOR,
+    TOOL_CANCELLED_COLOR,
     TOOL_COMPLETED_COLOR,
     TOOL_DURATION_COLOR,
     TOOL_FAILED_COLOR,
@@ -920,6 +921,10 @@ class ChatLog(VerticalScroll):
         if plan_id:
             self._plan_widgets[plan_id] = bubble
         self._scroll_to_end()
+        if active:
+            self.call_after_refresh(
+                lambda: self.call_after_refresh(bubble._focus_implement)
+            )
 
     def resolve_plan(self, plan_id: str, status: str) -> None:
         """Mark an existing plan bubble as resolved."""
@@ -946,6 +951,10 @@ class ChatLog(VerticalScroll):
         if goal_id:
             self._goal_widgets[goal_id] = bubble
         self._scroll_to_end()
+        if active:
+            self.call_after_refresh(
+                lambda: self.call_after_refresh(bubble._focus_implement)
+            )
 
     def resolve_goal(self, goal_id: str, status: str) -> None:
         """Mark an existing Goal bubble as resolved."""
@@ -1101,8 +1110,14 @@ class ChatLog(VerticalScroll):
         for child in list(self.children):
             child.remove()
 
-    def show_waiting(self, label: str = "working...", *, elapsed: bool = False) -> None:
+    def show_waiting(self, label: str = "working...", *, elapsed: bool | None = None) -> None:
         """Show the transient thinking status while MIRA is idle."""
+        if elapsed is None:
+            elapsed = bool(
+                self._waiting_block is not None
+                and label == self._waiting_label
+                and self._waiting_elapsed
+            )
         if self._waiting_block is None or label != self._waiting_label or elapsed != self._waiting_elapsed:
             self._waiting_started_at = time.monotonic()
             self._waiting_spinner_index = 0
@@ -1645,7 +1660,7 @@ class ChatLog(VerticalScroll):
             terminal_status = str(block.get("terminal_status") or "")
             if terminal_status == "cancelled":
                 verb = "Cancelled after"
-                verb_color = TOOL_PREPARING_COLOR
+                verb_color = TOOL_CANCELLED_COLOR
             elif terminal_status == "interrupted":
                 verb = "Interrupted after"
                 verb_color = TOOL_FAILED_COLOR
@@ -1752,6 +1767,16 @@ class AssistantBubble(Vertical):
             self._copy_button.label = "Copy"
 
 
+def artifact_primary_label(status: str) -> str:
+    """Return the shared primary action for a retained Goal or Plan."""
+    normalized = str(status or "").strip().lower()
+    if normalized == "proposed":
+        return "Implement"
+    if normalized == "completed":
+        return "Run again"
+    return "Resume"
+
+
 class PlanActionButton(Button):
     """Compact plan control with shortcuts matching its visible label."""
 
@@ -1804,7 +1829,7 @@ class PlanBubble(Vertical):
         if self.active:
             with Horizontal(classes="plan-actions"):
                 yield PlanActionButton(
-                    "Implement",
+                    artifact_primary_label(str(self.plan.get("status") or self.status)),
                     id=f"plan-implement-{self.plan_id}",
                     classes="plan-action",
                     compact=True,
@@ -1815,11 +1840,9 @@ class PlanBubble(Vertical):
                 yield PlanActionButton(
                     "Close", id=f"plan-close-{self.plan_id}", classes="plan-action", compact=True
                 )
-
-    def on_mount(self) -> None:
-        """Focus the first action after an active plan is fully mounted."""
-        if self.active:
-            self.call_after_refresh(self._focus_implement)
+                yield PlanActionButton(
+                    "Clear", id=f"plan-clear-{self.plan_id}", classes="plan-action", compact=True
+                )
 
     def _focus_implement(self) -> None:
         """Focus Implement after composed children are available."""
@@ -1965,9 +1988,10 @@ class GoalBubble(Vertical):
         if self.active:
             with Horizontal(classes="goal-actions"):
                 for action, label in (
-                    ("implement", "Implement"),
+                    ("implement", artifact_primary_label(str(self.value.get("status") or self.status))),
                     ("revise", "Revise"),
                     ("close", "Close"),
+                    ("clear", "Clear"),
                 ):
                     yield GoalActionButton(
                         label,
@@ -1976,9 +2000,12 @@ class GoalBubble(Vertical):
                         compact=True,
                     )
 
-    def on_mount(self) -> None:
-        if self.active:
-            self.call_after_refresh(self.query_one(f"#goal-implement-{self.goal_id}", Button).focus)
+    def _focus_implement(self) -> None:
+        """Focus the primary Goal action after tail layout settles."""
+        try:
+            self.query_one(f"#goal-implement-{self.goal_id}", Button).focus()
+        except NoMatches:
+            return
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
         if isinstance(event.widget, GoalActionButton) and event.widget.id:

@@ -10,9 +10,28 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button, Static
 
+from ui.spinners import SPINNER_FRAMES
+from ui.terminal_colors import (
+    TOOL_CANCELLED_COLOR,
+    TOOL_COMPLETED_COLOR,
+    TOOL_FAILED_COLOR,
+    TOOL_PREPARING_COLOR,
+    TOOL_RUNNING_COLOR,
+)
+
+STATUS_STARTING_COLOR = TOOL_PREPARING_COLOR
+ANIMATED_STATES = {"starting", "running", "cancelling"}
+
 
 class StatusBar(Static):
     """Top operational session and activity status."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._mode = "ACT"
+        self._state = "starting"
+        self._dashboard: dict[str, Any] = {}
+        self._spinner_index = 0
 
     def set_state(
         self,
@@ -22,16 +41,30 @@ class StatusBar(Static):
         state: str,
         dashboard: dict[str, Any] | None = None,
         turns: int = 0,
-        detail: str = "",
     ) -> None:
         """Update the status bar text."""
+        normalized_state = str(state or "").strip().lower()
+        if normalized_state != self._state:
+            self._spinner_index = 0
+        self._mode = mode
+        self._state = normalized_state
+        self._dashboard = dashboard if isinstance(dashboard, dict) else {}
+        self._render_status()
+
+    def tick(self) -> None:
+        """Advance the fixed header badge while its state is transitional."""
+        if self._state not in ANIMATED_STATES:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        self._render_status()
+
+    def _render_status(self) -> None:
+        """Render the current operational state without refreshing telemetry."""
         text = Text()
         append_part(text, "MIRA", "bold #d6fff6")
-        append_part(text, mode)
-        append_part(text, state.title())
-        if detail:
-            append_part(text, detail)
-        append_context(text, dashboard.get("context") if isinstance(dashboard, dict) else {})
+        append_part(text, self._mode)
+        append_operational_state(text, self._state, self._spinner_index)
+        append_context(text, self._dashboard.get("context"))
         self.update(text)
 
 
@@ -77,6 +110,30 @@ def append_part(text: Text, value: str, style: str = "#d7dee2") -> None:
     if len(text):
         text.append(" | ", style="#6f8389")
     text.append(str(value), style=style)
+
+
+def append_operational_state(text: Text, state: str, spinner_index: int = 0) -> None:
+    """Append one prominent state badge using MIRA's lifecycle palette."""
+    normalized = str(state or "").strip().lower()
+    if normalized == "starting":
+        symbol = SPINNER_FRAMES[spinner_index % len(SPINNER_FRAMES)]
+        style = f"bold {STATUS_STARTING_COLOR}"
+    elif normalized == "running":
+        symbol = SPINNER_FRAMES[spinner_index % len(SPINNER_FRAMES)]
+        style = f"bold {TOOL_RUNNING_COLOR}"
+    elif normalized == "cancelling":
+        symbol = SPINNER_FRAMES[spinner_index % len(SPINNER_FRAMES)]
+        style = f"bold {TOOL_CANCELLED_COLOR}"
+    elif normalized == "ready":
+        symbol = "●"
+        style = f"bold {TOOL_COMPLETED_COLOR}"
+    elif normalized == "error":
+        symbol = "×"
+        style = f"bold {TOOL_FAILED_COLOR}"
+    else:
+        symbol = "•"
+        style = "bold #d7dee2"
+    append_part(text, f"{symbol} {normalized.upper() or 'UNKNOWN'}", style)
 
 
 def append_context(text: Text, context: Any) -> None:

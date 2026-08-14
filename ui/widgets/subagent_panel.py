@@ -11,10 +11,11 @@ from typing import Any
 
 from rich.cells import cell_len, set_cell_size
 from rich.text import Text
-from textual import events
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual import events, on
+from textual.containers import Grid, Horizontal, Vertical
 from textual.css.query import NoMatches
-from textual.widgets import Static
+from textual.widgets import Button, Collapsible, DataTable, Label, OptionList
+from textual.widgets.option_list import Option
 
 from ui.names import generate_slug
 from ui.spinners import SPINNER_FRAMES
@@ -27,8 +28,10 @@ TASKS_GROUP = "__regular_tasks__"
 STATUS_COL = 11
 TIME_COL = 7
 TASK_MIN_COL = 4
+PANEL_BODY_ROWS = 8
 MAX_LABEL_CHARS = 80
-MAX_HINT_CHARS = 60
+FALLBACK_LABEL_CHARS = 60
+MAX_OUTPUT_CHARS = 60
 IDENTITY_STYLE = "bold #B7A4E8"
 
 
@@ -67,7 +70,6 @@ class SubagentsPanel(Vertical):
     """Bottom panel for live subagent telemetry."""
 
     can_focus = False
-    can_focus_children = False
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -83,24 +85,50 @@ class SubagentsPanel(Vertical):
         self._active_group: str = ""
         self._aliases: dict[str, deque[str]] = {}
         self._spinner_index = 0
-        self._expanded = True
-        self._closed = False
+        self._dismissed = False
         self._pending_reset = False
         self._fallback_suffixes = count(1)
-        self._last_header = ""
-        self._last_groups = ""
-        self._last_tasks = ""
 
     def compose(self) -> Any:
-        with Horizontal(id="subagents-panel-header-row"):
-            yield Static("[-]", id="subagents-panel-toggle", classes="subagents-panel-action")
-            yield Static("", id="subagents-panel-header")
-            yield Static("x", id="subagents-panel-close", classes="subagents-panel-action")
-        with Horizontal(id="subagents-panel-body"):
-            with VerticalScroll(id="subagents-groups-scroll"):
-                yield Static("", id="subagents-groups")
-            with VerticalScroll(id="subagents-tasks-scroll"):
-                yield Static("", id="subagents-tasks")
+        groups = Vertical(
+            Label("GROUPS", id="subagents-groups-label"),
+            OptionList(id="subagents-groups", compact=True),
+            id="subagents-groups-column",
+        )
+        tasks = DataTable(
+            id="subagents-tasks",
+            cursor_type="none",
+            zebra_stripes=False,
+            show_cursor=False,
+            show_header=False,
+        )
+        task_header = Grid(
+            Label("TASK", id="subagents-task-heading"),
+            Label("STATUS", id="subagents-status-heading"),
+            Label("TIME", id="subagents-time-heading"),
+            id="subagents-tasks-header",
+        )
+        task_column = Vertical(task_header, tasks, id="subagents-tasks-column")
+        body = Horizontal(groups, task_column, id="subagents-panel-body")
+        with Horizontal(id="subagents-panel-row"):
+            yield Collapsible(
+                body,
+                title="subagents",
+                collapsed=False,
+                id="subagents-collapsible",
+            )
+            with Vertical(id="subagents-close-cell"):
+                yield Button("x", id="subagents-panel-close", compact=True)
+
+    def on_mount(self) -> None:
+        """Configure native table columns after the widget is mounted."""
+        table = self.query_one("#subagents-tasks", DataTable)
+        table.cell_padding = 1
+        table.add_column("TASK", key="task", width=40)
+        table.add_column("STATUS", key="status", width=STATUS_COL - 2 * table.cell_padding)
+        table.add_column(Text("TIME", justify="center"), key="time", width=TIME_COL - 2 * table.cell_padding)
+        self._refresh()
+        self.call_after_refresh(self._align_task_column)
 
     def prepare_turn(self) -> None:
         """Collapse completed panel state before the next prompt."""
@@ -122,10 +150,7 @@ class SubagentsPanel(Vertical):
         self._active_group = ""
         self._aliases = {}
         self._pending_reset = False
-        self._closed = False
-        self._last_header = ""
-        self._last_groups = ""
-        self._last_tasks = ""
+        self._dismissed = False
         self.display = False
         self._refresh()
 
@@ -134,17 +159,14 @@ class SubagentsPanel(Vertical):
         if self.has_running_subagents():
             self.set_expanded(False)
             return
-        self._closed = True
+        self._dismissed = True
         self.display = False
 
-    def toggle(self) -> None:
-        """Toggle expanded/collapsed panel body."""
-        self.set_expanded(not self._expanded)
-
     def set_expanded(self, expanded: bool) -> None:
-        self._expanded = expanded
-        self._refresh_visibility()
-        self._refresh_controls()
+        try:
+            self.query_one("#subagents-collapsible", Collapsible).collapsed = not expanded
+        except NoMatches:
+            return
         self._refresh()
 
     def start_subagent(
@@ -157,7 +179,7 @@ class SubagentsPanel(Vertical):
         label: str = "",
     ) -> None:
         """Add or update a running subagent row."""
-        if self._pending_reset or self._closed:
+        if self._pending_reset:
             self.reset()
 
         eval_key = str(eval_id or "")
@@ -230,7 +252,7 @@ class SubagentsPanel(Vertical):
                 return
         replaces_fallback = record.status == STATUS_CANCELLED and status != STATUS_CANCELLED
         record.status = status
-        record.output = sanitize(result, max_chars=MAX_HINT_CHARS)
+        record.output = sanitize(result, max_chars=MAX_OUTPUT_CHARS)
         if record.finished_at is None or replaces_fallback:
             record.finished_at = (
                 record.started + duration_ms / 1000
@@ -281,28 +303,44 @@ class SubagentsPanel(Vertical):
         if not self.has_running_subagents():
             return
         self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
-        self._refresh()
+        if not self.is_mounted:
+            return
+        self.query_one("#subagents-collapsible", Collapsible).title = self._render_header()
+        self._refresh_running_groups()
+        self._refresh_running_tasks()
 
     def on_resize(self, _event: events.Resize) -> None:
         """Rebuild fixed-width task rows after terminal layout changes."""
-        self.call_after_refresh(self._refresh)
+        self.call_after_refresh(self._align_task_column)
+
+    def on_show(self, _event: events.Show) -> None:
+        """Fit columns once a previously hidden panel has a real width."""
+        self.call_after_refresh(self._align_task_column)
+
+    @on(Button.Pressed, "#subagents-panel-close")
+    def close_panel(self, event: Button.Pressed) -> None:
+        """Close completed panel state from its native button."""
+        event.stop()
+        self.close()
+
+    @on(OptionList.OptionSelected, "#subagents-groups")
+    def select_group_option(self, event: OptionList.OptionSelected) -> None:
+        """Select the group represented by a native option."""
+        event.stop()
+        keys = self._display_group_keys()
+        if event.option_id not in keys:
+            return
+        previous = self._selected_group_key()
+        if event.option_id == previous:
+            return
+        self._selected_group = event.option_id
+        self._refresh_group_prompt(previous)
+        self._refresh_group_prompt(event.option_id)
+        self._refresh_tasks()
+        self._refresh_body_height()
 
     def has_running_subagents(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())
-
-    def select_group(self, index: int) -> None:
-        """Select a displayed group by zero-based index."""
-        keys = self._display_group_keys()
-        if index < 0 or index >= len(keys):
-            return
-        self._selected_group = keys[index]
-        self._refresh()
-
-    def select_group_line(self, line: int) -> None:
-        """Select a group from a rendered group-list line."""
-        if line <= 0:
-            return
-        self.select_group(line - 1)
 
     def _group_key_for_eval(self, eval_id: str) -> str:
         if eval_id in self._eval_groups:
@@ -407,42 +445,31 @@ class SubagentsPanel(Vertical):
         return None
 
     def _show(self) -> None:
-        self._closed = False
+        was_hidden = not self.display
+        self._dismissed = False
         self.display = True
-        self.set_expanded(True)
-
-    def _refresh_controls(self) -> None:
-        try:
-            self.query_one("#subagents-panel-toggle", Static).update("[-]" if self._expanded else "[+]")
-            self.query_one("#subagents-panel-close", Static).display = not self.has_running_subagents()
-        except NoMatches:
-            return
-
-    def _refresh_visibility(self) -> None:
-        try:
-            self.query_one("#subagents-panel-body").display = self._expanded
-            self.query_one("#subagents-groups-scroll").display = self._expanded and bool(self._display_group_keys())
-        except NoMatches:
-            return
+        if was_hidden:
+            self.set_expanded(True)
+        else:
+            self._refresh()
 
     def _refresh(self) -> None:
-        self._refresh_visibility()
-        self._refresh_controls()
-        self._update_static("subagents-panel-header", self._render_header())
-        self._update_static("subagents-groups", self._render_groups())
-        self._update_static("subagents-tasks", self._render_tasks())
-
-    def _update_static(self, widget_id: str, text: Text) -> None:
-        plain = text.plain
-        cache_name = f"_last_{widget_id.replace('subagents-panel-', '').replace('subagents-', '')}"
-        if getattr(self, cache_name, "") == plain:
+        if not self.is_mounted:
             return
-        try:
-            widget = self.query_one(f"#{widget_id}", Static)
-        except NoMatches:
-            return
-        widget.update(text)
-        setattr(self, cache_name, plain)
+        close = self.query_one("#subagents-panel-close", Button)
+        groups = self.query_one("#subagents-groups-column")
+        collapsible = self.query_one("#subagents-collapsible", Collapsible)
+        close_visible = not self.has_running_subagents()
+        groups_visible = bool(self._display_group_keys())
+        relayout = close.display != close_visible or groups.display != groups_visible
+        close.display = close_visible
+        groups.display = groups_visible
+        collapsible.title = self._render_header()
+        self._refresh_groups()
+        self._refresh_tasks()
+        self._refresh_body_height()
+        if relayout:
+            self.call_after_refresh(self._align_task_column)
 
     def _render_header(self) -> Text:
         done, total, failed, cancelled = self._counts(self._records.values())
@@ -461,46 +488,104 @@ class SubagentsPanel(Vertical):
             text.append(f"  {cancelled} cancelled", style="yellow")
         return text
 
-    def _render_groups(self) -> Text:
-        text = Text()
+    def _refresh_groups(self) -> None:
         keys = self._display_group_keys()
+        groups = self.query_one("#subagents-groups", OptionList)
+        if keys != [option.id for option in groups.options]:
+            groups.set_options(Option("", id=key) for key in keys)
         if not keys:
-            return text
-        text.append("Groups\n", style="dim")
-        selected = self._selected_group or self._active_group or keys[-1]
-        for group_key in keys:
-            records = self._records_for_group_key(group_key)
-            done, total, failed, cancelled = self._counts(records)
-            if group_key != TASKS_GROUP and self._groups[group_key].terminal_status == STATUS_ERROR:
-                failed = max(1, failed)
-            marker = ">" if group_key == selected else " "
-            status, style = group_status_icon(done=done, total=total, failed=failed, cancelled=cancelled)
-            elapsed = group_elapsed_seconds(records)
-            label = "Tasks" if group_key == TASKS_GROUP else f"Group {self._groups[group_key].index}"
-            text.append(f"{marker} ")
-            text.append(status, style=style)
-            text.append(f" {label} {done}/{total}  {format_seconds(elapsed)}\n")
+            return
+        for index, group_key in enumerate(keys):
+            groups.replace_option_prompt_at_index(index, self._group_prompt(group_key))
+        groups.highlighted = keys.index(self._selected_group_key())
+
+    def _refresh_running_groups(self) -> None:
+        """Update only group prompts whose status icon or clock is live."""
+        for group_key in self._display_group_keys():
+            if any(record.status == STATUS_RUNNING for record in self._records_for_group_key(group_key)):
+                self._refresh_group_prompt(group_key)
+
+    def _refresh_group_prompt(self, group_key: str) -> None:
+        keys = self._display_group_keys()
+        if group_key not in keys:
+            return
+        self.query_one("#subagents-groups", OptionList).replace_option_prompt_at_index(
+            keys.index(group_key), self._group_prompt(group_key)
+        )
+
+    def _group_prompt(self, group_key: str) -> Text:
+        records = self._records_for_group_key(group_key)
+        done, total, failed, cancelled = self._counts(records)
+        if group_key != TASKS_GROUP and self._groups[group_key].terminal_status == STATUS_ERROR:
+            failed = max(1, failed)
+        status, style = group_status_icon(done=done, total=total, failed=failed, cancelled=cancelled)
+        label = "Tasks" if group_key == TASKS_GROUP else f"Group {self._groups[group_key].index}"
+        text = Text()
+        text.append("> " if group_key == self._selected_group_key() else "  ")
+        text.append(status, style=style)
+        text.append(f" {label} {done}/{total}  {format_seconds(group_elapsed_seconds(records))}")
         return text
 
-    def _render_tasks(self) -> Text:
+    def _refresh_tasks(self) -> None:
         records = self._displayed_records()
-        text = Text()
-        if not records:
-            return text
-        task_col = self._task_col()
-        text.append(" " * 3)
-        text.append("TASK".ljust(task_col), style="dim")
-        text.append("STATUS".ljust(STATUS_COL), style="dim")
-        text.append("TIME".rjust(TIME_COL), style="dim")
-        text.append("\n")
+        table = self.query_one("#subagents-tasks", DataTable)
+        if len(table.ordered_columns) != 3:
+            return
+        keys = [record.key for record in records]
+        rebuild = keys != [key.value for key in table.rows]
+        if rebuild:
+            table.clear(columns=False)
+        task_width = table.ordered_columns[0].width
         for record in records:
-            icon, style = status_icon(record.status, self._spinner_index)
-            text.append(f" {icon} ", style=style)
-            append_task_cell(text, record, task_col)
-            text.append(record.status.ljust(STATUS_COL), style=style)
-            text.append(format_seconds(record.elapsed_seconds()).rjust(TIME_COL), style="dim")
-            text.append("\n")
-        return text
+            task, status, elapsed = self._row_cells(record, task_width)
+            if rebuild:
+                table.add_row(task, status, elapsed, key=record.key)
+            else:
+                table.update_cell(record.key, "task", task)
+                table.update_cell(record.key, "status", status)
+                table.update_cell(record.key, "time", elapsed)
+
+    def _refresh_running_tasks(self) -> None:
+        """Update live icons and clocks without rebuilding the selected table."""
+        table = self.query_one("#subagents-tasks", DataTable)
+        if len(table.ordered_columns) != 3:
+            return
+        task_width = table.ordered_columns[0].width
+        for record in self._displayed_records():
+            if record.status != STATUS_RUNNING or record.key not in table.rows:
+                continue
+            task, _, elapsed = self._row_cells(record, task_width)
+            table.update_cell(record.key, "task", task)
+            table.update_cell(record.key, "time", elapsed)
+
+    def _row_cells(self, record: SubagentRecord, task_width: int) -> tuple[Text, Text, Text]:
+        icon, style = status_icon(record.status, self._spinner_index)
+        task = Text()
+        task.append(f" {icon} ", style=style)
+        append_task_cell(task, record, max(0, task_width - 3))
+        status = Text(record.status, style=style)
+        elapsed = Text(format_seconds(record.elapsed_seconds()), style="dim", justify="center")
+        return task, status, elapsed
+
+    def _refresh_body_height(self) -> None:
+        body = self.query_one("#subagents-panel-body")
+        body.styles.height = PANEL_BODY_ROWS
+
+    def _align_task_column(self) -> None:
+        table = self.query_one("#subagents-tasks", DataTable)
+        if len(table.ordered_columns) != 3:
+            return
+        width = table.content_region.width or table.size.width
+        if width <= 0:
+            return
+        fixed_width = STATUS_COL + TIME_COL
+        task_width = max(TASK_MIN_COL, width - fixed_width - 2 * table.cell_padding - 1)
+        column = table.ordered_columns[0]
+        if column.width == task_width:
+            return
+        column.width = task_width
+        self._refresh_tasks()
+        table.refresh(layout=True)
 
     def _display_group_keys(self) -> list[str]:
         keys = []
@@ -508,6 +593,13 @@ class SubagentsPanel(Vertical):
             keys.append(TASKS_GROUP)
         keys.extend(self._group_order)
         return keys
+
+    def _selected_group_key(self) -> str:
+        keys = self._display_group_keys()
+        if not keys:
+            return ""
+        selected = self._selected_group or self._active_group or keys[-1]
+        return selected if selected in keys else keys[-1]
 
     def _displayed_records(self) -> list[SubagentRecord]:
         if not self._group_order:
@@ -522,17 +614,6 @@ class SubagentsPanel(Vertical):
         if group is None:
             return []
         return [self._records[key] for key in group.order if key in self._records]
-
-    def _task_col(self) -> int:
-        try:
-            width = self.query_one("#subagents-tasks-scroll").content_region.width
-        except NoMatches:
-            width = 0
-        if width <= 0:
-            width = max(50, self.size.width or 80)
-            if self._display_group_keys():
-                width -= 18
-        return max(TASK_MIN_COL, width - STATUS_COL - TIME_COL - 3)
 
     def _counts(self, records: Any) -> tuple[int, int, int, int]:
         items = list(records)
@@ -627,23 +708,23 @@ def base_name(label: str) -> str:
 
 
 def compact_hint(value: Any) -> str:
-    return sanitize(value, max_chars=MAX_HINT_CHARS)
+    return sanitize(value)
 
 
 def compact_subagent_hint(label: Any, task: Any) -> str:
-    """Keep an ellipsis when an event label is a truncated task fallback."""
+    """Prefer full task text when an event label is its truncated fallback."""
     hint = compact_hint(label or task)
     task_hint = compact_hint(task)
-    if label and task and task_hint == f"{hint}...":
+    if label and task and len(hint) >= FALLBACK_LABEL_CHARS and task_hint.startswith(hint) and len(task_hint) > len(hint):
         return task_hint
     return hint
 
 
-def sanitize(value: Any, *, max_chars: int) -> str:
+def sanitize(value: Any, *, max_chars: int | None = None) -> str:
     text = str(value or "")
     text = re.sub(r"[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= max_chars:
+    if max_chars is None or len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "..."
 
