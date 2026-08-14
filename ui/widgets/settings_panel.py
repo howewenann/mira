@@ -12,7 +12,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, ContentSwitcher, Input, Select, Static
 
 from config.settings import (
     DYNAMIC_SUBAGENTS,
@@ -243,18 +243,36 @@ class SettingsPanel(Vertical):
                         classes="settings-select",
                     )
 
-                for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
-                    with Horizontal(id=f"settings-execute-env-{key}-row", classes="settings-row settings-wide-row") as row:
-                        row.display = execute_env_mode == mode
-                        yield Static(label, classes="settings-label")
-                        yield Input(
-                            value=str(execute_env.get(key) or ""),
-                            placeholder=f"<{placeholder}>",
-                            id=f"settings-execute-env-{key}",
-                            classes="settings-input",
-                        )
+                with ContentSwitcher(
+                    initial=f"settings-execute-env-page-{execute_env_mode}",
+                    id="settings-execute-env-switcher",
+                ):
+                    with Vertical(
+                        id="settings-execute-env-page-system",
+                        classes="settings-execute-env-page",
+                    ):
+                        pass
+                    for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
+                        with Vertical(
+                            id=f"settings-execute-env-page-{mode}",
+                            classes="settings-execute-env-page",
+                        ):
+                            with Horizontal(
+                                id=f"settings-execute-env-{key}-row",
+                                classes="settings-row settings-wide-row",
+                            ):
+                                yield Static(label, classes="settings-label")
+                                yield Input(
+                                    value=str(execute_env.get(key) or ""),
+                                    placeholder=f"<{placeholder}>",
+                                    id=f"settings-execute-env-{key}",
+                                    classes="settings-input",
+                                )
 
-                with Horizontal(classes="settings-row settings-wide-row"):
+                with Horizontal(
+                    id="settings-execute-env-allow-row",
+                    classes="settings-row settings-wide-row",
+                ):
                     yield Static("Additional env var names", classes="settings-label")
                     yield Input(
                         value=", ".join(execute_env.get("allow") or []),
@@ -482,9 +500,17 @@ class SettingsPanel(Vertical):
         self._set_status(message)
         if ok:
             self.settings = updated
-            self._refresh_execute_env_section("settings-execute-env-mode")
+            self.query_one("#settings-execute-env-switcher", ContentSwitcher).current = (
+                f"settings-execute-env-page-{event.value}"
+            )
+            allow_row = self.query_one("#settings-execute-env-allow-row", Horizontal)
+            self.call_after_refresh(
+                allow_row.scroll_visible,
+                animate=False,
+                immediate=True,
+            )
         else:
-            event.select.value = current
+            self._restore_select_value(event.select, current)
 
     @on(Select.Changed, ".settings-model-select")
     async def change_model_assignment(self, event: Select.Changed) -> None:
@@ -593,7 +619,12 @@ class SettingsPanel(Vertical):
         self._set_status(message)
         if ok:
             self.settings = updated
-            self._refresh_execute_env_section(input_id)
+            saved = execute_env_settings(self.settings)
+            if input_id == "settings-execute-env-allow":
+                event.input.value = ", ".join(saved.get("allow") or [])
+            else:
+                key = input_id.removeprefix("settings-execute-env-")
+                event.input.value = str(saved.get(key) or "")
 
     @on(Button.Pressed, "#settings-close")
     def press_close(self, event: Button.Pressed) -> None:
@@ -790,22 +821,6 @@ class SettingsPanel(Vertical):
             select.value = value
         label = next((label for label, option_value in options if option_value == value), value)
         select.query_one("SelectCurrent").update(label)
-
-    def _refresh_execute_env_section(self, focus_id: str | None = None) -> None:
-        execute_env = execute_env_settings(self.settings)
-        mode = str(execute_env.get("mode") or "system")
-        select = self.query_one("#settings-execute-env-mode", Select)
-        if select.value != mode:
-            select.value = mode
-        for field_mode, (key, _, _) in EXECUTE_ENV_FIELDS.items():
-            self.query_one(f"#settings-execute-env-{key}-row", Horizontal).display = mode == field_mode
-            self.query_one(f"#settings-execute-env-{key}", Input).value = str(execute_env.get(key) or "")
-        self.query_one("#settings-execute-env-allow", Input).value = ", ".join(execute_env.get("allow") or [])
-        if focus_id is not None:
-            try:
-                self.query_one(f"#{focus_id}").focus(scroll_visible=False)
-            except Exception:
-                pass
 
     def _refresh_rubric_control(self) -> None:
         """Refresh dependent rubric controls after the parent toggle changes."""

@@ -942,6 +942,11 @@ Button.goal-action:focus {
     height: 3;
 }
 
+#settings-execute-env-switcher,
+.settings-execute-env-page {
+    height: auto;
+}
+
 .settings-header-row {
     height: 1;
 }

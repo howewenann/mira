@@ -23,7 +23,17 @@ from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.selection import SELECT_ALL
-from textual.widgets import Button, Collapsible, DataTable, Input, OptionList, Select, Static, TextArea
+from textual.widgets import (
+    Button,
+    Collapsible,
+    ContentSwitcher,
+    DataTable,
+    Input,
+    OptionList,
+    Select,
+    Static,
+    TextArea,
+)
 
 from agent.compaction import PostTurnCompactionResult
 from agent.context_overflow import context_overflow_error, set_context_overflow_notice
@@ -35,6 +45,7 @@ from config.llm import ModelProfile, ModelRegistry
 from config.runtime import LaunchOptions, build_runtime_snapshot
 from config.settings import (
     DEFAULT_SETTINGS,
+    EXECUTE_ENV_MODES,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
@@ -6124,8 +6135,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons[button_id].label), "no")
                 self.assertEqual(len(calls), 1)
 
-    async def test_settings_panel_execute_env_selection_preserves_scroll(self) -> None:
-        """Changing execute env mode should not jump the settings body back to the top."""
+    async def test_settings_panel_execute_env_selection_reveals_fields_and_preserves_scroll(self) -> None:
+        """Changing execute env mode should reveal its rows without resetting scroll or focus."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
@@ -6157,8 +6168,37 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 execute_env_select.focus(scroll_visible=False)
-                execute_env_select.value = "conda_name"
-                await wait_until(lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_name")
+                switcher = panel.query_one("#settings-execute-env-switcher", ContentSwitcher)
+                allow_row = panel.query_one("#settings-execute-env-allow-row", Horizontal)
+                self.assertEqual(
+                    renderable_plain(allow_row.query_one(".settings-label", Static)),
+                    "Additional env var names",
+                )
+                execute_env_select.action_show_overlay()
+                await wait_until(lambda: execute_env_select.expanded)
+                overlay = execute_env_select.query_one("SelectOverlay")
+                overlay.highlighted = 1
+                overlay.action_select()
+                for index, mode in enumerate(
+                    ("conda_name", "conda_prefix", "venv", "system", "conda_name")
+                ):
+                    if index:
+                        execute_env_select.value = mode
+                    await wait_until(
+                        lambda mode=mode: execute_env_settings(load_settings(workspace))["mode"] == mode
+                    )
+                    await wait_until(
+                        lambda mode=mode: switcher.current == f"settings-execute-env-page-{mode}"
+                    )
+                    for candidate in EXECUTE_ENV_MODES:
+                        page = panel.query_one(f"#settings-execute-env-page-{candidate}")
+                        self.assertEqual(page.display, candidate == mode)
+                    await wait_until(
+                        lambda: allow_row.virtual_region.y >= body.scroll_y
+                        and allow_row.virtual_region.bottom
+                        <= body.scroll_y + body.container_size.height
+                    )
+                    self.assertGreater(body.scroll_y, 0)
                 await pilot.pause()
 
                 panel = app.query_one(SettingsPanel)
@@ -6168,6 +6208,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(before, 0)
                 self.assertGreater(body.scroll_y, 0)
                 self.assertTrue(panel.query_one("#settings-execute-env-name-row").display)
+                self.assertEqual(switcher.current, "settings-execute-env-page-conda_name")
                 self.assertEqual(panel.query_one("#settings-execute-env-mode", Select).value, "conda_name")
                 self.assertTrue(panel.query_one("#settings-execute-env-mode", Select).has_focus)
 
@@ -6200,18 +6241,77 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await panel.submit_execute_env_input(Input.Submitted(name_input, "orbit_wars"))
                 await wait_until(lambda: execute_env_settings(load_settings(workspace))["name"] == "orbit_wars")
 
+                panel.query_one("#settings-execute-env-mode", Select).value = "conda_prefix"
+                await wait_until(
+                    lambda: execute_env_settings(load_settings(workspace))["mode"] == "conda_prefix"
+                )
+                prefix_input = panel.query_one("#settings-execute-env-prefix", Input)
+                self.assertEqual(prefix_input.value, "")
+                self.assertEqual(prefix_input.placeholder, r"<C:\Users\me\.conda\envs\my_project_env>")
+                prefix_input.value = r"  C:\envs\project  "
+                await panel.submit_execute_env_input(
+                    Input.Submitted(prefix_input, r"  C:\envs\project  ")
+                )
+                await wait_until(
+                    lambda: execute_env_settings(load_settings(workspace))["prefix"] == r"C:\envs\project"
+                )
+                self.assertEqual(prefix_input.value, r"C:\envs\project")
+
+                panel.query_one("#settings-execute-env-mode", Select).value = "venv"
+                await wait_until(lambda: execute_env_settings(load_settings(workspace))["mode"] == "venv")
+                path_input = panel.query_one("#settings-execute-env-path", Input)
+                self.assertEqual(path_input.value, "")
+                self.assertEqual(path_input.placeholder, r"<.venv or .venv\Scripts\python.exe>")
+                path_input.value = "  .venv  "
+                await panel.submit_execute_env_input(Input.Submitted(path_input, "  .venv  "))
+                await wait_until(lambda: execute_env_settings(load_settings(workspace))["path"] == ".venv")
+                self.assertEqual(path_input.value, ".venv")
+
                 panel = app.query_one(SettingsPanel)
                 allow_input = panel.query_one("#settings-execute-env-allow", Input)
                 allow_input.value = "CUDA_HOME, HF_HOME, TOKEN=value"
                 await panel.submit_execute_env_input(Input.Submitted(allow_input, "CUDA_HOME, HF_HOME, TOKEN=value"))
                 await wait_until(lambda: execute_env_settings(load_settings(workspace))["allow"] == ["CUDA_HOME", "HF_HOME"])
+                self.assertEqual(allow_input.value, "CUDA_HOME, HF_HOME")
 
             saved = execute_env_settings(load_settings(workspace))
-            self.assertEqual(saved["mode"], "conda_name")
+            self.assertEqual(saved["mode"], "venv")
             self.assertEqual(saved["name"], "orbit_wars")
+            self.assertEqual(saved["prefix"], r"C:\envs\project")
+            self.assertEqual(saved["path"], ".venv")
             self.assertEqual(saved["allow"], ["CUDA_HOME", "HF_HOME"])
             self.assertNotIn("my_project_env", str(saved))
-            self.assertGreaterEqual(len(calls), 2)
+            self.assertGreaterEqual(len(calls), 6)
+
+    async def test_settings_panel_restores_rejected_execute_env_mode(self) -> None:
+        """A rejected mode save should restore the Select and active native page."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
+
+                async def reject_change(settings: dict[str, Any]) -> tuple[bool, str]:
+                    return False, "settings not saved"
+
+                panel.apply_change = reject_change
+                select = panel.query_one("#settings-execute-env-mode", Select)
+                switcher = panel.query_one("#settings-execute-env-switcher", ContentSwitcher)
+                select.value = "conda_name"
+                await wait_until(
+                    lambda: renderable_plain(panel.query_one("#settings-status", Static))
+                    == "settings not saved"
+                )
+
+                self.assertEqual(select.value, "system")
+                self.assertEqual(switcher.current, "settings-execute-env-page-system")
+                self.assertEqual(execute_env_settings(panel.settings)["mode"], "system")
+                self.assertEqual(execute_env_settings(load_settings(workspace))["mode"], "system")
 
     async def test_settings_panel_confirm_cancel_keeps_execute_disabled(self) -> None:
         """Cancelling the execute warning should leave settings unchanged."""
