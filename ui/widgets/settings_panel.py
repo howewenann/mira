@@ -87,6 +87,12 @@ EXECUTE_ENV_FIELDS = {
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
 CloseCallback = Callable[[], None]
 INHERIT_VALUE = "__mira_default__"
+SETTINGS_TAB_PAGES = {
+    "general": "settings-body",
+    "models": "settings-models-body",
+    "custom": "settings-custom-body",
+    "mcp": "settings-mcp-body",
+}
 
 
 @dataclass(frozen=True)
@@ -125,11 +131,9 @@ class SettingsPanel(Vertical):
         self.mcp_manager = mcp_manager
         self.model_registry = model_registry
         self.subagent_metadata = list(subagent_metadata or [])
-        self.initial_tab = initial_tab if initial_tab in {"general", "models", "custom", "mcp"} else "general"
+        self.initial_tab = initial_tab if initial_tab in SETTINGS_TAB_PAGES else "general"
         self._model_controls_ready = False
         self._button_cells: dict[str, ToggleCell] = {}
-        if self.initial_tab != "general":
-            self.styles.visibility = "hidden"
 
     def compose(self) -> ComposeResult:
         """Compose a scrollable settings window."""
@@ -158,298 +162,298 @@ class SettingsPanel(Vertical):
                     id="settings-tab-mcp",
                     classes=f"settings-tab{' active' if self.initial_tab == 'mcp' else ''}",
                 )
-            with VerticalScroll(
-                id="settings-body",
-                classes="settings-body settings-general-body",
+            with ContentSwitcher(
+                initial=SETTINGS_TAB_PAGES[self.initial_tab],
+                id="settings-switcher",
             ):
-                yield Static("System Settings", classes="settings-section system")
-                yield SettingsHeaderRow("", show_always=False)
-                with Horizontal(classes="settings-row settings-policy-row"):
-                    yield Static("Git Protection", classes="settings-label")
-                    yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
-                with Horizontal(classes="settings-row settings-policy-row"):
-                    yield Static("Dynamic eval subagents", classes="settings-label")
-                    yield self._toggle_button(
-                        ToggleCell("system", DYNAMIC_SUBAGENTS),
-                        dynamic_subagents_enabled(self.settings),
-                    )
-                with Horizontal(classes="settings-row settings-child-row settings-policy-row"):
-                    yield Static("Response schemas", classes="settings-label settings-child-label")
-                    yield self._toggle_button(
-                        ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
-                        dynamic_subagent_response_schema_enabled(self.settings),
-                    )
-                with Horizontal(classes="settings-row settings-policy-row"):
-                    yield Static("Planning todos", classes="settings-label")
-                    yield self._toggle_button(
-                        ToggleCell("todos", PLANNING_TODOS),
-                        planning_todos_enabled(self.settings),
-                    )
-                with Horizontal(
-                    classes="settings-row settings-value-row planning-response-status-retries-row"
+                with VerticalScroll(
+                    id="settings-body",
+                    classes="settings-body settings-general-body",
                 ):
-                    yield Static("Response-status retries", classes="settings-label")
-                    yield Input(
-                        value=str(planning_response_status_max_retries(self.settings)),
-                        id="settings-planning-response-status-max-retries",
-                        classes="settings-input planning-response-status-retries-input",
-                    )
-                with Horizontal(classes="settings-row settings-policy-row"):
-                    yield Static("Rubric Middleware", classes="settings-label")
-                    yield self._toggle_button(
-                        ToggleCell("rubric", RUBRIC),
-                        rubric_enabled(self.settings),
-                    )
-                with Horizontal(
-                    classes="settings-row settings-child-row settings-value-row rubric-iterations-row"
-                ):
-                    yield Static("Maximum iterations", classes="settings-label settings-child-label")
-                    yield Input(
-                        value=str(rubric_max_iterations(self.settings)),
-                        id="settings-rubric-max-iterations",
-                        classes="settings-input rubric-iterations-input",
-                        disabled=not rubric_enabled(self.settings),
-                    )
-
-                yield Static("Inbuilt Tools", classes="settings-section inbuilt")
-                yield SettingsHeaderRow("", show_ptc=True)
-                for tool_name in INBUILT_DANGEROUS_TOOLS:
-                    enabled = tool_enabled(self.settings, tool_name)
-                    with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
-                        yield Static(tool_name, classes="settings-label")
+                    yield Static("System Settings", classes="settings-section system")
+                    yield SettingsHeaderRow("", show_always=False)
+                    with Horizontal(classes="settings-row settings-policy-row"):
+                        yield Static("Git Protection", classes="settings-label")
+                        yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
+                    with Horizontal(classes="settings-row settings-policy-row"):
+                        yield Static("Dynamic eval subagents", classes="settings-label")
                         yield self._toggle_button(
-                            ToggleCell("enabled", tool_name),
-                            enabled,
+                            ToggleCell("system", DYNAMIC_SUBAGENTS),
+                            dynamic_subagents_enabled(self.settings),
                         )
+                    with Horizontal(classes="settings-row settings-child-row settings-policy-row"):
+                        yield Static("Response schemas", classes="settings-label settings-child-label")
                         yield self._toggle_button(
-                            ToggleCell("always_allow", tool_name),
-                            tool_always_allow(self.settings, tool_name),
+                            ToggleCell("response_schema", DYNAMIC_SUBAGENT_RESPONSE_SCHEMA),
+                            dynamic_subagent_response_schema_enabled(self.settings),
                         )
+                    with Horizontal(classes="settings-row settings-policy-row"):
+                        yield Static("Planning todos", classes="settings-label")
                         yield self._toggle_button(
-                            ToggleCell("ptc", tool_name),
-                            tool_ptc(self.settings, tool_name),
+                            ToggleCell("todos", PLANNING_TODOS),
+                            planning_todos_enabled(self.settings),
                         )
-
-                yield Static("Execute Environment", classes="settings-section execute-env")
-                execute_env = execute_env_settings(self.settings)
-                execute_env_mode = str(execute_env.get("mode") or "system")
-                with Horizontal(classes="settings-row settings-wide-row"):
-                    yield Static("Run commands in", classes="settings-label")
-                    yield Select(
-                        ((label, mode) for mode, label in EXECUTE_ENV_LABELS.items()),
-                        value=execute_env_mode,
-                        allow_blank=False,
-                        id="settings-execute-env-mode",
-                        classes="settings-select",
-                    )
-
-                with ContentSwitcher(
-                    initial=f"settings-execute-env-page-{execute_env_mode}",
-                    id="settings-execute-env-switcher",
-                ):
-                    with Vertical(
-                        id="settings-execute-env-page-system",
-                        classes="settings-execute-env-page",
+                    with Horizontal(
+                        classes="settings-row settings-value-row planning-response-status-retries-row"
                     ):
-                        pass
-                    for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
-                        with Vertical(
-                            id=f"settings-execute-env-page-{mode}",
-                            classes="settings-execute-env-page",
-                        ):
-                            with Horizontal(
-                                id=f"settings-execute-env-{key}-row",
-                                classes="settings-row settings-wide-row",
-                            ):
-                                yield Static(label, classes="settings-label")
-                                yield Input(
-                                    value=str(execute_env.get(key) or ""),
-                                    placeholder=f"<{placeholder}>",
-                                    id=f"settings-execute-env-{key}",
-                                    classes="settings-input",
-                                )
-
-                with Horizontal(
-                    id="settings-execute-env-allow-row",
-                    classes="settings-row settings-wide-row",
-                ):
-                    yield Static("Additional env var names", classes="settings-label")
-                    yield Input(
-                        value=", ".join(execute_env.get("allow") or []),
-                        placeholder="<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
-                        id="settings-execute-env-allow",
-                        classes="settings-input",
-                    )
-
-            with VerticalScroll(id="settings-models-body", classes="settings-body"):
-                yield Static("Model Context", classes="settings-section model-context")
-                with Horizontal(classes="settings-row settings-wide-row settings-value-row settings-context-row"):
-                    yield Static("Context limit tokens", classes="settings-label")
-                    yield Input(
-                        str(context_limit_tokens(self.settings)),
-                        id="settings-model-context-limit",
-                        classes="settings-input settings-context-limit-input",
-                    )
-
-                yield Static("Model Assignments", classes="settings-section model-assignments")
-                for role, label in (
-                    (MAIN_MODEL, "Main"),
-                    (RUBRIC_MODEL, "Rubric"),
-                    (SUMMARIZATION_MODEL, "Summarization"),
-                ):
-                    with Horizontal(classes="settings-row settings-wide-row settings-model-row"):
-                        yield Static(label, classes="settings-label")
-                        yield Select(
-                            self._role_options(role),
-                            value=model_assignment(self.settings, role) or INHERIT_VALUE,
-                            allow_blank=False,
-                            id=f"settings-model-{role}",
-                            classes="settings-select settings-model-select",
+                        yield Static("Response-status retries", classes="settings-label")
+                        yield Input(
+                            value=str(planning_response_status_max_retries(self.settings)),
+                            id="settings-planning-response-status-max-retries",
+                            classes="settings-input planning-response-status-retries-input",
                         )
-
-                yield Static("Subagents", classes="settings-section subagents")
-                yield SettingsHeaderRow(
-                    "",
-                    show_always=False,
-                    show_model=True,
-                    row_class="settings-subagent-header",
-                )
-                for item in self.subagent_metadata:
-                    name = str(item.get("name") or "")
-                    if not name:
-                        continue
-                    kind = str(item.get("kind") or "raw")
-                    with Horizontal(classes="settings-row settings-wide-row settings-subagent-row"):
-                        yield Static(name, classes="settings-label")
+                    with Horizontal(classes="settings-row settings-policy-row"):
+                        yield Static("Rubric Middleware", classes="settings-label")
                         yield self._toggle_button(
-                            ToggleCell("subagent_enabled", name, locked=name == "general-purpose"),
-                            subagent_enabled(self.settings, name),
+                            ToggleCell("rubric", RUBRIC),
+                            rubric_enabled(self.settings),
                         )
-                        yield Select(
-                            self._subagent_options(item),
-                            value=subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
-                            allow_blank=False,
-                            disabled=kind != "raw",
-                            id=f"settings-subagent-model-{safe_id(name)}",
-                            classes="settings-select settings-subagent-model-select",
+                    with Horizontal(
+                        classes="settings-row settings-child-row settings-value-row rubric-iterations-row"
+                    ):
+                        yield Static("Maximum iterations", classes="settings-label settings-child-label")
+                        yield Input(
+                            value=str(rubric_max_iterations(self.settings)),
+                            id="settings-rubric-max-iterations",
+                            classes="settings-input rubric-iterations-input",
+                            disabled=not rubric_enabled(self.settings),
                         )
 
-            with VerticalScroll(id="settings-custom-body", classes="settings-body"):
-                yield Static("Custom Tools", classes="settings-section custom")
-                yield SettingsHeaderRow(
-                    "",
-                    show_plan=True,
-                    show_ptc=True,
-                    row_class="settings-custom-tool-header",
-                )
-                custom_names = custom_tool_names(self.tool_metadata)
-                if not custom_names:
-                    yield Static("No custom tools loaded", classes="settings-empty")
-                for tool_name in custom_names:
-                    enabled = tool_enabled(self.settings, tool_name)
-                    with Horizontal(classes="settings-row settings-policy-row settings-custom-tool-row"):
-                        yield Static(tool_name, classes="settings-label")
-                        yield self._toggle_button(ToggleCell("enabled", tool_name), enabled)
-                        yield self._toggle_button(
-                            ToggleCell("always_allow", tool_name),
-                            tool_always_allow(self.settings, tool_name),
-                        )
-                        yield self._toggle_button(
-                            ToggleCell("plan_access", tool_name),
-                            tool_plan_access(self.settings, tool_name),
-                        )
-                        yield self._toggle_button(ToggleCell("ptc", tool_name), tool_ptc(self.settings, tool_name))
-
-            with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
-                states = list(getattr(self.mcp_manager, "servers", {}).values())
-                if not states:
-                    yield Static("No MCP servers configured", classes="settings-empty")
-                for index, state in enumerate(states):
-                    enabled = mcp_server_enabled(self.settings, state.name)
-                    group_classes = "settings-mcp-server-group"
-                    if index == 0:
-                        group_classes += " first"
-                    with Vertical(classes=group_classes):
-                        yield Static(
-                            f"{state.name} [{state.transport.upper()}]",
-                            classes="settings-mcp-server-title",
-                            markup=False,
-                        )
-                        yield SettingsHeaderRow(
-                            "",
-                            row_class="settings-mcp-server-header",
-                        )
-                        with Horizontal(
-                            classes="settings-row settings-policy-row settings-mcp-server-policy-row"
-                        ):
-                            yield Static("Server", classes="settings-label")
+                    yield Static("Inbuilt Tools", classes="settings-section inbuilt")
+                    yield SettingsHeaderRow("", show_ptc=True)
+                    for tool_name in INBUILT_DANGEROUS_TOOLS:
+                        enabled = tool_enabled(self.settings, tool_name)
+                        with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
+                            yield Static(tool_name, classes="settings-label")
                             yield self._toggle_button(
-                                ToggleCell("mcp_server_enabled", state.name, server=state.name),
+                                ToggleCell("enabled", tool_name),
                                 enabled,
                             )
                             yield self._toggle_button(
-                                ToggleCell("mcp_server_allow", state.name, server=state.name),
-                                mcp_server_always_allow(self.settings, state.name),
+                                ToggleCell("always_allow", tool_name),
+                                tool_always_allow(self.settings, tool_name),
                             )
-                        yield SettingsHeaderRow(
-                            "Tool",
-                            show_plan=True,
-                            show_ptc=True,
-                            row_class="settings-mcp-tool-header",
+                            yield self._toggle_button(
+                                ToggleCell("ptc", tool_name),
+                                tool_ptc(self.settings, tool_name),
+                            )
+
+                    yield Static("Execute Environment", classes="settings-section execute-env")
+                    execute_env = execute_env_settings(self.settings)
+                    execute_env_mode = str(execute_env.get("mode") or "system")
+                    with Horizontal(classes="settings-row settings-wide-row"):
+                        yield Static("Run commands in", classes="settings-label")
+                        yield Select(
+                            ((label, mode) for mode, label in EXECUTE_ENV_LABELS.items()),
+                            value=execute_env_mode,
+                            allow_blank=False,
+                            id="settings-execute-env-mode",
+                            classes="settings-select",
                         )
-                        if not state.tool_metadata:
-                            yield Static("No tools", classes="settings-empty settings-mcp-tool-empty")
-                        for item in state.tool_metadata:
-                            original = item.get("original_name", "")
-                            policy = mcp_tool_policy(self.settings, state.name, original)
-                            with Horizontal(
-                                classes="settings-row settings-policy-row settings-mcp-tool-row"
+
+                    with ContentSwitcher(
+                        initial=f"settings-execute-env-page-{execute_env_mode}",
+                        id="settings-execute-env-switcher",
+                    ):
+                        with Vertical(
+                            id="settings-execute-env-page-system",
+                            classes="settings-execute-env-page",
+                        ):
+                            pass
+                        for mode, (key, label, placeholder) in EXECUTE_ENV_FIELDS.items():
+                            with Vertical(
+                                id=f"settings-execute-env-page-{mode}",
+                                classes="settings-execute-env-page",
                             ):
-                                yield Static(original, classes="settings-label")
+                                with Horizontal(
+                                    id=f"settings-execute-env-{key}-row",
+                                    classes="settings-row settings-wide-row",
+                                ):
+                                    yield Static(label, classes="settings-label")
+                                    yield Input(
+                                        value=str(execute_env.get(key) or ""),
+                                        placeholder=f"<{placeholder}>",
+                                        id=f"settings-execute-env-{key}",
+                                        classes="settings-input",
+                                    )
+
+                    with Horizontal(
+                        id="settings-execute-env-allow-row",
+                        classes="settings-row settings-wide-row",
+                    ):
+                        yield Static("Additional env var names", classes="settings-label")
+                        yield Input(
+                            value=", ".join(execute_env.get("allow") or []),
+                            placeholder="<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
+                            id="settings-execute-env-allow",
+                            classes="settings-input",
+                        )
+
+                with VerticalScroll(id="settings-models-body", classes="settings-body"):
+                    yield Static("Model Context", classes="settings-section model-context")
+                    with Horizontal(classes="settings-row settings-wide-row settings-value-row settings-context-row"):
+                        yield Static("Context limit tokens", classes="settings-label")
+                        yield Input(
+                            str(context_limit_tokens(self.settings)),
+                            id="settings-model-context-limit",
+                            classes="settings-input settings-context-limit-input",
+                        )
+
+                    yield Static("Model Assignments", classes="settings-section model-assignments")
+                    for role, label in (
+                        (MAIN_MODEL, "Main"),
+                        (RUBRIC_MODEL, "Rubric"),
+                        (SUMMARIZATION_MODEL, "Summarization"),
+                    ):
+                        with Horizontal(classes="settings-row settings-wide-row settings-model-row"):
+                            yield Static(label, classes="settings-label")
+                            yield Select(
+                                self._role_options(role),
+                                value=model_assignment(self.settings, role) or INHERIT_VALUE,
+                                allow_blank=False,
+                                id=f"settings-model-{role}",
+                                classes="settings-select settings-model-select",
+                            )
+
+                    yield Static("Subagents", classes="settings-section subagents")
+                    yield SettingsHeaderRow(
+                        "",
+                        show_always=False,
+                        show_model=True,
+                        row_class="settings-subagent-header",
+                    )
+                    for item in self.subagent_metadata:
+                        name = str(item.get("name") or "")
+                        if not name:
+                            continue
+                        kind = str(item.get("kind") or "raw")
+                        with Horizontal(classes="settings-row settings-wide-row settings-subagent-row"):
+                            yield Static(name, classes="settings-label")
+                            yield self._toggle_button(
+                                ToggleCell("subagent_enabled", name, locked=name == "general-purpose"),
+                                subagent_enabled(self.settings, name),
+                            )
+                            yield Select(
+                                self._subagent_options(item),
+                                value=subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
+                                allow_blank=False,
+                                disabled=kind != "raw",
+                                id=f"settings-subagent-model-{safe_id(name)}",
+                                classes="settings-select settings-subagent-model-select",
+                            )
+
+                with VerticalScroll(id="settings-custom-body", classes="settings-body"):
+                    yield Static("Custom Tools", classes="settings-section custom")
+                    yield SettingsHeaderRow(
+                        "",
+                        show_plan=True,
+                        show_ptc=True,
+                        row_class="settings-custom-tool-header",
+                    )
+                    custom_names = custom_tool_names(self.tool_metadata)
+                    if not custom_names:
+                        yield Static("No custom tools loaded", classes="settings-empty")
+                    for tool_name in custom_names:
+                        enabled = tool_enabled(self.settings, tool_name)
+                        with Horizontal(classes="settings-row settings-policy-row settings-custom-tool-row"):
+                            yield Static(tool_name, classes="settings-label")
+                            yield self._toggle_button(ToggleCell("enabled", tool_name), enabled)
+                            yield self._toggle_button(
+                                ToggleCell("always_allow", tool_name),
+                                tool_always_allow(self.settings, tool_name),
+                            )
+                            yield self._toggle_button(
+                                ToggleCell("plan_access", tool_name),
+                                tool_plan_access(self.settings, tool_name),
+                            )
+                            yield self._toggle_button(ToggleCell("ptc", tool_name), tool_ptc(self.settings, tool_name))
+
+                with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
+                    states = list(getattr(self.mcp_manager, "servers", {}).values())
+                    if not states:
+                        yield Static("No MCP servers configured", classes="settings-empty")
+                    for index, state in enumerate(states):
+                        enabled = mcp_server_enabled(self.settings, state.name)
+                        group_classes = "settings-mcp-server-group"
+                        if index == 0:
+                            group_classes += " first"
+                        with Vertical(classes=group_classes):
+                            yield Static(
+                                f"{state.name} [{state.transport.upper()}]",
+                                classes="settings-mcp-server-title",
+                                markup=False,
+                            )
+                            yield SettingsHeaderRow(
+                                "",
+                                row_class="settings-mcp-server-header",
+                            )
+                            with Horizontal(
+                                classes="settings-row settings-policy-row settings-mcp-server-policy-row"
+                            ):
+                                yield Static("Server", classes="settings-label")
                                 yield self._toggle_button(
-                                    ToggleCell("mcp_tool_enabled", original, not enabled, state.name),
-                                    policy.enabled,
+                                    ToggleCell("mcp_server_enabled", state.name, server=state.name),
+                                    enabled,
                                 )
                                 yield self._toggle_button(
-                                    ToggleCell(
-                                        "mcp_tool_allow",
-                                        original,
-                                        not enabled or not policy.enabled,
-                                        state.name,
-                                    ),
-                                    policy.always_allow,
+                                    ToggleCell("mcp_server_allow", state.name, server=state.name),
+                                    mcp_server_always_allow(self.settings, state.name),
                                 )
-                                yield self._toggle_button(
-                                    ToggleCell(
-                                        "mcp_tool_plan",
-                                        original,
-                                        not enabled or not policy.enabled,
-                                        state.name,
-                                    ),
-                                    policy.plan_access,
-                                )
-                                yield self._toggle_button(
-                                    ToggleCell(
-                                        "mcp_tool_ptc",
-                                        original,
-                                        not enabled or not policy.enabled,
-                                        state.name,
-                                    ),
-                                    policy.ptc,
-                                )
+                            yield SettingsHeaderRow(
+                                "Tool",
+                                show_plan=True,
+                                show_ptc=True,
+                                row_class="settings-mcp-tool-header",
+                            )
+                            if not state.tool_metadata:
+                                yield Static("No tools", classes="settings-empty settings-mcp-tool-empty")
+                            for item in state.tool_metadata:
+                                original = item.get("original_name", "")
+                                policy = mcp_tool_policy(self.settings, state.name, original)
+                                with Horizontal(
+                                    classes="settings-row settings-policy-row settings-mcp-tool-row"
+                                ):
+                                    yield Static(original, classes="settings-label")
+                                    yield self._toggle_button(
+                                        ToggleCell("mcp_tool_enabled", original, not enabled, state.name),
+                                        policy.enabled,
+                                    )
+                                    yield self._toggle_button(
+                                        ToggleCell(
+                                            "mcp_tool_allow",
+                                            original,
+                                            not enabled or not policy.enabled,
+                                            state.name,
+                                        ),
+                                        policy.always_allow,
+                                    )
+                                    yield self._toggle_button(
+                                        ToggleCell(
+                                            "mcp_tool_plan",
+                                            original,
+                                            not enabled or not policy.enabled,
+                                            state.name,
+                                        ),
+                                        policy.plan_access,
+                                    )
+                                    yield self._toggle_button(
+                                        ToggleCell(
+                                            "mcp_tool_ptc",
+                                            original,
+                                            not enabled or not policy.enabled,
+                                            state.name,
+                                        ),
+                                        policy.ptc,
+                                    )
 
             yield Static("", id="settings-status", classes="settings-status")
 
     def on_mount(self) -> None:
         """Focus the first editable toggle when the panel appears."""
-        # Select composes an internal overlay. Keep the whole panel invisible
-        # until nested selectors mount and the requested tab is ready.
-        self.call_after_refresh(self._activate_initial_tab)
+        self.call_after_refresh(self._finish_mount)
 
-    def _activate_initial_tab(self) -> None:
-        self._show_tab(self.initial_tab)
+    def _finish_mount(self) -> None:
         self._model_controls_ready = True
-        self.styles.visibility = "visible"
         if not any(widget.has_focus for widget in self.query("Button, Input, Select")):
             self._focus_first_toggle()
 
@@ -457,15 +461,13 @@ class SettingsPanel(Vertical):
     def press_tab(self, event: Button.Pressed) -> None:
         event.stop()
         selected = (event.button.id or "").removeprefix("settings-tab-")
-        self.initial_tab = selected
-        self._show_tab(selected)
-        self.call_after_refresh(self._focus_first_toggle)
-
-    def _show_tab(self, selected: str) -> None:
-        for name in ("general", "models", "custom", "mcp"):
-            selector = "#settings-body" if name == "general" else f"#settings-{name}-body"
-            self.query_one(selector).display = name == selected
+        page_id = SETTINGS_TAB_PAGES.get(selected)
+        if page_id is None:
+            return
+        self.query_one("#settings-switcher", ContentSwitcher).current = page_id
+        for name in SETTINGS_TAB_PAGES:
             self.query_one(f"#settings-tab-{name}", Button).set_class(name == selected, "active")
+        self.call_after_refresh(self._focus_first_toggle)
 
     async def on_key(self, event: Key) -> None:
         """Handle direct yes/no and close shortcuts."""

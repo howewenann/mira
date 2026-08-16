@@ -5773,6 +5773,39 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(settings_status.region.y, settings_body.region.bottom + 1)
                 self.assertEqual(settings_status.region.bottom, settings_window.content_region.bottom)
 
+    async def test_settings_panel_uses_native_content_switcher_for_tabs(self) -> None:
+        """Settings tabs should delegate page visibility to ContentSwitcher."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 40)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: panel._model_controls_ready)
+                switcher = panel.query_one("#settings-switcher", ContentSwitcher)
+                pages = {
+                    "general": "settings-body",
+                    "models": "settings-models-body",
+                    "custom": "settings-custom-body",
+                    "mcp": "settings-mcp-body",
+                }
+
+                self.assertEqual(switcher.current, pages["general"])
+                for tab, page_id in pages.items():
+                    panel.query_one(f"#settings-tab-{tab}", Button).press()
+                    await pilot.pause()
+                    self.assertEqual(switcher.current, page_id)
+                    self.assertIs(switcher.visible_content, panel.query_one(f"#{page_id}"))
+                    self.assertTrue(panel.query_one(f"#settings-tab-{tab}", Button).has_class("active"))
+                    for candidate_id in pages.values():
+                        self.assertEqual(
+                            panel.query_one(f"#{candidate_id}").display,
+                            candidate_id == page_id,
+                        )
+
     async def test_settings_panel_groups_mcp_server_and_tool_policies(self) -> None:
         """MCP settings should render one transparent policy group per server."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -6229,6 +6262,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
+                await wait_until(lambda: panel._model_controls_ready)
 
                 panel.query_one("#settings-execute-env-mode", Select).value = "conda_name"
                 await wait_until(
@@ -6295,6 +6329,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query("#settings-execute-env-mode")) > 0)
+                await wait_until(lambda: panel._model_controls_ready)
 
                 async def reject_change(settings: dict[str, Any]) -> tuple[bool, str]:
                     return False, "settings not saved"

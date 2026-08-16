@@ -1160,6 +1160,7 @@ Button.goal-action:focus {
 }
 
 #settings-tabs { height: 3; }
+#settings-switcher { height: 1fr; }
 .settings-tab { width: 18; height: 3; border: none; background: #151a1d; color: #aeb8be; }
 .settings-tab.active { background: #1b3036; color: #eef7f8; text-style: bold; }
 .settings-body { height: 1fr; }

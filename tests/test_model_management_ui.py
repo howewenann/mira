@@ -32,7 +32,7 @@ from ui.widgets import IssuesScreen, PromptBox, SettingsPanel
 from ui.widgets.settings_panel import INHERIT_VALUE
 from textual.color import Color
 from textual.geometry import Region
-from textual.widgets import Button, Collapsible, Select, Static
+from textual.widgets import Button, Collapsible, ContentSwitcher, Select, Static
 
 
 def rendered_lines(widget: object) -> list[str]:
@@ -88,6 +88,10 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: panel._model_controls_ready)
+                self.assertEqual(
+                    panel.query_one("#settings-switcher", ContentSwitcher).current,
+                    "settings-models-body",
+                )
                 self.assertFalse(panel.query_one("#settings-body").display)
                 self.assertTrue(panel.query_one("#settings-models-body").display)
                 self.assertFalse(panel.query_one("#settings-tab-general", Button).has_class("active"))
@@ -106,6 +110,10 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
                 command_panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: command_panel._model_controls_ready)
+                self.assertEqual(
+                    command_panel.query_one("#settings-switcher", ContentSwitcher).current,
+                    "settings-models-body",
+                )
                 self.assertFalse(command_panel.query_one("#settings-body").display)
                 self.assertTrue(command_panel.query_one("#settings-models-body").display)
                 self.assertTrue(command_panel.query_one("#settings-tab-models", Button).has_class("active"))
