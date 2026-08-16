@@ -43,6 +43,7 @@ class ToolPolicy:
     always_allow: bool = False
     plan_access: bool = False
     ptc: bool = False
+    rubric: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
-            "execute": {"enabled": False, "always_allow": False, "ptc": False},
+            "execute": {"enabled": False, "always_allow": False, "ptc": False, "rubric": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
         },
@@ -238,6 +239,10 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
             ptc = spec.get("ptc")
             if name not in PTC_INAPPLICABLE_TOOLS and isinstance(ptc, bool):
                 current["ptc"] = ptc
+            rubric = spec.get("rubric")
+            if name not in INBUILT_DANGEROUS_TOOLS or name == EXECUTE_TOOL:
+                if isinstance(rubric, bool):
+                    current["rubric"] = rubric
             normalized_tools[name] = current
         settings["hitl"]["tools"] = normalized_tools
 
@@ -261,7 +266,7 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                         continue
                     normalized_tool = {
                         key: tool_spec[key]
-                        for key in ("enabled", "always_allow", "plan_access", "ptc")
+                        for key in ("enabled", "always_allow", "plan_access", "ptc", "rubric")
                         if isinstance(tool_spec.get(key), bool)
                     }
                     if normalized_tool:
@@ -452,7 +457,7 @@ def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *
     if not isinstance(raw, dict):
         issues.append(_invalid_setting(path, "must be a mapping"))
         return
-    allowed = {"enabled", "always_allow", "ptc"}
+    allowed = {"enabled", "always_allow", "ptc", "rubric"}
     if include_plan:
         allowed.add("plan_access")
     for name, spec in raw.items():
@@ -757,24 +762,32 @@ def tool_policy(config_or_settings: dict[str, Any] | None, tool_name: str) -> To
         always_allow=tool_always_allow(config_or_settings, tool_name),
         plan_access=tool_plan_access(config_or_settings, tool_name),
         ptc=tool_ptc(config_or_settings, tool_name),
+        rubric=tool_rubric_access(config_or_settings, tool_name),
     )
 
 
 def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
-    hitl = hitl_settings(config_or_settings)
-    tools = hitl.get("tools", {})
-    spec = tools.get(tool_name) if isinstance(tools, dict) else None
-    return bool(spec.get("plan_access", False)) if isinstance(spec, dict) else False
+    return _tool_access_value(config_or_settings, tool_name, "plan_access")
 
 
 def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool may be called from eval."""
     if tool_name in PTC_INAPPLICABLE_TOOLS:
         return False
-    hitl = hitl_settings(config_or_settings)
-    tools = hitl.get("tools", {})
+    return _tool_access_value(config_or_settings, tool_name, "ptc")
+
+
+def tool_rubric_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
+    """Return whether an applicable local tool is available to the rubric grader."""
+    if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
+        return False
+    return _tool_access_value(config_or_settings, tool_name, "rubric")
+
+
+def _tool_access_value(config_or_settings: dict[str, Any] | None, tool_name: str, key: str) -> bool:
+    tools = hitl_settings(config_or_settings).get("tools", {})
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
-    return bool(spec.get("ptc", False)) if isinstance(spec, dict) else False
+    return bool(spec.get(key, False)) if isinstance(spec, dict) else False
 
 
 def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
@@ -817,24 +830,29 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
 
 def set_tool_plan_access(settings: dict[str, Any], tool_name: str, plan_access: bool) -> dict[str, Any]:
     """Return settings with explicit Custom Tool Plan trust."""
-    updated = normalize_settings(settings)
-    current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {}))
-    current.setdefault("enabled", True)
-    current.setdefault("always_allow", False)
-    current["plan_access"] = bool(plan_access)
-    updated["hitl"]["tools"][tool_name] = current
-    return updated
+    return _set_tool_access_value(settings, tool_name, "plan_access", plan_access)
 
 
 def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[str, Any]:
     """Return settings with explicit local-tool PTC access."""
-    updated = normalize_settings(settings)
     if tool_name in PTC_INAPPLICABLE_TOOLS:
-        return updated
+        return normalize_settings(settings)
+    return _set_tool_access_value(settings, tool_name, "ptc", ptc)
+
+
+def set_tool_rubric_access(settings: dict[str, Any], tool_name: str, value: bool) -> dict[str, Any]:
+    """Return settings with explicit local-tool Rubric access."""
+    if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
+        return normalize_settings(settings)
+    return _set_tool_access_value(settings, tool_name, "rubric", value)
+
+
+def _set_tool_access_value(settings: dict[str, Any], tool_name: str, key: str, value: bool) -> dict[str, Any]:
+    updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {}))
     current.setdefault("enabled", True)
     current.setdefault("always_allow", False)
-    current["ptc"] = bool(ptc)
+    current[key] = bool(value)
     updated["hitl"]["tools"][tool_name] = current
     return updated
 
@@ -873,6 +891,7 @@ def mcp_tool_policy(
         always_allow=bool(value.get("always_allow", False)),
         plan_access=bool(value.get("plan_access", False)),
         ptc=bool(value.get("ptc", False)),
+        rubric=bool(value.get("rubric", False)),
     )
 
 
@@ -895,7 +914,7 @@ def set_mcp_tool_policy_value(
     key: str,
     value: bool,
 ) -> dict[str, Any]:
-    if key not in {"enabled", "always_allow", "plan_access", "ptc"}:
+    if key not in {"enabled", "always_allow", "plan_access", "ptc", "rubric"}:
         return normalize_settings(settings)
     updated = normalize_settings(settings)
     servers = updated.setdefault("mcp", {}).setdefault("servers", {})

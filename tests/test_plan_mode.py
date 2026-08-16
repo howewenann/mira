@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.exceptions import ContextOverflowError
+from langchain_core.tools import tool
+from deepagents.backends import StateBackend
 from rich.console import Console
 from rich.text import Text
 
@@ -404,14 +406,70 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             factory.build_plan_agent(config, ".", "checkpointer")
             plan_kwargs = create.call_args.kwargs
 
-        rubric.assert_called_once_with(model="model", tools=None, max_iterations=5)
+        call = rubric.call_args.kwargs
+        self.assertEqual([tool.name for tool in call["tools"]], ["ls", "read_file", "glob", "grep"])
+        self.assertEqual(call["grader_middleware"], [])
+        self.assertEqual(call["model"], "model")
+        self.assertEqual(call["max_iterations"], 5)
         self.assertIn("rubric", action_middleware)
         self.assertNotIn("rubric", plan_kwargs["middleware"])
         self.assertIn("prepare_goal", [tool_name(tool) for tool in plan_kwargs["tools"]])
         self.assertTrue(any(isinstance(item, PlanningStageEnforcementMiddleware) for item in plan_kwargs["middleware"]))
 
-    def test_rubric_override_builds_a_dedicated_grader_without_tools(self) -> None:
-        """A configured grader profile should not replace the action model or gain tools."""
+    def test_effective_rubric_tools_filter_disabled_and_unapproved_live_tools(self) -> None:
+        """Runtime filtering must independently enforce enabled and Rubric access."""
+
+        @tool
+        def approved_custom() -> str:
+            """Inspect approved custom state."""
+            return "ok"
+
+        @tool
+        def disabled_custom() -> str:
+            """Inspect disabled custom state."""
+            return "no"
+
+        @tool("mcp__docs__search")
+        def mcp_search() -> str:
+            """Inspect MCP state."""
+            return "ok"
+
+        settings = deepcopy(DEFAULT_SETTINGS)
+        settings["hitl"]["tools"].update(
+            {
+                "approved_custom": {"enabled": True, "always_allow": False, "rubric": True},
+                "disabled_custom": {"enabled": False, "always_allow": True, "rubric": True},
+            }
+        )
+        settings["mcp"] = {
+            "servers": {
+                "docs": {
+                    "enabled": False,
+                    "tools": {"search": {"enabled": True, "always_allow": True, "rubric": True}},
+                }
+            }
+        }
+        metadata = [
+            {"name": "approved_custom", "source": "project"},
+            {"name": "disabled_custom", "source": "project"},
+            {"name": "mcp__docs__search", "source": "mcp", "server": "docs", "original_name": "search"},
+        ]
+
+        tools, interrupts = factory.effective_rubric_tools(
+            {"settings": settings},
+            StateBackend(),
+            [approved_custom, disabled_custom, mcp_search],
+            metadata,
+        )
+
+        self.assertEqual(
+            [tool_name(value) for value in tools],
+            ["ls", "read_file", "glob", "grep", "approved_custom"],
+        )
+        self.assertEqual(set(interrupts), {"approved_custom"})
+
+    def test_rubric_override_builds_a_dedicated_grader_with_safe_reads(self) -> None:
+        """A configured grader profile should not replace the action model."""
         settings = deepcopy(DEFAULT_SETTINGS)
         settings["models"]["main"] = "main"
         settings["models"]["rubric"] = "grader"
@@ -438,7 +496,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(get_llm.call_count, 2)
         self.assertEqual(get_llm.call_args_list[1].kwargs["role"], "rubric")
-        rubric.assert_called_once_with(model="grader-model", tools=None, max_iterations=2)
+        call = rubric.call_args.kwargs
+        self.assertEqual(call["model"], "grader-model")
+        self.assertEqual([tool.name for tool in call["tools"]], ["ls", "read_file", "glob", "grep"])
+        self.assertEqual(call["grader_middleware"], [])
+        self.assertEqual(call["max_iterations"], 2)
         self.assertEqual(create.call_args.kwargs["model"], "main-model")
         self.assertEqual(agent.mira_rubric_model_name, "[grader] lmstudio:bonsai")
 

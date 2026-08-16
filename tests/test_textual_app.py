@@ -57,11 +57,16 @@ from config.settings import (
     save_settings,
     set_model_assignment,
     set_dynamic_subagents,
+    set_mcp_tool_policy_value,
+    set_tool_plan_access,
     set_tool_ptc,
+    set_tool_rubric_access,
     set_rubric_enabled,
     tool_always_allow,
     tool_enabled,
+    tool_plan_access,
     tool_ptc,
+    tool_rubric_access,
 )
 from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
@@ -5492,11 +5497,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-enabled-edit_file", buttons)
                 self.assertIn("settings-toggle-always_allow-edit_file", buttons)
                 self.assertIn("settings-toggle-enabled-write_file", buttons)
-                self.assertIn("settings-toggle-ptc-write_file", buttons)
                 self.assertIn("settings-toggle-enabled-execute", buttons)
                 self.assertIn("settings-toggle-always_allow-execute", buttons)
-                self.assertIn("settings-toggle-ptc-eval", buttons)
-                self.assertIn("settings-toggle-ptc-task", buttons)
+                self.assertIn("settings-tab-access", buttons)
                 self.assertIn("settings-close", buttons)
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 await wait_until(lambda: execute_env_select.value == "system")
@@ -5575,12 +5578,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-ptc-write_file"].label), "no")
-                self.assertFalse(buttons["settings-toggle-ptc-write_file"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-ptc-eval"].label), "-")
-                self.assertTrue(buttons["settings-toggle-ptc-eval"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-ptc-task"].label), "-")
-                self.assertTrue(buttons["settings-toggle-ptc-task"].disabled)
+                self.assertEqual(str(buttons["settings-access-policy-plan"].label), "Plan        4 tools  >")
+                self.assertEqual(str(buttons["settings-access-policy-ptc"].label), "PTC        4 tools  >")
+                self.assertEqual(str(buttons["settings-access-policy-rubric"].label), "Rubric        4 tools  >")
                 self.assertNotIn("Adds write_todos", rendered)
                 self.assertNotIn("Enter a whole number", rendered)
                 self.assertNotIn("Press Enter/click", rendered)
@@ -5737,10 +5737,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(custom_header.region.y, custom_section.region.y + custom_section.region.height)
                 self.assertEqual(custom_first_row.region.y, custom_header.region.y + custom_header.region.height)
 
-                self.assertEqual(
-                    renderable_plain(custom_header.query_one(".settings-column-label.plan", Static)),
-                    "plan access",
-                )
+                self.assertEqual(len(custom_header.query(".settings-column-label.plan")), 0)
                 panel.query_one("#settings-tab-mcp", Button).press()
                 await pilot.pause()
                 self.assertEqual(len(panel.query(".settings-section.mcp")), 0)
@@ -5751,7 +5748,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 execute_section = labels["Execute Environment"]
                 inbuilt_section = labels["Inbuilt Tools"]
                 last_system_row = labels["Maximum iterations"]
-                last_inbuilt_row = labels["execute"]
+                last_inbuilt_row = labels["task"]
                 run_commands = labels["Run commands in"]
                 last_execute_row = labels["Additional env var names"]
                 git_protection = labels["Git Protection"]
@@ -5791,6 +5788,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "models": "settings-models-body",
                     "custom": "settings-custom-body",
                     "mcp": "settings-mcp-body",
+                    "access": "settings-access-body",
                 }
 
                 self.assertEqual(switcher.current, pages["general"])
@@ -5805,6 +5803,80 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                             panel.query_one(f"#{candidate_id}").display,
                             candidate_id == page_id,
                         )
+
+    async def test_settings_access_recycles_one_body_and_counts_only_effective_tools(self) -> None:
+        """Access should omit disabled tools, count fixed reads, and persist toggles."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_tool_plan_access(load_settings(workspace), "custom_search", True)
+            configured = set_tool_rubric_access(configured, "custom_search", False)
+            configured["hitl"]["tools"]["disabled_custom"] = {
+                "enabled": False,
+                "ptc": True,
+                "rubric": True,
+            }
+            configured = set_mcp_tool_policy_value(configured, "docs", "search", "rubric", True)
+            configured.setdefault("mcp", {}).setdefault("servers", {}).setdefault("off", {})["enabled"] = False
+            configured = set_mcp_tool_policy_value(configured, "off", "hidden", "rubric", True)
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
+            docs = SimpleNamespace(
+                name="docs",
+                transport="http",
+                transient=False,
+                usable=True,
+                tools=[object()],
+                tool_metadata=[{"original_name": "search"}],
+            )
+            off = SimpleNamespace(
+                name="off",
+                transport="http",
+                transient=False,
+                usable=True,
+                tools=[object()],
+                tool_metadata=[{"original_name": "hidden"}],
+            )
+
+            async with app.run_test(size=(110, 35)) as pilot:
+                await pilot.pause()
+                async def rebuild() -> None:
+                    return None
+
+                app._rebuild_agents = rebuild
+                app.mcp_manager = SimpleNamespace(
+                    servers={"docs": docs, "off": off},
+                    show_status=False,
+                    shutdown=AsyncMock(),
+                )
+                app.mode.setdefault("resources", {})["tools"] = [
+                    {"name": "custom_search", "source": "project"},
+                    {"name": "disabled_custom", "source": "project"},
+                ]
+                app._handle_settings_command("access")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-access-policy-rubric")) == 1)
+                labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
+                self.assertEqual(labels["settings-access-policy-plan"], "Plan        5 tools  >")
+                self.assertEqual(labels["settings-access-policy-ptc"], "PTC        4 tools  >")
+                self.assertEqual(labels["settings-access-policy-rubric"], "Rubric        5 tools  >")
+
+                panel.query_one("#settings-access-policy-rubric", Button).press()
+                await wait_until(lambda: len(panel.query("#settings-toggle-rubric_access-custom_search")) == 1)
+                self.assertEqual(len(panel.query("#settings-toggle-rubric_access-disabled_custom")), 0)
+                self.assertEqual(len(panel.query("#settings-toggle-rubric_access-execute")), 0)
+                self.assertEqual(len(panel.query("#settings-toggle-mcp_tool_rubric-off-hidden")), 0)
+                self.assertEqual(
+                    str(panel.query_one("#settings-toggle-mcp_tool_rubric-docs-search", Button).label),
+                    "yes",
+                )
+                panel.query_one("#settings-toggle-rubric_access-custom_search", Button).press()
+                await wait_until(lambda: tool_rubric_access(load_settings(workspace), "custom_search"))
+                await pilot.pause()
+                self.assertEqual(
+                    str(panel.query_one("#settings-access-policy-rubric", Button).label),
+                    "Rubric        6 tools  >",
+                )
 
     async def test_settings_panel_groups_mcp_server_and_tool_policies(self) -> None:
         """MCP settings should render one transparent policy group per server."""
@@ -5903,7 +5975,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     [renderable_plain(label).strip() for label in tool_header.query(Static)],
-                    ["Tool", "enable", "always allow", "plan access", "PTC"],
+                    ["Tool", "enable", "always allow"],
                 )
                 self.assertEqual(renderable_plain(server_row.query_one(".settings-label", Static)), "Server")
                 self.assertEqual(
@@ -5940,8 +6012,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     [
                         tool_header.query_one(".settings-column-label.enabled", Static).region.x,
                         tool_header.query_one(".settings-column-label.always", Static).region.x,
-                        tool_header.query_one(".settings-column-label.plan", Static).region.x,
-                        tool_header.query_one(".settings-column-label.ptc", Static).region.x,
                     ],
                 )
                 self.assertEqual(
@@ -5951,11 +6021,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     long_mcp_tool_label.region.right + 2,
                     list(tool_rows[1].query(Button))[0].region.x,
-                )
-                self.assertLessEqual(
-                    panel.query_one("#settings-mcp-body").content_region.right
-                    - tool_buttons[-1].region.right,
-                    4,
                 )
                 self.assertEqual(server_header.region.y, title.region.bottom)
                 self.assertEqual(server_row.region.y, server_header.region.bottom)
@@ -6000,10 +6065,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command("mcp")
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-tab-access")) == 1)
+                panel.query_one("#settings-tab-access", Button).press()
+                await pilot.pause()
+                panel.query_one("#settings-access-policy-ptc", Button).press()
                 await wait_until(lambda: len(panel.query("#settings-toggle-mcp_tool_ptc-docs-search")) == 1)
                 buttons = {button.id: button for button in panel.query(Button)}
 
-                for kind in ("mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc"):
+                for kind in ("mcp_tool_ptc",):
                     button = buttons[f"settings-toggle-{kind}-docs-search"]
                     self.assertEqual(str(button.label), "yes")
                     self.assertTrue(button.disabled)
@@ -6038,9 +6107,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-enabled-edit_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-edit_file"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-always_allow-edit_file"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-ptc-edit_file"].label), "yes")
-                self.assertTrue(buttons["settings-toggle-ptc-edit_file"].disabled)
                 self.assertTrue(tool_ptc(loaded, "edit_file"))
+                panel.query_one("#settings-tab-access", Button).press()
+                panel.query_one("#settings-access-policy-ptc", Button).press()
+                await pilot.pause()
+                self.assertEqual(len(panel.query("#settings-toggle-ptc-edit_file")), 0)
                 self.assertEqual(len(calls), 1)
 
     async def test_settings_panel_ptc_is_independent_and_eval_gates_controls(self) -> None:
@@ -6060,6 +6131,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-tab-access")) == 1)
+                panel.query_one("#settings-tab-access", Button).press()
+                await pilot.pause()
+                panel.query_one("#settings-access-policy-ptc", Button).press()
                 await wait_until(lambda: len(panel.query("#settings-toggle-ptc-write_file")) == 1)
 
                 panel.query_one("#settings-toggle-ptc-write_file", Button).press()
@@ -6451,11 +6526,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(tool_enabled(loaded, "project_status"))
                 self.assertEqual(str(buttons["settings-toggle-always_allow-project_status"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-always_allow-project_status"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-plan_access-project_status"].label), "yes")
-                self.assertTrue(buttons["settings-toggle-plan_access-project_status"].disabled)
-                self.assertEqual(str(buttons["settings-toggle-ptc-project_status"].label), "yes")
-                self.assertTrue(buttons["settings-toggle-ptc-project_status"].disabled)
+                self.assertTrue(tool_plan_access(loaded, "project_status"))
                 self.assertTrue(tool_ptc(loaded, "project_status"))
+                panel.query_one("#settings-tab-access", Button).press()
+                await pilot.pause()
+                panel.query_one("#settings-access-policy-plan", Button).press()
+                await pilot.pause()
+                self.assertEqual(len(panel.query("#settings-toggle-plan_access-project_status")), 0)
                 self.assertEqual(len(calls), 1)
 
     def test_action_preview_shows_key_value_rows(self) -> None:

@@ -510,7 +510,7 @@ class MCPManager:
         tools: list[Any] = [self.read_tool]
         metadata: list[dict[str, str]] = []
         for state in self.servers.values():
-            if not state.usable:
+            if not state.usable or not mcp_server_enabled(settings, state.name):
                 continue
             for item, tool_value in zip(state.tool_metadata, state.tools, strict=True):
                 policy = mcp_tool_policy(settings, state.name, item["original_name"])

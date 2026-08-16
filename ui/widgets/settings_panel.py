@@ -47,10 +47,12 @@ from config.settings import (
     set_tool_enabled,
     set_tool_plan_access,
     set_tool_ptc,
+    set_tool_rubric_access,
     tool_always_allow,
     tool_enabled,
     tool_plan_access,
     tool_ptc,
+    tool_rubric_access,
     mcp_server_always_allow,
     mcp_server_enabled,
     mcp_tool_policy,
@@ -70,7 +72,8 @@ from config.settings import (
 
 ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access", "ptc",
-    "mcp_server_enabled", "mcp_server_allow", "mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc",
+    "rubric_access", "mcp_server_enabled", "mcp_server_allow", "mcp_tool_enabled", "mcp_tool_allow",
+    "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric",
     "subagent_enabled",
 ]
 EXECUTE_ENV_LABELS = {
@@ -92,7 +95,11 @@ SETTINGS_TAB_PAGES = {
     "models": "settings-models-body",
     "custom": "settings-custom-body",
     "mcp": "settings-mcp-body",
+    "access": "settings-access-body",
 }
+ACCESS_POLICIES = ("plan", "ptc", "rubric")
+ACCESS_POLICY_LABELS = {"plan": "Plan", "ptc": "PTC", "rubric": "Rubric"}
+SAFE_READ_TOOL_COUNT = 4
 
 
 @dataclass(frozen=True)
@@ -162,6 +169,11 @@ class SettingsPanel(Vertical):
                     id="settings-tab-mcp",
                     classes=f"settings-tab{' active' if self.initial_tab == 'mcp' else ''}",
                 )
+                yield Button(
+                    "Access",
+                    id="settings-tab-access",
+                    classes=f"settings-tab{' active' if self.initial_tab == 'access' else ''}",
+                )
             with ContentSwitcher(
                 initial=SETTINGS_TAB_PAGES[self.initial_tab],
                 id="settings-switcher",
@@ -220,7 +232,7 @@ class SettingsPanel(Vertical):
                         )
 
                     yield Static("Inbuilt Tools", classes="settings-section inbuilt")
-                    yield SettingsHeaderRow("", show_ptc=True)
+                    yield SettingsHeaderRow("")
                     for tool_name in INBUILT_DANGEROUS_TOOLS:
                         enabled = tool_enabled(self.settings, tool_name)
                         with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
@@ -232,10 +244,6 @@ class SettingsPanel(Vertical):
                             yield self._toggle_button(
                                 ToggleCell("always_allow", tool_name),
                                 tool_always_allow(self.settings, tool_name),
-                            )
-                            yield self._toggle_button(
-                                ToggleCell("ptc", tool_name),
-                                tool_ptc(self.settings, tool_name),
                             )
 
                     yield Static("Execute Environment", classes="settings-section execute-env")
@@ -346,8 +354,6 @@ class SettingsPanel(Vertical):
                     yield Static("Custom Tools", classes="settings-section custom")
                     yield SettingsHeaderRow(
                         "",
-                        show_plan=True,
-                        show_ptc=True,
                         row_class="settings-custom-tool-header",
                     )
                     custom_names = custom_tool_names(self.tool_metadata)
@@ -362,11 +368,6 @@ class SettingsPanel(Vertical):
                                 ToggleCell("always_allow", tool_name),
                                 tool_always_allow(self.settings, tool_name),
                             )
-                            yield self._toggle_button(
-                                ToggleCell("plan_access", tool_name),
-                                tool_plan_access(self.settings, tool_name),
-                            )
-                            yield self._toggle_button(ToggleCell("ptc", tool_name), tool_ptc(self.settings, tool_name))
 
                 with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
                     states = list(getattr(self.mcp_manager, "servers", {}).values())
@@ -401,8 +402,6 @@ class SettingsPanel(Vertical):
                                 )
                             yield SettingsHeaderRow(
                                 "Tool",
-                                show_plan=True,
-                                show_ptc=True,
                                 row_class="settings-mcp-tool-header",
                             )
                             if not state.tool_metadata:
@@ -427,24 +426,17 @@ class SettingsPanel(Vertical):
                                         ),
                                         policy.always_allow,
                                     )
-                                    yield self._toggle_button(
-                                        ToggleCell(
-                                            "mcp_tool_plan",
-                                            original,
-                                            not enabled or not policy.enabled,
-                                            state.name,
-                                        ),
-                                        policy.plan_access,
-                                    )
-                                    yield self._toggle_button(
-                                        ToggleCell(
-                                            "mcp_tool_ptc",
-                                            original,
-                                            not enabled or not policy.enabled,
-                                            state.name,
-                                        ),
-                                        policy.ptc,
-                                    )
+                with Vertical(id="settings-access-body", classes="settings-body"):
+                    with ContentSwitcher(initial="settings-access-landing", id="settings-access-switcher"):
+                        with VerticalScroll(id="settings-access-landing"):
+                            for policy in ACCESS_POLICIES:
+                                yield Button(
+                                    self._access_policy_label(policy),
+                                    id=f"settings-access-policy-{policy}",
+                                    classes="settings-access-policy",
+                                )
+                        with VerticalScroll(id="settings-access-detail"):
+                            pass
 
             yield Static("", id="settings-status", classes="settings-status")
 
@@ -467,7 +459,26 @@ class SettingsPanel(Vertical):
         self.query_one("#settings-switcher", ContentSwitcher).current = page_id
         for name in SETTINGS_TAB_PAGES:
             self.query_one(f"#settings-tab-{name}", Button).set_class(name == selected, "active")
-        self.call_after_refresh(self._focus_first_toggle)
+        if selected == "access":
+            self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"
+            self.call_after_refresh(self.query_one("#settings-access-policy-plan", Button).focus)
+        else:
+            self.call_after_refresh(self._focus_first_toggle)
+
+    @on(Button.Pressed, ".settings-access-policy")
+    async def press_access_policy(self, event: Button.Pressed) -> None:
+        """Recycle the shared detail body for the selected access policy."""
+        event.stop()
+        policy = (event.button.id or "").removeprefix("settings-access-policy-")
+        if policy not in ACCESS_POLICIES:
+            return
+        detail = self.query_one("#settings-access-detail", VerticalScroll)
+        await detail.remove_children()
+        await detail.mount(*self._access_widgets(policy))
+        self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-detail"
+        buttons = list(detail.query(".settings-toggle"))
+        if buttons:
+            buttons[0].focus()
 
     async def on_key(self, event: Key) -> None:
         """Handle direct yes/no and close shortcuts."""
@@ -670,6 +681,8 @@ class SettingsPanel(Vertical):
             updated = set_tool_plan_access(self.settings, cell.name, value)
         elif cell.kind == "ptc":
             updated = set_tool_ptc(self.settings, cell.name, value)
+        elif cell.kind == "rubric_access":
+            updated = set_tool_rubric_access(self.settings, cell.name, value)
         elif cell.kind == "mcp_server_enabled":
             if self.mcp_manager is None or not await self.mcp_manager.set_server_enabled(cell.server, value):
                 self._set_status("could not update MCP server")
@@ -679,6 +692,7 @@ class SettingsPanel(Vertical):
             self.settings = load_settings(self.mcp_manager.workspace)
             self._set_status("MCP server updated")
             self._refresh_buttons()
+            self._refresh_access_counts()
             return
         elif cell.kind == "mcp_server_allow":
             if self.mcp_manager is None or not await self.mcp_manager.set_server_always_allow(cell.server, value):
@@ -690,12 +704,13 @@ class SettingsPanel(Vertical):
             self._set_status("MCP server approval updated")
             self._refresh_buttons()
             return
-        elif cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc"}:
+        elif cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric"}:
             key = {
                 "mcp_tool_enabled": "enabled",
                 "mcp_tool_allow": "always_allow",
                 "mcp_tool_plan": "plan_access",
                 "mcp_tool_ptc": "ptc",
+                "mcp_tool_rubric": "rubric",
             }[cell.kind]
             updated = set_mcp_tool_policy_value(self.settings, cell.server, cell.name, key, value)
         else:
@@ -706,6 +721,7 @@ class SettingsPanel(Vertical):
             return
         self.settings = updated
         self._refresh_buttons()
+        self._refresh_access_counts()
         self._refresh_rubric_control()
 
     async def _submit_rubric_iterations(self, input_widget: Input) -> None:
@@ -762,7 +778,10 @@ class SettingsPanel(Vertical):
 
     def _refresh_buttons(self) -> None:
         for button_id, cell in self._button_cells.items():
-            button = self.query_one(f"#{button_id}", Button)
+            matches = list(self.query(f"#{button_id}"))
+            if not matches:
+                continue
+            button = matches[0]
             locked = self._cell_locked(cell)
             value = selected_value(self.settings, cell)
             button.label = button_label(cell, value)
@@ -770,7 +789,7 @@ class SettingsPanel(Vertical):
             button.set_classes(toggle_classes(value, locked=locked))
 
     def _cell_locked(self, cell: ToggleCell) -> bool:
-        if cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc"}:
+        if cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric"}:
             if not mcp_server_enabled(self.settings, cell.server) or not self._mcp_tool_available(cell):
                 return True
             if cell.kind != "mcp_tool_enabled" and not mcp_tool_policy(self.settings, cell.server, cell.name).enabled:
@@ -778,7 +797,7 @@ class SettingsPanel(Vertical):
             if cell.kind == "mcp_tool_ptc" and not tool_enabled(self.settings, "eval"):
                 return True
             return False
-        if cell.kind in {"always_allow", "plan_access", "ptc"}:
+        if cell.kind in {"always_allow", "plan_access", "ptc", "rubric_access"}:
             if cell.kind == "ptc" and (
                 cell.name in PTC_INAPPLICABLE_TOOLS or not tool_enabled(self.settings, "eval")
             ):
@@ -844,6 +863,69 @@ class SettingsPanel(Vertical):
         ]
         if buttons:
             buttons[0].focus()
+
+    def _access_policy_label(self, policy: str) -> str:
+        count = SAFE_READ_TOOL_COUNT + sum(
+            value for _title, rows in self._access_groups(policy) for _name, _cell, value in rows
+        )
+        return f"{ACCESS_POLICY_LABELS[policy]}        {count} tools  >"
+
+    def _refresh_access_counts(self) -> None:
+        for policy in ACCESS_POLICIES:
+            buttons = list(self.query(f"#settings-access-policy-{policy}"))
+            if buttons:
+                buttons[0].label = self._access_policy_label(policy)
+
+    def _access_groups(self, policy: str) -> list[tuple[str, list[tuple[str, ToggleCell, bool]]]]:
+        """Discover enabled rows once for both Access counts and the shared body."""
+        local_kind = {"plan": "plan_access", "ptc": "ptc", "rubric": "rubric_access"}[policy]
+        mcp_kind = {"plan": "mcp_tool_plan", "ptc": "mcp_tool_ptc", "rubric": "mcp_tool_rubric"}[policy]
+        groups: list[tuple[str, list[tuple[str, ToggleCell, bool]]]] = []
+
+        def build_rows(
+            names: list[str],
+            kind: ToggleKind = local_kind,
+            server: str = "",
+        ) -> list[tuple[str, ToggleCell, bool]]:
+            cells = [ToggleCell(kind, name, server=server) for name in names]
+            return [(cell.name, cell, selected_value(self.settings, cell)) for cell in cells]
+
+        builtins = (
+            [name for name in INBUILT_DANGEROUS_TOOLS if name not in PTC_INAPPLICABLE_TOOLS]
+            if policy == "ptc"
+            else [EXECUTE_TOOL] if policy == "rubric" else []
+        )
+        for title, names in (("Inbuilt Tools", builtins), ("Custom Tools", custom_tool_names(self.tool_metadata))):
+            enabled_rows = build_rows([name for name in names if tool_enabled(self.settings, name)])
+            if enabled_rows:
+                groups.append((title, enabled_rows))
+        for state in getattr(self.mcp_manager, "servers", {}).values():
+            if not mcp_server_enabled(self.settings, state.name):
+                continue
+            access_rows = []
+            for item in state.tool_metadata:
+                original = item.get("original_name", "")
+                tool_policy = mcp_tool_policy(self.settings, state.name, original)
+                if tool_policy.enabled:
+                    access_rows.extend(build_rows([original], mcp_kind, state.name))
+            if access_rows:
+                groups.append((state.name, access_rows))
+        return groups
+
+    def _access_widgets(self, policy: str) -> list[Any]:
+        widgets: list[Any] = []
+        for title, rows in self._access_groups(policy):
+            widgets.append(Static(title, classes="settings-mcp-server-title", markup=False))
+            for name, cell, value in rows:
+                button = self._toggle_button(cell, value)
+                widgets.append(
+                    Horizontal(
+                        Static(name, classes="settings-label"),
+                        button,
+                        classes="settings-row settings-policy-row settings-access-tool-row",
+                    )
+                )
+        return widgets
 
     def _close(self) -> None:
         self.remove()
@@ -931,17 +1013,20 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return tool_plan_access(settings, cell.name)
     if cell.kind == "ptc":
         return tool_ptc(settings, cell.name)
+    if cell.kind == "rubric_access":
+        return tool_rubric_access(settings, cell.name)
     if cell.kind == "mcp_server_enabled":
         return mcp_server_enabled(settings, cell.server)
     if cell.kind == "mcp_server_allow":
         return mcp_server_always_allow(settings, cell.server)
-    if cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc"}:
+    if cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric"}:
         policy = mcp_tool_policy(settings, cell.server, cell.name)
         return {
             "mcp_tool_enabled": policy.enabled,
             "mcp_tool_allow": policy.always_allow,
             "mcp_tool_plan": policy.plan_access,
             "mcp_tool_ptc": policy.ptc,
+            "mcp_tool_rubric": policy.rubric,
         }[cell.kind]
     return tool_always_allow(settings, cell.name)
 
@@ -996,8 +1081,6 @@ class SettingsHeaderRow(Horizontal):
         name_label: str,
         *,
         show_always: bool = True,
-        show_plan: bool = False,
-        show_ptc: bool = False,
         show_model: bool = False,
         row_class: str = "",
     ) -> None:
@@ -1007,8 +1090,6 @@ class SettingsHeaderRow(Horizontal):
         super().__init__(classes=classes)
         self.name_label = name_label
         self.show_always = show_always
-        self.show_plan = show_plan
-        self.show_ptc = show_ptc
         self.show_model = show_model
 
     def compose(self) -> ComposeResult:
@@ -1016,10 +1097,6 @@ class SettingsHeaderRow(Horizontal):
         yield Static("enable", classes="settings-column-label enabled")
         if self.show_always:
             yield Static("always allow", classes="settings-column-label always")
-        if self.show_plan:
-            yield Static("plan access", classes="settings-column-label plan")
-        if self.show_ptc:
-            yield Static("PTC", classes="settings-column-label ptc")
         if self.show_model:
             yield Static("model", classes="settings-column-label model")
 

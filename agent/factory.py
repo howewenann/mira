@@ -5,7 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deepagents import FilesystemPermission, HarnessProfile, RubricMiddleware, create_deep_agent, register_harness_profile
+from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
+from deepagents.middleware import FilesystemMiddleware
+from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 
 from agent.llm import get_llm, get_rubric_model_name
@@ -17,6 +19,7 @@ from agent.middleware import (
     QUICKJS_PTC_TOOLS,
     build_agent_middleware,
 )
+from agent.middleware.rubric import MiraRubricMiddleware as RubricMiddleware
 from agent.planning.response_status import PlanningResponseStatusRule
 from agent.planning.policy import (
     FINALIZE_GOAL_TOOL,
@@ -45,9 +48,12 @@ from config.settings import (
     rubric_max_iterations,
     tool_always_allow,
     tool_enabled,
+    tool_policy,
     tool_plan_access,
     tool_ptc,
+    tool_rubric_access,
     mcp_tool_policy,
+    mcp_server_enabled,
     RUBRIC_MODEL,
     SUMMARIZATION_MODEL,
     model_assignment,
@@ -187,18 +193,6 @@ def _build_agent(
     rubric_model = model
     if enable_rubric and model_assignment(config, RUBRIC_MODEL):
         rubric_model = get_llm(config, role=RUBRIC_MODEL)
-    rubric_middleware = (
-        [RubricMiddleware(model=rubric_model, tools=None, max_iterations=rubric_max_iterations(config))]
-        if enable_rubric
-        else []
-    )
-    extra_middleware = [
-        *(extra_middleware or []),
-        *rubric_middleware,
-        *([ProjectToolErrorMiddleware(project_tool_names)] if project_tool_names else []),
-        ModelToolVisibilityMiddleware(excluded_tools),
-    ]
-
     summarization_model = (
         get_llm(config, role=SUMMARIZATION_MODEL)
         if model_assignment(config, SUMMARIZATION_MODEL)
@@ -228,6 +222,31 @@ def _build_agent(
         and (not planning or _local_tool_available_in_plan(config, local_metadata, tool_name(tool)))
     ]
     tools.extend(mcp_tools)
+    rubric_middleware: list[AgentMiddleware] = []
+    if enable_rubric:
+        rubric_tools, rubric_interrupts = effective_rubric_tools(
+            config,
+            backend,
+            tools,
+            [*local_metadata, *mcp_metadata],
+            excluded_tools,
+        )
+        rubric_middleware.append(
+            RubricMiddleware(
+                model=rubric_model,
+                tools=rubric_tools,
+                grader_middleware=(
+                    [HumanInTheLoopMiddleware(interrupt_on=rubric_interrupts)] if rubric_interrupts else []
+                ),
+                max_iterations=rubric_max_iterations(config),
+            )
+        )
+    extra_middleware = [
+        *(extra_middleware or []),
+        *rubric_middleware,
+        *([ProjectToolErrorMiddleware(project_tool_names)] if project_tool_names else []),
+        ModelToolVisibilityMiddleware(excluded_tools),
+    ]
     subagents = subagents_with_project_tool_errors(resources.subagents, project_tool_names)
     settings = (config or {}).get("settings")
     if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
@@ -489,7 +508,7 @@ def effective_ptc_tool_names(
             continue
         item = metadata_by_name.get(name, {})
         source = item.get("source")
-        if source == "project" and tool_ptc(config, name):
+        if source == "project" and tool_enabled(config, name) and tool_ptc(config, name):
             names.append(name)
         elif source == "mcp":
             policy = mcp_tool_policy(
@@ -497,9 +516,49 @@ def effective_ptc_tool_names(
                 item.get("server", ""),
                 item.get("original_name", ""),
             )
-            if policy.ptc:
+            if mcp_server_enabled(config, item.get("server", "")) and policy.enabled and policy.ptc:
                 names.append(name)
     return names
+
+
+def effective_rubric_tools(
+    config: dict[str, Any] | None,
+    backend: Any,
+    tools: list[Any],
+    metadata: list[dict[str, str]],
+    excluded_tools: tuple[str, ...] = (),
+) -> tuple[list[Any], dict[str, Any]]:
+    """Build the grader's enabled tool surface and normal HITL policy."""
+    excluded = set(excluded_tools)
+    filesystem_names = list(QUICKJS_PTC_TOOLS)
+    if (
+        EXECUTE_TOOL not in excluded
+        and tool_enabled(config, EXECUTE_TOOL)
+        and tool_rubric_access(config, EXECUTE_TOOL)
+    ):
+        filesystem_names.append(EXECUTE_TOOL)
+    resolved = list(FilesystemMiddleware(backend=backend, tools=filesystem_names).tools)
+    selected = set(filesystem_names) - set(QUICKJS_PTC_TOOLS)
+    metadata_by_name = {item.get("name", ""): item for item in metadata if item.get("name")}
+
+    for tool in tools:
+        name = tool_name(tool)
+        item = metadata_by_name.get(name, {})
+        source = item.get("source")
+        if name in excluded or source not in {"project", "mcp"}:
+            continue
+        policy = tool_policy(config, name)
+        enabled = policy.enabled
+        if source == "mcp":
+            server = item.get("server", "")
+            policy = mcp_tool_policy(config, server, item.get("original_name", ""))
+            enabled = mcp_server_enabled(config, server) and policy.enabled
+        if not enabled or not policy.rubric:
+            continue
+        resolved.append(tool)
+        selected.add(name)
+    interrupts = _write_interrupts(config, metadata)
+    return resolved, {name: rule for name, rule in interrupts.items() if name in selected}
 
 
 def effective_excluded_tools(

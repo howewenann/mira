@@ -976,9 +976,7 @@ Button.goal-action:focus {
 }
 
 .settings-column-label.enabled,
-.settings-column-label.always,
-.settings-column-label.plan,
-.settings-column-label.ptc {
+.settings-column-label.always {
     width: 12;
     min-width: 12;
     margin: 0 2 0 0;
@@ -1164,6 +1162,19 @@ Button.goal-action:focus {
 .settings-tab { width: 18; height: 3; border: none; background: #151a1d; color: #aeb8be; }
 .settings-tab.active { background: #1b3036; color: #eef7f8; text-style: bold; }
 .settings-body { height: 1fr; }
+#settings-access-switcher,
+#settings-access-landing,
+#settings-access-detail { height: 1fr; }
+.settings-access-policy {
+    width: 44;
+    height: 2;
+    margin: 1 0 0 0;
+    border: none;
+    background: #151a1d;
+    color: #e8fffb;
+    content-align: left middle;
+}
+.settings-access-policy:focus { background: #1b3036; }
 .settings-mcp-server-group {
     height: auto;
     margin: 1 0 0 0;

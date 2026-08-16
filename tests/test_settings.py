@@ -38,6 +38,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_always_allow(loaded, "delete"))
         self.assertFalse(settings.tool_ptc(loaded, "write_file"))
         self.assertFalse(settings.tool_ptc(loaded, "custom_search"))
+        self.assertFalse(settings.tool_rubric_access(loaded, "execute"))
+        self.assertFalse(settings.tool_rubric_access(loaded, "custom_search"))
         self.assertEqual(
             settings.execute_env_settings(loaded),
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
@@ -167,6 +169,31 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tool_ptc(loaded, "write_file"))
         self.assertTrue(settings.tool_ptc(loaded, "custom_search"))
         self.assertTrue(settings.mcp_tool_policy(loaded, "docs", "search").ptc)
+
+    def test_rubric_access_round_trips_and_only_allows_execute_builtin(self) -> None:
+        """Rubric access should default off and reject inapplicable built-ins."""
+        configured = settings.normalize_settings(
+            {
+                "hitl": {
+                    "tools": {
+                        "execute": {"rubric": True},
+                        "write_file": {"rubric": True},
+                        "custom_search": {"rubric": True},
+                    }
+                },
+                "mcp": {"servers": {"docs": {"tools": {"search": {"rubric": True}}}}},
+            }
+        )
+
+        self.assertTrue(settings.tool_rubric_access(configured, "execute"))
+        self.assertFalse(settings.tool_rubric_access(configured, "write_file"))
+        self.assertNotIn("rubric", configured["hitl"]["tools"]["write_file"])
+        self.assertTrue(settings.tool_rubric_access(configured, "custom_search"))
+        self.assertTrue(settings.mcp_tool_policy(configured, "docs", "search").rubric)
+        self.assertFalse(settings.tool_rubric_access(settings.normalize_settings({}), "custom_search"))
+
+        rejected = settings.set_tool_rubric_access(configured, "edit_file", True)
+        self.assertFalse(settings.tool_rubric_access(rejected, "edit_file"))
 
     def test_planning_todos_default_off_and_can_toggle(self) -> None:
         """Planning todos should be an explicit, reversible opt-in."""
