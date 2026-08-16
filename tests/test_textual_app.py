@@ -5578,9 +5578,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-write_file"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
-                self.assertEqual(str(buttons["settings-access-policy-plan"].label), "Plan        4 tools  >")
-                self.assertEqual(str(buttons["settings-access-policy-ptc"].label), "PTC        4 tools  >")
-                self.assertEqual(str(buttons["settings-access-policy-rubric"].label), "Rubric        4 tools  >")
+                self.assertTrue(
+                    str(buttons["settings-access-policy-plan"].label).endswith("0 selected      >")
+                )
+                self.assertTrue(
+                    str(buttons["settings-access-policy-ptc"].label).endswith("0 selected      >")
+                )
+                self.assertTrue(
+                    str(buttons["settings-access-policy-rubric"].label).endswith("0 selected      >")
+                )
                 self.assertNotIn("Adds write_todos", rendered)
                 self.assertNotIn("Enter a whole number", rendered)
                 self.assertNotIn("Press Enter/click", rendered)
@@ -5798,6 +5804,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(switcher.current, page_id)
                     self.assertIs(switcher.visible_content, panel.query_one(f"#{page_id}"))
                     self.assertTrue(panel.query_one(f"#settings-tab-{tab}", Button).has_class("active"))
+                    if tab == "access":
+                        self.assertIsNone(app.screen.focused)
                     for candidate_id in pages.values():
                         self.assertEqual(
                             panel.query_one(f"#{candidate_id}").display,
@@ -5805,7 +5813,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         )
 
     async def test_settings_access_recycles_one_body_and_counts_only_effective_tools(self) -> None:
-        """Access should omit disabled tools, count fixed reads, and persist toggles."""
+        """Access should omit disabled tools, count explicit grants, and persist toggles."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             configured = set_tool_plan_access(load_settings(workspace), "custom_search", True)
@@ -5856,13 +5864,96 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
                 panel = app.query_one(SettingsPanel)
                 await wait_until(lambda: len(panel.query("#settings-access-policy-rubric")) == 1)
+                await pilot.pause()
+                self.assertEqual(
+                    renderable_plain(panel.query_one(".settings-access-landing-heading", Static)),
+                    "Tool Access",
+                )
+                access_heading = panel.query_one(".settings-access-landing-heading", Static)
+                self.assertEqual(access_heading.styles.color, Color.parse("#D8DEE9"))
+                self.assertEqual(access_heading.styles.margin.top, 2)
+                self.assertIsNone(app.screen.focused)
+                self.assertEqual(
+                    renderable_plain(panel.query_one(".settings-access-description", Static)),
+                    "Choose which enabled tools are available to each policy.",
+                )
                 labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
-                self.assertEqual(labels["settings-access-policy-plan"], "Plan        5 tools  >")
-                self.assertEqual(labels["settings-access-policy-ptc"], "PTC        4 tools  >")
-                self.assertEqual(labels["settings-access-policy-rubric"], "Rubric        5 tools  >")
+                self.assertTrue(labels["settings-access-policy-plan"].startswith("Plan"))
+                self.assertTrue(labels["settings-access-policy-plan"].endswith("1 selected      >"))
+                self.assertTrue(labels["settings-access-policy-ptc"].startswith("PTC"))
+                self.assertTrue(labels["settings-access-policy-ptc"].endswith("0 selected      >"))
+                self.assertTrue(labels["settings-access-policy-rubric"].startswith("Rubric"))
+                self.assertTrue(labels["settings-access-policy-rubric"].endswith("1 selected      >"))
+                plan_button = panel.query_one("#settings-access-policy-plan", Button)
+                execute_select = panel.query_one("#settings-execute-env-mode", Select)
+                self.assertEqual(plan_button.region.width, 56)
+                self.assertEqual(plan_button.styles.width, execute_select.styles.width)
+                self.assertEqual(plan_button.styles.height, execute_select.styles.height)
+                ptc_button = panel.query_one("#settings-access-policy-ptc", Button)
+                self.assertEqual(ptc_button.region.height, 3)
+                self.assertEqual(ptc_button.styles.margin.bottom, 0)
+                self.assertEqual(ptc_button.styles.border_top, ("solid", Color.parse("#56616a")))
+                ptc_button.focus()
+                await pilot.pause()
+                self.assertEqual(ptc_button.styles.border_top, ("solid", Color.parse("#5bb8b1")))
+                self.assertEqual(ptc_button.styles.background, Color.parse("#151a1d"))
+                self.assertNotIn("reverse", str(ptc_button.styles.text_style))
 
                 panel.query_one("#settings-access-policy-rubric", Button).press()
                 await wait_until(lambda: len(panel.query("#settings-toggle-rubric_access-custom_search")) == 1)
+                await pilot.pause()
+                switcher = panel.query_one("#settings-access-switcher", ContentSwitcher)
+                self.assertEqual(switcher.current, "settings-access-detail")
+                detail = panel.query_one("#settings-access-detail")
+                back = panel.query_one("#settings-access-back", Button)
+                self.assertTrue(back.compact)
+                self.assertEqual(str(back.label), "< Back")
+                self.assertEqual(back.region.height, 1)
+                self.assertTrue(all(edge[0] == "" for edge in back.styles.border))
+                back.focus()
+                await pilot.pause()
+                self.assertEqual(back.styles.background, Color.parse("#1b3036"))
+                self.assertEqual(back.styles.color, Color.parse("#eef7f8"))
+                self.assertNotIn("reverse", str(back.styles.text_style))
+                self.assertEqual(
+                    renderable_plain(detail.query_one(".settings-access-heading", Static)),
+                    "Rubric Access",
+                )
+                detail_heading = detail.query_one(".settings-access-detail-heading", Static)
+                self.assertEqual(detail_heading.styles.color, Color.parse("#D8DEE9"))
+                self.assertEqual(detail_heading.styles.margin.top, 1)
+                self.assertEqual(back.styles.margin.top, 1)
+                guidance = panel.query_one(".settings-access-guidance", Static)
+                self.assertEqual(
+                    renderable_plain(guidance),
+                    "Only enabled tools are shown. Enable tools in the relevant "
+                    "Settings tab to make them available here.",
+                )
+                self.assertEqual(guidance.styles.background, Color.parse("#122023"))
+                self.assertEqual(guidance.styles.border_left, ("solid", Color.parse("#5bb8b1")))
+                self.assertEqual(guidance.styles.margin.bottom, 2)
+                headers = list(detail.query(".settings-access-header"))
+                self.assertEqual(len(headers), 2)
+                for header in headers:
+                    self.assertEqual(
+                        [renderable_plain(item).strip() for item in header.query(Static)],
+                        ["", "Access"],
+                    )
+                    self.assertEqual(header.styles.margin.bottom, 0)
+                sections = list(detail.query(".settings-access-section"))
+                self.assertEqual(
+                    [renderable_plain(item).strip() for item in sections],
+                    ["Custom Tools", "MCP · docs [HTTP]"],
+                )
+                self.assertEqual(sections[0].styles.margin.top, 0)
+                self.assertEqual(sections[1].styles.margin.top, 1)
+                self.assertEqual(
+                    [
+                        renderable_plain(item)
+                        for item in panel.query(".settings-access-tool-row > .settings-label")
+                    ],
+                    ["custom_search", "search"],
+                )
                 self.assertEqual(len(panel.query("#settings-toggle-rubric_access-disabled_custom")), 0)
                 self.assertEqual(len(panel.query("#settings-toggle-rubric_access-execute")), 0)
                 self.assertEqual(len(panel.query("#settings-toggle-mcp_tool_rubric-off-hidden")), 0)
@@ -5875,8 +5966,63 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(
                     str(panel.query_one("#settings-access-policy-rubric", Button).label),
-                    "Rubric        6 tools  >",
+                    panel._access_policy_label("rubric"),
                 )
+                self.assertTrue(
+                    str(panel.query_one("#settings-access-policy-rubric", Button).label).endswith(
+                        "2 selected      >"
+                    )
+                )
+
+                panel.query_one("#settings-access-back", Button).press()
+                await wait_until(lambda: switcher.current == "settings-access-landing")
+                await pilot.pause()
+                self.assertIsNone(app.screen.focused)
+
+                panel.query_one("#settings-access-policy-rubric", Button).press()
+                await wait_until(lambda: switcher.current == "settings-access-detail")
+                await wait_until(
+                    lambda: panel.query_one("#settings-access-back", Button).has_focus
+                )
+                await pilot.press("escape")
+                await wait_until(lambda: switcher.current == "settings-access-landing")
+                self.assertEqual(len(app.query(SettingsPanel)), 1)
+                self.assertIsNone(app.screen.focused)
+
+    async def test_settings_access_plan_empty_state_hides_fixed_reads(self) -> None:
+        """Plan Access should explain an empty configurable tool set without fixed reads."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command("access")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-access-policy-plan")) == 1)
+                panel.query_one("#settings-access-policy-plan", Button).press()
+                await wait_until(lambda: len(panel.query("#settings-access-back")) == 1)
+                await pilot.pause()
+                detail = panel.query_one("#settings-access-detail")
+
+                self.assertEqual(
+                    renderable_plain(detail.query_one(".settings-access-heading", Static)),
+                    "Plan Access",
+                )
+                self.assertEqual(
+                    renderable_plain(detail.query_one(".settings-empty", Static)),
+                    "No enabled tools available for Plan.",
+                )
+                self.assertEqual(len(detail.query(".settings-access-guidance")), 1)
+                self.assertEqual(len(detail.query(".settings-access-header")), 0)
+                self.assertEqual(len(detail.query(".settings-access-tool-row")), 0)
+                detail_labels = [
+                    renderable_plain(item)
+                    for item in detail.query(".settings-label")
+                ]
+                for fixed_read in ("ls", "read_file", "glob", "grep"):
+                    self.assertNotIn(fixed_read, detail_labels)
 
     async def test_settings_panel_groups_mcp_server_and_tool_policies(self) -> None:
         """MCP settings should render one transparent policy group per server."""

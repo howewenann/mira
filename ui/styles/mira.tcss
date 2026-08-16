@@ -905,7 +905,8 @@ Button.goal-action:focus {
 }
 
 .settings-section.system,
-.settings-section.custom {
+.settings-section.custom,
+.settings-access-landing-heading {
     margin-top: 2;
 }
 
@@ -1041,14 +1042,16 @@ Button.goal-action:focus {
     color: #aeb8be;
 }
 
-.settings-select {
+.settings-select,
+.settings-access-policy {
     width: 56;
     min-width: 36;
     height: 3;
     margin: 0 1 0 0;
 }
 
-.settings-select > SelectCurrent {
+.settings-select > SelectCurrent,
+.settings-access-policy {
     border: solid #56616a;
     color: #e8fffb;
     background: #151a1d;
@@ -1058,7 +1061,8 @@ Button.goal-action:focus {
     color: #e8fffb;
 }
 
-.settings-select:focus > SelectCurrent {
+.settings-select:focus > SelectCurrent,
+.settings-access-policy:focus {
     border: solid #5bb8b1;
 }
 
@@ -1165,16 +1169,61 @@ Button.goal-action:focus {
 #settings-access-switcher,
 #settings-access-landing,
 #settings-access-detail { height: 1fr; }
+.settings-access-heading {
+    height: 1;
+    color: #D8DEE9;
+    text-style: bold;
+}
+.settings-access-description {
+    height: 1;
+    margin-bottom: 1;
+    color: #aeb8be;
+}
 .settings-access-policy {
-    width: 44;
-    height: 2;
-    margin: 1 0 0 0;
-    border: none;
-    background: #151a1d;
-    color: #e8fffb;
+    margin: 0;
     content-align: left middle;
 }
-.settings-access-policy:focus { background: #1b3036; }
+Button.settings-access-back {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+    height: 1;
+    min-height: 1;
+    margin-top: 1;
+    padding: 0 1;
+    border: none;
+    background: #1b3036;
+    color: #eef7f8;
+    text-style: bold;
+}
+Button.settings-access-back:focus,
+Button.settings-access-back:hover {
+    border: none;
+    background: #1b3036;
+    background-tint: transparent;
+    color: #eef7f8;
+    text-style: bold;
+}
+.settings-access-policy:focus {
+    background: #151a1d;
+    background-tint: transparent;
+    color: #e8fffb;
+    text-style: bold;
+}
+.settings-access-detail-heading { margin: 1 0 1 0; }
+.settings-access-guidance {
+    width: 72;
+    height: auto;
+    margin-bottom: 2;
+    padding: 0 1;
+    border-left: solid #5bb8b1;
+    background: #122023;
+    color: #b8c1c7;
+}
+.settings-section.settings-access-section,
+.settings-mcp-server-title.settings-access-section { margin: 0; }
+.settings-section.settings-access-section.subsequent,
+.settings-mcp-server-title.settings-access-section.subsequent { margin-top: 1; }
 .settings-mcp-server-group {
     height: auto;
     margin: 1 0 0 0;

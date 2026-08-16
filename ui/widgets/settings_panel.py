@@ -99,7 +99,7 @@ SETTINGS_TAB_PAGES = {
 }
 ACCESS_POLICIES = ("plan", "ptc", "rubric")
 ACCESS_POLICY_LABELS = {"plan": "Plan", "ptc": "PTC", "rubric": "Rubric"}
-SAFE_READ_TOOL_COUNT = 4
+ACCESS_POLICY_LABEL_WIDTH = 52
 
 
 @dataclass(frozen=True)
@@ -429,6 +429,14 @@ class SettingsPanel(Vertical):
                 with Vertical(id="settings-access-body", classes="settings-body"):
                     with ContentSwitcher(initial="settings-access-landing", id="settings-access-switcher"):
                         with VerticalScroll(id="settings-access-landing"):
+                            yield Static(
+                                "Tool Access",
+                                classes="settings-access-heading settings-access-landing-heading",
+                            )
+                            yield Static(
+                                "Choose which enabled tools are available to each policy.",
+                                classes="settings-access-description",
+                            )
                             for policy in ACCESS_POLICIES:
                                 yield Button(
                                     self._access_policy_label(policy),
@@ -446,6 +454,10 @@ class SettingsPanel(Vertical):
 
     def _finish_mount(self) -> None:
         self._model_controls_ready = True
+        switcher = self.query_one("#settings-switcher", ContentSwitcher)
+        if switcher.current == SETTINGS_TAB_PAGES["access"]:
+            self.screen.set_focus(None)
+            return
         if not any(widget.has_focus for widget in self.query("Button, Input, Select")):
             self._focus_first_toggle()
 
@@ -460,8 +472,7 @@ class SettingsPanel(Vertical):
         for name in SETTINGS_TAB_PAGES:
             self.query_one(f"#settings-tab-{name}", Button).set_class(name == selected, "active")
         if selected == "access":
-            self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"
-            self.call_after_refresh(self.query_one("#settings-access-policy-plan", Button).focus)
+            self._show_access_landing()
         else:
             self.call_after_refresh(self._focus_first_toggle)
 
@@ -476,13 +487,21 @@ class SettingsPanel(Vertical):
         await detail.remove_children()
         await detail.mount(*self._access_widgets(policy))
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-detail"
-        buttons = list(detail.query(".settings-toggle"))
-        if buttons:
-            buttons[0].focus()
+        self.call_after_refresh(detail.query_one("#settings-access-back", Button).focus)
+
+    @on(Button.Pressed, "#settings-access-back")
+    def press_access_back(self, event: Button.Pressed) -> None:
+        """Return from the shared policy detail to the Access landing page."""
+        event.stop()
+        self._show_access_landing()
 
     async def on_key(self, event: Key) -> None:
         """Handle direct yes/no and close shortcuts."""
         key = event.key.lower()
+        if key == "escape" and self._access_detail_visible():
+            event.stop()
+            self._show_access_landing()
+            return
         if key in {"escape", "q"}:
             event.stop()
             self._close()
@@ -865,10 +884,20 @@ class SettingsPanel(Vertical):
             buttons[0].focus()
 
     def _access_policy_label(self, policy: str) -> str:
-        count = SAFE_READ_TOOL_COUNT + sum(
+        count = sum(
             value for _title, rows in self._access_groups(policy) for _name, _cell, value in rows
         )
-        return f"{ACCESS_POLICY_LABELS[policy]}        {count} tools  >"
+        suffix = f"{count} selected      >"
+        label = ACCESS_POLICY_LABELS[policy]
+        return f"{label}{suffix.rjust(ACCESS_POLICY_LABEL_WIDTH - len(label))}"
+
+    def _access_detail_visible(self) -> bool:
+        switcher = self.query_one("#settings-access-switcher", ContentSwitcher)
+        return switcher.current == "settings-access-detail"
+
+    def _show_access_landing(self) -> None:
+        self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"
+        self.screen.set_focus(None)
 
     def _refresh_access_counts(self) -> None:
         for policy in ACCESS_POLICIES:
@@ -909,13 +938,52 @@ class SettingsPanel(Vertical):
                 if tool_policy.enabled:
                     access_rows.extend(build_rows([original], mcp_kind, state.name))
             if access_rows:
-                groups.append((state.name, access_rows))
+                groups.append((f"MCP · {state.name} [{state.transport.upper()}]", access_rows))
         return groups
 
     def _access_widgets(self, policy: str) -> list[Any]:
-        widgets: list[Any] = []
-        for title, rows in self._access_groups(policy):
-            widgets.append(Static(title, classes="settings-mcp-server-title", markup=False))
+        label = ACCESS_POLICY_LABELS[policy]
+        widgets: list[Any] = [
+            Button(
+                "< Back",
+                id="settings-access-back",
+                classes="settings-access-back",
+                compact=True,
+            ),
+            Static(
+                f"{label} Access",
+                classes="settings-access-heading settings-access-detail-heading",
+            ),
+            Static(
+                "Only enabled tools are shown. Enable tools in the relevant "
+                "Settings tab to make them available here.",
+                classes="settings-access-guidance",
+            ),
+        ]
+        groups = self._access_groups(policy)
+        if not groups:
+            widgets.append(
+                Static(f"No enabled tools available for {label}.", classes="settings-empty")
+            )
+            return widgets
+        for index, (title, rows) in enumerate(groups):
+            if title == "Inbuilt Tools":
+                title_classes = "settings-section inbuilt settings-access-section"
+            elif title == "Custom Tools":
+                title_classes = "settings-section custom settings-access-section"
+            else:
+                title_classes = "settings-mcp-server-title settings-access-section"
+            if index:
+                title_classes += " subsequent"
+            widgets.append(Static(title, classes=title_classes, markup=False))
+            widgets.append(
+                SettingsHeaderRow(
+                    "",
+                    show_always=False,
+                    enabled_label="Access",
+                    row_class="settings-access-header",
+                )
+            )
             for name, cell, value in rows:
                 button = self._toggle_button(cell, value)
                 widgets.append(
@@ -1062,6 +1130,10 @@ class SettingsToggleButton(Button):
     async def on_key(self, event: Key) -> None:
         """Support q/Esc/y/n while focus is on a button."""
         key = event.key.lower()
+        if key == "escape" and self.panel._access_detail_visible():
+            event.stop()
+            self.panel._show_access_landing()
+            return
         if key in {"escape", "q"}:
             event.stop()
             self.panel._close()
@@ -1082,6 +1154,7 @@ class SettingsHeaderRow(Horizontal):
         *,
         show_always: bool = True,
         show_model: bool = False,
+        enabled_label: str = "enable",
         row_class: str = "",
     ) -> None:
         classes = "settings-row settings-header-row"
@@ -1091,10 +1164,11 @@ class SettingsHeaderRow(Horizontal):
         self.name_label = name_label
         self.show_always = show_always
         self.show_model = show_model
+        self.enabled_label = enabled_label
 
     def compose(self) -> ComposeResult:
         yield Static(self.name_label, classes="settings-column-label name")
-        yield Static("enable", classes="settings-column-label enabled")
+        yield Static(self.enabled_label, classes="settings-column-label enabled")
         if self.show_always:
             yield Static("always allow", classes="settings-column-label always")
         if self.show_model:
