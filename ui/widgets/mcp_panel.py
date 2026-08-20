@@ -24,7 +24,7 @@ class MCPPanelScreen(ModalScreen[None]):
     AUTO_FOCUS = ""
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, manager: Any, reload_runtime: Callable[[], Awaitable[None]]) -> None:
+    def __init__(self, manager: Any, reload_runtime: Callable[[], Awaitable[bool]]) -> None:
         super().__init__()
         self.manager = manager
         self.reload_runtime = reload_runtime

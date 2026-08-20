@@ -43,6 +43,11 @@ def load_effective_config(
         config = dict(loader.load_config(workspace, override_dotenv=True))
     else:
         config = dict(loader.load_config(workspace))
+    from tracing.bootstrap import configure_tracing
+
+    tracing_issues = configure_tracing(config.get("settings"))
+    if tracing_issues:
+        config["issues"] = [*(config.get("issues") or []), *tracing_issues]
     config["llm_direct"] = launch_options.llm_direct
     return config
 

@@ -376,7 +376,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 42)) as pilot:
                 await pilot.pause()
                 app._apply_settings = AsyncMock(  # type: ignore[method-assign]
-                    return_value=(True, "settings saved; agents rebuilt")
+                    return_value=(True, "settings saved; agents rebuilt; no reload required")
                 )
                 app._handle_settings_command("models")
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
@@ -565,7 +565,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                     for update in updates:
                         ok, message = await app._apply_settings(update(app.config["settings"]))
                         self.assertTrue(ok)
-                        self.assertEqual(message, "settings saved; agents rebuilt")
+                        self.assertEqual(message, "settings saved; agents rebuilt; no reload required")
 
                     footer = str(app.query_one("#model-settings-button", Button).label)
 
@@ -633,7 +633,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 ok, message = await app._apply_settings(updated)
 
             self.assertTrue(ok)
-            self.assertEqual(message, "settings saved; agents rebuilt")
+            self.assertEqual(message, "settings saved; agents rebuilt; no reload required")
             app._reload_runtime.assert_not_awaited()
             manager.reload.assert_not_awaited()
             self.assertIsNone(app.agent)

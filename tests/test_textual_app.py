@@ -57,6 +57,8 @@ from config.settings import (
     save_settings,
     set_model_assignment,
     set_dynamic_subagents,
+    set_mcp_server_always_allow,
+    set_mcp_server_enabled,
     set_mcp_tool_policy_value,
     set_tool_plan_access,
     set_tool_ptc,
@@ -3237,6 +3239,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await app._run_settings_command()
                 self.assertEqual(app.status_state, "error")
 
+                unchanged, unchanged_message = await app._apply_settings(
+                    deepcopy(app.config["settings"])
+                )
+                self.assertTrue(unchanged)
+                self.assertEqual(unchanged_message, "settings unchanged")
+
                 app.ready = False
                 updated = set_rubric_enabled(
                     deepcopy(app.config["settings"]),
@@ -3245,7 +3253,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 saved, message = await app._apply_settings(updated)
 
                 self.assertTrue(saved)
-                self.assertEqual(message, "settings saved; run /reload-runtime to retry startup")
+                self.assertEqual(message, "settings saved; MIRA is not ready; Reload Runtime required")
                 self.assertEqual(app.status_state, "error")
 
     async def test_context_overflow_notice_stays_separate_from_compaction_block(self) -> None:
@@ -4733,12 +4741,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt = app.query_one(PromptBox)
             self.assertTrue(prompt.disabled)
 
-            await app._run_reload_runtime_command()
+            duplicate_reloaded = await app._run_reload_runtime_command()
             app._reload_runtime.assert_awaited_once_with()
             self.assertTrue(prompt.disabled)
+            self.assertFalse(duplicate_reloaded)
 
             release_reload.set()
-            await first_reload
+            self.assertTrue(await first_reload)
             self.assertFalse(prompt.disabled)
             rendered = "\n".join(
                 renderable_plain(block) for block in app.query_one(ChatLog).children
@@ -5392,6 +5401,101 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(tool_always_allow(load_settings(workspace), "edit_file"))
 
+    async def test_tracing_config_validates_previews_persists_and_reloads_runtime(self) -> None:
+        """Tracing details should preserve secret references and reuse runtime reload."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            app._run_reload_runtime_command = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+            async with app.run_test(size=(110, 36)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                await wait_until(
+                    lambda: "settings-tracing-config"
+                    in {candidate.id for candidate in app.query_one(SettingsPanel).query(Button)}
+                )
+                config_button = app.query_one("#settings-tracing-config", Button)
+                tracing_toggle = app.query_one("#settings-toggle-tracing-tracing", Button)
+                self.assertTrue(config_button.disabled)
+                self.assertEqual(config_button.region.width, tracing_toggle.region.width)
+                self.assertEqual(config_button.styles.background, Color.parse("#14524f"))
+                self.assertEqual(config_button.styles.color, Color.parse("#e8fffb"))
+
+                tracing_toggle.press()
+                await wait_until(lambda: not config_button.disabled)
+                await wait_until(
+                    lambda: renderable_plain(app.query_one("#settings-status", Static))
+                    == "tracing settings saved; Reload Runtime required"
+                )
+                app.query_one("#settings-tab-models", Button).press()
+                app.query_one("#settings-tab-general", Button).press()
+                self.assertEqual(
+                    renderable_plain(app.query_one("#settings-status", Static)),
+                    "tracing settings saved; Reload Runtime required",
+                )
+                config_button.press()
+                await wait_until(lambda: len(app.query("#settings-tracing-back")) == 1)
+                await pilot.pause()
+
+                back_button = app.query_one("#settings-tracing-back", Button)
+                tracing_detail = app.query_one("#settings-tracing-detail", VerticalScroll)
+                self.assertEqual(str(back_button.label), "< Back")
+                self.assertEqual(tracing_detail.styles.padding.top, 0)
+                self.assertEqual(back_button.styles.margin.top, 1)
+                self.assertEqual(back_button.styles.background, Color.parse("#1b3036"))
+                self.assertEqual(back_button.styles.color, Color.parse("#eef7f8"))
+                self.assertEqual(len(app.query("#settings-tracing-reload")), 0)
+                self.assertEqual(len(app.query("#settings-tracing-close")), 0)
+
+                endpoint = app.query_one("#settings-tracing-endpoint", Input)
+                headers = app.query_one("#settings-tracing-headers", TextArea)
+                endpoint.value = "https://example.com/otel/v1/traces"
+                headers.text = "- malformed"
+                await pilot.pause()
+                preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
+                self.assertIn("Preview unavailable", preview)
+
+                back_button.press()
+                await pilot.pause()
+                self.assertEqual(len(app.query("#settings-tracing-detail")), 1)
+                app._run_reload_runtime_command.assert_not_awaited()
+
+                headers.text = 'Authorization: "Bearer ${TRACE_TOKEN}"\ntenant: my-team'
+                await pilot.pause()
+                preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
+                self.assertIn("tracing:", preview)
+                self.assertIn("${TRACE_TOKEN}", preview)
+                self.assertNotIn("resolved-secret", preview)
+
+                back_button.press()
+                await wait_until(lambda: len(app.query("#settings-tracing-detail")) == 0)
+                await wait_until(
+                    lambda: renderable_plain(app.query_one("#settings-status", Static))
+                    == "tracing settings saved; Reload Runtime required"
+                )
+                app._run_reload_runtime_command.assert_not_awaited()
+
+                app.query_one("#settings-reload-runtime", Button).press()
+                await wait_until(lambda: app._run_reload_runtime_command.await_count == 1)
+                await wait_until(
+                    lambda: renderable_plain(app.query_one("#settings-status", Static))
+                    == "runtime reloaded"
+                )
+
+                app._run_reload_runtime_command.return_value = False
+                app.query_one("#settings-reload-runtime", Button).press()
+                await wait_until(lambda: app._run_reload_runtime_command.await_count == 2)
+                await wait_until(
+                    lambda: renderable_plain(app.query_one("#settings-status", Static))
+                    == "runtime reload failed"
+                )
+
+            loaded = load_settings(workspace)["tracing"]
+            self.assertEqual(loaded["endpoint"], "https://example.com/otel/v1/traces")
+            self.assertEqual(loaded["headers"]["Authorization"], "Bearer ${TRACE_TOKEN}")
+
     async def test_settings_command_can_always_allow_delete(self) -> None:
         """Delete should use the same configurable approval toggle as other tools."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -5437,7 +5541,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 panel.query_one("#settings-toggle-git-git_protection", Button).focus()
                 await pilot.press("n")
-                await pilot.pause()
+                await wait_until(
+                    lambda: renderable_plain(panel.query_one("#settings-status", Static))
+                    == "git protection disabled; no reload required"
+                )
 
             self.assertTrue(git_dir.exists())
             self.assertFalse(load_settings(workspace)["hitl"]["git_protection"]["enabled"])
@@ -5453,12 +5560,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(Button)) >= 10)
+                await wait_until(
+                    lambda: "settings-access-policy-plan"
+                    in {candidate.id for candidate in panel.query(Button)}
+                )
                 rendered = "\n".join(renderable_plain(child) for child in panel.query(Static))
                 static_labels = {renderable_plain(child).strip() for child in panel.query(Static)}
                 buttons = {button.id: button for button in panel.query(Button)}
 
-                self.assertNotIn("Config", rendered)
+                self.assertIn("Tracing", rendered)
+                self.assertIn("settings-tracing-config", buttons)
                 self.assertIn("Settings", rendered)
                 self.assertIn("enable", rendered)
                 self.assertIn("always allow", rendered)
@@ -5501,6 +5612,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("settings-toggle-always_allow-execute", buttons)
                 self.assertIn("settings-tab-access", buttons)
                 self.assertIn("settings-close", buttons)
+                self.assertIn("settings-reload-runtime", buttons)
+                self.assertEqual(str(buttons["settings-reload-runtime"].label), "Reload runtime")
                 execute_env_select = panel.query_one("#settings-execute-env-mode", Select)
                 await wait_until(lambda: execute_env_select.value == "system")
                 execute_env_select_current = execute_env_select.query_one("SelectCurrent")
@@ -5592,9 +5705,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Press Enter/click", rendered)
                 self.assertNotIn("Examples only", rendered)
 
+                panel.query_one("#settings-tab-mcp", Button).press()
+                await pilot.pause()
+                mcp_guidance = panel.query_one("#settings-mcp-guidance", Static)
+                mcp_empty = panel.query_one(".settings-mcp-empty", Static)
+                self.assertEqual(mcp_empty.region.y, mcp_guidance.region.bottom + 2)
+
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
-                self.assertTrue(app.query_one(PromptBox).has_focus)
+                await wait_until(lambda: app.query_one(PromptBox).has_focus)
 
     async def test_settings_panel_validates_and_persists_rubric_iterations(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -5773,8 +5892,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 settings_window = panel.query_one("#settings-window")
                 settings_body = panel.query_one("#settings-body")
                 settings_status = panel.query_one("#settings-status", Static)
+                settings_reload = panel.query_one("#settings-reload-runtime", Button)
                 self.assertEqual(settings_status.region.y, settings_body.region.bottom + 1)
                 self.assertEqual(settings_status.region.bottom, settings_window.content_region.bottom)
+                self.assertEqual(settings_reload.region.right, settings_window.content_region.right)
+                self.assertEqual(settings_reload.region.bottom, settings_window.content_region.bottom)
+                self.assertEqual(settings_reload.region.width, 20)
+                self.assertEqual(settings_reload.styles.background, Color.parse("#1b3036"))
+                self.assertEqual(settings_reload.styles.color, Color.parse("#eef7f8"))
 
     async def test_settings_panel_uses_native_content_switcher_for_tabs(self) -> None:
         """Settings tabs should delegate page visibility to ContentSwitcher."""
@@ -6099,12 +6224,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 group = groups[0]
                 second_title = groups[1].query_one(".settings-mcp-server-title", Static)
                 title = group.query_one(".settings-mcp-server-title", Static)
+                guidance = panel.query_one("#settings-mcp-guidance", Static)
+                tabs = panel.query_one("#settings-tabs", Horizontal)
                 server_header = group.query_one(".settings-mcp-server-header", SettingsHeaderRow)
                 server_row = group.query_one(".settings-mcp-server-policy-row", Horizontal)
                 tool_header = group.query_one(".settings-mcp-tool-header", SettingsHeaderRow)
                 tool_rows = list(group.query(".settings-mcp-tool-row"))
 
                 self.assertEqual(renderable_plain(title).strip(), "microsoft-learn-tools [HTTP]")
+                self.assertEqual(
+                    renderable_plain(guidance),
+                    "MCP access changes apply immediately; config or environment edits require Reload Runtime.",
+                )
+                self.assertEqual(guidance.styles.background, Color.parse("#122023"))
+                self.assertEqual(guidance.styles.border_left, ("solid", Color.parse("#5bb8b1")))
+                self.assertEqual(guidance.styles.color, Color.parse("#b8c1c7"))
+                self.assertEqual(guidance.region.y, tabs.region.bottom + 1)
+                self.assertEqual(title.region.y, guidance.region.bottom + 2)
                 rendered_title = title.render()
                 self.assertEqual(
                     getattr(rendered_title, "plain", str(rendered_title)).strip(),
@@ -6172,6 +6308,62 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(server_row.region.y, server_header.region.bottom)
                 self.assertEqual(second_title.region.y, tool_rows[-1].region.bottom + 1)
                 self.assertEqual(panel.query_one("#settings-window").region.width, 110)
+
+    async def test_settings_mcp_changes_report_that_reload_is_not_required(self) -> None:
+        """Settings should distinguish live MCP controls from config-file reloads."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            state = SimpleNamespace(
+                name="docs",
+                transport="http",
+                transient=False,
+                usable=True,
+                tools=[],
+                tool_metadata=[],
+            )
+
+            async def set_enabled(server: str, enabled: bool) -> bool:
+                updated = set_mcp_server_enabled(load_settings(workspace), server, enabled)
+                return save_settings(workspace, updated)
+
+            async def set_always_allow(server: str, enabled: bool) -> bool:
+                updated = set_mcp_server_always_allow(load_settings(workspace), server, enabled)
+                return save_settings(workspace, updated)
+
+            manager = SimpleNamespace(
+                workspace=workspace,
+                servers={state.name: state},
+                set_server_enabled=AsyncMock(side_effect=set_enabled),
+                set_server_always_allow=AsyncMock(side_effect=set_always_allow),
+                shutdown=AsyncMock(),
+            )
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+
+            async with app.run_test(size=(110, 36)) as pilot:
+                await pilot.pause()
+                app._run_reload_runtime_command = AsyncMock(return_value=True)  # type: ignore[method-assign]
+                app.mcp_manager = manager
+                app._handle_settings_command(initial_tab="mcp")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query(".settings-mcp-server-policy-row")) == 1)
+                server_row = panel.query_one(".settings-mcp-server-policy-row", Horizontal)
+                enabled_button, approval_button = list(server_row.query(Button))
+
+                approval_button.press()
+                await wait_until(
+                    lambda: renderable_plain(panel.query_one("#settings-status", Static))
+                    == "MCP approval updated; no reload required"
+                )
+                enabled_button.press()
+                await wait_until(
+                    lambda: renderable_plain(panel.query_one("#settings-status", Static))
+                    == "MCP server updated; agents rebuilt; no reload required"
+                )
+
+            manager.set_server_always_allow.assert_awaited_once_with("docs", True)
+            manager.set_server_enabled.assert_awaited_once_with("docs", False)
+            app._run_reload_runtime_command.assert_not_awaited()
 
     async def test_settings_panel_dims_saved_mcp_policies_when_tool_is_unavailable(self) -> None:
         """Unavailable MCP tools should show saved values instead of N/A placeholders."""
@@ -6597,6 +6789,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("not your full environment or API keys", prompts[0])
                 self.assertFalse(tool_enabled(load_settings(workspace), "execute"))
                 self.assertEqual(str(panel.query_one("#settings-toggle-enabled-execute", Button).label), "no")
+                self.assertEqual(
+                    renderable_plain(panel.query_one("#settings-status", Static)),
+                    "execute remains disabled",
+                )
 
     async def test_settings_panel_confirm_enable_execute_rebuilds_agents(self) -> None:
         """Accepting the execute warning should save settings and rebuild agents."""
@@ -6628,6 +6824,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-enabled-execute"].label), "yes")
                 self.assertFalse(buttons["settings-toggle-always_allow-execute"].disabled)
                 self.assertEqual(len(calls), 1)
+                self.assertEqual(
+                    renderable_plain(panel.query_one("#settings-status", Static)),
+                    "settings saved; agents rebuilt; no reload required",
+                )
 
     async def test_settings_panel_can_disable_custom_tools(self) -> None:
         """Disabled custom tools should retain all saved policy values while dimmed."""

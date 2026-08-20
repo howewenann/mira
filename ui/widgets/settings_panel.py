@@ -7,12 +7,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import yaml
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.widgets import Button, ContentSwitcher, Input, Select, Static
+from textual.widgets import Button, ContentSwitcher, Input, Select, Static, TextArea
 
 from config.settings import (
     DYNAMIC_SUBAGENTS,
@@ -68,13 +69,18 @@ from config.settings import (
     set_subagent_model_assignment,
     subagent_enabled,
     subagent_model_assignment,
+    set_tracing_config,
+    set_tracing_enabled,
+    tracing_enabled,
+    tracing_settings,
 )
+from tracing.bootstrap import parse_headers_yaml, tracing_yaml_fragment
 
 ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access", "ptc",
     "rubric_access", "mcp_server_enabled", "mcp_server_allow", "mcp_tool_enabled", "mcp_tool_allow",
     "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric",
-    "subagent_enabled",
+    "subagent_enabled", "tracing",
 ]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
@@ -88,6 +94,7 @@ EXECUTE_ENV_FIELDS = {
     "venv": ("path", "Venv location", r".venv or .venv\Scripts\python.exe"),
 }
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
+ReloadCallback = Callable[[], Awaitable[bool]]
 CloseCallback = Callable[[], None]
 INHERIT_VALUE = "__mira_default__"
 SETTINGS_TAB_PAGES = {
@@ -123,6 +130,7 @@ class SettingsPanel(Vertical):
         *,
         tool_metadata: list[dict[str, str]] | None = None,
         apply_change: ToggleCallback,
+        reload_runtime: ReloadCallback | None = None,
         close_panel: CloseCallback | None = None,
         mcp_manager: Any = None,
         model_registry: Any = None,
@@ -134,6 +142,7 @@ class SettingsPanel(Vertical):
         self.settings = settings
         self.tool_metadata = tool_metadata or []
         self.apply_change = apply_change
+        self.reload_runtime = reload_runtime
         self.close_panel = close_panel
         self.mcp_manager = mcp_manager
         self.model_registry = model_registry
@@ -187,6 +196,18 @@ class SettingsPanel(Vertical):
                     with Horizontal(classes="settings-row settings-policy-row"):
                         yield Static("Git Protection", classes="settings-label")
                         yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
+                    with Horizontal(classes="settings-row settings-policy-row settings-tracing-row"):
+                        yield Static("Tracing", classes="settings-label")
+                        yield self._toggle_button(
+                            ToggleCell("tracing", "tracing"),
+                            tracing_enabled(self.settings),
+                        )
+                        yield Button(
+                            "Config",
+                            id="settings-tracing-config",
+                            classes="settings-config-button",
+                            disabled=not tracing_enabled(self.settings),
+                        )
                     with Horizontal(classes="settings-row settings-policy-row"):
                         yield Static("Dynamic eval subagents", classes="settings-label")
                         yield self._toggle_button(
@@ -370,9 +391,17 @@ class SettingsPanel(Vertical):
                             )
 
                 with VerticalScroll(id="settings-mcp-body", classes="settings-body"):
+                    yield Static(
+                        "MCP access changes apply immediately; config or environment edits require Reload Runtime.",
+                        id="settings-mcp-guidance",
+                        classes="settings-mcp-guidance",
+                    )
                     states = list(getattr(self.mcp_manager, "servers", {}).values())
                     if not states:
-                        yield Static("No MCP servers configured", classes="settings-empty")
+                        yield Static(
+                            "No MCP servers configured",
+                            classes="settings-empty settings-mcp-empty",
+                        )
                     for index, state in enumerate(states):
                         enabled = mcp_server_enabled(self.settings, state.name)
                         group_classes = "settings-mcp-server-group"
@@ -446,7 +475,13 @@ class SettingsPanel(Vertical):
                         with VerticalScroll(id="settings-access-detail"):
                             pass
 
-            yield Static("", id="settings-status", classes="settings-status")
+            with Horizontal(id="settings-footer"):
+                yield Static("", id="settings-status", classes="settings-status")
+                yield Button(
+                    "Reload runtime",
+                    id="settings-reload-runtime",
+                    classes="settings-config-action settings-reload-button settings-footer-reload",
+                )
 
     def on_mount(self) -> None:
         """Focus the first editable toggle when the panel appears."""
@@ -489,6 +524,44 @@ class SettingsPanel(Vertical):
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-detail"
         self.call_after_refresh(detail.query_one("#settings-access-back", Button).focus)
 
+    @on(Button.Pressed, "#settings-tracing-config")
+    async def press_tracing_config(self, event: Button.Pressed) -> None:
+        """Open tracing details inside the existing Settings switcher."""
+        event.stop()
+        switcher = self.query_one("#settings-switcher", ContentSwitcher)
+        existing = list(self.query("#settings-tracing-detail"))
+        if existing:
+            await existing[0].remove()
+        detail = VerticalScroll(*self._tracing_widgets(), id="settings-tracing-detail", classes="settings-body")
+        await switcher.mount(detail)
+        switcher.current = "settings-tracing-detail"
+        self.call_after_refresh(detail.query_one("#settings-tracing-endpoint", Input).focus)
+
+    @on(Button.Pressed, "#settings-tracing-back")
+    async def press_tracing_back(self, event: Button.Pressed) -> None:
+        """Persist valid tracing values and return to General settings."""
+        event.stop()
+        try:
+            updated = self._draft_tracing_settings()
+        except ValueError as exc:
+            self._set_status(str(exc))
+            self._refresh_tracing_preview()
+            return
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if not ok:
+            return
+        self.settings = updated
+        await self._close_tracing_detail()
+
+    @on(Input.Changed, "#settings-tracing-endpoint")
+    def tracing_endpoint_changed(self, _event: Input.Changed) -> None:
+        self._refresh_tracing_preview()
+
+    @on(TextArea.Changed, "#settings-tracing-headers")
+    def tracing_headers_changed(self, _event: TextArea.Changed) -> None:
+        self._refresh_tracing_preview()
+
     @on(Button.Pressed, "#settings-access-back")
     def press_access_back(self, event: Button.Pressed) -> None:
         """Return from the shared policy detail to the Access landing page."""
@@ -498,6 +571,10 @@ class SettingsPanel(Vertical):
     async def on_key(self, event: Key) -> None:
         """Handle direct yes/no and close shortcuts."""
         key = event.key.lower()
+        if key == "escape" and self._tracing_detail_visible():
+            event.stop()
+            await self._close_tracing_detail()
+            return
         if key == "escape" and self._access_detail_visible():
             event.stop()
             self._show_access_landing()
@@ -664,6 +741,12 @@ class SettingsPanel(Vertical):
         event.stop()
         self._close()
 
+    @on(Button.Pressed, "#settings-reload-runtime")
+    async def press_reload_runtime(self, event: Button.Pressed) -> None:
+        """Run the shared full-runtime reload from the Settings footer."""
+        event.stop()
+        await self._reload_from_settings("runtime reloaded")
+
     async def _set_focused(self, value: bool) -> None:
         button = self._focused_toggle()
         if button is None:
@@ -688,6 +771,8 @@ class SettingsPanel(Vertical):
                 self._set_status(f"model profile '{override}' is unavailable")
                 return
             updated = set_rubric_enabled(self.settings, value)
+        elif cell.kind == "tracing":
+            updated = set_tracing_enabled(self.settings, value)
         elif cell.kind == "subagent_enabled":
             override = subagent_model_assignment(self.settings, cell.name)
             if value and override and override not in self._profile_names():
@@ -709,7 +794,7 @@ class SettingsPanel(Vertical):
             from config.settings import load_settings
 
             self.settings = load_settings(self.mcp_manager.workspace)
-            self._set_status("MCP server updated")
+            self._set_status("MCP server updated; agents rebuilt; no reload required")
             self._refresh_buttons()
             self._refresh_access_counts()
             return
@@ -720,7 +805,7 @@ class SettingsPanel(Vertical):
             from config.settings import load_settings
 
             self.settings = load_settings(self.mcp_manager.workspace)
-            self._set_status("MCP server approval updated")
+            self._set_status("MCP approval updated; no reload required")
             self._refresh_buttons()
             return
         elif cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric"}:
@@ -740,6 +825,7 @@ class SettingsPanel(Vertical):
             return
         self.settings = updated
         self._refresh_buttons()
+        self._refresh_tracing_control()
         self._refresh_access_counts()
         self._refresh_rubric_control()
 
@@ -844,6 +930,24 @@ class SettingsPanel(Vertical):
     def _set_status(self, message: str) -> None:
         self.query_one("#settings-status", Static).update(message)
 
+    async def _reload_from_settings(self, success_message: str) -> None:
+        """Run the shared reload callback and keep Settings feedback truthful."""
+        if self.reload_runtime is None:
+            self._set_status("runtime reload unavailable")
+            return
+        buttons = list(self.query("#settings-reload-runtime"))
+        for button in buttons:
+            button.disabled = True
+        try:
+            reloaded = await self.reload_runtime()
+        except Exception:
+            reloaded = False
+        finally:
+            for button in buttons:
+                if button.is_mounted:
+                    button.disabled = False
+        self._set_status(success_message if reloaded else "runtime reload failed")
+
     def _restore_select_value(self, select: Select, value: str) -> None:
         """Restore a rejected model selection without firing another save."""
         with select.prevent(Select.Changed):
@@ -867,6 +971,12 @@ class SettingsPanel(Vertical):
         control = self.query_one("#settings-rubric-max-iterations", Input)
         control.disabled = not rubric_enabled(self.settings)
         control.value = str(rubric_max_iterations(self.settings))
+
+    def _refresh_tracing_control(self) -> None:
+        """Keep Config available only while tracing is enabled."""
+        controls = list(self.query("#settings-tracing-config"))
+        if controls:
+            controls[0].disabled = not tracing_enabled(self.settings)
 
     def _focused_toggle(self) -> Button | None:
         for button in self.query(Button):
@@ -894,6 +1004,82 @@ class SettingsPanel(Vertical):
     def _access_detail_visible(self) -> bool:
         switcher = self.query_one("#settings-access-switcher", ContentSwitcher)
         return switcher.current == "settings-access-detail"
+
+    def _tracing_detail_visible(self) -> bool:
+        return self.query_one("#settings-switcher", ContentSwitcher).current == "settings-tracing-detail"
+
+    async def _close_tracing_detail(self) -> None:
+        switcher = self.query_one("#settings-switcher", ContentSwitcher)
+        switcher.current = "settings-body"
+        matches = list(self.query("#settings-tracing-detail"))
+        if matches:
+            await matches[0].remove()
+        self.call_after_refresh(self.query_one("#settings-tracing-config", Button).focus)
+
+    def _tracing_widgets(self) -> list[Any]:
+        values = tracing_settings(self.settings)
+        headers = values["headers"]
+        header_text = yaml.safe_dump(headers, sort_keys=False).rstrip() if headers else ""
+        return [
+            Button(
+                "< Back",
+                id="settings-tracing-back",
+                classes="settings-access-back",
+                compact=True,
+            ),
+            Static(
+                "Tracing Configuration",
+                classes="settings-access-heading settings-access-detail-heading settings-tracing-heading",
+            ),
+            Static("Endpoint", classes="settings-tracing-label"),
+            Input(
+                value=str(values["endpoint"]),
+                id="settings-tracing-endpoint",
+                classes="settings-input settings-tracing-input",
+            ),
+            Static("Headers (YAML)", classes="settings-tracing-label"),
+            TextArea(
+                header_text,
+                placeholder='Authorization: "Bearer ${TRACE_TOKEN}"\ntenant: my-team',
+                show_line_numbers=False,
+                id="settings-tracing-headers",
+                classes="settings-tracing-headers",
+            ),
+            Static("settings.yml preview", classes="settings-tracing-label"),
+            Static(
+                tracing_yaml_fragment(
+                    enabled=bool(values["enabled"]),
+                    endpoint=str(values["endpoint"]),
+                    headers=headers,
+                ),
+                id="settings-tracing-preview",
+                classes="settings-tracing-preview",
+                markup=False,
+            ),
+        ]
+
+    def _draft_tracing_settings(self) -> dict[str, Any]:
+        endpoint = self.query_one("#settings-tracing-endpoint", Input).value.strip()
+        if not endpoint:
+            raise ValueError("endpoint is required")
+        headers = parse_headers_yaml(self.query_one("#settings-tracing-headers", TextArea).text)
+        return set_tracing_config(self.settings, endpoint=endpoint, headers=headers)
+
+    def _refresh_tracing_preview(self) -> None:
+        preview = self.query_one("#settings-tracing-preview", Static)
+        try:
+            updated = self._draft_tracing_settings()
+        except ValueError as exc:
+            preview.update(f"Preview unavailable: {exc}")
+            return
+        values = tracing_settings(updated)
+        preview.update(
+            tracing_yaml_fragment(
+                enabled=bool(values["enabled"]),
+                endpoint=str(values["endpoint"]),
+                headers=values["headers"],
+            )
+        )
 
     def _show_access_landing(self) -> None:
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"
@@ -1073,6 +1259,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
         return planning_todos_enabled(settings)
     if cell.kind == "rubric":
         return rubric_enabled(settings)
+    if cell.kind == "tracing":
+        return tracing_enabled(settings)
     if cell.kind == "subagent_enabled":
         return subagent_enabled(settings, cell.name)
     if cell.kind == "enabled":

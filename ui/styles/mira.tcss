@@ -1050,6 +1050,120 @@ Button.goal-action:focus {
     margin: 0 1 0 0;
 }
 
+.settings-tracing-row > .settings-config-button {
+    width: 12;
+    min-width: 12;
+    margin: 0 2 1 0;
+}
+
+.settings-config-action {
+    width: 16;
+    min-width: 16;
+    margin: 0 1 1 0;
+}
+
+.settings-config-action.settings-reload-button {
+    width: 20;
+    min-width: 20;
+}
+
+.settings-tracing-row > .settings-config-button,
+.settings-config-action {
+    height: 1;
+    min-height: 1;
+    padding: 0 1;
+    border: none;
+    text-style: bold;
+}
+
+.settings-tracing-row > .settings-config-button:focus,
+.settings-tracing-row > .settings-config-button:hover {
+    border: none;
+    background: #14524f;
+    color: #e8fffb;
+    text-style: bold;
+}
+
+.settings-tracing-row > .settings-config-button {
+    background: #14524f;
+    color: #e8fffb;
+}
+
+.settings-config-action {
+    background: #1b3036;
+    color: #eef7f8;
+}
+
+.settings-config-action:focus,
+.settings-config-action:hover {
+    border: none;
+    background: #1b3036;
+    background-tint: transparent;
+    color: #eef7f8;
+    text-style: bold;
+}
+
+#settings-footer {
+    width: 1fr;
+    height: 2;
+}
+
+#settings-footer > .settings-status {
+    width: 1fr;
+    height: 1;
+    margin-top: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#settings-footer > .settings-footer-reload {
+    margin: 1 0 0 1;
+}
+
+#settings-tracing-detail {
+    padding-top: 0;
+}
+
+.settings-tracing-heading,
+.settings-tracing-label {
+    height: 1;
+    margin-bottom: 1;
+}
+
+.settings-tracing-label {
+    color: #aeb8be;
+    text-style: bold;
+}
+
+.settings-input.settings-tracing-input {
+    width: 1fr;
+    margin-bottom: 1;
+}
+
+.settings-tracing-headers {
+    width: 1fr;
+    height: 7;
+    margin-bottom: 1;
+    border: solid #56616a;
+    background: #151a1d;
+    color: #e8fffb;
+}
+
+.settings-tracing-headers:focus {
+    border: solid #5bb8b1;
+}
+
+.settings-tracing-preview {
+    width: 1fr;
+    height: auto;
+    min-height: 5;
+    margin-bottom: 1;
+    padding: 0 1;
+    border: solid #3c4a50;
+    background: #151a1d;
+    color: #d2d8dc;
+}
+
 .settings-select > SelectCurrent,
 .settings-access-policy {
     border: solid #56616a;
@@ -1211,7 +1325,8 @@ Button.settings-access-back:hover {
     text-style: bold;
 }
 .settings-access-detail-heading { margin: 1 0 1 0; }
-.settings-access-guidance {
+.settings-access-guidance,
+.settings-mcp-guidance {
     width: 72;
     height: auto;
     margin-bottom: 2;
@@ -1219,6 +1334,9 @@ Button.settings-access-back:hover {
     border-left: solid #5bb8b1;
     background: #122023;
     color: #b8c1c7;
+}
+.settings-mcp-guidance {
+    margin: 1 0 2 0;
 }
 .settings-section.settings-access-section,
 .settings-mcp-server-title.settings-access-section { margin: 0; }
@@ -1231,7 +1349,11 @@ Button.settings-access-back:hover {
 }
 
 .settings-mcp-server-group.first {
-    margin-top: 2;
+    margin-top: 0;
+}
+
+.settings-mcp-empty {
+    margin-top: 0;
 }
 
 .settings-mcp-server-title {
@@ -1270,11 +1392,6 @@ Button.settings-access-back:hover {
 .settings-input.planning-response-status-retries-input:focus,
 .settings-input.planning-response-status-retries-input:disabled {
     border: none;
-}
-
-.settings-status {
-    height: 1;
-    margin-top: 1;
 }
 
 .message.tool-call {

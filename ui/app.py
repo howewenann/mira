@@ -1841,29 +1841,29 @@ class MiraApp(App[None]):
             self.system_message(f"settings error: {exc}", kind="error")
             self._set_status(state="error")
 
-    async def _run_reload_command(self) -> None:
+    async def _run_reload_command(self) -> bool:
         """Reload configuration/resources and rebuild agents without restarting MCP."""
-        await self._run_reload(full_runtime=False)
+        return await self._run_reload(full_runtime=False)
 
-    async def _run_reload_runtime_command(self) -> None:
+    async def _run_reload_runtime_command(self) -> bool:
         """Reload the full runtime, including MCP connections."""
-        await self._run_reload(full_runtime=True)
+        return await self._run_reload(full_runtime=True)
 
-    async def _run_reload(self, *, full_runtime: bool) -> None:
+    async def _run_reload(self, *, full_runtime: bool) -> bool:
         """Run one reload scope with shared status and error handling."""
         if self.query_one(PromptPanel).active:
             if isinstance(self.screen, MCPPanelScreen):
                 self.screen.dismiss()
             self.system_message("answer the current prompt before reloading", kind="warning")
-            return
+            return False
 
         if self._reload_in_progress:
             self.system_message("reload already in progress", kind="warning")
-            return
+            return False
 
         if self.busy:
             await self._handle_reload_command(full_runtime=full_runtime)
-            return
+            return False
 
         prompt = self.query_one(PromptBox)
         prompt_was_disabled = prompt.disabled
@@ -1871,8 +1871,10 @@ class MiraApp(App[None]):
         prompt.disabled = True
         self._set_status(state="running")
         try:
-            if await self._handle_reload_command(full_runtime=full_runtime):
+            reloaded = await self._handle_reload_command(full_runtime=full_runtime)
+            if reloaded:
                 self._set_status(state="ready")
+            return reloaded
         except Exception as exc:
             from config.llm import ConfigError
 
@@ -1882,6 +1884,7 @@ class MiraApp(App[None]):
                 error_path = self._write_error_report(exc, source="tui.reload")
                 self.system_message(f"reload error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
+            return False
         finally:
             self._reload_in_progress = False
             if self.is_mounted:
@@ -2042,6 +2045,7 @@ class MiraApp(App[None]):
             settings,
             tool_metadata=self._settings_tool_metadata(),
             apply_change=self._apply_settings,
+            reload_runtime=self._run_reload_runtime_command,
             close_panel=self._close_settings_panel,
             mcp_manager=self.mcp_manager,
             model_registry=(self.config or {}).get("model_registry"),
@@ -2067,11 +2071,13 @@ class MiraApp(App[None]):
         self.config = dict(old_config or {})
         self.config["settings"] = settings
         if not self.ready:
-            return True, "settings saved; run /reload-runtime to retry startup"
+            return True, "settings saved; MIRA is not ready; Reload Runtime required"
         if new_git_enabled != old_git_enabled:
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
-            return True, "git protection disabled"
+            return True, "git protection disabled; no reload required"
+        if old_settings.get("tracing") != settings.get("tracing"):
+            return True, "tracing settings saved; Reload Runtime required"
 
         try:
             if old_settings.get("models") != settings.get("models"):
@@ -2092,7 +2098,7 @@ class MiraApp(App[None]):
                 message += "; could not restore .mira/settings.yml"
             return False, message
         self._set_status(state="ready")
-        return True, "settings saved; agents rebuilt"
+        return True, "settings saved; agents rebuilt; no reload required"
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
         """Confirm before switching the agent to LocalShellBackend."""
@@ -2123,10 +2129,10 @@ class MiraApp(App[None]):
         from cli.git_guard import init_git_repository, is_git_worktree
 
         if is_git_worktree(self.workspace):
-            return True, "git protection enabled"
+            return True, "git protection enabled; no reload required"
         if init_git_repository(self.workspace):
-            return True, "git protection enabled; repository initialized"
-        return True, "git protection enabled, but Git was not initialized"
+            return True, "git protection enabled; repository initialized; no reload required"
+        return True, "git protection enabled; Git was not initialized; no reload required"
 
     def _settings_tool_metadata(self) -> list[dict[str, str]]:
         """Return loaded tool metadata for the settings panel."""

@@ -13,6 +13,8 @@ from config.llm import DEFAULT_CONTEXT_TOKENS
 from runtime.issues import Issue
 
 SETTINGS_FILE = "settings.yml"
+TRACING = "tracing"
+TRACING_DEFAULT_ENDPOINT = "http://127.0.0.1:6006/v1/traces"
 EXECUTE_TOOL = "execute"
 DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
@@ -56,6 +58,11 @@ class SettingsLoadResult:
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    TRACING: {
+        "enabled": False,
+        "endpoint": TRACING_DEFAULT_ENDPOINT,
+        "headers": {},
+    },
     MODELS: {
         CONTEXT_LIMIT_TOKENS: DEFAULT_CONTEXT_TOKENS,
         MAIN_MODEL: None,
@@ -150,6 +157,20 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     settings = deepcopy(DEFAULT_SETTINGS)
     if not isinstance(raw, dict):
         return settings
+
+    tracing = raw.get(TRACING)
+    if isinstance(tracing, dict):
+        if isinstance(tracing.get("enabled"), bool):
+            settings[TRACING]["enabled"] = tracing["enabled"]
+        endpoint = tracing.get("endpoint")
+        if isinstance(endpoint, str) and endpoint.strip():
+            settings[TRACING]["endpoint"] = endpoint.strip()
+        headers = tracing.get("headers")
+        if isinstance(headers, dict) and all(
+            isinstance(key, str) and key.strip() and isinstance(value, str)
+            for key, value in headers.items()
+        ):
+            settings[TRACING]["headers"] = dict(headers)
 
     models = raw.get(MODELS)
     if isinstance(models, dict):
@@ -291,7 +312,34 @@ def settings_issues(raw: Any) -> list[Issue]:
     issues: list[Issue] = []
     if not isinstance(raw, dict):
         return [_invalid_setting("settings", "top level must be a mapping")]
-    _unknown_settings(raw, {MODELS, "system", "hitl", "mcp"}, "", issues)
+    _unknown_settings(raw, {TRACING, MODELS, "system", "hitl", "mcp"}, "", issues)
+
+    tracing = raw.get(TRACING)
+    if tracing is not None:
+        if not isinstance(tracing, dict):
+            issues.append(_invalid_setting(TRACING, "must be a mapping"))
+        else:
+            _unknown_settings(tracing, {"enabled", "endpoint", "headers"}, TRACING, issues)
+            if "enabled" in tracing and not isinstance(tracing["enabled"], bool):
+                issues.append(_invalid_setting(f"{TRACING}.enabled", "must be true or false"))
+            if "endpoint" in tracing and (
+                not isinstance(tracing["endpoint"], str) or not tracing["endpoint"].strip()
+            ):
+                issues.append(_invalid_setting(f"{TRACING}.endpoint", "must be a non-empty string"))
+            headers = tracing.get("headers")
+            if headers is not None and not (
+                isinstance(headers, dict)
+                and all(
+                    isinstance(key, str) and key.strip() and isinstance(value, str)
+                    for key, value in headers.items()
+                )
+            ):
+                issues.append(
+                    _invalid_setting(
+                        f"{TRACING}.headers",
+                        "must be a mapping with non-empty string names and string values",
+                    )
+                )
 
     models = raw.get(MODELS)
     if models is not None:
@@ -473,6 +521,46 @@ def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *
 
 def valid_context_limit_tokens(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def tracing_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the normalized generic OTLP tracing configuration."""
+    settings = _settings_object(config_or_settings)
+    return dict(normalize_settings(settings)[TRACING])
+
+
+def tracing_enabled(config_or_settings: dict[str, Any] | None) -> bool:
+    return bool(tracing_settings(config_or_settings)["enabled"])
+
+
+def set_tracing_enabled(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    current = tracing_settings(settings)
+    current["enabled"] = bool(enabled)
+    updated = normalize_settings(settings)
+    updated[TRACING] = current
+    return updated
+
+
+def set_tracing_config(
+    settings: dict[str, Any],
+    *,
+    endpoint: str,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    """Return settings with validated, unresolved tracing values."""
+    if not endpoint.strip():
+        raise ValueError("endpoint is required")
+    if not all(
+        isinstance(key, str) and key.strip() and isinstance(value, str)
+        for key, value in headers.items()
+    ):
+        raise ValueError("headers must use non-empty string names and string values")
+    current = tracing_settings(settings)
+    current["endpoint"] = endpoint.strip()
+    current["headers"] = dict(headers)
+    updated = normalize_settings(settings)
+    updated[TRACING] = current
+    return updated
 
 
 def model_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:

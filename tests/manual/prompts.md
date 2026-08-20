@@ -1486,10 +1486,10 @@ Use a disposable workspace with no existing `.mira/`.
    Main, and confirm only inherited labels change. While MCP servers are
    connected, change Main, Rubric, Summarization, the context limit, a subagent
    enable toggle, and a raw subagent model. Expected: each change reports
-   `settings saved; agents rebuilt`, takes effect immediately, and does not
-   disconnect or restart any MCP server. The bright footer button reads
-   `model: [profile] provider:model`, stays left-aligned, and truncates with `…`
-   only when the terminal cannot fit the complete identity.
+   `settings saved; agents rebuilt; no reload required`, takes effect
+   immediately, and does not disconnect or restart any MCP server. The bright
+   footer button reads `model: [profile] provider:model`, stays left-aligned,
+   and truncates with `…` only when the terminal cannot fit the complete identity.
 4. Add a raw subagent with a long name and `description`, and use a long profile
    name. Expected: Context, the assignment dropdowns, and Subagent Enable share
    one left edge; the Subagents header has no visible `name`; and names and model
@@ -1503,3 +1503,21 @@ Use a disposable workspace with no existing `.mira/`.
    `/issues` shows one flat, initially collapsed list ordered STARTUP, MODEL,
    MCP, TOOL. Expanded rows show location, details, and guidance; there are no
    package inputs or install controls.
+
+## Generic OTLP tracing
+
+Install `mira[tracing]`, start a disposable OTLP/HTTP backend, and open
+Settings → General. Confirm the Tracing row uses the normal yes/no control and
+Config opens inline without adding a Settings tab. Enter an endpoint and a
+header such as `Authorization: "Bearer ${TRACE_TOKEN}"`; confirm the full YAML
+preview keeps the reference literal, malformed or non-mapping YAML cannot be
+saved, blank headers preview as `{}`, and Back saves valid changes and returns
+to General.
+
+Set `TRACE_TOKEN` in the launching process, choose Reload Runtime, and confirm
+new turns arrive at the configured backend without exposing the resolved token
+in Settings, Preview, or `.mira/settings.yml`. Change the endpoint and reload
+again; only the new backend should receive subsequent traces. Finally, test an
+environment without the tracing extra: MIRA should remain usable and Issues
+should recommend `pip install "mira[tracing]"` without showing LangSmith's raw
+dependency error.

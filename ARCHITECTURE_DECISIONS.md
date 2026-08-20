@@ -783,7 +783,7 @@ differently.
 
 ## DeepAgents Runtime Ownership
 
-**Decision:** MIRA pins DeepAgents 0.7.3 and `langchain-quickjs` 0.3.5. MIRA
+**Decision:** MIRA pins DeepAgents 0.7.7 and `langchain-quickjs` 0.3.5. MIRA
 owns a small general-purpose action prompt and its existing planning prompt;
 DeepAgents owns the filesystem, delegation, streaming, and middleware
 execution. Project and bundled memory files remain opaque Markdown resources,
@@ -819,6 +819,26 @@ not receive ambient filesystem, network, process, or clock access.
 
 **Update this when:** DeepAgents or QuickJS versions change, prompt ownership
 moves, todo defaults change, or filesystem/rubric semantics change.
+
+## Generic OTLP tracing
+
+**Decision:** Optional tracing is configured once at startup or full runtime
+reload through LangChain's existing LangSmith tracer in OTLP mode. MIRA owns no
+trace event model and adds no callbacks or per-tool instrumentation. The
+backend-neutral endpoint and header templates stay in `settings.yml`; only the
+runtime copy resolves environment references.
+
+**Why:** DeepAgents already emits the LangChain run structure users need.
+Reusing that path keeps observability optional and vendor-neutral. A fresh
+public OTel provider, HTTP exporter, and LangSmith client are installed on each
+full reload so changed endpoints and headers cannot remain cached. Missing
+optional dependencies are a non-fatal Issue.
+
+**Where to check:** `tracing/bootstrap.py`, `config/runtime.py`,
+`ui/widgets/settings_panel.py`, `pyproject.toml`.
+
+**Update this when:** tracing ownership, OTLP transport, reload behavior, or
+secret-resolution boundaries change.
 
 ## Sessions And Compaction
 
