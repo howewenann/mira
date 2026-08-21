@@ -823,18 +823,24 @@ moves, todo defaults change, or filesystem/rubric semantics change.
 ## Generic OTLP tracing
 
 **Decision:** Optional tracing is configured once at startup or full runtime
-reload through LangChain's existing LangSmith tracer in OTLP mode. MIRA owns no
-trace event model and adds no callbacks or per-tool instrumentation. The
-backend-neutral endpoint and header templates stay in a bootstrapped
-`.mira/tracing.yml` profile registry. `settings.yml` retains only enablement and
-the selected profile. Only the selected runtime copy resolves environment
-references.
+reload through OpenInference's public LangChain instrumentor. The instrumentor
+emits AI-semantic OpenTelemetry spans into one MIRA-owned provider, standard
+batch processor, and OTLP/HTTP exporter. MIRA owns no trace event model,
+semantic translation, filtering, or per-backend path. The backend-neutral
+endpoint and header templates stay in a bootstrapped `.mira/tracing.yml` profile
+registry. `settings.yml` retains only enablement and the selected profile. Only
+the selected runtime copy resolves environment references.
 
 **Why:** DeepAgents already emits the LangChain run structure users need.
-Reusing that path keeps observability optional and vendor-neutral. A fresh
-public OTel provider, HTTP exporter, and LangSmith client are installed on each
-full reload so changed endpoints and headers cannot remain cached. Missing
-optional dependencies are a non-fatal Issue.
+OpenInference's LangChain integration converts that structure into one portable
+representation with structured input/output, message, tool, span-kind, and
+token conventions on top of OTel. A fresh instrumentor, public OTel provider,
+HTTP exporter, and resource identity are installed on each full reload so
+changed endpoints and headers cannot remain cached. Reload and shutdown first
+uninstrument LangChain, then perform a bounded flush and close the old provider.
+Missing optional dependencies and initialization failures are non-fatal Issues.
+MIRA never changes external LangSmith tracing switches; it warns when they can
+produce a duplicate native trace alongside MIRA's OpenInference trace.
 
 **Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
 `config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.

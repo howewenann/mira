@@ -22,7 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tracing = ["langsmith[otel]"]
+tracing = [
+    "openinference-instrumentation-langchain>=0.1.70,<0.2.0",
+    "opentelemetry-sdk>=1.44.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0,<2.0.0",
+]
 
 [project.scripts]
 mira = "cli.main:app"

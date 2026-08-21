@@ -3302,9 +3302,14 @@ class MiraApp(App[None]):
         return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
 
     async def on_unmount(self) -> None:
-        """Close every MCP runtime when the Textual app exits."""
-        if self.mcp_manager is not None:
-            await self.mcp_manager.shutdown()
+        """Close every process-owned runtime when the Textual app exits."""
+        try:
+            if self.mcp_manager is not None:
+                await self.mcp_manager.shutdown()
+        finally:
+            from tracing.bootstrap import shutdown_tracing
+
+            shutdown_tracing()
 
     def _agent_mode_updates(
         self,

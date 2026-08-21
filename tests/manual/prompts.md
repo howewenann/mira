@@ -1522,3 +1522,17 @@ again; only the new backend should receive subsequent traces. Finally, test an
 environment without the tracing extra: MIRA should remain usable and Issues
 should recommend `pip install "mira[tracing]"` without showing LangSmith's raw
 dependency error.
+
+With Phoenix selected, run a normal model turn followed by a prompt that uses a
+built-in tool and, if available, `eval`, `task`, or a subagent. Inspect the
+OpenInference span tree and record the root, model, and tool span names; verify
+`openinference.span.kind`, `input.value`, `output.value`, structured messages or
+tool attributes, and token counts where the model reports them. Explicitly note
+whether any `wrap_model_call`, `awrap_model_call`, `wrap_tool_call`, or
+`awrap_tool_call` spans appear. Do not filter or reparent the observed tree.
+
+If LangSmith credentials are available, select its profile and repeat the same
+prompt. Confirm the hierarchy and OpenInference attributes render sensibly and
+match the Phoenix representation. Start once with `LANGSMITH_TRACING=true` and
+confirm MIRA still initializes, preserves the variable, and reports a non-fatal
+duplicate-tracing warning.

@@ -140,9 +140,14 @@ async def _run(
         if invocation_rubric is not None and result.rubric_status != "satisfied":
             raise typer.Exit(code=3)
     finally:
-        manager = app.get("mcp_manager")
-        if manager is not None:
-            await manager.shutdown()
+        try:
+            manager = app.get("mcp_manager")
+            if manager is not None:
+                await manager.shutdown()
+        finally:
+            from tracing.bootstrap import shutdown_tracing
+
+            shutdown_tracing()
 
 
 def _resolve_one_shot_inputs(
