@@ -1985,6 +1985,8 @@ class MiraApp(App[None]):
         )
 
         self.config = config
+        if self._settings_panel is not None and self._settings_panel.is_mounted:
+            self._settings_panel.refresh_tracing_registry(config["tracing_registry"])
         self.model_name = model_name
         self.context_limit_tokens = metadata.context_tokens
         self.context_limit_source = metadata.context_source
@@ -2034,6 +2036,8 @@ class MiraApp(App[None]):
 
     def _handle_settings_command(self, initial_tab: str = "general") -> Any:
         """Mount the interactive settings panel."""
+        from config.tracing import TracingRegistry, load_tracing_registry
+
         if self.busy:
             self.system_message("finish the current turn before changing settings", kind="warning")
             return True
@@ -2041,6 +2045,9 @@ class MiraApp(App[None]):
         settings = load_settings(self.workspace)
         if self._settings_panel is not None and self._settings_panel.is_mounted:
             self._settings_panel.remove()
+        tracing_registry = (self.config or {}).get("tracing_registry")
+        if not isinstance(tracing_registry, TracingRegistry):
+            tracing_registry = load_tracing_registry(self.workspace)
         panel = SettingsPanel(
             settings,
             tool_metadata=self._settings_tool_metadata(),
@@ -2049,6 +2056,7 @@ class MiraApp(App[None]):
             close_panel=self._close_settings_panel,
             mcp_manager=self.mcp_manager,
             model_registry=(self.config or {}).get("model_registry"),
+            tracing_registry=tracing_registry,
             subagent_metadata=((self.mode.get("resources") or {}).get("subagents") or []),
             initial_tab=initial_tab,
         )

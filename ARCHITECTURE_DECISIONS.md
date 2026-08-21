@@ -825,8 +825,10 @@ moves, todo defaults change, or filesystem/rubric semantics change.
 **Decision:** Optional tracing is configured once at startup or full runtime
 reload through LangChain's existing LangSmith tracer in OTLP mode. MIRA owns no
 trace event model and adds no callbacks or per-tool instrumentation. The
-backend-neutral endpoint and header templates stay in `settings.yml`; only the
-runtime copy resolves environment references.
+backend-neutral endpoint and header templates stay in a bootstrapped
+`.mira/tracing.yml` profile registry. `settings.yml` retains only enablement and
+the selected profile. Only the selected runtime copy resolves environment
+references.
 
 **Why:** DeepAgents already emits the LangChain run structure users need.
 Reusing that path keeps observability optional and vendor-neutral. A fresh
@@ -834,8 +836,8 @@ public OTel provider, HTTP exporter, and LangSmith client are installed on each
 full reload so changed endpoints and headers cannot remain cached. Missing
 optional dependencies are a non-fatal Issue.
 
-**Where to check:** `tracing/bootstrap.py`, `config/runtime.py`,
-`ui/widgets/settings_panel.py`, `pyproject.toml`.
+**Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
+`config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.
 
 **Update this when:** tracing ownership, OTLP transport, reload behavior, or
 secret-resolution boundaries change.

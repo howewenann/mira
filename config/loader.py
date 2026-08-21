@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from config.llm import load_model_registry
 from config.settings import load_settings_result
+from config.tracing import load_tracing_registry
 
 
 def _int_env(name: str, default: int) -> int:
@@ -34,12 +35,14 @@ def load_config(workspace: Path, *, override_dotenv: bool = False) -> dict[str, 
 
     settings_result = load_settings_result(workspace)
     registry = load_model_registry(workspace, environ=os.environ)
+    tracing_registry = load_tracing_registry(workspace)
     return {
         "workspace": str(workspace),
         "settings": settings_result.settings,
         "settings_valid": settings_result.valid,
         "model_registry": registry,
-        "issues": [*settings_result.issues, *registry.issues],
+        "tracing_registry": tracing_registry,
+        "issues": [*settings_result.issues, *registry.issues, *tracing_registry.issues],
         "tool_output_chars": _int_env("MIRA_TOOL_OUTPUT_CHARS", 240),
         "lmstudio_metadata_timeout": _float_env("MIRA_LMSTUDIO_METADATA_TIMEOUT", 2.0),
         "session_dir": os.getenv("MIRA_SESSION_DIR", str(workspace / ".mira" / "_sessions")),

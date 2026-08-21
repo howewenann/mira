@@ -79,19 +79,10 @@ pip install arize-phoenix
 phoenix serve
 ```
 
-Open `MIRA → Settings → General → Tracing → Yes → Config`, set:
-
-```text
-Endpoint:
-http://127.0.0.1:6006/v1/traces
-
-Headers:
-leave empty
-```
-
-Choose **Reload Runtime**, then open the Phoenix UI at
-`http://127.0.0.1:6006`. Endpoint and Headers can point to any compatible OTLP
-backend; Phoenix is only the recommended local quick-start.
+Open `MIRA → Settings → General → Tracing → Yes → Config`, select the
+bootstrapped `Phoenix` profile, and choose **Reload Runtime**. Then open the
+Phoenix UI at `http://127.0.0.1:6006`. Add any other compatible OTLP/HTTP
+profiles to `.mira/tracing.yml`; no MIRA code changes are required.
 
 ## More information
 

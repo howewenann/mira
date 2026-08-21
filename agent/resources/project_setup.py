@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from config.tracing import TRACING_REGISTRY_TEMPLATE
+
 from agent.resources.paths import (
     MCP_DIR,
     MEMORIES_DIR,
@@ -35,6 +37,7 @@ def ensure_project_examples(workspace: Path) -> None:
 
     write_example(mcp_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
     write_example(mira_dir / "models.yml", MODEL_REGISTRY_TEMPLATE)
+    write_example(mira_dir / "tracing.yml", TRACING_REGISTRY_TEMPLATE)
     write_example(mcp_dir / "example.json", EXAMPLE_MCP_CONFIGURATION)
     write_example(mcp_dir / "schema.json", MCP_CONFIGURATION_SCHEMA)
     write_example(mira_dir / "README.md", PROJECT_README)
@@ -185,6 +188,8 @@ MIRA loads project resources from this folder on top of its defaults.
   storing the resolved value. Run `/reload-runtime` after changes.
 - `models.yml`: ordered AnyLLM profiles. Put secrets in `.env`, reference them
   with `${NAME}`, then select Main and other assignments through `/models`.
+- `tracing.yml`: generic OTLP tracing profiles selected through Settings.
+  Environment references remain unresolved on disk and in the Settings preview.
 - `prompts/**/*`: recursive Mustache prompt files flattened to `/prompt__...`
   commands with `__` between suffix-free path components.
 - `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is

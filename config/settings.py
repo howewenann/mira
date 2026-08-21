@@ -14,7 +14,7 @@ from runtime.issues import Issue
 
 SETTINGS_FILE = "settings.yml"
 TRACING = "tracing"
-TRACING_DEFAULT_ENDPOINT = "http://127.0.0.1:6006/v1/traces"
+TRACING_DEFAULT_PROFILE = "phoenix"
 EXECUTE_TOOL = "execute"
 DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
@@ -60,8 +60,7 @@ class SettingsLoadResult:
 DEFAULT_SETTINGS: dict[str, Any] = {
     TRACING: {
         "enabled": False,
-        "endpoint": TRACING_DEFAULT_ENDPOINT,
-        "headers": {},
+        "profile": TRACING_DEFAULT_PROFILE,
     },
     MODELS: {
         CONTEXT_LIMIT_TOKENS: DEFAULT_CONTEXT_TOKENS,
@@ -162,15 +161,9 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     if isinstance(tracing, dict):
         if isinstance(tracing.get("enabled"), bool):
             settings[TRACING]["enabled"] = tracing["enabled"]
-        endpoint = tracing.get("endpoint")
-        if isinstance(endpoint, str) and endpoint.strip():
-            settings[TRACING]["endpoint"] = endpoint.strip()
-        headers = tracing.get("headers")
-        if isinstance(headers, dict) and all(
-            isinstance(key, str) and key.strip() and isinstance(value, str)
-            for key, value in headers.items()
-        ):
-            settings[TRACING]["headers"] = dict(headers)
+        profile = tracing.get("profile")
+        if isinstance(profile, str) and profile.strip():
+            settings[TRACING]["profile"] = profile.strip()
 
     models = raw.get(MODELS)
     if isinstance(models, dict):
@@ -319,27 +312,13 @@ def settings_issues(raw: Any) -> list[Issue]:
         if not isinstance(tracing, dict):
             issues.append(_invalid_setting(TRACING, "must be a mapping"))
         else:
-            _unknown_settings(tracing, {"enabled", "endpoint", "headers"}, TRACING, issues)
+            _unknown_settings(tracing, {"enabled", "profile"}, TRACING, issues)
             if "enabled" in tracing and not isinstance(tracing["enabled"], bool):
                 issues.append(_invalid_setting(f"{TRACING}.enabled", "must be true or false"))
-            if "endpoint" in tracing and (
-                not isinstance(tracing["endpoint"], str) or not tracing["endpoint"].strip()
+            if "profile" in tracing and (
+                not isinstance(tracing["profile"], str) or not tracing["profile"].strip()
             ):
-                issues.append(_invalid_setting(f"{TRACING}.endpoint", "must be a non-empty string"))
-            headers = tracing.get("headers")
-            if headers is not None and not (
-                isinstance(headers, dict)
-                and all(
-                    isinstance(key, str) and key.strip() and isinstance(value, str)
-                    for key, value in headers.items()
-                )
-            ):
-                issues.append(
-                    _invalid_setting(
-                        f"{TRACING}.headers",
-                        "must be a mapping with non-empty string names and string values",
-                    )
-                )
+                issues.append(_invalid_setting(f"{TRACING}.profile", "must be a non-empty string"))
 
     models = raw.get(MODELS)
     if models is not None:
@@ -541,23 +520,12 @@ def set_tracing_enabled(settings: dict[str, Any], enabled: bool) -> dict[str, An
     return updated
 
 
-def set_tracing_config(
-    settings: dict[str, Any],
-    *,
-    endpoint: str,
-    headers: dict[str, str],
-) -> dict[str, Any]:
-    """Return settings with validated, unresolved tracing values."""
-    if not endpoint.strip():
-        raise ValueError("endpoint is required")
-    if not all(
-        isinstance(key, str) and key.strip() and isinstance(value, str)
-        for key, value in headers.items()
-    ):
-        raise ValueError("headers must use non-empty string names and string values")
+def set_tracing_profile(settings: dict[str, Any], profile: str) -> dict[str, Any]:
+    """Return settings with one selected tracing profile."""
+    if not isinstance(profile, str) or not profile.strip():
+        raise ValueError("tracing profile is required")
     current = tracing_settings(settings)
-    current["endpoint"] = endpoint.strip()
-    current["headers"] = dict(headers)
+    current["profile"] = profile.strip()
     updated = normalize_settings(settings)
     updated[TRACING] = current
     return updated

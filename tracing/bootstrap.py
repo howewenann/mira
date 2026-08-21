@@ -7,10 +7,9 @@ from collections.abc import Mapping, MutableMapping
 from typing import Any
 from urllib.parse import quote
 
-import yaml
-
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
 from config.settings import tracing_enabled, tracing_settings
+from config.tracing import TracingRegistry
 from runtime.issues import Issue
 
 _ENVIRONMENT_KEYS = (
@@ -26,6 +25,7 @@ _saved_environment: dict[str, str | None] | None = None
 
 def configure_tracing(
     settings: dict[str, Any] | None,
+    registry: TracingRegistry | None = None,
     *,
     environ: MutableMapping[str, str] | None = None,
 ) -> list[Issue]:
@@ -35,9 +35,30 @@ def configure_tracing(
         _disable_tracing(target)
         return []
 
-    values = tracing_settings(settings)
+    selected = str(tracing_settings(settings)["profile"])
+    if registry is None or registry.profile(selected) is None:
+        _disable_tracing(target)
+        if registry is not None and selected in registry.invalid_names:
+            return [
+                _tracing_issue(
+                    f"Tracing profile '{selected}' is invalid",
+                    f"Correct profile '{selected}' in .mira/tracing.yml.",
+                )
+            ]
+        return [
+            _tracing_issue(
+                f"Tracing profile '{selected}' was not found in .mira/tracing.yml.",
+                "Select an available profile or add it to .mira/tracing.yml.",
+            )
+        ]
+
+    profile = registry.profile(selected)
+    assert profile is not None
     try:
-        resolved = resolve_environment(values, environ=target)
+        resolved = resolve_environment(
+            {"endpoint": profile.endpoint, "headers": profile.headers},
+            environ=target,
+        )
     except EnvironmentInterpolationError as exc:
         _disable_tracing(target)
         reason = str(exc).partition(";")[0]
@@ -111,30 +132,21 @@ def serialize_headers(headers: Mapping[str, str]) -> str:
     )
 
 
-def parse_headers_yaml(text: str) -> dict[str, str]:
-    """Parse a YAML mapping suitable for OTLP HTTP headers."""
-    if not text.strip():
-        return {}
-    try:
-        parsed = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise ValueError("headers must be valid YAML") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("headers must be a YAML mapping")
-    if not all(
-        isinstance(key, str) and key.strip() and isinstance(value, str)
-        for key, value in parsed.items()
-    ):
-        raise ValueError("header names and values must be strings")
-    return dict(parsed)
+def tracing_yaml_fragment(
+    *,
+    enabled: bool,
+    profile: str,
+    endpoint: str,
+    headers: Mapping[str, str],
+) -> str:
+    """Render the unresolved effective tracing fragment used by the preview."""
+    import yaml
 
-
-def tracing_yaml_fragment(*, enabled: bool, endpoint: str, headers: Mapping[str, str]) -> str:
-    """Render the exact unresolved settings fragment used by the preview."""
     return yaml.safe_dump(
         {
             "tracing": {
                 "enabled": bool(enabled),
+                "profile": profile,
                 "endpoint": endpoint.strip(),
                 "headers": dict(headers),
             }
@@ -198,7 +210,11 @@ def _tracing_issue(summary: str, details: str) -> Issue:
     return Issue(
         "STARTUP",
         summary,
-        ".mira/settings.yml / tracing",
+        ".mira/tracing.yml",
         details,
-        'Install the tracing extra with: pip install "mira[tracing]", then run /reload-runtime.',
+        (
+            'Install the tracing extra with: pip install "mira[tracing]", then run /reload-runtime.'
+            if "dependencies" in summary.lower()
+            else "Correct the tracing profile and run /reload-runtime."
+        ),
     )

@@ -106,26 +106,35 @@ Install the optional tracing runtime with:
 pip install "mira[tracing]"
 ```
 
-The tracing settings are backend-neutral:
+Tracing enablement and selection stay in `.mira/settings.yml`:
 
 ```yaml
 tracing:
   enabled: true
-  endpoint: https://example.com/otel/v1/traces
-  headers:
-    Authorization: "Bearer ${TRACE_TOKEN}"
-    tenant: my-team
+  profile: corporate
 ```
 
-`endpoint` is the complete OTLP/HTTP traces endpoint. `headers` is a YAML
-mapping; blank headers are stored as `{}`. Environment references stay literal
-in Settings, Preview, and `settings.yml`. MIRA resolves them only in the
-in-memory tracing copy and serializes the result at the OTLP boundary. Supply
-referenced values in the process environment before starting or reloading MIRA.
+MIRA bootstraps `.mira/tracing.yml` once with Phoenix and LangSmith profiles.
+Each profile contains only a complete OTLP/HTTP `endpoint` and a `headers`
+mapping. Add any number of profiles directly to that file:
+
+```yaml
+profiles:
+  corporate:
+    endpoint: https://example.com/otel/v1/traces
+    headers:
+      Authorization: "Bearer ${TRACE_TOKEN}"
+      tenant: my-team
+```
+
+Existing registries are never overwritten or extended automatically.
+Environment references stay literal in `tracing.yml` and the Settings preview.
+MIRA resolves only the selected profile's in-memory runtime copy at the OTLP
+boundary. Supply referenced values before starting or reloading MIRA.
 
 Reload Runtime closes the current MIRA-owned LangSmith client and OTel provider,
-rebuilds both with the current endpoint and headers, and then follows the same
-full reload path as `/reload-runtime`. If the extra is missing, tracing is
+rebuilds both with the selected profile's endpoint and headers, and follows the
+same full reload path as `/reload-runtime`. If the extra is missing, tracing is
 disabled for that runtime and Issues shows the install command. Exporter
 connection failures follow normal OpenTelemetry behavior and do not disable the
 agent runtime.

@@ -43,6 +43,7 @@ from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
 from config.llm import ModelProfile, ModelRegistry
 from config.runtime import LaunchOptions, build_runtime_snapshot
+from config.tracing import TRACING_REGISTRY_TEMPLATE, load_tracing_registry, tracing_path
 from config.settings import (
     DEFAULT_SETTINGS,
     EXECUTE_ENV_MODES,
@@ -5401,12 +5402,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(tool_always_allow(load_settings(workspace), "edit_file"))
 
-    async def test_tracing_config_validates_previews_persists_and_reloads_runtime(self) -> None:
-        """Tracing details should preserve secret references and reuse runtime reload."""
+    async def test_tracing_profiles_preview_persist_width_and_reload_discovery(self) -> None:
+        """Tracing profiles should fill the preview width and refresh through runtime reload."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
-            app._run_reload_runtime_command = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+            async def reload_runtime() -> bool:
+                app.query_one(SettingsPanel).refresh_tracing_registry(load_tracing_registry(workspace))
+                return True
+
+            app._run_reload_runtime_command = AsyncMock(side_effect=reload_runtime)  # type: ignore[method-assign]
 
             async with app.run_test(size=(110, 36)) as pilot:
                 await pilot.pause()
@@ -5449,24 +5455,39 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(app.query("#settings-tracing-reload")), 0)
                 self.assertEqual(len(app.query("#settings-tracing-close")), 0)
 
-                endpoint = app.query_one("#settings-tracing-endpoint", Input)
-                headers = app.query_one("#settings-tracing-headers", TextArea)
-                endpoint.value = "https://example.com/otel/v1/traces"
-                headers.text = "- malformed"
-                await pilot.pause()
-                preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
-                self.assertIn("Preview unavailable", preview)
-
-                back_button.press()
-                await pilot.pause()
-                self.assertEqual(len(app.query("#settings-tracing-detail")), 1)
-                app._run_reload_runtime_command.assert_not_awaited()
-
-                headers.text = 'Authorization: "Bearer ${TRACE_TOKEN}"\ntenant: my-team'
-                await pilot.pause()
+                profile = app.query_one("#settings-tracing-profile", Select)
+                preview_widget = app.query_one("#settings-tracing-preview", Static)
+                self.assertEqual(profile.region.width, preview_widget.region.width)
+                self.assertEqual(
+                    [value for _label, value in profile._options],
+                    ["phoenix", "langsmith"],
+                )
                 preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
                 self.assertIn("tracing:", preview)
-                self.assertIn("${TRACE_TOKEN}", preview)
+                self.assertIn("profile: phoenix", preview)
+                self.assertIn("headers: {}", preview)
+
+                tracing_path(workspace).write_text(
+                    TRACING_REGISTRY_TEMPLATE
+                    + "\n  corporate:\n"
+                    + "    endpoint: https://otel.company.example/v1/traces\n"
+                    + "    headers:\n"
+                    + '      Authorization: "Bearer ${CORP_OTEL_TOKEN}"\n',
+                    encoding="utf-8",
+                )
+
+                app.query_one("#settings-reload-runtime", Button).press()
+                await wait_until(lambda: app._run_reload_runtime_command.await_count == 1)
+                await wait_until(
+                    lambda: "corporate"
+                    in [value for _label, value in app.query_one("#settings-tracing-profile", Select)._options]
+                )
+                profile.value = "corporate"
+                await wait_until(lambda: load_settings(workspace)["tracing"]["profile"] == "corporate")
+                preview = renderable_plain(preview_widget)
+                self.assertIn("profile: corporate", preview)
+                self.assertIn("https://otel.company.example/v1/traces", preview)
+                self.assertIn("${CORP_OTEL_TOKEN}", preview)
                 self.assertNotIn("resolved-secret", preview)
 
                 back_button.press()
@@ -5475,16 +5496,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     lambda: renderable_plain(app.query_one("#settings-status", Static))
                     == "tracing settings saved; Reload Runtime required"
                 )
-                app._run_reload_runtime_command.assert_not_awaited()
-
-                app.query_one("#settings-reload-runtime", Button).press()
-                await wait_until(lambda: app._run_reload_runtime_command.await_count == 1)
-                await wait_until(
-                    lambda: renderable_plain(app.query_one("#settings-status", Static))
-                    == "runtime reloaded"
-                )
+                app._run_reload_runtime_command.assert_awaited_once()
 
                 app._run_reload_runtime_command.return_value = False
+                app._run_reload_runtime_command.side_effect = None
                 app.query_one("#settings-reload-runtime", Button).press()
                 await wait_until(lambda: app._run_reload_runtime_command.await_count == 2)
                 await wait_until(
@@ -5493,8 +5508,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             loaded = load_settings(workspace)["tracing"]
-            self.assertEqual(loaded["endpoint"], "https://example.com/otel/v1/traces")
-            self.assertEqual(loaded["headers"]["Authorization"], "Bearer ${TRACE_TOKEN}")
+            self.assertEqual(loaded, {"enabled": True, "profile": "corporate"})
 
     async def test_settings_command_can_always_allow_delete(self) -> None:
         """Delete should use the same configurable approval toggle as other tools."""

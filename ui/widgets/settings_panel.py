@@ -7,13 +7,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import yaml
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
-from textual.widgets import Button, ContentSwitcher, Input, Select, Static, TextArea
+from textual.widgets import Button, ContentSwitcher, Input, Select, Static
 
 from config.settings import (
     DYNAMIC_SUBAGENTS,
@@ -69,12 +68,13 @@ from config.settings import (
     set_subagent_model_assignment,
     subagent_enabled,
     subagent_model_assignment,
-    set_tracing_config,
     set_tracing_enabled,
+    set_tracing_profile,
     tracing_enabled,
     tracing_settings,
 )
-from tracing.bootstrap import parse_headers_yaml, tracing_yaml_fragment
+from config.tracing import TracingRegistry
+from tracing.bootstrap import tracing_yaml_fragment
 
 ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access", "ptc",
@@ -134,6 +134,7 @@ class SettingsPanel(Vertical):
         close_panel: CloseCallback | None = None,
         mcp_manager: Any = None,
         model_registry: Any = None,
+        tracing_registry: TracingRegistry | None = None,
         subagent_metadata: list[dict[str, str]] | None = None,
         initial_tab: str = "general",
         **kwargs: Any,
@@ -146,6 +147,7 @@ class SettingsPanel(Vertical):
         self.close_panel = close_panel
         self.mcp_manager = mcp_manager
         self.model_registry = model_registry
+        self.tracing_registry = tracing_registry or TracingRegistry()
         self.subagent_metadata = list(subagent_metadata or [])
         self.initial_tab = initial_tab if initial_tab in SETTINGS_TAB_PAGES else "general"
         self._model_controls_ready = False
@@ -535,32 +537,34 @@ class SettingsPanel(Vertical):
         detail = VerticalScroll(*self._tracing_widgets(), id="settings-tracing-detail", classes="settings-body")
         await switcher.mount(detail)
         switcher.current = "settings-tracing-detail"
-        self.call_after_refresh(detail.query_one("#settings-tracing-endpoint", Input).focus)
+        self.call_after_refresh(detail.query_one("#settings-tracing-profile", Select).focus)
 
     @on(Button.Pressed, "#settings-tracing-back")
     async def press_tracing_back(self, event: Button.Pressed) -> None:
-        """Persist valid tracing values and return to General settings."""
+        """Return to General settings after profile changes save in place."""
         event.stop()
-        try:
-            updated = self._draft_tracing_settings()
-        except ValueError as exc:
-            self._set_status(str(exc))
-            self._refresh_tracing_preview()
-            return
-        ok, message = await self.apply_change(updated)
-        self._set_status(message)
-        if not ok:
-            return
-        self.settings = updated
         await self._close_tracing_detail()
 
-    @on(Input.Changed, "#settings-tracing-endpoint")
-    def tracing_endpoint_changed(self, _event: Input.Changed) -> None:
-        self._refresh_tracing_preview()
-
-    @on(TextArea.Changed, "#settings-tracing-headers")
-    def tracing_headers_changed(self, _event: TextArea.Changed) -> None:
-        self._refresh_tracing_preview()
+    @on(Select.Changed, "#settings-tracing-profile")
+    async def change_tracing_profile(self, event: Select.Changed) -> None:
+        """Persist the selected registry profile and refresh its effective preview."""
+        event.stop()
+        selected = str(event.value) if event.value is not Select.NULL else ""
+        current = str(tracing_settings(self.settings)["profile"])
+        if not selected or selected == current:
+            return
+        if selected not in self.tracing_registry.profiles:
+            self._set_status(f"tracing profile '{selected}' is unavailable")
+            self._restore_select_value(event.select, current)
+            return
+        updated = set_tracing_profile(self.settings, selected)
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+            self._refresh_tracing_preview()
+        else:
+            self._restore_select_value(event.select, current)
 
     @on(Button.Pressed, "#settings-access-back")
     def press_access_back(self, event: Button.Pressed) -> None:
@@ -948,6 +952,25 @@ class SettingsPanel(Vertical):
                     button.disabled = False
         self._set_status(success_message if reloaded else "runtime reload failed")
 
+    def refresh_tracing_registry(self, registry: TracingRegistry) -> None:
+        """Refresh tracing choices after the shared runtime reload."""
+        self.tracing_registry = registry
+        selects = list(self.query("#settings-tracing-profile"))
+        if not selects:
+            return
+        select = selects[0]
+        options = self._tracing_profile_options()
+        if not options:
+            self._refresh_tracing_preview()
+            return
+        selected = str(tracing_settings(self.settings)["profile"])
+        value = selected if selected in self.tracing_registry.profiles else options[0][1]
+        with select.prevent(Select.Changed):
+            select.set_options(options)
+            select.value = value
+        select.query_one("SelectCurrent").update(self._tracing_profile_label(str(value)))
+        self._refresh_tracing_preview()
+
     def _restore_select_value(self, select: Select, value: str) -> None:
         """Restore a rejected model selection without firing another save."""
         with select.prevent(Select.Changed):
@@ -1018,8 +1041,9 @@ class SettingsPanel(Vertical):
 
     def _tracing_widgets(self) -> list[Any]:
         values = tracing_settings(self.settings)
-        headers = values["headers"]
-        header_text = yaml.safe_dump(headers, sort_keys=False).rstrip() if headers else ""
+        profile = str(values["profile"])
+        options = self._tracing_profile_options()
+        available = profile in self.tracing_registry.profiles
         return [
             Button(
                 "< Back",
@@ -1031,55 +1055,52 @@ class SettingsPanel(Vertical):
                 "Tracing Configuration",
                 classes="settings-access-heading settings-access-detail-heading settings-tracing-heading",
             ),
-            Static("Endpoint", classes="settings-tracing-label"),
-            Input(
-                value=str(values["endpoint"]),
-                id="settings-tracing-endpoint",
-                classes="settings-input settings-tracing-input",
-            ),
-            Static("Headers (YAML)", classes="settings-tracing-label"),
-            TextArea(
-                header_text,
-                placeholder='Authorization: "Bearer ${TRACE_TOKEN}"\ntenant: my-team',
-                show_line_numbers=False,
-                id="settings-tracing-headers",
-                classes="settings-tracing-headers",
+            Static("Profile", classes="settings-tracing-label"),
+            Select(
+                options,
+                value=profile if available else Select.NULL,
+                prompt="Select profile",
+                allow_blank=not available,
+                disabled=not options,
+                id="settings-tracing-profile",
+                classes="settings-tracing-profile",
             ),
             Static("settings.yml preview", classes="settings-tracing-label"),
             Static(
-                tracing_yaml_fragment(
-                    enabled=bool(values["enabled"]),
-                    endpoint=str(values["endpoint"]),
-                    headers=headers,
-                ),
+                self._tracing_preview_text(),
                 id="settings-tracing-preview",
                 classes="settings-tracing-preview",
                 markup=False,
             ),
         ]
 
-    def _draft_tracing_settings(self) -> dict[str, Any]:
-        endpoint = self.query_one("#settings-tracing-endpoint", Input).value.strip()
-        if not endpoint:
-            raise ValueError("endpoint is required")
-        headers = parse_headers_yaml(self.query_one("#settings-tracing-headers", TextArea).text)
-        return set_tracing_config(self.settings, endpoint=endpoint, headers=headers)
-
     def _refresh_tracing_preview(self) -> None:
-        preview = self.query_one("#settings-tracing-preview", Static)
-        try:
-            updated = self._draft_tracing_settings()
-        except ValueError as exc:
-            preview.update(f"Preview unavailable: {exc}")
-            return
-        values = tracing_settings(updated)
-        preview.update(
-            tracing_yaml_fragment(
-                enabled=bool(values["enabled"]),
-                endpoint=str(values["endpoint"]),
-                headers=values["headers"],
-            )
+        previews = list(self.query("#settings-tracing-preview"))
+        if previews:
+            previews[0].update(self._tracing_preview_text())
+
+    def _tracing_preview_text(self) -> str:
+        values = tracing_settings(self.settings)
+        selected = str(values["profile"])
+        profile = self.tracing_registry.profile(selected)
+        if profile is None:
+            return f"Preview unavailable: tracing profile '{selected}' was not found"
+        return tracing_yaml_fragment(
+            enabled=bool(values["enabled"]),
+            profile=selected,
+            endpoint=profile.endpoint,
+            headers=profile.headers,
         )
+
+    def _tracing_profile_options(self) -> list[tuple[str, str]]:
+        return [
+            (self._tracing_profile_label(name), name)
+            for name in self.tracing_registry.profiles
+        ]
+
+    @staticmethod
+    def _tracing_profile_label(name: str) -> str:
+        return name[:1].upper() + name[1:]
 
     def _show_access_landing(self) -> None:
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"

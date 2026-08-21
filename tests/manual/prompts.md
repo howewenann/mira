@@ -1508,15 +1508,16 @@ Use a disposable workspace with no existing `.mira/`.
 
 Install `mira[tracing]`, start a disposable OTLP/HTTP backend, and open
 Settings → General. Confirm the Tracing row uses the normal yes/no control and
-Config opens inline without adding a Settings tab. Enter an endpoint and a
-header such as `Authorization: "Bearer ${TRACE_TOKEN}"`; confirm the full YAML
-preview keeps the reference literal, malformed or non-mapping YAML cannot be
-saved, blank headers preview as `{}`, and Back saves valid changes and returns
-to General.
+Config opens inline without adding a Settings tab. Confirm the Profile dropdown
+spans the same horizontal region as the read-only preview. Add a profile with a
+header such as `Authorization: "Bearer ${TRACE_TOKEN}"` to `.mira/tracing.yml`,
+choose Reload runtime, and confirm the profile appears without restarting MIRA.
+Select it and confirm the effective preview updates immediately, keeps the
+reference literal, and renders blank headers as `{}`.
 
 Set `TRACE_TOKEN` in the launching process, choose Reload Runtime, and confirm
 new turns arrive at the configured backend without exposing the resolved token
-in Settings, Preview, or `.mira/settings.yml`. Change the endpoint and reload
+in Settings, Preview, or either YAML file. Change the profile endpoint and reload
 again; only the new backend should receive subsequent traces. Finally, test an
 environment without the tracing extra: MIRA should remain usable and Issues
 should recommend `pip install "mira[tracing]"` without showing LangSmith's raw

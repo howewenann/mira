@@ -1135,22 +1135,10 @@ Button.goal-action:focus {
     text-style: bold;
 }
 
-.settings-input.settings-tracing-input {
+.settings-tracing-profile {
     width: 1fr;
+    height: 3;
     margin-bottom: 1;
-}
-
-.settings-tracing-headers {
-    width: 1fr;
-    height: 7;
-    margin-bottom: 1;
-    border: solid #56616a;
-    background: #151a1d;
-    color: #e8fffb;
-}
-
-.settings-tracing-headers:focus {
-    border: solid #5bb8b1;
 }
 
 .settings-tracing-preview {
@@ -1165,30 +1153,37 @@ Button.goal-action:focus {
 }
 
 .settings-select > SelectCurrent,
+.settings-tracing-profile > SelectCurrent,
 .settings-access-policy {
     border: solid #56616a;
     color: #e8fffb;
     background: #151a1d;
 }
 
-.settings-select > SelectCurrent > Static#label {
+.settings-select > SelectCurrent > Static#label,
+.settings-tracing-profile > SelectCurrent > Static#label {
     color: #e8fffb;
 }
 
 .settings-select:focus > SelectCurrent,
+.settings-tracing-profile:focus > SelectCurrent,
 .settings-access-policy:focus {
     border: solid #5bb8b1;
 }
 
 .settings-select > SelectOverlay,
-.settings-select > SelectOverlay:focus {
+.settings-select > SelectOverlay:focus,
+.settings-tracing-profile > SelectOverlay,
+.settings-tracing-profile > SelectOverlay:focus {
     border: solid #5bb8b1;
     color: #e8fffb;
     background: #151a1d;
 }
 
 .settings-select > SelectOverlay > .option-list--option-highlighted,
-.settings-select > SelectOverlay:focus > .option-list--option-highlighted {
+.settings-select > SelectOverlay:focus > .option-list--option-highlighted,
+.settings-tracing-profile > SelectOverlay > .option-list--option-highlighted,
+.settings-tracing-profile > SelectOverlay:focus > .option-list--option-highlighted {
     color: #e8fffb;
     background: #14524f;
     text-style: bold;
