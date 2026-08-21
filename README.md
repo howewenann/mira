@@ -71,9 +71,9 @@ subagents, and MCP resources. Sessions are saved automatically; start with
 
 ## Optional local tracing with Phoenix
 
-MIRA instruments LangChain/DeepAgents with OpenInference semantics and exports
-the resulting OpenTelemetry spans through generic OTLP/HTTP. To try a local
-Phoenix backend:
+MIRA preserves LangChain/DeepAgents trace topology with LangSmith and enriches
+the same OpenTelemetry spans with OpenInference semantics before generic
+OTLP/HTTP export. To try a local Phoenix backend:
 
 ```bash
 pip install "mira[tracing]"

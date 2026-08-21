@@ -132,26 +132,22 @@ Environment references stay literal in `tracing.yml` and the Settings preview.
 MIRA resolves only the selected profile's in-memory runtime copy at the OTLP
 boundary. Supply referenced values before starting or reloading MIRA.
 
-LangChain and DeepAgents runs are instrumented once with OpenInference, which
-adds AI-specific span kinds, structured inputs and outputs, messages, tools,
-and token attributes to ordinary OpenTelemetry spans. A standard OTel batch
-processor sends that same representation to every selected OTLP/HTTP profile;
-there is no backend-specific instrumentation. Phoenix is the recommended local
-viewer, while LangSmith and custom compatible destinations are transport
-profiles in the same registry.
+LangSmith collects LangChain and DeepAgents runs in OTel-only mode so it remains
+the sole owner of the trace tree. Before export, MIRA adds OpenInference span
+kinds, structured inputs and outputs, model messages, tool attributes, and token
+counts to those same spans. A standard OTel batch processor sends the enriched
+tree to every selected OTLP/HTTP profile; there is no backend-specific
+instrumentation. Phoenix is the recommended local viewer, while LangSmith and
+custom compatible destinations are transport profiles in the same registry.
 
-Reload Runtime detaches the current OpenInference instrumentor, drains and
-closes its MIRA-owned OTel provider, then rebuilds both with the selected
-profile's endpoint and headers. It follows the same full reload path as
-`/reload-runtime`. If the extra is missing, tracing is disabled for that runtime
-and Issues shows the install command. Exporter connection failures follow
-normal OpenTelemetry behavior and do not disable the agent runtime.
-
-MIRA does not enable native LangSmith tracing. If `LANGSMITH_TRACING` or a
-supported legacy LangChain tracing switch is already enabled in the launching
-environment, MIRA leaves it unchanged and shows a non-fatal duplicate-tracing
-warning. Disable the external switch if the configured OpenInference path
-should be the only trace source.
+Reload Runtime closes the current OTel-only LangSmith client, drains and closes
+its MIRA-owned OTel provider, then rebuilds the processor chain with the selected
+profile's endpoint and headers. MIRA temporarily sets the LangSmith callback
+activation values required by LangChain and restores the launching process's
+previous values on reload, disable, or shutdown. If the extra is missing,
+tracing is disabled for that runtime and Issues shows the install command.
+Exporter connection failures follow normal OpenTelemetry behavior and do not
+disable the agent runtime.
 
 ## Safety, storage, and diagnostics
 

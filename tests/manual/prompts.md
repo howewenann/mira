@@ -1523,16 +1523,18 @@ environment without the tracing extra: MIRA should remain usable and Issues
 should recommend `pip install "mira[tracing]"` without showing LangSmith's raw
 dependency error.
 
-With Phoenix selected, run a normal model turn followed by a prompt that uses a
-built-in tool and, if available, `eval`, `task`, or a subagent. Inspect the
-OpenInference span tree and record the root, model, and tool span names; verify
-`openinference.span.kind`, `input.value`, `output.value`, structured messages or
-tool attributes, and token counts where the model reports them. Explicitly note
-whether any `wrap_model_call`, `awrap_model_call`, `wrap_tool_call`, or
-`awrap_tool_call` spans appear. Do not filter or reparent the observed tree.
+With Phoenix selected, run a normal model turn followed by an `eval` that uses
+`Promise.all` to launch at least two `task()` subagents. Inspect the
+OpenInference span tree and verify it contains one root trace with each task
+under `eval` and each subagent under its task. Record the root, model, and tool
+span names; verify `openinference.span.kind`, `input.value`, `output.value`,
+structured messages and tool-call IDs, tool attributes, and token counts where
+the model reports them. Explicitly note any `wrap_model_call`,
+`awrap_model_call`, `wrap_tool_call`, or `awrap_tool_call` spans. Do not filter
+or reparent the observed tree.
 
 If LangSmith credentials are available, select its profile and repeat the same
-prompt. Confirm the hierarchy and OpenInference attributes render sensibly and
-match the Phoenix representation. Start once with `LANGSMITH_TRACING=true` and
-confirm MIRA still initializes, preserves the variable, and reports a non-fatal
-duplicate-tracing warning.
+prompt. Confirm the hierarchy renders as one tree and the exporter sends the
+same enriched spans. Start once with pre-existing `LANGSMITH_TRACING` and
+`LANGSMITH_TRACING_MODE` values; disable or reload tracing and confirm both
+original values are restored.

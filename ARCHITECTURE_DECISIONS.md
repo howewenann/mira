@@ -822,27 +822,28 @@ moves, todo defaults change, or filesystem/rubric semantics change.
 
 ## Generic OTLP tracing
 
-**Decision:** Optional tracing is configured once at startup or full runtime
-reload through OpenInference's public LangChain instrumentor. The instrumentor
-emits AI-semantic OpenTelemetry spans into one MIRA-owned provider, standard
-batch processor, and OTLP/HTTP exporter. MIRA owns no trace event model,
-semantic translation, filtering, or per-backend path. The backend-neutral
-endpoint and header templates stay in a bootstrapped `.mira/tracing.yml` profile
-registry. `settings.yml` retains only enablement and the selected profile. Only
-the selected runtime copy resolves environment references.
+**Decision:** LangSmith owns LangChain run collection and trace topology in
+OTel-only mode. MIRA enriches those same LangSmith-created OpenTelemetry spans
+with OpenInference semantic conventions before one standard batch processor and
+OTLP/HTTP exporter. The backend-neutral endpoint and header templates stay in a
+bootstrapped `.mira/tracing.yml` profile registry. `settings.yml` retains only
+enablement and the selected profile. Only the selected runtime copy resolves
+environment references.
 
 **Why:** DeepAgents already emits the LangChain run structure users need.
-OpenInference's LangChain integration converts that structure into one portable
-representation with structured input/output, message, tool, span-kind, and
-token conventions on top of OTel. A fresh instrumentor, public OTel provider,
-HTTP exporter, and resource identity are installed on each full reload so
-changed endpoints and headers cannot remain cached. Reload and shutdown first
-uninstrument LangChain, then perform a bounded flush and close the old provider.
-Missing optional dependencies and initialization failures are non-fatal Issues.
-MIRA never changes external LangSmith tracing switches; it warns when they can
-produce a duplicate native trace alongside MIRA's OpenInference trace.
+LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree
+cannot reliably recover. The small semantic processor only augments attributes;
+it never creates or reparents spans. OTel freezes attributes before processor
+callbacks, so the processor uses the same `ReadableSpan._attributes` replacement
+pattern as OpenInference's upstream conversion processors. A fresh LangSmith
+client, provider, processor chain, exporter, and resource identity are installed
+on each full reload. MIRA temporarily enables LangSmith callback collection,
+restores the user's prior environment on teardown, closes the client, then
+performs a bounded provider flush and shutdown. Missing optional dependencies
+and initialization failures are non-fatal Issues.
 
 **Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
+`tracing/semantic_processor.py`,
 `config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.
 
 **Update this when:** tracing ownership, OTLP transport, reload behavior, or

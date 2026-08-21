@@ -1,4 +1,4 @@
-"""Configure OpenInference LangChain tracing for generic OTLP/HTTP export."""
+"""Configure LangSmith LangChain tracing for generic OTLP/HTTP export."""
 
 from __future__ import annotations
 
@@ -12,14 +12,12 @@ from config.tracing import TracingRegistry
 from runtime.issues import Issue
 
 _FLUSH_TIMEOUT_MILLIS = 1_000
-_LANGSMITH_TRACING_KEYS = (
-    "LANGSMITH_TRACING",
-    "LANGSMITH_TRACING_V2",
-    "LANGCHAIN_TRACING",
-    "LANGCHAIN_TRACING_V2",
-)
-_active_instrumentor: Any = None
+_OWNED_ENVIRONMENT_KEYS = ("LANGSMITH_TRACING", "LANGSMITH_TRACING_MODE")
+_active_langsmith: Any = None
+_active_client: Any = None
 _active_provider: Any = None
+_active_environment: MutableMapping[str, str] | None = None
+_saved_environment: dict[str, str | None] | None = None
 
 
 def configure_tracing(
@@ -70,10 +68,11 @@ def configure_tracing(
     shutdown_tracing()
     try:
         (
-            LangChainInstrumentor,
+            langsmith,
             Resource,
             ResourceAttributes,
             TracerProvider,
+            LangSmithOpenInferenceProcessor,
             BatchSpanProcessor,
             OTLPSpanExporter,
         ) = _load_runtime()
@@ -87,7 +86,7 @@ def configure_tracing(
 
     endpoint = str(resolved["endpoint"])
     headers = dict(resolved["headers"])
-    instrumentor = None
+    client = None
     provider = None
     try:
         resource = Resource.create(
@@ -98,11 +97,19 @@ def configure_tracing(
         )
         provider = TracerProvider(resource=resource)
         exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
+        provider.add_span_processor(LangSmithOpenInferenceProcessor())
         provider.add_span_processor(BatchSpanProcessor(exporter))
-        instrumentor = LangChainInstrumentor()
-        instrumentor.instrument(tracer_provider=provider)
+        _remember_environment(target)
+        target.update(
+            {
+                "LANGSMITH_TRACING": "true",
+                "LANGSMITH_TRACING_MODE": "otel",
+            }
+        )
+        client = langsmith.Client(tracing_mode="otel", otel_tracer_provider=provider)
+        langsmith.configure(client=client, enabled=True)
     except Exception as exc:
-        _teardown_runtime(instrumentor, provider)
+        _teardown_runtime(langsmith, client, provider, target)
         return [
             _tracing_issue(
                 "Tracing could not be initialized",
@@ -110,19 +117,24 @@ def configure_tracing(
             )
         ]
 
-    global _active_instrumentor, _active_provider
-    _active_instrumentor = instrumentor
+    global _active_langsmith, _active_client, _active_provider, _active_environment
+    _active_langsmith = langsmith
+    _active_client = client
     _active_provider = provider
-    return _external_langsmith_issues(target)
+    _active_environment = target
+    return []
 
 
 def shutdown_tracing() -> None:
-    """Idempotently detach instrumentation and drain the MIRA-owned provider."""
-    global _active_instrumentor, _active_provider
-    instrumentor, provider = _active_instrumentor, _active_provider
-    _active_instrumentor = None
+    """Idempotently disable callbacks and drain the MIRA-owned provider."""
+    global _active_langsmith, _active_client, _active_provider, _active_environment
+    langsmith = _active_langsmith
+    client, provider, environ = _active_client, _active_provider, _active_environment
+    _active_langsmith = None
+    _active_client = None
     _active_provider = None
-    _teardown_runtime(instrumentor, provider)
+    _active_environment = None
+    _teardown_runtime(langsmith, client, provider, environ)
 
 
 def tracing_yaml_fragment(
@@ -148,29 +160,41 @@ def tracing_yaml_fragment(
     ).rstrip()
 
 
-def _load_runtime() -> tuple[Any, Any, Any, Any, Any, Any]:
+def _load_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
     """Import optional tracing dependencies only after tracing is enabled."""
-    from openinference.instrumentation.langchain import LangChainInstrumentor
+    import langsmith
     from openinference.semconv.resource import ResourceAttributes
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from tracing.semantic_processor import LangSmithOpenInferenceProcessor
 
     return (
-        LangChainInstrumentor,
+        langsmith,
         Resource,
         ResourceAttributes,
         TracerProvider,
+        LangSmithOpenInferenceProcessor,
         BatchSpanProcessor,
         OTLPSpanExporter,
     )
 
 
-def _teardown_runtime(instrumentor: Any, provider: Any) -> None:
-    if instrumentor is not None:
+def _teardown_runtime(
+    langsmith: Any,
+    client: Any,
+    provider: Any,
+    environ: MutableMapping[str, str] | None,
+) -> None:
+    if langsmith is not None:
         try:
-            instrumentor.uninstrument()
+            langsmith.configure(client=None, enabled=None)
+        except Exception:
+            pass
+    if client is not None:
+        try:
+            client.close(timeout=1.0)
         except Exception:
             pass
     if provider is not None:
@@ -182,37 +206,33 @@ def _teardown_runtime(instrumentor: Any, provider: Any) -> None:
             provider.shutdown()
         except Exception:
             pass
+    if environ is not None:
+        _restore_environment(environ)
 
 
-def _external_langsmith_issues(environ: Mapping[str, str]) -> list[Issue]:
-    enabled_keys = [key for key in _LANGSMITH_TRACING_KEYS if _is_true(environ.get(key))]
-    if not enabled_keys:
-        return []
-    names = " or ".join(enabled_keys)
-    return [
-        Issue(
-            "STARTUP",
-            "External LangSmith tracing is also enabled",
-            "process environment",
-            (
-                f"External setting(s) {names} enable LangSmith's native tracing while "
-                "MIRA's OpenInference tracing is active, so duplicate traces may be produced."
-            ),
-            (
-                "Disable external LangSmith tracing if MIRA's configured OpenInference "
-                "path should be the only trace source."
-            ),
-        )
-    ]
+def _remember_environment(environ: Mapping[str, str]) -> None:
+    global _saved_environment
+    _saved_environment = {key: environ.get(key) for key in _OWNED_ENVIRONMENT_KEYS}
 
 
-def _is_true(value: str | None) -> bool:
-    return bool(value and value.strip().lower() in {"true", "1"})
+def _restore_environment(environ: MutableMapping[str, str]) -> None:
+    global _saved_environment
+    if _saved_environment is None:
+        return
+    for key, value in _saved_environment.items():
+        if value is None:
+            environ.pop(key, None)
+        else:
+            environ[key] = value
+    _saved_environment = None
 
 
 def _tracing_issue(summary: str, details: str) -> Issue:
     if "dependencies" in summary.lower():
-        guidance = 'Install the tracing extra with: pip install "mira[tracing]", then run /reload-runtime.'
+        guidance = (
+            'Install the tracing extra with: pip install "mira[tracing]", '
+            "then run /reload-runtime."
+        )
     elif "initialized" in summary.lower():
         guidance = "Review the tracing error and run /reload-runtime; MIRA remains usable."
     else:
