@@ -505,8 +505,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         completions = {
             "ask_user": "Use A",
-            "prepare_goal": "Success Criteria are ready. Continue to finalize_goal.",
-            "prepare_plan": "Success Criteria are ready. Continue to finalize_plan.",
+            "prepare_goal": "Success Criteria ready; finalizing Goal.",
+            "prepare_plan": "Success Criteria ready; finalizing Plan.",
             "finalize_goal": "Goal presented for user review.",
             "finalize_plan": "Plan presented for user review.",
             "show_goal": "Current Goal rendered.",
@@ -2066,6 +2066,80 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("✗ Tested", rubric_text)
             self.assertIn("No focused test.", rubric_text)
 
+    async def test_artifact_presentations_replace_the_same_visible_identity(self) -> None:
+        app = make_app()
+        goal = goal_artifact(
+            goal_id="goal-one",
+            title="One Goal",
+            objective="Keep one Goal bubble.",
+            success_criteria="- One Goal bubble is visible.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        plan = plan_artifact(
+            plan_id="plan-one",
+            title="One Plan",
+            objective="Keep one Plan bubble.",
+            context_and_constraints="None.",
+            key_changes=["Replace the prior projection."],
+            test_plan=["Count visible bubbles."],
+            assumptions=["Identity is stable."],
+            success_criteria="- One Plan bubble is visible.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            chat = app.query_one(ChatLog)
+            chat.present_goal(goal, active=True)
+            chat.present_goal(goal, active=True)
+            chat.present_plan(plan, active=True)
+            chat.present_plan(plan, active=True)
+            await pilot.pause()
+
+            self.assertEqual(len(list(chat.query(".goal"))), 1)
+            self.assertEqual(len(list(chat.query(".plan"))), 1)
+
+    async def test_restore_session_hides_closed_and_cleared_artifacts(self) -> None:
+        app = make_app()
+        goal = goal_artifact(
+            goal_id="goal-cleared",
+            title="Cleared Goal",
+            objective="Hide this Goal.",
+            success_criteria="- The Goal is hidden.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        plan = plan_artifact(
+            plan_id="plan-closed",
+            title="Closed Plan",
+            objective="Hide this Plan.",
+            context_and_constraints="None.",
+            key_changes=["Hide the projection."],
+            test_plan=["Replay the session."],
+            assumptions=["The event remains durable."],
+            success_criteria="- The Plan is hidden.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+
+        async with app.run_test(size=(100, 35)) as pilot:
+            chat = app.query_one(ChatLog)
+            chat.restore_session(
+                {
+                    "events": [
+                        {"id": 1, "type": "goal", "goal": goal, "status": "cleared"},
+                        {"id": 2, "type": "plan", "plan": plan, "status": "closed"},
+                    ],
+                    "current_goal": None,
+                    "current_plan": None,
+                }
+            )
+            await pilot.pause()
+
+            self.assertEqual(len(list(chat.query(".goal"))), 0)
+            self.assertEqual(len(list(chat.query(".plan"))), 0)
+
     async def test_rubric_progress_uses_elapsed_clock_and_stops_on_cancel(self) -> None:
         """Live grading should update in place without leaving an active timer behind."""
         app = make_app()
@@ -2148,6 +2222,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(artifact_button.display)
             self.assertEqual(artifact_button.label.plain, "Goal Draft")
             await app._handle_goal_action("clear", "goal-1")
+            await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
 
         self.assertIsNone(app.session["current_goal"])
         self.assertTrue(any(event.get("type") == "goal" for event in app.session["events"]))
@@ -2164,10 +2240,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app._sync_artifact_button()
             await pilot.pause()
             await app._handle_goal_action("close", "goal-1")
+            await pilot.pause()
             self.assertEqual(app.session["current_goal"]["id"], "goal-1")
             self.assertEqual(app.session["current_goal"]["status"], "proposed")
-            closed_actions = list(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action"))
-            self.assertTrue(all(button.disabled and not button.display for button in closed_actions))
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
             artifact_button = app.query_one("#artifact-status-button", Button)
             self.assertTrue(artifact_button.display)
             self.assertEqual(artifact_button.label.plain, "Goal Draft")
@@ -2176,7 +2252,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#artifact-status-button")
                 await wait_until(lambda: show_goal.await_count == 1)
             await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 1)
             self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))[-1].query(".goal-action")), 4)
+
+            await app.show_goal()
+            await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 1)
 
     async def test_artifact_header_and_primary_actions_follow_canonical_status(self) -> None:
         """The retained control and bubble wording should share the durable status."""
@@ -2366,6 +2447,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.pause()
                         direct = list(app.query_one(ChatLog).query(".goal"))[-1]
                         direct_actions = list(direct.query(".goal-action"))
+                        direct_actionable = all(
+                            not button.disabled and button.display for button in direct_actions
+                        )
 
                         await app._run_turn("Show, reopen, and review the retained Goal.")
                         await pilot.pause()
@@ -2374,9 +2458,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                         self.assertEqual(len(direct_actions), 4)
                         self.assertEqual(len(natural_actions), 4)
-                        self.assertTrue(
-                            all(not button.disabled and button.display for button in direct_actions)
-                        )
+                        self.assertTrue(direct_actionable)
                         self.assertTrue(
                             all(not button.disabled and button.display for button in natural_actions)
                         )
@@ -8897,6 +8979,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app._pending_artifact_review)
             app.busy = False
             await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".plan"))), 0)
 
     async def test_pending_plan_clear_preserves_previous_retained_plan(self) -> None:
         app = make_app()
@@ -8912,7 +8995,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rubric_enabled=False,
             rubric_iterations=3,
         )
-        async with app.run_test(size=(100, 30)):
+        async with app.run_test(size=(100, 30)) as pilot:
             app.session["current_plan"] = previous
             app.session.setdefault("events", []).append(
                 {"type": "plan", "plan": previous, "status": "proposed"}
@@ -8923,6 +9006,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             provisional_id = str(app._pending_artifact_review.artifact["id"])
             await app._handle_plan_action("clear", provisional_id)
             self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "clear")
+            await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".plan"))), 0)
 
         self.assertEqual(current_plan(app.session)["id"], "plan-a")
         previous_event = next(event for event in app.session["events"] if event.get("plan", {}).get("id") == "plan-a")
@@ -8938,7 +9023,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rubric_enabled=False,
             rubric_iterations=3,
         )
-        async with app.run_test(size=(100, 30)):
+        async with app.run_test(size=(100, 30)) as pilot:
             app.session["current_goal"] = previous
             app.session.setdefault("events", []).append(
                 {"type": "goal", "goal": previous, "status": "proposed"}
@@ -8949,6 +9034,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             provisional_id = str(app._pending_artifact_review.artifact["id"])
             await app._handle_goal_action("clear", provisional_id)
             self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "clear")
+            await pilot.pause()
+            self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
 
         self.assertEqual(current_goal(app.session)["id"], "goal-a")
 

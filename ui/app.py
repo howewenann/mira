@@ -812,7 +812,7 @@ class MiraApp(App[None]):
             return
 
         if action == "close":
-            self.query_one(ChatLog).resolve_plan(plan_id, "closed")
+            self.query_one(ChatLog).dismiss_plan(plan_id)
             update_plan_event_status(self.session, plan_id, "closed")
             self.store.save(self.session)
             self.system_message(f"closed plan \"{plan_title(plan)}\"", kind="muted")
@@ -940,7 +940,7 @@ class MiraApp(App[None]):
             return
 
         if action == "close":
-            self.query_one(ChatLog).resolve_goal(goal_id, "closed")
+            self.query_one(ChatLog).dismiss_goal(goal_id)
             update_goal_event_status(self.session, goal_id, "closed")
             self.store.save(self.session)
             self.system_message(f'closed Goal "{goal_title(value)}"', kind="muted")
@@ -1035,10 +1035,10 @@ class MiraApp(App[None]):
 
         if action == "clear":
             if review.kind == "plan":
-                self.query_one(ChatLog).resolve_plan(artifact_id, "cleared")
+                self.query_one(ChatLog).dismiss_plan(artifact_id)
                 update_plan_event_status(self.session, artifact_id, "cleared")
             else:
-                self.query_one(ChatLog).resolve_goal(artifact_id, "cleared")
+                self.query_one(ChatLog).dismiss_goal(artifact_id)
                 update_goal_event_status(self.session, artifact_id, "cleared")
             self.store.save(self.session)
             review.resolve("clear")
@@ -1080,10 +1080,10 @@ class MiraApp(App[None]):
             self.system_message(f'implementing {review.kind} "{title}"', kind="status")
         else:
             if review.kind == "plan":
-                self.query_one(ChatLog).resolve_plan(artifact_id, "closed")
+                self.query_one(ChatLog).dismiss_plan(artifact_id)
                 update_plan_event_status(self.session, artifact_id, "closed")
             else:
-                self.query_one(ChatLog).resolve_goal(artifact_id, "closed")
+                self.query_one(ChatLog).dismiss_goal(artifact_id)
                 update_goal_event_status(self.session, artifact_id, "closed")
 
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
@@ -1533,7 +1533,7 @@ class MiraApp(App[None]):
                 return
             self.system_message("no current Plan", kind="muted")
             return
-        self.query_one(ChatLog).resolve_plan(str(value["id"]), "cleared")
+        self.query_one(ChatLog).dismiss_plan(str(value["id"]))
         self.store.save(self.session)
         self._sync_artifact_button()
         self.system_message(f'cleared current Plan "{plan_title(value)}"', kind="muted")
@@ -1639,7 +1639,7 @@ class MiraApp(App[None]):
                 return
             self.system_message("no current Goal", kind="muted")
             return
-        self.query_one(ChatLog).resolve_goal(str(value["id"]), "cleared")
+        self.query_one(ChatLog).dismiss_goal(str(value["id"]))
         self.store.save(self.session)
         self._sync_artifact_button()
         self.system_message(f'cleared current Goal "{goal_title(value)}"', kind="muted")

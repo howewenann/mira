@@ -390,10 +390,12 @@ Plan a small improvement to README navigation without editing files yet.
 
 Expected:
 
-- The existing actionable Plan bubble appears with Implement, Revise, and
-  Close.
+- The existing actionable Plan bubble appears with Implement, Revise, Close,
+  and Clear.
 - `prepare_plan` and `finalize_plan` use the same stable call/result lifecycle
   as other control tools while retaining the dedicated Plan surface.
+- `prepare_plan` completes with `Success Criteria ready; finalizing Plan.` and
+  the internal criteria model reasoning/text is not rendered separately.
 - No partial plan content or new plan status block appears.
 
 Choose Revise and enter `Keep the same scope but add an exact verification
@@ -411,6 +413,8 @@ Expected:
   containing Objective and Success Criteria but no Plan.
 - `prepare_goal` and forced `finalize_goal` retain stable call/result identity
   without duplicating the dedicated Goal surface.
+- `prepare_goal` completes with `Success Criteria ready; finalizing Goal.` and
+  the generated criteria appear only inside the Goal bubble.
 - No partial criteria, partial goal, or additional goal status block appears.
 
 Choose Revise and enter `Require Unicode examples.` Verify the existing goal
@@ -820,27 +824,32 @@ Use a disposable workspace and retain its session file for replay checks.
 4. Select Revise and provide outcome-changing feedback. Expected:
    `SuccessCriteriaService.revise()` preserves still-valid criteria, may update
    the Objective, and a complete replacement Goal becomes current.
-5. Select Close, then run `/goal-show`. Expected: Close retains lifecycle state;
-   `/goal-show` renders the exact Goal again with Implement, Revise, and Close.
-6. Ask `Show me the current Goal.` Expected: `show_goal` uses the same bubble,
+5. Select Close, then run `/goal-show`. Expected: Close removes the visible
+   bubble but retains lifecycle state; `/goal-show` renders exactly one copy of
+   the exact Goal again with Implement, Revise, Close, and Clear. Close it and
+   reload the session; the closed bubble remains hidden.
+6. Select Clear on a retained Goal and reload the session. Expected: the Goal
+   bubble is removed and stays hidden, `current_goal` is empty, and the cleared
+   event remains in session JSON for audit.
+7. Ask `Show me the current Goal.` Expected: `show_goal` uses the same bubble,
    preserves its tool-call id, produces no duplicate output, and changes no state.
-7. Implement a rubric-disabled Goal. Expected: only this explicit attempt gets
+8. Implement a rubric-disabled Goal. Expected: only this explicit attempt gets
    Goal context, no Plan fields are injected, and success completes as
    `agent-declared`; an error or cancellation pauses it.
-8. Implement a rubric-enabled Goal. Verify separate rubric bubbles,
+9. Implement a rubric-enabled Goal. Verify separate rubric bubbles,
    `needs_revision` continuation, `satisfied` -> `rubric-verified`, and resumable
    `max_iterations_reached` via `/goal-resume`.
-9. Reopen a completed Goal with `/goal-show` and select Implement. Expected: the
+10. Reopen a completed Goal with `/goal-show` and select Implement. Expected: the
    same Goal starts a new attempt and increments its attempt count.
-10. Replace a completed Plan with a Goal and a completed Goal with a Plan.
+11. Replace a completed Plan with a Goal and a completed Goal with a Plan.
     Expected: replacement is automatic only after successful presentation.
-11. Attempt both replacement directions with incomplete formal work. Expected:
+12. Attempt both replacement directions with incomplete formal work. Expected:
     the structured Replace/Keep choice appears; Keep preserves the old artifact,
     and accepting replacement still preserves it if generation later fails.
-12. Reload a session with an exact `current_goal`, then try a retired
+13. Reload a session with an exact `current_goal`, then try a retired
     `active_goal` session. Expected: the exact current Goal replays and the
     retired session is not migrated.
-13. Check `/plan-show` while a Goal is current and `/goal-show` while a Plan is
+14. Check `/plan-show` while a Goal is current and `/goal-show` while a Plan is
     current. Expected: deterministic guidance to the matching command.
 
 ## Windows TUI Keyboard And Copy Matrix

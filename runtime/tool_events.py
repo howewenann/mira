@@ -23,6 +23,10 @@ CONTROL_TOOLS = {
     "show_plan",
 }
 WATCHER_SHUTDOWN_SECONDS = 0.1
+PREPARE_TOOL_COMPLETIONS = {
+    "prepare_goal": "Success Criteria ready; finalizing Goal.",
+    "prepare_plan": "Success Criteria ready; finalizing Plan.",
+}
 
 
 async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
@@ -80,6 +84,15 @@ async def watch_tool_result(
     """Follow one call to completion and deliver a visible non-control result."""
     output, is_error, native_error = await tool_call_completion(call)
     if isinstance(output, Command):
+        completion = PREPARE_TOOL_COMPLETIONS.get(name)
+        if completion:
+            render_tool_completion(
+                renderer,
+                result,
+                name=name,
+                text=completion,
+                call_id=call_id,
+            )
         return
     if name in CONTROL_TOOLS and not native_error:
         # Pinned LangGraph projects successful control-flow interrupts through

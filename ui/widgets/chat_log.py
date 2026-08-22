@@ -267,6 +267,8 @@ class ChatLog(VerticalScroll):
                 plan_id = str(event_plan.get("id") or "")
                 is_current = bool(retained_id and plan_id == retained_id)
                 event_status = str(event.get("status") or "resolved")
+                if event_status in {"closed", "cleared"}:
+                    continue
                 is_actionable = is_current and event_status not in {
                     "cleared",
                     "closed",
@@ -289,6 +291,8 @@ class ChatLog(VerticalScroll):
                 goal_id = str(event_goal.get("id") or "")
                 is_current = bool(retained_goal_id and goal_id == retained_goal_id)
                 event_status = str(event.get("status") or "resolved")
+                if event_status in {"closed", "cleared"}:
+                    continue
                 is_actionable = is_current and event_status not in {
                     "cleared", "closed", "revision requested", "superseded"
                 }
@@ -914,6 +918,7 @@ class ChatLog(VerticalScroll):
         """Append a structured plan bubble."""
         self.finish_main()
         plan_id = str(plan.get("id") or "")
+        self.dismiss_plan(plan_id)
         bubble = PlanBubble(plan, active=active, status=status)
         if timestamp := timestamp_text(created_at):
             bubble.border_subtitle = escape(timestamp)
@@ -933,6 +938,13 @@ class ChatLog(VerticalScroll):
             bubble.resolve(status)
             self._scroll_to_end()
 
+    def dismiss_plan(self, plan_id: str) -> None:
+        """Remove one Plan bubble from the visible transcript."""
+        bubble = self._plan_widgets.pop(plan_id, None)
+        if bubble is not None:
+            bubble.remove()
+            self._scroll_to_end()
+
     def present_goal(
         self,
         value: dict[str, Any],
@@ -944,6 +956,7 @@ class ChatLog(VerticalScroll):
         """Append a dedicated Goal bubble."""
         self.finish_main()
         goal_id = str(value.get("id") or "")
+        self.dismiss_goal(goal_id)
         bubble = GoalBubble(value, active=active, status=status)
         if timestamp := timestamp_text(created_at):
             bubble.border_subtitle = escape(timestamp)
@@ -961,6 +974,13 @@ class ChatLog(VerticalScroll):
         bubble = self._goal_widgets.get(goal_id)
         if bubble is not None:
             bubble.resolve(status)
+            self._scroll_to_end()
+
+    def dismiss_goal(self, goal_id: str) -> None:
+        """Remove one Goal bubble from the visible transcript."""
+        bubble = self._goal_widgets.pop(goal_id, None)
+        if bubble is not None:
+            bubble.remove()
             self._scroll_to_end()
 
     def rubric_evaluation_started(

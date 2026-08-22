@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
 
-from agent.planning.criteria import SuccessCriteriaService
+from agent.planning.criteria import SUCCESS_CRITERIA_SOURCE, SuccessCriteriaService
 
 
 class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
@@ -22,6 +22,10 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not create an execution plan", messages[0].content)
         self.assertIn("<objective>\nCompare two options\n</objective>", messages[1].content)
         self.assertNotIn("<research_context>", messages[1].content)
+        self.assertEqual(
+            model.ainvoke.await_args.kwargs["config"]["metadata"]["lc_source"],
+            SUCCESS_CRITERIA_SOURCE,
+        )
 
     async def test_generation_receives_only_bounded_research_handoff(self) -> None:
         model = type("Model", (), {})()

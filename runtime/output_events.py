@@ -6,6 +6,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from agent.planning.criteria import SUCCESS_CRITERIA_SOURCE
+
 from agent.middleware.correction import CORRECTION_SOURCE
 from runtime.usage import field
 
@@ -46,6 +48,12 @@ def is_summarization_metadata_message(message: Any) -> bool:
     """Return whether message metadata marks a DeepAgents summary."""
     kwargs = field(message, "additional_kwargs")
     return isinstance(kwargs, dict) and kwargs.get("lc_source") == "summarization"
+
+
+def is_success_criteria_metadata_message(message: Any) -> bool:
+    """Return whether a finalized message is internal criteria generation."""
+    kwargs = field(message, "additional_kwargs")
+    return isinstance(kwargs, dict) and kwargs.get("lc_source") == SUCCESS_CRITERIA_SOURCE
 
 
 def visible_message_text(message: Any) -> str:

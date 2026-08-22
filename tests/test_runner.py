@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 
 from agent.compaction import (
     MiraSummarizationMiddleware,
@@ -2552,6 +2553,53 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_prepare_commands_complete_with_sanitized_results(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        calls = AsyncItems(
+            [
+                ToolCall(
+                    "prepare_goal",
+                    {"objective": "Ship it."},
+                    Command(update={"planning_stage": "goal_finalize"}),
+                    "call-goal",
+                ),
+                ToolCall(
+                    "prepare_plan",
+                    {"objective": "Ship it."},
+                    Command(update={"planning_stage": "plan_finalize"}),
+                    "call-plan",
+                ),
+            ]
+        )
+
+        await consume_tool_calls(calls, renderer, result)
+
+        self.assertEqual(
+            [event for event in renderer.events if event[0] == "tool_result"],
+            [
+                (
+                    "tool_result",
+                    "prepare_goal",
+                    "Success Criteria ready; finalizing Goal.",
+                    "call-goal",
+                ),
+                (
+                    "tool_result",
+                    "prepare_plan",
+                    "Success Criteria ready; finalizing Plan.",
+                    "call-plan",
+                ),
+            ],
+        )
+        self.assertEqual(
+            result.tool_results,
+            [
+                "Success Criteria ready; finalizing Goal.",
+                "Success Criteria ready; finalizing Plan.",
+            ],
+        )
+
     async def test_incomplete_tool_call_stream_item_does_not_await_output(self) -> None:
         renderer = RecordingRenderer()
         result = runner.TurnResult()
@@ -2903,6 +2951,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(renderer.events, [("compaction_started",), ("compaction_finished",)])
         self.assertEqual(result._stream_usage["total_tokens"], 40)
+
+    async def test_invocation_metadata_hides_criteria_stream_and_keeps_usage(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        registry = MessageInvocationMetadata()
+        registry.record("criteria-1", {"lc_source": "success_criteria"})
+        messages = AsyncItems(
+            [
+                Message(
+                    reasoning=AsyncItems(["Drafting internal criteria."]),
+                    text=AsyncItems(["- Exact generated criterion."]),
+                    message_id="criteria-1",
+                    usage_metadata={"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+                )
+            ]
+        )
+
+        await consume_messages(messages, renderer, result, invocation_metadata=registry)
+
+        self.assertEqual(renderer.events, [])
+        self.assertEqual(result._stream_usage["total_tokens"], 25)
 
     async def test_compaction_words_in_normal_reasoning_and_text_remain_visible(self) -> None:
         renderer = RecordingRenderer()

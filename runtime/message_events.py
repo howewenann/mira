@@ -10,6 +10,7 @@ from agent.middleware.correction import CORRECTION_SOURCE
 from runtime.message_metadata import MessageInvocationMetadata
 from runtime.output_events import (
     is_correction_metadata_message,
+    is_success_criteria_metadata_message,
     is_summarization_metadata_message,
     normalize_response_delta,
     visible_message_text,
@@ -36,6 +37,18 @@ async def consume_messages(
     as a provider fallback for live draft UI when exposed by a chat model.
     """
     async for message in messages:
+        is_success_criteria = (
+            invocation_metadata is not None and invocation_metadata.is_success_criteria(message)
+        ) or is_success_criteria_metadata_message(message)
+        if is_success_criteria:
+            await _drain_message(message)
+            call_renderer(renderer, "model_stream_finished")
+            if result is not None:
+                usage = usage_from_message(message)
+                if has_usage(usage):
+                    result.add_stream_usage(usage)
+            continue
+
         is_compaction = (
             invocation_metadata is not None and invocation_metadata.is_summarization(message)
         ) or is_summarization_metadata_message(message)

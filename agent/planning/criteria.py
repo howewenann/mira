@@ -9,6 +9,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from agent.llm import get_llm
 from config.metadata import ModelMetadata
 
+SUCCESS_CRITERIA_SOURCE = "success_criteria"
+
 INITIAL_CRITERIA_PROMPT = """You draft Success Criteria for a general-purpose agent objective.
 
 Return only a concise Markdown bullet list that the user can review before work begins.
@@ -92,7 +94,8 @@ class SuccessCriteriaService:
     async def _invoke(self, system_prompt: str, user_prompt: str) -> str:
         model = get_llm(self.config, metadata=self.metadata)
         response = await model.ainvoke(
-            [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+            [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)],
+            config={"metadata": {"lc_source": SUCCESS_CRITERIA_SOURCE}},
         )
         text = response_text(response).strip()
         if not text:

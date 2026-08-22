@@ -6,6 +6,8 @@ from typing import Any
 
 from langgraph.stream import ProtocolEvent, StreamTransformer
 
+from agent.planning.criteria import SUCCESS_CRITERIA_SOURCE
+
 
 class MessageInvocationMetadata:
     """Record model-call metadata before message streams reach consumers."""
@@ -24,6 +26,10 @@ class MessageInvocationMetadata:
 
     def is_summarization(self, message: Any) -> bool:
         return self.for_message(message).get("lc_source") == "summarization"
+
+    def is_success_criteria(self, message: Any) -> bool:
+        """Return whether a message belongs to internal criteria generation."""
+        return self.for_message(message).get("lc_source") == SUCCESS_CRITERIA_SOURCE
 
 
 class MessageInvocationMetadataTransformer(StreamTransformer):

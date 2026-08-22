@@ -417,8 +417,9 @@ separate Success Criteria, status, rubric policy and cap, latest overall rubric
 result, completion source, attempts, and timestamps while `current_goal` is
 null. Supported
 statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
-`completed`. Transcript Plan bubbles remain immutable history; resume context
-labels only the populated current artifact as authoritative.
+`completed`. Dedicated Plan events remain durable history, while their chat
+projection may be hidden after an explicit Close or Clear; resume context labels
+only the populated current artifact as authoritative.
 Session normalization requires the exact current `current_plan` fields and
 types. A populated malformed or retired Plan artifact rejects the session;
 retired Summary, generic-stage, and pre-staging transcript event shapes are
@@ -434,7 +435,10 @@ Revise rejects the draft, runs another PLAN phase inside that same outer turn,
 and calls `SuccessCriteriaService.revise()`; approach-only feedback preserves
 criteria exactly. Clear rejects the draft and leaves any older retained formal
 artifact untouched. Later retained-artifact actions keep their deliberate
-new-turn behavior.
+new-turn behavior. Close and Clear remove the resolved bubble from live and
+replayed chat without deleting its durable event. Explicit Show reopens a
+retained artifact, and repeated Show calls replace the same identity-bound
+bubble rather than appending duplicates.
 
 `/plan-show` and the read-only `show_plan` control tool call the same renderer
 and make no Plan-generating model call. `/plan-clear` removes only
@@ -521,6 +525,9 @@ commits them, Revise creates another provisional draft in the same outer turn,
 and Clear discards them without disturbing older retained work. The primary
 action starts or restarts one explicit Act attempt. Later retained revisions use
 the read-only Goal pipeline and `SuccessCriteriaService.revise()` in a new turn.
+Close and Clear hide the resolved Goal bubble from live and replayed chat while
+retaining its event for audit; explicit recall remains duplicate-free by Goal
+identity.
 `/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
 incomplete states, and `/goal-clear` removes only the current Goal.
 Explicit Goal recall always reopens the retained artifact for review, including

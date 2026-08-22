@@ -1185,8 +1185,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         recording = SessionRecordingRenderer(renderer, recorder)
         completions = {
             "ask_user": "Use A",
-            "prepare_goal": "Success Criteria are ready. Continue to finalize_goal.",
-            "prepare_plan": "Success Criteria are ready. Continue to finalize_plan.",
+            "prepare_goal": "Success Criteria ready; finalizing Goal.",
+            "prepare_plan": "Success Criteria ready; finalizing Plan.",
             "finalize_goal": "Goal presented for user review.",
             "finalize_plan": "Plan presented for user review.",
             "show_goal": "Current Goal rendered.",
