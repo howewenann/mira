@@ -20,6 +20,7 @@ from agent.planning.policy import (
     SHOW_PLAN_TOOL,
 )
 from agent.tools.specs import tool_name as resource_tool_name
+from agent.planning.tool_context import PlanningToolContext
 
 CONTROL_TOOL_STAGES = {
     PREPARE_PLAN_TOOL: PLANNING_STAGE_PLAN_RESEARCH,
@@ -40,9 +41,19 @@ class PlanningStageState(AgentState):
     planning_stage: NotRequired[
         Literal["plan_research", "plan_finalize", "goal_research", "goal_finalize"]
     ]
+    planning_authoritative_request: NotRequired[str]
+    planning_previous_criteria: NotRequired[str]
+    planning_revision_feedback: NotRequired[str]
+    planning_previous_artifact: NotRequired[str]
+    planning_objective: NotRequired[str]
+    planning_context_and_constraints: NotRequired[str]
+    planning_research_evidence: NotRequired[str]
+    planning_success_criteria: NotRequired[str]
 
 
-class PlanningStageEnforcementMiddleware(AgentMiddleware[PlanningStageState, Any, Any]):
+class PlanningStageEnforcementMiddleware(
+    AgentMiddleware[PlanningStageState, PlanningToolContext, Any]
+):
     """Expose stage tools and enforce the finalization execution boundary."""
 
     state_schema = PlanningStageState

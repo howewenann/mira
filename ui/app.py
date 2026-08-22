@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,7 @@ from textual.widgets import Button, ListView, Static
 
 from agent.compaction import compact_after_turn
 from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
-from agent.planning.criteria import SuccessCriteriaService
 from agent.planning.policy import (
-    GOAL_FINALIZATION_POLICY,
-    PLAN_FINALIZATION_POLICY,
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
     PLANNING_STAGE_PLAN_FINALIZE,
@@ -42,7 +40,6 @@ from config.settings import (
 )
 from runtime.diagnostics import get_diagnostics_logger
 from runtime.error_report import clear_error_reports, write_error_report
-from runtime.runner import FORMAL_CONSTRUCTION_CANCELLED
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import append_event, sync_deepagents_compaction
@@ -75,11 +72,10 @@ from ui.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
-    goal_title_request,
+    goal_request,
     plan_request,
-    prepare_plan_request,
-    prepare_goal_request,
 )
+from ui.artifact_review import PendingArtifactReview
 from ui.repl import (
     available_tools,
     handle_command,
@@ -204,6 +200,7 @@ class MiraApp(App[None]):
         self.agent_unavailable_message = "Main model is not configured. Run /models."
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
+        self._pending_artifact_review: PendingArtifactReview | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -600,7 +597,6 @@ class MiraApp(App[None]):
                 self.mode["current_plan"] = current_plan(self.session)
                 self.store.save(self.session)
                 self.mode["executing_plan"] = False
-            self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.finish_turn(cancelled=True)
@@ -619,7 +615,6 @@ class MiraApp(App[None]):
                 self.mode["current_plan"] = current_plan(self.session)
                 self.store.save(self.session)
                 self.mode["executing_plan"] = False
-            self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.finish_turn(cancelled=True, tool_status="interrupted")
@@ -638,7 +633,6 @@ class MiraApp(App[None]):
                 self.mode["current_plan"] = current_plan(self.session)
                 self.store.save(self.session)
                 self.mode["executing_plan"] = False
-            self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.finish_turn(cancelled=True, tool_status="interrupted")
@@ -805,6 +799,10 @@ class MiraApp(App[None]):
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
+        pending = self._pending_artifact_review
+        if pending is not None and pending.matches("plan", plan_id):
+            await self._handle_pending_artifact_action(pending, action)
+            return
         plan = current_plan(self.session)
         if plan is None or str(plan.get("id") or "") != plan_id:
             self.system_message("that plan is no longer active", kind="warning")
@@ -929,6 +927,10 @@ class MiraApp(App[None]):
 
     async def _handle_goal_action(self, action: str, goal_id: str) -> None:
         """Resolve an action from the current Goal bubble."""
+        pending = self._pending_artifact_review
+        if pending is not None and pending.matches("goal", goal_id):
+            await self._handle_pending_artifact_action(pending, action)
+            return
         value = current_goal(self.session)
         if value is None or str(value.get("id") or "") != goal_id:
             self.system_message("that Goal is no longer current", kind="warning")
@@ -992,6 +994,102 @@ class MiraApp(App[None]):
                 name="goal-implementation",
                 exclusive=True,
             )
+
+    async def _handle_pending_artifact_action(
+        self,
+        review: PendingArtifactReview,
+        action: str,
+    ) -> None:
+        """Resolve only the exact provisional artifact awaiting finalizer HITL."""
+        artifact = review.artifact
+        artifact_id = str(artifact.get("id") or "")
+        title = plan_title(artifact) if review.kind == "plan" else goal_title(artifact)
+        if review is not self._pending_artifact_review or review.future.done():
+            self.system_message(f"that {review.kind} review is no longer pending", kind="warning")
+            return
+        if action not in {"implement", "close", "revise", "clear"}:
+            self.system_message(f"unknown {review.kind} review action", kind="warning")
+            return
+
+        if action in {"revise", "implement"} and not self._model_agents_available():
+            return
+        if action == "revise":
+            label = "Plan" if review.kind == "plan" else "Goal"
+            feedback = await self._prompt_text(
+                f"Revise {label}",
+                f"What should MIRA change about this {label}?",
+            )
+            feedback = (feedback or "").strip()
+            if not feedback:
+                self.system_message(f'kept {label} "{title}" under review', kind="muted")
+                return
+            if review.kind == "plan":
+                self.query_one(ChatLog).resolve_plan(artifact_id, "rejected")
+                update_plan_event_status(self.session, artifact_id, "rejected")
+            else:
+                self.query_one(ChatLog).resolve_goal(artifact_id, "rejected")
+                update_goal_event_status(self.session, artifact_id, "rejected")
+            self.store.save(self.session)
+            review.resolve("revise", feedback=feedback)
+            return
+
+        if action == "clear":
+            if review.kind == "plan":
+                self.query_one(ChatLog).resolve_plan(artifact_id, "cleared")
+                update_plan_event_status(self.session, artifact_id, "cleared")
+            else:
+                self.query_one(ChatLog).resolve_goal(artifact_id, "cleared")
+                update_goal_event_status(self.session, artifact_id, "cleared")
+            self.store.save(self.session)
+            review.resolve("clear")
+            return
+
+        previous_plan = current_plan(self.session)
+        previous_goal = current_goal(self.session)
+        if review.kind == "plan":
+            accepted = replace_current_plan(self.session, artifact)
+            self.mode["current_plan"] = accepted
+            self.mode["current_goal"] = None
+            if previous_plan is not None:
+                self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
+            if previous_goal is not None:
+                self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
+        else:
+            accepted = replace_current_goal(self.session, artifact)
+            self.mode["current_plan"] = None
+            self.mode["current_goal"] = accepted
+            if previous_plan is not None:
+                self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
+            if previous_goal is not None:
+                self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
+
+        if action == "implement":
+            if review.kind == "plan":
+                accepted = start_plan_attempt(self.session)
+                self.mode["current_plan"] = accepted
+                self.mode["executing_plan"] = True
+                self.mode["executing_goal"] = False
+                self.query_one(ChatLog).resolve_plan(artifact_id, "active")
+            else:
+                accepted = start_goal_attempt(self.session)
+                self.mode["current_goal"] = accepted
+                self.mode["executing_goal"] = True
+                self.mode["executing_plan"] = False
+                self.query_one(ChatLog).resolve_goal(artifact_id, "active")
+            self.mode["planning"] = False
+            self.system_message(f'implementing {review.kind} "{title}"', kind="status")
+        else:
+            if review.kind == "plan":
+                self.query_one(ChatLog).resolve_plan(artifact_id, "closed")
+                update_plan_event_status(self.session, artifact_id, "closed")
+            else:
+                self.query_one(ChatLog).resolve_goal(artifact_id, "closed")
+                update_goal_event_status(self.session, artifact_id, "closed")
+
+        self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
+        self._sync_artifact_button()
+        self.store.save(self.session)
+        review.resolve(action, artifact=accepted)
 
     async def _run_turn_for_goal(self, value: dict[str, Any]) -> None:
         """Run the normal action agent for one explicit Goal attempt."""
@@ -1166,7 +1264,6 @@ class MiraApp(App[None]):
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
-            self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.finish_turn(cancelled=True)
@@ -1174,7 +1271,6 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
             raise
         except Exception as exc:
-            self.mode["plan_staging"] = None
             self.mode["plan_revision"] = None
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.finish_turn(cancelled=True, tool_status="interrupted")
@@ -1269,6 +1365,8 @@ class MiraApp(App[None]):
     def _cancel_turn(self) -> None:
         """Cancel the active turn worker."""
         if self.busy and self.turn_worker is not None:
+            if self._pending_artifact_review is not None:
+                self._pending_artifact_review.cancel()
             self.finish_turn(cancelled=True)
             self.turn_worker.cancel()
             self._set_status(state="cancelling")
@@ -1366,91 +1464,26 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).command_output(renderable)
 
-    async def prepare_plan(self, interrupt: Any) -> str:
-        """Generate Success Criteria before the forced Plan finalisation call."""
+    async def finalize_plan(self, interrupt: Any) -> dict[str, Any]:
+        """Render a provisional Plan and await an explicit review decision."""
         self.waiting_finished()
-        revision = self.mode.get("plan_revision")
-        confirm = getattr(self, "_confirm_formal_replacement", None)
-        accepted = await confirm("Plan") if not isinstance(revision, dict) and callable(confirm) else True
-        if not accepted:
-            self.mode["plan_staging"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.system_message("kept the current formal work", kind="muted")
-            return FORMAL_CONSTRUCTION_CANCELLED
-        request = prepare_plan_request(interrupt)
-        objective = request["objective"]
-        context = request["context_and_constraints"] or "No additional constraints."
-        if not objective:
-            raise RuntimeError("prepare_plan requires the authoritative user objective")
-        self.waiting_started("Generating success criteria", immediate=True, elapsed=True)
-        service = SuccessCriteriaService(self.config or {})
-        if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
-            previous = revision["previous_plan"]
-            criteria = await service.revise(
-                objective,
-                str(previous.get("success_criteria") or ""),
-                str(revision.get("feedback") or ""),
-                context,
-            )
-        else:
-            criteria = await service.generate(objective, context)
-        self.mode["plan_staging"] = {
-            "objective": objective,
-            "context_and_constraints": context,
-            "success_criteria": criteria,
-        }
         self.mode["planning_stage"] = PLANNING_STAGE_PLAN_FINALIZE
-        self.waiting_started("Creating plan", immediate=True, elapsed=True)
-        revision_context = ""
-        if isinstance(revision, dict) and isinstance(revision.get("previous_plan"), dict):
-            revision_context = (
-                "\n\nThe revision must be a complete replacement.\n"
-                f"<previous_plan>\n{plan_artifact_text(revision['previous_plan'])}\n</previous_plan>\n"
-                f"<user_feedback>\n{revision.get('feedback') or ''}\n</user_feedback>"
-            )
-        return (
-            f"{PLAN_FINALIZATION_POLICY}\n\n"
-            f"<objective>\n{objective}\n</objective>\n\n"
-            f"<context_and_constraints>\n{context}\n</context_and_constraints>\n\n"
-            f"<success_criteria>\n{criteria}\n</success_criteria>"
-            f"{revision_context}"
-        )
-
-    async def finalize_plan(self, interrupt: Any) -> str:
-        """Persist and render one criteria-first PlanArtifact."""
-        self.waiting_finished()
         payload = plan_request(interrupt)
-        staging = self.mode.get("plan_staging")
-        if not isinstance(staging, dict):
+        if not payload.get("objective") or not payload.get("success_criteria"):
             raise RuntimeError("finalize_plan requires staged Plan context and Success Criteria")
         plan_id = self._next_plan_id()
         artifact = plan_artifact(
             plan_id=plan_id,
             title=str(payload.get("title") or "Plan"),
-            objective=str(staging.get("objective") or ""),
-            context_and_constraints=str(staging.get("context_and_constraints") or ""),
+            objective=str(payload.get("objective") or ""),
+            context_and_constraints=str(payload.get("context_and_constraints") or ""),
             key_changes=list(payload.get("key_changes") or []),
             test_plan=list(payload.get("test_plan") or []),
             assumptions=list(payload.get("assumptions") or []),
-            success_criteria=str(staging.get("success_criteria") or ""),
+            success_criteria=str(payload.get("success_criteria") or ""),
             rubric_enabled=bool(self.mode.get("rubric_enabled")),
             rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
         )
-
-        previous_plan = current_plan(self.session)
-        previous_goal = current_goal(self.session)
-        if previous_plan is not None:
-            self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
-        if previous_goal is not None:
-            self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
-
-        artifact = replace_current_plan(self.session, artifact)
-        self.mode["current_plan"] = artifact
-        self.mode["current_goal"] = None
-        self.mode["plan_staging"] = None
-        self.mode["plan_revision"] = None
-        self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-        self._sync_artifact_button()
         event = append_event(
             self.session,
             {"type": "plan", "mode": "planning", "plan": artifact, "status": "proposed"},
@@ -1462,7 +1495,19 @@ class MiraApp(App[None]):
             status="proposed",
             created_at=str(event.get("created_at") or ""),
         )
-        return "Plan and Success Criteria presented for user review."
+        review = PendingArtifactReview.create("plan", artifact)
+        self._pending_artifact_review = review
+        try:
+            return await review.wait()
+        except asyncio.CancelledError:
+            with suppress(NoMatches):
+                self.query_one(ChatLog).resolve_plan(plan_id, "cancelled")
+            update_plan_event_status(self.session, plan_id, "cancelled")
+            self.store.save(self.session)
+            raise
+        finally:
+            if self._pending_artifact_review is review:
+                self._pending_artifact_review = None
 
     async def show_plan(self, interrupt: Any = None) -> str:  # noqa: ARG002
         """Render the exact current Plan without invoking or paraphrasing through a model."""
@@ -1529,88 +1574,21 @@ class MiraApp(App[None]):
             exclusive=True,
         )
 
-    async def prepare_goal(self, interrupt: Any) -> str:
-        """Generate shared Success Criteria before forced Goal finalisation."""
+    async def finalize_goal(self, interrupt: Any) -> dict[str, Any]:
+        """Render a provisional Goal and await an explicit review decision."""
         self.waiting_finished()
-        staging = self.mode.get("goal_staging")
-        if not isinstance(staging, dict):
-            raise RuntimeError("Goal staging context is unavailable")
-        request = prepare_goal_request(interrupt)
-        revision = self.mode.get("goal_revision")
-        authoritative_request = str(staging.get("authoritative_objective") or "")
-        objective = request["objective"] or authoritative_request
-        if not objective:
-            raise RuntimeError("prepare_goal requires the authoritative user objective")
-        context = request["context_and_constraints"]
-        evidence = request["research_evidence"]
-        research_context = "\n\n".join(value for value in (context, evidence) if value)
-        self.waiting_started("Generating success criteria", immediate=True, elapsed=True)
-        service = SuccessCriteriaService(self.config or {})
-        previous = revision.get("previous_goal") if isinstance(revision, dict) else None
-        if isinstance(previous, dict):
-            criteria = await service.revise(
-                objective,
-                str(previous.get("success_criteria") or ""),
-                str(revision.get("feedback") or ""),
-                research_context,
-            )
-        else:
-            criteria = await service.generate(
-                objective,
-                research_context,
-                authoritative_request=authoritative_request,
-            )
-        staging.update(
-            {
-                "objective": objective,
-                "context_and_constraints": context,
-                "research_evidence": evidence,
-                "success_criteria": criteria,
-                "stage": PLANNING_STAGE_GOAL_FINALIZE,
-            }
-        )
         self.mode["planning_stage"] = PLANNING_STAGE_GOAL_FINALIZE
-        self.waiting_started("Finalizing Goal", immediate=True, elapsed=True)
-        revision_context = ""
-        if isinstance(revision, dict):
-            revision_context = (
-                f"\n\n<user_feedback>\n{str(revision.get('feedback') or '')}\n</user_feedback>"
-            )
-        return (
-            f"{GOAL_FINALIZATION_POLICY}\n\n"
-            f"<authoritative_request>\n{authoritative_request}\n</authoritative_request>\n\n"
-            f"<objective>\n{objective}\n</objective>\n\n"
-            f"<success_criteria>\n{criteria}\n</success_criteria>"
-            f"{revision_context}"
-        )
-
-    async def finalize_goal(self, interrupt: Any) -> str:
-        """Persist and render one criteria-only GoalArtifact."""
-        self.waiting_finished()
-        staging = self.mode.get("goal_staging")
-        if not isinstance(staging, dict) or not staging.get("success_criteria"):
+        payload = goal_request(interrupt)
+        if not payload.get("objective") or not payload.get("success_criteria"):
             raise RuntimeError("finalize_goal requires staged Objective and Success Criteria")
         artifact = goal_artifact(
             goal_id=self._next_goal_id(),
-            title=goal_title_request(interrupt),
-            objective=str(staging.get("objective") or ""),
-            success_criteria=str(staging.get("success_criteria") or ""),
+            title=payload["title"],
+            objective=payload["objective"],
+            success_criteria=payload["success_criteria"],
             rubric_enabled=bool(self.mode.get("rubric_enabled")),
             rubric_iterations=int(self.mode.get("rubric_max_iterations") or 3),
         )
-        previous_plan = current_plan(self.session)
-        previous_goal = current_goal(self.session)
-        if previous_plan is not None:
-            self.query_one(ChatLog).resolve_plan(str(previous_plan["id"]), "superseded")
-        if previous_goal is not None:
-            self.query_one(ChatLog).resolve_goal(str(previous_goal["id"]), "superseded")
-        artifact = replace_current_goal(self.session, artifact)
-        self.mode["current_plan"] = None
-        self.mode["current_goal"] = artifact
-        self.mode["goal_staging"] = None
-        self.mode["goal_revision"] = None
-        self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-        self._sync_artifact_button()
         event = append_event(
             self.session,
             {"type": "goal", "mode": "planning" if self.mode.get("planning") else "action", "goal": artifact, "status": "proposed"},
@@ -1622,7 +1600,20 @@ class MiraApp(App[None]):
             status="proposed",
             created_at=str(event.get("created_at") or ""),
         )
-        return "Goal and Success Criteria presented for user review."
+        review = PendingArtifactReview.create("goal", artifact)
+        self._pending_artifact_review = review
+        try:
+            return await review.wait()
+        except asyncio.CancelledError:
+            goal_id = str(artifact["id"])
+            with suppress(NoMatches):
+                self.query_one(ChatLog).resolve_goal(goal_id, "cancelled")
+            update_goal_event_status(self.session, goal_id, "cancelled")
+            self.store.save(self.session)
+            raise
+        finally:
+            if self._pending_artifact_review is review:
+                self._pending_artifact_review = None
 
     async def show_goal(self, interrupt: Any = None) -> str:  # noqa: ARG002
         """Render the exact current Goal without a model call."""
@@ -2683,17 +2674,24 @@ class MiraApp(App[None]):
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
             for index, action in enumerate(action_requests(interrupt)):
-                answer = await self._prompt_choice(
-                    action_title(action),
-                    action_preview(action),
-                    action_choices(interrupt, action, index),
-                )
-                if answer == "e":
-                    decisions.append(await self.edit_decision(action))
-                elif answer == "r":
-                    decisions.append({"type": "reject"})
-                else:
-                    decisions.append({"type": "approve"})
+                while True:
+                    answer = await self._prompt_choice(
+                        action_title(action),
+                        action_preview(action),
+                        action_choices(interrupt, action, index),
+                    )
+                    if answer is None:
+                        continue
+                    if answer == "e":
+                        decision = await self.edit_decision(action)
+                        if decision is None:
+                            continue
+                        decisions.append(decision)
+                    elif answer == "r":
+                        decisions.append({"type": "reject"})
+                    else:
+                        decisions.append({"type": "approve"})
+                    break
         return decisions
 
     async def ask_user(self, interrupt: Any) -> str:
@@ -2703,14 +2701,25 @@ class MiraApp(App[None]):
         question = ask_user_question(request)
         options = ask_user_options(request)
         choices = [(str(index), f"{index} {option}") for index, option in enumerate(options, start=1)]
-        answer = str(await self._prompt_choice("Question", question, choices, vertical=True) or "")
-        selected = options[int(answer) - 1] if answer.isdigit() and 0 < int(answer) <= len(options) else options[-1]
-        if selected != ASK_USER_OPEN_OPTION:
-            result = selected
-        else:
+        while True:
+            answer = await self._prompt_choice("Question", question, choices, vertical=True)
+            if answer is None:
+                continue
+            selected = (
+                options[int(answer) - 1]
+                if answer.isdigit() and 0 < int(answer) <= len(options)
+                else None
+            )
+            if selected is None:
+                continue
+            if selected != ASK_USER_OPEN_OPTION:
+                return selected
             response = await self._prompt_text("Question", ASK_USER_OPEN_OPTION)
-            result = (response or "").strip() or ASK_USER_OPEN_OPTION
-        return result
+            if response is None:
+                continue
+            result = response.strip()
+            if result:
+                return result
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""
@@ -2722,14 +2731,14 @@ class MiraApp(App[None]):
         answer = await self._prompt_choice("Git", message, [("c", "Continue (c)"), ("e", "Exit (e)")])
         return answer == "c"
 
-    async def edit_decision(self, action: Any) -> dict[str, Any]:
+    async def edit_decision(self, action: Any) -> dict[str, Any] | None:
         """Prompt for edited JSON args and return a LangGraph decision."""
         if not isinstance(action, dict):
             return {"type": "reject"}
 
         edited_text = await self._prompt_json("Edited Args", json.dumps(action.get("args", {}), indent=2))
         if edited_text is None:
-            return {"type": "reject"}
+            return None
 
         try:
             edited_args = json.loads(edited_text)

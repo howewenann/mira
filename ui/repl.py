@@ -186,7 +186,6 @@ def initial_mode(
         "executing_plan": False,
         "current_goal": current_goal(session or {}),
         "executing_goal": False,
-        "plan_staging": None,
         "plan_revision": None,
         "goal_staging": None,
         "goal_revision": None,
@@ -227,7 +226,7 @@ async def run_user_turn(
     prepared_messages: list[Any] | None = None,
     attachments: list[dict[str, str]] | None = None,
 ) -> TurnResult:
-    """Route one submitted user prompt through planning or action mode."""
+    """Run one submitted MIRA interaction across all immediate internal phases."""
     live_usage_applied = False
 
     def apply_live_usage(usage: dict[str, Any]) -> None:
@@ -259,34 +258,213 @@ async def run_user_turn(
         if callable(usage_updated):
             usage_updated()
 
-    approved_rubric: str | None = None
     goal_staging = mode.get("goal_staging") if isinstance(mode.get("goal_staging"), dict) else None
-    retained_goal: dict[str, Any] | None = None
-    retained_plan: dict[str, Any] | None = None
     using_planning_agent = bool(mode["planning"] or goal_staging is not None)
-    if using_planning_agent:
-        active_agent = plan_agent
-        thread_id = str((goal_staging or {}).get("thread_id") or mode["plan_thread_id"])
-        mode_name = "planning" if mode["planning"] else "action"
-        planning_stage = str(
-            (goal_staging or {}).get("stage")
-            or mode.get("planning_stage")
-            or PLANNING_STAGE_PLAN_RESEARCH
-        )
-        if goal_staging is not None:
-            proposal_text = explicit_goal_request_text(text)
+    ensure_dashboard(
+        session,
+        model_name=model_name,
+        context_limit_tokens=context_limit_tokens,
+        context_limit_source=context_limit_source,
+    )
+    initial_mode_name = "planning" if mode.get("planning") else "action"
+    recorder = SessionRecorder(session, store, initial_mode_name)
+    visible_text = display_text if display_text is not None else text
+    if record_user:
+        user_event = recorder.user_message(visible_text, attachments=attachments)
+        update_title(session)
+        recorder.save()
+        user_renderer = getattr(renderer, "user_message", None)
+        if callable(user_renderer):
+            call_renderer(
+                user_renderer,
+                visible_text,
+                planning=initial_mode_name == "planning",
+                created_at=str(user_event.get("created_at") or ""),
+            )
+    from langchain_core.messages import HumanMessage
+    from session.context import session_mcp_attachments
+
+    all_attachments = session_mcp_attachments(session)
+    aggregate = TurnResult()
+    compact_targets: list[tuple[SessionRecorder, Any, str]] = []
+
+    def invocation_messages(request_text: str, supplied: list[Any] | None = None) -> list[Any]:
+        messages = list(supplied) if supplied is not None else [HumanMessage(content=request_text)]
+        if all_attachments:
+            for index, message in enumerate(messages):
+                if isinstance(message, HumanMessage):
+                    extra = dict(message.additional_kwargs)
+                    extra["mira_mcp_attachments"] = all_attachments
+                    messages[index] = message.model_copy(update={"additional_kwargs": extra})
+                    break
+        return messages
+
+    async def run_phase(
+        *,
+        phase_agent: Any,
+        request_text: str,
+        thread_id: str,
+        phase_mode: str,
+        stage: str | None = None,
+        state: dict[str, str] | None = None,
+        rubric: str | None = None,
+        rubric_iterations: int = 3,
+        supplied_messages: list[Any] | None = None,
+    ) -> TurnResult:
+        phase_recorder = SessionRecorder(session, store, phase_mode)
+        wrapped_renderer = RecordingRenderer(renderer, phase_recorder)
+        poller = asyncio.create_task(poll_compactions(phase_recorder, phase_agent, thread_id))
+        try:
+            with context_usage_scope(apply_deepagents_context_usage):
+                phase_result = await run_turn(
+                    agent=phase_agent,
+                    text=request_text,
+                    renderer=wrapped_renderer,
+                    thread_id=thread_id,
+                    usage_callback=apply_live_usage,
+                    rubric=rubric,
+                    rubric_max_iterations=rubric_iterations,
+                    include_rubric_state=(bool(mode.get("rubric_enabled")) or bool(rubric))
+                    and stage is None,
+                    planning_stage=stage,
+                    planning_state=state,
+                    planning_context=getattr(phase_agent, "mira_planning_context", None)
+                    if stage is not None
+                    else None,
+                    messages=invocation_messages(request_text, supplied_messages),
+                )
+        except asyncio.CancelledError:
+            wrapped_renderer.stop_active_tools("cancelled")
+            await sync_compaction_safely(phase_recorder, phase_agent, thread_id)
+            phase_recorder.interrupted("turn interrupted before completion")
+            raise
+        except ContextOverflowError as exc:
+            wrapped_renderer.stop_active_tools("interrupted")
+            await sync_compaction_safely(phase_recorder, phase_agent, thread_id)
+            notice = pop_context_overflow_notice(exc)
+            if notice and not wrapped_renderer.context_notice_rendered():
+                phase_recorder.info(notice)
+                write_line(renderer, notice, kind="info")
+                wrapped_renderer.mark_context_notice_rendered()
+            mark_context_notice_rendered(exc)
+            raise
+        except Exception as exc:
+            wrapped_renderer.stop_active_tools("interrupted")
+            await sync_compaction_safely(phase_recorder, phase_agent, thread_id)
+            phase_recorder.system_error(f"turn error: {exc}")
+            raise
+        finally:
+            poller.cancel()
+            with suppress(asyncio.CancelledError):
+                await poller
+        phase_recorder.ensure_assistant(phase_result.final_text)
+        compact_targets.append((phase_recorder, phase_agent, thread_id))
+        merge_turn_results(aggregate, phase_result)
+        return phase_result
+
+    first_phase = True
+    workflow = "goal" if goal_staging is not None else "plan" if using_planning_agent else ""
+    existing_revision = (
+        mode.get("goal_revision") if workflow == "goal" else mode.get("plan_revision")
+    )
+    previous_key = "previous_goal" if workflow == "goal" else "previous_plan"
+    previous_artifact = (
+        existing_revision.get(previous_key)
+        if isinstance(existing_revision, dict)
+        and isinstance(existing_revision.get(previous_key), dict)
+        else None
+    )
+    feedback = (
+        str(existing_revision.get("feedback") or "").strip()
+        if isinstance(existing_revision, dict)
+        else ""
+    )
+    phase_text = feedback if previous_artifact is not None and feedback else text
+    result = aggregate
+
+    while workflow:
+        if workflow == "goal":
+            authoritative = str(
+                (goal_staging or {}).get("authoritative_objective")
+                or (previous_artifact or {}).get("objective")
+                or text
+            )
+            proposal = (
+                explicit_goal_request_text(phase_text)
+                if previous_artifact is None
+                else goal_revision_text(previous_artifact, feedback)
+            )
+            stage = PLANNING_STAGE_GOAL_RESEARCH
+            if first_phase:
+                thread_id = str((goal_staging or {}).get("thread_id") or mode.get("plan_thread_id"))
+            else:
+                mode["plan_runs"] = int(mode.get("plan_runs") or 0) + 1
+                thread_id = plan_thread_id(session, mode["plan_runs"])
         else:
-            proposal_text = plan_request_text(text)
-        request_text = with_resume_context(
-            session,
-            proposal_text,
+            authoritative = str((previous_artifact or {}).get("objective") or text)
+            proposal = (
+                plan_request_text(phase_text)
+                if previous_artifact is None
+                else plan_revision_text(previous_artifact, feedback)
+            )
+            stage = PLANNING_STAGE_PLAN_RESEARCH
+            thread_id = str(mode.get("plan_thread_id") or plan_thread_id(session))
+
+        mode["planning_stage"] = stage
+        planning_state = {
+            "planning_authoritative_request": authoritative,
+            "planning_previous_criteria": str(
+                (previous_artifact or {}).get("success_criteria") or ""
+            ),
+            "planning_revision_feedback": feedback,
+            "planning_previous_artifact": (
+                plan_artifact_text(previous_artifact)
+                if workflow == "plan" and previous_artifact is not None
+                else goal_artifact_text(previous_artifact)
+                if previous_artifact is not None
+                else ""
+            ),
+        }
+        request_text = with_resume_context(session, proposal)
+        result = await run_phase(
+            phase_agent=plan_agent,
+            request_text=request_text,
+            thread_id=thread_id,
+            phase_mode="planning" if mode.get("planning") else "action",
+            stage=stage,
+            state=planning_state,
+            supplied_messages=prepared_messages if first_phase else None,
         )
-    else:
-        active_agent = agent
-        thread_id = session["id"]
-        mode_name = "action"
+        first_phase = False
+        review = result.formal_review
+        if not isinstance(review, dict):
+            workflow = ""
+            break
+        action = str(review.get("action") or "")
+        if action == "revise":
+            candidate = review.get("artifact")
+            if not isinstance(candidate, dict):
+                raise RuntimeError("formal revision requires the reviewed provisional artifact")
+            previous_artifact = candidate
+            feedback = str(review.get("feedback") or "").strip()
+            if not feedback:
+                raise RuntimeError("formal revision requires explicit feedback")
+            phase_text = feedback
+            continue
+        if action == "implement":
+            workflow = ""
+            break
+        workflow = ""
+        break
+
+    if not using_planning_agent or (
+        isinstance(result.formal_review, dict)
+        and result.formal_review.get("action") == "implement"
+    ):
         retained_plan = current_plan(session) if mode.get("executing_plan") else None
-        retained_goal = current_goal(session) if mode.get("executing_goal") and retained_plan is None else None
+        retained_goal = (
+            current_goal(session) if mode.get("executing_goal") and retained_plan is None else None
+        )
         approved_rubric = (
             str(retained_plan.get("success_criteria") or "")
             if retained_plan and retained_plan.get("rubric_enabled")
@@ -305,107 +483,29 @@ async def run_user_turn(
             action_text,
             exclude_current_goal=retained_goal is not None,
         )
-        planning_stage = None
-
-    ensure_dashboard(
-        session,
-        model_name=model_name,
-        context_limit_tokens=context_limit_tokens,
-        context_limit_source=context_limit_source,
-    )
-    recorder = SessionRecorder(session, store, mode_name)
-    visible_text = display_text if display_text is not None else text
-    if record_user:
-        user_event = recorder.user_message(visible_text, attachments=attachments)
-        update_title(session)
-        recorder.save()
-        user_renderer = getattr(renderer, "user_message", None)
-        if callable(user_renderer):
-            call_renderer(
-                user_renderer,
-                visible_text,
-                planning=mode_name == "planning",
-                created_at=str(user_event.get("created_at") or ""),
-            )
-    from langchain_core.messages import HumanMessage
-    from session.context import session_mcp_attachments
-
-    all_attachments = session_mcp_attachments(session)
-    invocation_messages = list(prepared_messages) if prepared_messages is not None else None
-    if invocation_messages is None:
-        invocation_messages = [
-            HumanMessage(
-                content=request_text,
-                additional_kwargs={"mira_mcp_attachments": all_attachments} if all_attachments else {},
-            )
-        ]
-    elif all_attachments:
-        for index, message in enumerate(invocation_messages):
-            if isinstance(message, HumanMessage):
-                extra = dict(message.additional_kwargs)
-                extra["mira_mcp_attachments"] = all_attachments
-                invocation_messages[index] = message.model_copy(update={"additional_kwargs": extra})
-                break
-
-    wrapped_renderer = RecordingRenderer(renderer, recorder)
-    poller = asyncio.create_task(poll_compactions(recorder, active_agent, thread_id))
-
-    try:
-        with context_usage_scope(apply_deepagents_context_usage):
-            result = await run_turn(
-                agent=active_agent,
-                text=request_text,
-                renderer=wrapped_renderer,
-                thread_id=thread_id,
-                usage_callback=apply_live_usage,
-                rubric=approved_rubric,
-                rubric_max_iterations=int(
-                    (retained_goal or {}).get("rubric_iterations")
-                    or (retained_plan or {}).get("rubric_iterations")
-                    or mode.get("rubric_max_iterations")
-                    or 3
-                ),
-                include_rubric_state=(
-                    (bool(mode.get("rubric_enabled")) or bool(approved_rubric))
-                    and not using_planning_agent
-                ),
-                planning_stage=planning_stage,
-                messages=invocation_messages,
-            )
-    except asyncio.CancelledError:
-        wrapped_renderer.stop_active_tools("cancelled")
-        await sync_compaction_safely(recorder, active_agent, thread_id)
-        recorder.interrupted("turn interrupted before completion")
-        raise
-    except ContextOverflowError as exc:
-        wrapped_renderer.stop_active_tools("interrupted")
-        await sync_compaction_safely(recorder, active_agent, thread_id)
-        notice = pop_context_overflow_notice(exc)
-        if notice and not wrapped_renderer.context_notice_rendered():
-            recorder.info(notice)
-            write_line(renderer, notice, kind="info")
-            wrapped_renderer.mark_context_notice_rendered()
-        mark_context_notice_rendered(exc)
-        raise
-    except Exception as exc:
-        wrapped_renderer.stop_active_tools("interrupted")
-        await sync_compaction_safely(recorder, active_agent, thread_id)
-        recorder.system_error(f"turn error: {exc}")
-        raise
-    finally:
-        poller.cancel()
-        with suppress(asyncio.CancelledError):
-            await poller
-
-    recorder.ensure_assistant(getattr(result, "final_text", ""))
+        result = await run_phase(
+            phase_agent=agent,
+            request_text=request_text,
+            thread_id=str(session["id"]),
+            phase_mode="action",
+            rubric=approved_rubric,
+            rubric_iterations=int(
+                (retained_goal or {}).get("rubric_iterations")
+                or (retained_plan or {}).get("rubric_iterations")
+                or mode.get("rubric_max_iterations")
+                or 3
+            ),
+            supplied_messages=prepared_messages if first_phase else None,
+        )
 
     session["turns"] = int(session.get("turns") or 0) + 1
     update_title(session)
-    await sync_compaction_safely(recorder, active_agent, thread_id)
+    for phase_recorder, phase_agent, phase_thread_id in compact_targets:
+        await sync_compaction_safely(phase_recorder, phase_agent, phase_thread_id)
     if not live_usage_applied:
         apply_turn_usage(
             session,
-            result,
+            aggregate,
             model_name=model_name,
             context_limit_tokens=context_limit_tokens,
             context_limit_source=context_limit_source,
@@ -419,7 +519,25 @@ async def run_user_turn(
         mode["current_plan"] = current_plan(session)
         mode["executing_plan"] = False
     store.save(session)
-    return result
+    return aggregate
+
+
+def merge_turn_results(target: TurnResult, source: TurnResult) -> None:
+    """Accumulate existing per-run results across phases of one MIRA turn."""
+    target.final_text = source.final_text or target.final_text
+    target.tool_calls.extend(source.tool_calls)
+    target.tool_results.extend(source.tool_results)
+    target.input_tokens += source.input_tokens
+    target.output_tokens += source.output_tokens
+    target.total_tokens += source.total_tokens
+    if source.context_tokens:
+        target.context_tokens = source.context_tokens
+        target.context_source = source.context_source
+    if target.usage_source == "unknown" and source.usage_source != "unknown":
+        target.usage_source = source.usage_source
+    target.rubric_status = source.rubric_status or target.rubric_status
+    target.rubric_evaluations.extend(source.rubric_evaluations)
+    target.formal_review = source.formal_review or target.formal_review
 
 
 async def sync_compaction_safely(recorder: SessionRecorder, agent: Any, thread_id: str) -> None:

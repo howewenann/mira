@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from runtime.runner import TurnResult
 from session.context import build_resume_context, normalize_session
@@ -21,6 +21,8 @@ from session.goals import (
 from session.plans import plan_artifact, replace_current_plan
 from session.store import SessionStore
 from ui.repl import action_request_text, run_user_turn
+from agent.default_resources.tools.prepare_goal import prepare_goal
+from agent.planning.tool_context import PlanningToolContext
 
 
 def artifact(*, rubric: bool = False, goal_id: str = "goal-1") -> dict:
@@ -156,6 +158,35 @@ class CurrentGoalTests(unittest.TestCase):
 
 
 class GoalExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_goal_returns_normally_with_exact_generated_criteria(self) -> None:
+        service = SimpleNamespace(
+            generate=AsyncMock(return_value="- Exact generated criterion."),
+            revise=AsyncMock(),
+        )
+        runtime = SimpleNamespace(
+            context=PlanningToolContext(service),
+            state={"planning_authoritative_request": "Deliver the exact outcome."},
+            tool_call_id="call-goal",
+        )
+
+        result = await prepare_goal.coroutine(
+            "Deliver the exact outcome.",
+            runtime,
+            "Keep it focused.",
+            "Existing evidence.",
+        )
+
+        self.assertEqual(result.update["planning_stage"], "goal_finalize")
+        self.assertEqual(
+            result.update["planning_success_criteria"],
+            "- Exact generated criterion.",
+        )
+        self.assertEqual(
+            result.update["messages"][0].content.count("- Exact generated criterion."),
+            1,
+        )
+        service.generate.assert_awaited_once()
+
     async def test_explicit_attempt_injects_exact_criteria_and_completes_without_rubric(self) -> None:
         value = artifact()
         value["status"] = "active"

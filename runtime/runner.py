@@ -14,13 +14,7 @@ from langgraph.types import Command
 from langgraph.stream.transformers import CustomTransformer
 
 from agent.middleware.correction import CORRECTION_EVENT
-from agent.planning.policy import (
-    PLANNING_STAGE_GOAL_FINALIZE,
-    PLANNING_STAGE_GOAL_RESEARCH,
-    PLANNING_STAGE_PLAN_FINALIZE,
-    PLANNING_STAGE_PLAN_RESEARCH,
-    PLANNING_STAGES,
-)
+from agent.planning.policy import PLANNING_STAGES
 from runtime.correction_events import normalize_correction_event
 from runtime.message_events import consume_messages
 from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
@@ -42,7 +36,6 @@ from runtime.tool_events import (
     render_tool_completion,
 )
 
-FORMAL_CONSTRUCTION_CANCELLED = "Formal construction cancelled; current formal work retained."
 from runtime.usage import (
     empty_usage,
     has_context_usage,
@@ -71,6 +64,7 @@ class TurnResult:
     usage_source: str = "unknown"
     rubric_status: str = ""
     rubric_evaluations: list[dict[str, Any]] = field(default_factory=list)
+    formal_review: dict[str, Any] | None = None
     _stream_usage: dict[str, Any] = field(default_factory=empty_usage, repr=False)
     _tool_call_drafts: list[tuple[str, str]] = field(default_factory=list, repr=False)
     _tool_call_ids: list[str] = field(default_factory=list, repr=False)
@@ -457,6 +451,8 @@ async def run_turn(
     rubric_model_name: str = "",
     include_rubric_state: bool = False,
     planning_stage: str | None = None,
+    planning_state: dict[str, str] | None = None,
+    planning_context: Any | None = None,
     messages: list[Any] | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
@@ -476,6 +472,8 @@ async def run_turn(
         payload["rubric"] = rubric
     if planning_stage in PLANNING_STAGES:
         payload["planning_stage"] = planning_stage
+    if planning_state:
+        payload.update(planning_state)
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
     historical_tool_lifecycle = await checkpoint_tool_lifecycle(agent, config)
@@ -486,6 +484,7 @@ async def run_turn(
             payload,
             config=config,
             version="v3",
+            **({"context": planning_context} if planning_context is not None else {}),
             transformers=[
                 CustomTransformer,
                 lambda scope: MessageInvocationMetadataTransformer(scope, message_metadata),
@@ -573,6 +572,8 @@ async def run_turn(
                 if not result.rubric_status and result.rubric_evaluations:
                     result.rubric_status = str(result.rubric_evaluations[-1].get("result") or "")
                 rubric_renderer.finalize(result.rubric_status)
+            if result.formal_review is not None:
+                result.final_text = ""
             return result
 
         approval_bindings = render_interrupt_tool_calls(
@@ -582,64 +583,12 @@ async def run_turn(
             result,
             tool_call_start,
         )
-        prepare_plan_interrupt = first_typed_interrupt(interrupts, "prepare_plan")
-        prepare_goal_interrupt = first_typed_interrupt(interrupts, "prepare_goal")
         finalize_goal_interrupt = first_typed_interrupt(interrupts, "finalize_goal")
         finalize_plan_interrupt = first_typed_interrupt(interrupts, "finalize_plan")
         show_goal_interrupt = first_typed_interrupt(interrupts, "show_goal")
         show_plan_interrupt = first_typed_interrupt(interrupts, "show_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
-        if prepare_plan_interrupt is not None:
-            call_id = ensure_control_tool_call(
-                "prepare_plan",
-                prepare_plan_interrupt,
-                output.get("value"),
-                event_renderer,
-                result,
-                tool_call_start,
-                tool_draft_start,
-            )
-            finalization = await resolve_control_surface(
-                "prepare_plan",
-                renderer.prepare_plan(prepare_plan_interrupt),
-                event_renderer,
-                result,
-                call_id,
-            )
-            if finalization == FORMAL_CONSTRUCTION_CANCELLED:
-                result.final_text = ""
-                return result
-            payload = Command(
-                resume=finalization,
-                update={"planning_stage": PLANNING_STAGE_PLAN_FINALIZE},
-            )
-            planning_stage = PLANNING_STAGE_PLAN_FINALIZE
-        elif prepare_goal_interrupt is not None:
-            call_id = ensure_control_tool_call(
-                "prepare_goal",
-                prepare_goal_interrupt,
-                output.get("value"),
-                event_renderer,
-                result,
-                tool_call_start,
-                tool_draft_start,
-            )
-            finalization = await resolve_control_surface(
-                "prepare_goal",
-                renderer.prepare_goal(prepare_goal_interrupt),
-                event_renderer,
-                result,
-                call_id,
-            )
-            if finalization == FORMAL_CONSTRUCTION_CANCELLED:
-                result.final_text = ""
-                return result
-            payload = Command(
-                resume=finalization,
-                update={"planning_stage": PLANNING_STAGE_GOAL_FINALIZE},
-            )
-            planning_stage = PLANNING_STAGE_GOAL_FINALIZE
-        elif finalize_goal_interrupt is not None:
+        if finalize_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "finalize_goal",
                 finalize_goal_interrupt,
@@ -649,15 +598,15 @@ async def run_turn(
                 tool_call_start,
                 tool_draft_start,
             )
-            await resolve_control_surface(
+            decision = await resolve_control_surface(
                 "finalize_goal",
                 renderer.finalize_goal(finalize_goal_interrupt),
                 event_renderer,
                 result,
                 call_id,
             )
-            result.final_text = ""
-            return result
+            result.formal_review = decision if isinstance(decision, dict) else {"action": str(decision)}
+            payload = Command(resume=decision)
         elif finalize_plan_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "finalize_plan",
@@ -668,15 +617,15 @@ async def run_turn(
                 tool_call_start,
                 tool_draft_start,
             )
-            await resolve_control_surface(
+            decision = await resolve_control_surface(
                 "finalize_plan",
                 renderer.finalize_plan(finalize_plan_interrupt),
                 event_renderer,
                 result,
                 call_id,
             )
-            result.final_text = ""
-            return result
+            result.formal_review = decision if isinstance(decision, dict) else {"action": str(decision)}
+            payload = Command(resume=decision)
         elif show_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "show_goal",

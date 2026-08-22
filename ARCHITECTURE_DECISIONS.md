@@ -311,6 +311,11 @@ default tool prompt asks the agent to prefer 1-3 concise options. Prompt-panel
 keyboard focus styles the selected button itself, not a parent row; ask_user
 option buttons fill their row to provide a full-row selection feel without
 extra focus bookkeeping.
+Across every LangGraph human-review surface, Escape or a nested Cancel means no
+decision: the caller reopens the same approval or question and does not issue
+`Command(resume=...)`. Cancelling an approval JSON editor returns to the same
+approval, and cancelling ask_user freeform input returns to its choices. Alt+Q
+instead cancels the whole outer MIRA turn and clears any pending review waiter.
 
 **Why:** Approval prompts make file edits, eval, subagent delegation, and shell
 execution transcript-compatible and user-controlled. Keeping disabled project
@@ -360,6 +365,13 @@ Success Criteria are binding context. The model supplies Title, Key Changes,
 Test Plan, and Assumptions around the staged Objective and Context and
 Constraints; no Summary field exists. This path and its model inputs are
 identical whether automatic rubric evaluation is enabled or disabled.
+`prepare_plan` is a normal async tool: `ToolRuntime` injects the per-agent
+`SuccessCriteriaService`, and the tool returns a state-updating `Command` that
+sets `planning_stage=plan_finalize` and preserves the exact generated criteria.
+It does not interrupt. The following model inference constructs the Plan and is
+constrained to the sole required finalizer. `finalize_plan` remains the real
+human-review interrupt and is `return_direct`, so its resumed result ends that
+PLAN graph without another model call.
 
 The user's request is authoritative for meaning, while `prepare_plan` may
 rewrite the visible Objective for clarity. That rewrite is wording-only: it
@@ -413,14 +425,16 @@ retired Summary, generic-stage, and pre-staging transcript event shapes are
 not projected as Plan events.
 
 The Plan bubble uses Plan colours for Plan content, rubric colours for Success
-Criteria, and muted text for automatic-evaluation policy and status. Its actions
-are a status-aware primary action, Revise, Close, and Clear. Draft work says
-Implement, incomplete attempted work says Resume, and completed work says Run
-again. The primary action starts or restarts the exact Plan in Act mode. Revise
-stays in the persistent Plan conversation, creates a complete replacement, and
-calls `SuccessCriteriaService.revise()` for both rubric settings; approach-only
-feedback preserves criteria. Close hides controls without changing
-`current_plan`; Clear alone removes it.
+Criteria, and muted text for automatic-evaluation policy and status. A newly
+finalized Plan is provisional while its exact identity-bound review waiter is
+pending; rendering it does not replace durable current work. Implement and
+Close accept it and only then supersede the previous artifact. Implement starts
+the attempt and the same outer MIRA turn runs the separate ACT graph and rubric.
+Revise rejects the draft, runs another PLAN phase inside that same outer turn,
+and calls `SuccessCriteriaService.revise()`; approach-only feedback preserves
+criteria exactly. Clear rejects the draft and leaves any older retained formal
+artifact untouched. Later retained-artifact actions keep their deliberate
+new-turn behavior.
 
 `/plan-show` and the read-only `show_plan` control tool call the same renderer
 and make no Plan-generating model call. `/plan-clear` removes only
@@ -471,6 +485,10 @@ finalization, while only the polished Objective is persisted in the existing
 Goal artifact. Bounded evidence may clarify but not enlarge either. Failed or
 cancelled generation leaves current formal work unchanged. Goal construction
 never calls `finalize_plan` and never produces a hidden implementation Plan.
+Like Plan preparation, `prepare_goal` is a normal async `ToolRuntime`-injected
+tool that generates or revises exact criteria and updates the graph to
+`goal_finalize`. `finalize_goal` alone interrupts for review and its
+`return_direct` result terminates the resumed Goal graph.
 
 Goal research uses the same transient natural-stop protocol and bounded retry
 state as Plan research, but its only preparation marker and tool are
@@ -497,12 +515,12 @@ artifact rejects the session. Retired proposal events are not projected as
 Goal events.
 
 `GoalBubble` shows Objective and Success Criteria with the same status-aware
-primary action, Revise, Close, and Clear controls as a Plan. A newly finalized
-`proposed` Goal remains active through the post-command refresh so all four
-review actions stay available. The primary action starts or restarts one
-explicit Act attempt. Revise uses the read-only Goal pipeline and
-`SuccessCriteriaService.revise()` to create a complete replacement. Close hides
-controls without changing `current_goal`; Clear alone removes it.
+primary action, Revise, Close, and Clear controls as a Plan. Newly finalized
+Goals follow the same provisional review contract: only Implement or Close
+commits them, Revise creates another provisional draft in the same outer turn,
+and Clear discards them without disturbing older retained work. The primary
+action starts or restarts one explicit Act attempt. Later retained revisions use
+the read-only Goal pipeline and `SuccessCriteriaService.revise()` in a new turn.
 `/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
 incomplete states, and `/goal-clear` removes only the current Goal.
 Explicit Goal recall always reopens the retained artifact for review, including
@@ -512,13 +530,10 @@ execution path resolves its execution bubble after completion, pausing,
 cancellation, failure, or rubric exhaustion.
 
 MIRA replaces current formal work only after the new Plan or Goal is presented
-successfully. Completed work may be replaced automatically. Incomplete work
-requires structured confirmation named for the current artifact, for every
-Plan-to-Plan, Plan-to-Goal, Goal-to-Plan, and Goal-to-Goal combination. The
-dialog explains which new kind will replace which current kind. Acceptance is
-transient and does not clear the old artifact early. Successful replacement
-marks the old transcript event `superseded`, clears the opposite current field,
-and stores the new artifact.
+and explicitly accepted. Acceptance does not clear the old artifact early.
+Successful replacement marks the old transcript event `superseded`, clears the
+opposite current field, and stores the new artifact. Rejected, revised, cleared,
+failed, or cancelled provisional work never becomes current.
 
 Goal construction is identical with rubrics on or off. A non-rubric successful
 attempt completes as `agent-declared`. A rubric-enabled attempt passes exact
@@ -836,6 +851,9 @@ MIRA-owned tracing runtime is active, each complete call opens one LangSmith
 the run through LangSmith context propagation. MIRA does not parent individual
 graph, model, tool, subagent, or rubric spans. Consecutive calls therefore
 produce separate roots, while all work inside one call shares one trace.
+One call may now contain multiple PLAN revision graph runs followed by one ACT
+graph run; these remain internal phases of the same submitted MIRA interaction,
+with one persisted user message and one session turn increment.
 
 **Why:** DeepAgents already emits the LangChain run structure users need.
 LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree

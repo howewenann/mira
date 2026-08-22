@@ -545,22 +545,14 @@ class RunTurnRenderer(RecordingRenderer):
         self.events.append(("ask_user", interrupt))
         return self.ask_user_answer
 
-    async def finalize_plan(self, interrupt: Any) -> str:
+    async def finalize_plan(self, interrupt: Any) -> dict[str, str]:
         self.plan_prompts.append(interrupt)
         self.events.append(("finalize_plan", interrupt))
-        return "Plan presented for user review."
+        return {"action": "close"}
 
-    async def finalize_goal(self, interrupt: Any) -> str:
+    async def finalize_goal(self, interrupt: Any) -> dict[str, str]:
         self.events.append(("finalize_goal", interrupt))
-        return "Goal presented for user review."
-
-    async def prepare_goal(self, interrupt: Any) -> str:
-        self.events.append(("prepare_goal", interrupt))
-        return "Success Criteria are ready. Continue to finalize_goal."
-
-    async def prepare_plan(self, interrupt: Any) -> str:
-        self.events.append(("prepare_plan", interrupt))
-        return "Success Criteria are ready. Continue to finalize_plan."
+        return {"action": "close"}
 
     async def show_plan(self, interrupt: Any) -> str:
         self.events.append(("show_plan", interrupt))
@@ -860,6 +852,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     tool_calls=[call],
                     interrupts=[interrupt],
                 ),
+                FakeStream(output={"messages": []}),
             ]
         )
         renderer = RunTurnRenderer()
@@ -869,9 +862,11 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(renderer.plan_prompts, [interrupt])
         self.assertEqual(renderer.ask_user_prompts, [])
         self.assertEqual(renderer.approvals, [])
-        self.assertEqual(len(agent.payloads), 1)
+        self.assertEqual(len(agent.payloads), 2)
+        self.assertEqual(agent.payloads[1].resume, {"action": "close"})
         self.assertEqual(result.final_text, "")
-        self.assertEqual(result.tool_results, ["Plan presented for user review."])
+        self.assertEqual(result.formal_review, {"action": "close"})
+        self.assertEqual(result.tool_results, ["{'action': 'close'}"])
         self.assertEqual(
             [
                 event
@@ -884,7 +879,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 (
                     "tool_result",
                     "finalize_plan",
-                    "Plan presented for user review.",
+                    "{'action': 'close'}",
                     "call-plan",
                 ),
             ],
@@ -1389,110 +1384,6 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("planning_stage", agent.payloads[0])
         self.assertEqual(result.rubric_evaluations, [])
 
-    async def test_run_turn_resumes_prepare_goal_control_interrupt(self) -> None:
-        interrupt = {
-            "type": "prepare_goal",
-            "research_evidence": "Existing index is SQLite.",
-        }
-        call = {
-            "name": "prepare_goal",
-            "id": "call-prepare",
-            "args": {"research_evidence": interrupt["research_evidence"]},
-            "completed": False,
-        }
-        agent = FakeAgent(
-            [
-                FakeStream(
-                    output={"messages": []},
-                    tool_calls=[call],
-                    interrupts=[interrupt],
-                ),
-                FakeStream(output={"messages": []}),
-            ]
-        )
-        renderer = RunTurnRenderer()
-
-        await runner.run_turn(
-            agent,
-            "research first",
-            renderer,
-            "thread-1",
-            planning_stage="goal_research",
-        )
-
-        self.assertIn(("prepare_goal", interrupt), renderer.events)
-        self.assertEqual(len(agent.payloads), 2)
-        self.assertEqual(agent.payloads[0]["planning_stage"], "goal_research")
-        self.assertEqual(agent.payloads[1].update, {"planning_stage": "goal_finalize"})
-        self.assertEqual(
-            [
-                event
-                for event in renderer.events
-                if event[0] in {"tool_call", "prepare_goal", "tool_result"}
-            ],
-            [
-                ("tool_call", "prepare_goal", call["args"], "call-prepare"),
-                ("prepare_goal", interrupt),
-                (
-                    "tool_result",
-                    "prepare_goal",
-                    "Success Criteria are ready. Continue to finalize_goal.",
-                    "call-prepare",
-                ),
-            ],
-        )
-
-    async def test_run_turn_resumes_prepare_plan_then_forces_plan_finalize_stage(self) -> None:
-        interrupt = {
-            "type": "prepare_plan",
-            "objective": "Deliver the result.",
-            "context_and_constraints": "Keep it concise.",
-        }
-        call = {
-            "name": "prepare_plan",
-            "id": "call-prepare-plan",
-            "args": {
-                "objective": interrupt["objective"],
-                "context_and_constraints": interrupt["context_and_constraints"],
-            },
-            "completed": False,
-        }
-        agent = FakeAgent(
-            [
-                FakeStream(
-                    output={"messages": []},
-                    tool_calls=[call],
-                    interrupts=[interrupt],
-                ),
-                FakeStream(output={"messages": []}),
-            ]
-        )
-        renderer = RunTurnRenderer()
-
-        await runner.run_turn(
-            agent,
-            "finalize a Plan",
-            renderer,
-            "thread-1:plan",
-            planning_stage="plan_research",
-        )
-
-        self.assertIn(("prepare_plan", interrupt), renderer.events)
-        self.assertEqual(agent.payloads[0]["planning_stage"], "plan_research")
-        self.assertEqual(
-            agent.payloads[1].update,
-            {"planning_stage": "plan_finalize"},
-        )
-        self.assertIn(
-            (
-                "tool_result",
-                "prepare_plan",
-                "Success Criteria are ready. Continue to finalize_plan.",
-                "call-prepare-plan",
-            ),
-            renderer.events,
-        )
-
     async def test_run_turn_show_plan_uses_control_lifecycle_and_returns(self) -> None:
         interrupt = {"type": "show_plan"}
         call = {
@@ -1534,7 +1425,10 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_turn_show_goal_uses_control_lifecycle_and_returns(self) -> None:
         interrupt = {"type": "show_goal"}
         call = {"name": "show_goal", "id": "call-goal-show", "args": {}, "completed": False}
-        agent = FakeAgent([FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt])])
+        agent = FakeAgent([
+            FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt]),
+            FakeStream(output={"messages": []}),
+        ])
         renderer = RunTurnRenderer()
 
         result = await runner.run_turn(agent, "Show the current Goal.", renderer, "thread-1")
@@ -1546,14 +1440,20 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_turn_finalize_goal_uses_dedicated_surface(self) -> None:
         interrupt = {"type": "finalize_goal", "title": "Search"}
         call = {"name": "finalize_goal", "id": "call-present-goal", "args": {"title": "Search"}, "completed": False}
-        agent = FakeAgent([FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt])])
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, tool_calls=[call], interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
         renderer = RunTurnRenderer()
 
         result = await runner.run_turn(agent, "finalize", renderer, "thread-1")
 
         self.assertEqual(result.final_text, "")
+        self.assertEqual(result.formal_review, {"action": "close"})
         self.assertIn(("finalize_goal", interrupt), renderer.events)
-        self.assertIn(("tool_result", "finalize_goal", "Goal presented for user review.", "call-present-goal"), renderer.events)
+        self.assertIn(("tool_result", "finalize_goal", "{'action': 'close'}", "call-present-goal"), renderer.events)
 
     async def test_control_surface_error_updates_original_call(self) -> None:
         interrupt = {

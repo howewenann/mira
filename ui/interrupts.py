@@ -53,39 +53,23 @@ def ask_user_options(request: dict[str, Any]) -> list[str]:
 def plan_request(interrupt: Any) -> dict[str, Any]:
     """Extract a structured plan request from a LangGraph interrupt payload."""
     value = getattr(interrupt, "value", interrupt)
-    return normalize_plan(value if isinstance(value, dict) else {})
-
-
-def prepare_goal_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]:
-    """Extract the bounded objective and evidence handoff from prepare_goal."""
-    value = getattr(interrupt, "value", interrupt)
-    if not isinstance(value, dict):
-        return {"objective": "", "context_and_constraints": "", "research_evidence": ""}
+    raw = value if isinstance(value, dict) else {}
     return {
-        "objective": str(value.get("objective") or "").strip()[:limit],
-        "context_and_constraints": str(value.get("context_and_constraints") or "").strip()[:limit],
-        "research_evidence": str(value.get("research_evidence") or "").strip()[:limit],
+        **normalize_plan(raw),
+        "objective": str(raw.get("objective") or ""),
+        "context_and_constraints": str(raw.get("context_and_constraints") or ""),
+        "success_criteria": str(raw.get("success_criteria") or ""),
     }
 
 
-def goal_title_request(interrupt: Any) -> str:
-    """Extract the concise title supplied by finalize_goal."""
+def goal_request(interrupt: Any) -> dict[str, str]:
+    """Extract one complete staged Goal from its finalizer interrupt."""
     value = getattr(interrupt, "value", interrupt)
-    if not isinstance(value, dict):
-        return "Goal"
-    return compact_text(value.get("title")) or "Goal"
-
-
-def prepare_plan_request(interrupt: Any, *, limit: int = 4000) -> dict[str, str]:
-    """Extract the bounded objective and context handoff from prepare_plan."""
-    value = getattr(interrupt, "value", interrupt)
-    if not isinstance(value, dict):
-        return {"objective": "", "context_and_constraints": ""}
+    raw = value if isinstance(value, dict) else {}
     return {
-        "objective": str(value.get("objective") or "").strip()[:limit],
-        "context_and_constraints": str(value.get("context_and_constraints") or "").strip()[
-            :limit
-        ],
+        "title": compact_text(raw.get("title")) or "Goal",
+        "objective": str(raw.get("objective") or ""),
+        "success_criteria": str(raw.get("success_criteria") or ""),
     }
 
 

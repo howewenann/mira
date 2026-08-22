@@ -29,7 +29,6 @@ from runtime import runner
 from runtime.context_usage import record_deepagents_context_tokens
 from session.plans import plan_artifact
 from ui import repl
-from ui.interrupts import prepare_goal_request
 from ui.runtime_snapshot import resources_table, runtime_report, tools_table
 
 
@@ -1378,7 +1377,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(captured["agent"], "plan-agent")
-        self.assertEqual(captured["planning_stage"], "plan_finalize")
+        self.assertEqual(captured["planning_stage"], "plan_research")
 
     async def test_run_user_turn_applies_live_usage_once(self) -> None:
         """Interactive usage callbacks should refresh dashboard without final double-counting."""
@@ -1782,14 +1781,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<previous_success_criteria>\n- Ranked results are returned.", text)
         self.assertIn("<user_feedback>\nMake the plan shorter.\n</user_feedback>", text)
         self.assertIn("then call prepare_goal", text)
-
-    def test_prepare_goal_handoff_is_bounded(self) -> None:
-        request = prepare_goal_request(
-            {"type": "prepare_goal", "objective": "Goal", "research_evidence": "x" * 5000}
-        )
-
-        self.assertEqual(request["objective"], "Goal")
-        self.assertEqual(len(request["research_evidence"]), 4000)
 
     async def test_explicit_goal_request_uses_plan_agent_without_persistent_plan_mode(self) -> None:
         renderer = RecordingRenderer()

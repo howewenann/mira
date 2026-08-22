@@ -21,6 +21,8 @@ from agent.middleware import (
 )
 from agent.middleware.rubric import MiraRubricMiddleware as RubricMiddleware
 from agent.planning.response_status import PlanningResponseStatusRule
+from agent.planning.tool_context import PlanningToolContext
+from agent.planning.criteria import SuccessCriteriaService
 from agent.planning.policy import (
     FINALIZE_GOAL_TOOL,
     FINALIZE_PLAN_TOOL,
@@ -287,6 +289,7 @@ def _build_agent(
         system_prompt=system_prompt,
         interrupt_on=resolved_interrupt_on,
         checkpointer=checkpointer,
+        context_schema=PlanningToolContext if planning else None,
     )
     _attach_tool_specs(
         agent,
@@ -306,6 +309,11 @@ def _build_agent(
     _attach_summarization(agent, middleware_stack.summarization)
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))
+    if planning:
+        _attach_planning_context(
+            agent,
+            PlanningToolContext(SuccessCriteriaService(config, metadata=metadata)),
+        )
     return agent
 
 
@@ -634,5 +642,13 @@ def _attach_rubric_model_name(agent: Any, model_name: str) -> None:
     """Attach the effective grader identity for progress and durable results."""
     try:
         agent.mira_rubric_model_name = model_name
+    except AttributeError:
+        return
+
+
+def _attach_planning_context(agent: Any, context: PlanningToolContext) -> None:
+    """Attach the per-agent dependencies passed to formal planning tools."""
+    try:
+        agent.mira_planning_context = context
     except AttributeError:
         return

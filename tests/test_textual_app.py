@@ -75,8 +75,8 @@ from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
 from runtime.tool_events import CONTROL_TOOLS
 from runtime.trace_stream import TraceStream
-from session.goals import goal_artifact
-from session.plans import plan_artifact
+from session.goals import current_goal, goal_artifact
+from session.plans import current_plan, plan_artifact
 from session.recorder import RecordingRenderer as SessionRecordingRenderer
 from session.recorder import SessionRecorder
 from ui import repl
@@ -410,12 +410,27 @@ def make_app(
     )
 
 
-def stage_plan(app: MiraApp) -> None:
-    """Provide the exact criteria-first state required by finalize_plan."""
-    app.mode["plan_staging"] = {
+def final_plan_interrupt(title: str = "Reviewed Plan") -> dict[str, Any]:
+    """Return the complete payload emitted by the resumed PLAN finalizer."""
+    return {
+        "type": "finalize_plan",
+        "title": title,
         "objective": "Complete the requested Plan outcome.",
         "context_and_constraints": "Preserve unrelated behavior.",
-        "success_criteria": "- The requested Plan outcome is complete.",
+        "key_changes": ["Make the focused change."],
+        "test_plan": ["Run focused checks."],
+        "assumptions": ["No additional assumptions."],
+        "success_criteria": "- The exact requested outcome is verified.",
+    }
+
+
+def final_goal_interrupt(title: str = "Reviewed Goal") -> dict[str, Any]:
+    """Return the complete payload emitted by the resumed Goal finalizer."""
+    return {
+        "type": "finalize_goal",
+        "title": title,
+        "objective": "Complete the requested Goal outcome.",
+        "success_criteria": "- The exact requested outcome is verified.",
     }
 
 
@@ -1991,33 +2006,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         [renderable_plain(block) for block in reasoning_blocks],
                         ["first reasoning", "second reasoning"],
                     )
-
-    async def test_reasoning_starts_new_block_after_plan_bubble(self) -> None:
-        """Structured plan bubbles should also separate thinking blocks."""
-        app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Boundary Plan",
-            "key_changes": ["Render a plan bubble."],
-            "test_plan": ["Check reasoning block count."],
-            "assumptions": ["The plan is visible."],
-        }
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-
-            app.reasoning_delta("first reasoning")
-            stage_plan(app)
-            await app.finalize_plan(interrupt)
-            app.reasoning_delta("second reasoning")
-            await pilot.pause()
-
-            reasoning_blocks = [block for block in app.query_one(ChatLog).children if "reasoning" in block.classes]
-            self.assertEqual(
-                [renderable_plain(block) for block in reasoning_blocks],
-                ["first reasoning", "second reasoning"],
-            )
-
     async def test_goal_and_rubric_result_render_as_dedicated_blocks(self) -> None:
         app = make_app()
         goal = goal_artifact(
@@ -2103,222 +2091,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Review interrupted.", renderable_plain(chat.children[-1]))
             self.assertEqual(chat._rubric_activity, {})
 
-    async def test_prepare_goal_advances_live_mode_to_finalize(self) -> None:
-        app = make_app()
-        service = type("CriteriaService", (), {})()
-        service.generate = AsyncMock(return_value="- Ranked search works.")
-        with patch("ui.app.SuccessCriteriaService", return_value=service):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.mode.update(
-                    {
-                        "planning": True,
-                        "rubric_enabled": True,
-                        "goal_staging": {
-                            "authoritative_objective": "add ranked search to the results page",
-                            "stage": "goal_research",
-                            "success_criteria": "",
-                        },
-                        "planning_stage": "goal_research",
-                    }
-                )
-                resume = await app.prepare_goal(
-                    {
-                        "type": "prepare_goal",
-                        "objective": "Add ranked search to the results page.",
-                        "research_evidence": "Existing index is SQLite.",
-                    }
-                )
-
-        self.assertEqual(app.mode["planning_stage"], "goal_finalize")
-        self.assertEqual(app.mode["goal_staging"]["success_criteria"], "- Ranked search works.")
-        self.assertEqual(service.generate.await_args.args[0], "Add ranked search to the results page.")
-        self.assertEqual(service.generate.await_args.args[1], "Existing index is SQLite.")
-        self.assertEqual(
-            service.generate.await_args.kwargs["authoritative_request"],
-            "add ranked search to the results page",
-        )
-        self.assertIn(
-            "<authoritative_request>\nadd ranked search to the results page\n</authoritative_request>",
-            resume,
-        )
-        self.assertIn(
-            "<objective>\nAdd ranked search to the results page.\n</objective>",
-            resume,
-        )
-        self.assertIn("<success_criteria>\n- Ranked search works.", resume)
-
-    async def test_prepare_goal_blank_objective_falls_back_to_authoritative_request(self) -> None:
-        app = make_app()
-        service = type("CriteriaService", (), {})()
-        service.generate = AsyncMock(return_value="- The report exists.")
-        with patch("ui.app.SuccessCriteriaService", return_value=service):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.mode.update(
-                    {
-                        "goal_staging": {
-                            "authoritative_objective": "Write the weekly report.",
-                            "stage": "goal_research",
-                            "success_criteria": "",
-                        },
-                        "planning_stage": "goal_research",
-                    }
-                )
-                await app.prepare_goal({"type": "prepare_goal", "objective": "   "})
-
-        self.assertEqual(app.mode["goal_staging"]["objective"], "Write the weekly report.")
-        self.assertEqual(service.generate.await_args.args[0], "Write the weekly report.")
-        self.assertEqual(
-            service.generate.await_args.kwargs["authoritative_request"],
-            "Write the weekly report.",
-        )
-
-    async def test_prepare_goal_revision_passes_scope_changing_feedback_to_finalization(self) -> None:
-        app = make_app()
-        previous = goal_artifact(
-            goal_id="goal-1",
-            title="Short Story",
-            objective="Create an approximately 20-word story and save it as story.md.",
-            success_criteria="- story.md contains an approximately 20-word story.",
-            rubric_enabled=False,
-            rubric_iterations=3,
-        )
-        feedback = "Change the deliverable to poem.md and make it 40 words."
-        service = type("CriteriaService", (), {})()
-        service.revise = AsyncMock(return_value="- poem.md contains an approximately 40-word poem.")
-        with patch("ui.app.SuccessCriteriaService", return_value=service):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.mode.update(
-                    {
-                        "goal_revision": {"previous_goal": previous, "feedback": feedback},
-                        "goal_staging": {
-                            "authoritative_objective": previous["objective"],
-                            "stage": "goal_research",
-                            "success_criteria": "",
-                        },
-                        "planning_stage": "goal_research",
-                    }
-                )
-                resume = await app.prepare_goal(
-                    {
-                        "type": "prepare_goal",
-                        "objective": "Create an approximately 40-word poem and save it as poem.md.",
-                    }
-                )
-
-        self.assertEqual(service.revise.await_args.args[2], feedback)
-        self.assertIn(f"<user_feedback>\n{feedback}\n</user_feedback>", resume)
-        self.assertIn("explicit user feedback may change that meaning", resume)
-
-    async def test_prepare_show_goals_definition_and_plan_spinners(self) -> None:
-        app = make_app()
-        started = asyncio.Event()
-        release = asyncio.Event()
-        service = type("CriteriaService", (), {})()
-
-        async def generate(
-            _objective: str,
-            _research_context: str = "",
-            *,
-            authoritative_request: str = "",  # noqa: ARG001
-        ) -> str:
-            started.set()
-            await release.wait()
-            return "- Ranked search works."
-
-        service.generate = AsyncMock(side_effect=generate)
-        with patch("ui.app.SuccessCriteriaService", return_value=service):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.busy = True
-                app.mode.update(
-                    {
-                        "planning": True,
-                        "rubric_enabled": True,
-                        "goal_staging": {
-                            "authoritative_objective": "Add ranked search.",
-                            "stage": "goal_research",
-                            "success_criteria": "",
-                        },
-                        "planning_stage": "goal_research",
-                    }
-                )
-                task = asyncio.create_task(app.prepare_goal({"type": "prepare_goal"}))
-                await started.wait()
-                await pilot.pause()
-                self.assertIn(
-                    "Generating success criteria · 00:00 elapsed",
-                    renderable_plain(app.query_one(ChatLog).children[-1]),
-                )
-                chat = app.query_one(ChatLog)
-                chat._waiting_started_at = time.monotonic() - 62
-                chat.tick_waiting()
-                self.assertIn(
-                    "Generating success criteria · 01:02 elapsed",
-                    renderable_plain(app.query_one(ChatLog).children[-1]),
-                )
-
-                release.set()
-                await task
-                await pilot.pause()
-                self.assertIn(
-                    "Finalizing Goal · 00:00 elapsed",
-                    renderable_plain(app.query_one(ChatLog).children[-1]),
-                )
-                app.finish_turn()
-                app.busy = False
-
-    async def test_prepare_plan_uses_elapsed_activity_for_both_model_stages(self) -> None:
-        app = make_app()
-        started = asyncio.Event()
-        release = asyncio.Event()
-        service = type("CriteriaService", (), {})()
-
-        async def generate(_objective: str, _context: str = "") -> str:
-            started.set()
-            await release.wait()
-            return "- The focused change is verified."
-
-        service.generate = AsyncMock(side_effect=generate)
-        with patch("ui.app.SuccessCriteriaService", return_value=service):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-                app.busy = True
-                app.mode.update({"planning": True, "plan_revision": None})
-                task = asyncio.create_task(
-                    app.prepare_plan(
-                        {
-                            "type": "prepare_plan",
-                            "objective": "Improve timing UX.",
-                            "context_and_constraints": "Keep the patch focused.",
-                        }
-                    )
-                )
-                await started.wait()
-                await pilot.pause()
-
-                activity = renderable_plain(app.query_one(ChatLog).children[-1])
-                self.assertIn("Generating success criteria · 00:00 elapsed", activity)
-
-                release.set()
-                await task
-                await pilot.pause()
-
-                activity = renderable_plain(app.query_one(ChatLog).children[-1])
-                self.assertIn("Creating plan · 00:00 elapsed", activity)
-                app.finish_turn()
-                await pilot.pause()
-                self.assertNotIn(
-                    "Creating plan",
-                    "\n".join(
-                        renderable_plain(block)
-                        for block in app.query_one(ChatLog).children
-                    ),
-                )
-                app.busy = False
-
     async def test_goal_command_uses_transient_staging_without_switching_mode(self) -> None:
         app = make_app()
         captured: dict[str, Any] = {}
@@ -2361,73 +2133,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("● READY", renderable_plain(app.query_one(StatusBar)))
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                 self.assertIn("Goal generation cancelled", rendered)
-
-    async def test_goal_command_keeps_new_proposed_goal_actions_after_refresh(self) -> None:
-        app = make_app()
-        raw_request = "write me a story of about 20 words. save it to story.md in the root directory"
-        polished_objective = (
-            "Create an approximately 20-word story and save it as story.md in the project root."
-        )
-
-        async def construct_goal(**_kwargs: Any) -> None:
-            await app.prepare_goal(
-                {
-                    "type": "prepare_goal",
-                    "objective": polished_objective,
-                    "context_and_constraints": "Use the project root.",
-                }
-            )
-            await app.finalize_goal({"type": "finalize_goal", "title": "Short Story"})
-
-        service = type("CriteriaService", (), {})()
-        service.generate = AsyncMock(return_value="- story.md contains an approximately 20-word story.")
-        with (
-            patch("ui.app.SuccessCriteriaService", return_value=service),
-            patch("ui.app.run_user_turn", side_effect=construct_goal),
-        ):
-            async with app.run_test(size=(100, 35)) as pilot:
-                await pilot.pause()
-                await app._run_goal_command(raw_request)
-                await pilot.pause()
-
-                goal = app.session["current_goal"]
-                self.assertEqual(goal["status"], "proposed")
-                self.assertEqual(goal["objective"], polished_objective)
-                goal_bubble = list(app.query_one(ChatLog).query(".goal"))[-1]
-                actions = list(goal_bubble.query(".goal-action"))
-                self.assertEqual(len(actions), 4)
-                self.assertTrue(all(not button.disabled and button.display for button in actions))
-
-        self.assertEqual(
-            service.generate.await_args.kwargs["authoritative_request"],
-            raw_request,
-        )
-
-    async def test_finalize_goal_builds_criteria_only_current_goal(self) -> None:
-        app = make_app()
-        interrupt = {"type": "finalize_goal", "title": "Announcement"}
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            app.mode.update(
-                {
-                    "rubric_enabled": True,
-                    "goal_staging": {
-                        "objective": "Rewrite this announcement.",
-                        "success_criteria": "- The announcement is professional.",
-                        "stage": "goal_finalize",
-                    },
-                }
-            )
-            await app.finalize_goal(interrupt)
-            await pilot.pause()
-
-        value = app.session["current_goal"]
-        self.assertEqual(value["objective"], "Rewrite this announcement.")
-        self.assertEqual(value["success_criteria"], "- The announcement is professional.")
-        self.assertNotIn("authoritative_objective", value)
-        self.assertNotIn("authoritative_request", value)
-        self.assertNotIn("plan", value)
-
     async def test_current_goal_clear_preserves_event(self) -> None:
         app = make_app()
         value = goal_artifact(goal_id="goal-1", title="Report", objective="Write a report.", success_criteria="- The report exists.", rubric_enabled=False, rubric_iterations=3)
@@ -7031,7 +6736,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(editor.cursor_location, (1, 3))
 
             app.query_one("#prompt-cancel", Button).press()
-            self.assertEqual(await asyncio.wait_for(task, timeout=2), {"type": "reject"})
+            self.assertIsNone(await asyncio.wait_for(task, timeout=2))
 
     async def test_tool_arguments_start_collapsed_and_expand_to_pretty_selectable_json(self) -> None:
         app = make_app()
@@ -9175,197 +8880,175 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("enter")
             self.assertEqual(await asyncio.wait_for(task, timeout=2), "c")
-
-    async def test_finalize_plan_bubble_closes_but_retains_current_plan(self) -> None:
-        """Close should hide controls without clearing the authoritative Plan."""
+    async def test_pending_plan_close_commits_only_after_explicit_review(self) -> None:
         app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Ephemeral Structured Planning",
-            "key_changes": ["Add finalize_plan.", "Remove /plans."],
-            "test_plan": ["Verify the plan bubble controls."],
-            "assumptions": ["Plans are temporary UI artifacts."],
-        }
-
+        app.busy = True
         async with app.run_test(size=(100, 30)) as pilot:
+            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            provisional = app._pending_artifact_review.artifact
+            self.assertIsNone(current_plan(app.session))
+            self.assertEqual(provisional["success_criteria"], "- The exact requested outcome is verified.")
+
+            await app._handle_plan_action("close", str(provisional["id"]))
+            decision = await asyncio.wait_for(task, timeout=2)
+            self.assertEqual(decision["action"], "close")
+            self.assertEqual(current_plan(app.session), provisional)
+            self.assertIsNone(app._pending_artifact_review)
+            app.busy = False
             await pilot.pause()
 
-            stage_plan(app)
-            self.assertEqual(
-                await app.finalize_plan(interrupt),
-                "Plan and Success Criteria presented for user review.",
-            )
-            await pilot.pause()
-
-            self.assertIsNotNone(app.mode["current_plan"])
-            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-            self.assertIn("Ephemeral Structured Planning", rendered)
-            self.assertIn("Objective", rendered)
-            self.assertIn("Context and Constraints", rendered)
-            self.assertIn("Key Changes", rendered)
-            self.assertIn("Test Plan", rendered)
-            self.assertIn("Assumptions", rendered)
-            self.assertIn("Success Criteria", rendered)
-            buttons = list(app.query(".plan-action"))
-            self.assertEqual(len(buttons), 4)
-            self.assertEqual(
-                [button.label.plain for button in buttons],
-                ["Implement", "Revise", "Close", "Clear"],
-            )
-            self.assertEqual(len(app.query(".plan-actions")), 1)
-            self.assertTrue(all(button.compact for button in buttons))
-            self.assertTrue(all(button.region.height == 1 for button in buttons))
-            self.assertTrue(all(all(edge[0] == "" for edge in button.styles.border) for button in buttons))
-
-            close_button = app.query_one("#plan-close-plan-1", Button)
-            close_button.scroll_visible(animate=False, immediate=True)
-            await pilot.pause()
-            await pilot.click("#plan-close-plan-1")
-            await wait_until(
-                lambda: len(
-                    [button for button in app.query(".plan-action") if button.display]
-                )
-                == 0
-            )
-            await wait_until(lambda: app.query_one(PromptBox).has_focus)
-
-            self.assertIsNotNone(app.mode["current_plan"])
-            self.assertTrue(app.query_one(PromptBox).has_focus)
-            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 0)
-            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-            self.assertIn("Status: proposed", rendered)
-
-    async def test_finalize_plan_shortcuts_match_visible_button_labels(self) -> None:
-        """Presented plan controls should focus and honor visible keyboard controls."""
+    async def test_pending_plan_clear_preserves_previous_retained_plan(self) -> None:
         app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Shortcut Plan",
-            "key_changes": ["Handle i, r, and d."],
-            "test_plan": ["Press each visible shortcut."],
-            "assumptions": ["The plan button row has focus."],
-        }
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            stage_plan(app)
-            await app.finalize_plan(interrupt)
-            await pilot.pause()
-
-            first_button = app.query_one("#plan-implement-plan-1", Button)
-            await wait_until(lambda: first_button.has_focus)
-
-            revise_button = app.query_one("#plan-revise-plan-1", Button)
-            close_button = app.query_one("#plan-close-plan-1", Button)
-            clear_button = app.query_one("#plan-clear-plan-1", Button)
-            await pilot.press("right")
-            await wait_until(lambda: revise_button.has_focus)
-            await pilot.press("right")
-            await wait_until(lambda: close_button.has_focus)
-            await pilot.press("right")
-            await wait_until(lambda: clear_button.has_focus)
-            await pilot.press("right")
-            await wait_until(lambda: first_button.has_focus)
-            await pilot.press("left")
-            await wait_until(lambda: clear_button.has_focus)
-            await pilot.press("right")
-            await wait_until(lambda: first_button.has_focus)
-
-            app.query_one("#prompt").focus()
-            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
-            app.query_one(".plan-body").scroll_visible(animate=False, immediate=True)
-            await pilot.pause()
-            await pilot.click(".plan-body")
-            await wait_until(lambda: first_button.has_focus)
-
-            with patch.object(app, "_handle_plan_action", new_callable=AsyncMock) as handle_action:
-                for count, (shortcut, action) in enumerate(
-                    (("i", "implement"), ("r", "revise"), ("c", "close")),
-                    start=1,
-                ):
-                    await pilot.press(shortcut)
-                    await wait_until(lambda: handle_action.await_count == count)
-                    self.assertEqual(handle_action.await_args_list[-1].args, (action, "plan-1"))
-
-                await pilot.press("enter")
-                await wait_until(lambda: handle_action.await_count == 4)
-                self.assertEqual(handle_action.await_args_list[-1].args, ("implement", "plan-1"))
-
-            await pilot.press("escape")
-            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt")
-
-    async def test_show_plan_reopens_exact_plan_and_clear_keeps_history(self) -> None:
-        app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Recall Plan",
-            "key_changes": ["Keep exact fields."],
-            "test_plan": ["Check exact rendering."],
-            "assumptions": ["No additional assumptions."],
-        }
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-            stage_plan(app)
-            await app.finalize_plan(interrupt)
-            await pilot.pause()
-            expected = dict(app.session["current_plan"])
-            event_count = len(app.session["events"])
-            await app._handle_plan_action("close", "plan-1")
-            self.assertEqual(app.session["current_plan"], expected)
-            self.assertEqual(
-                next(
-                    event["status"]
-                    for event in app.session["events"]
-                    if event.get("type") == "plan"
-                ),
-                "closed",
+        previous = plan_artifact(
+            plan_id="plan-a",
+            title="Plan A",
+            objective="Keep A.",
+            context_and_constraints="None.",
+            key_changes=["Keep A."],
+            test_plan=["Verify A."],
+            assumptions=["None."],
+            success_criteria="- A remains current.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        async with app.run_test(size=(100, 30)):
+            app.session["current_plan"] = previous
+            app.session.setdefault("events", []).append(
+                {"type": "plan", "plan": previous, "status": "proposed"}
             )
-
-            self.assertEqual(await app.show_plan(), "Current Plan rendered.")
-            await pilot.pause()
-            self.assertEqual(app.session["current_plan"], expected)
-            self.assertEqual(len(app.session["events"]), event_count)
-            self.assertEqual(
-                len([button for button in app.query(".plan-action") if button.display]),
-                4,
-            )
-
-            app.clear_plan()
-            self.assertIsNone(app.session["current_plan"])
-            self.assertEqual(len(app.session["events"]), event_count)
-            self.assertIn("Recall Plan", renderable_plain(app.query_one(".plan-body")))
-
-    async def test_cancel_turn_keeps_unrelated_plan_bubble_active(self) -> None:
-        """Cancelling a later turn should not discard an active plan bubble."""
-        app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Cancellation Plan",
-            "key_changes": ["Cancel an unrelated turn."],
-            "test_plan": ["Verify plan actions remain visible."],
-            "assumptions": ["The cancellation is unrelated."],
-        }
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-
-            stage_plan(app)
-            await app.finalize_plan(interrupt)
-            await pilot.pause()
-            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
-
-            app.reasoning_delta("unrelated turn thinking")
             app.busy = True
-            app.turn_worker = FakeWorker()
-            app._cancel_turn()
-            await pilot.pause()
+            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt("Plan B")))
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            provisional_id = str(app._pending_artifact_review.artifact["id"])
+            await app._handle_plan_action("clear", provisional_id)
+            self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "clear")
 
-            self.assertIsNotNone(app.mode["current_plan"])
-            self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
-            rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-            self.assertIn("Cancellation Plan", rendered)
-            self.assertIn("Status: proposed", rendered)
+        self.assertEqual(current_plan(app.session)["id"], "plan-a")
+        previous_event = next(event for event in app.session["events"] if event.get("plan", {}).get("id") == "plan-a")
+        self.assertEqual(previous_event["status"], "proposed")
+
+    async def test_pending_goal_clear_preserves_previous_retained_goal(self) -> None:
+        app = make_app()
+        previous = goal_artifact(
+            goal_id="goal-a",
+            title="Goal A",
+            objective="Keep A.",
+            success_criteria="- A remains current.",
+            rubric_enabled=False,
+            rubric_iterations=3,
+        )
+        async with app.run_test(size=(100, 30)):
+            app.session["current_goal"] = previous
+            app.session.setdefault("events", []).append(
+                {"type": "goal", "goal": previous, "status": "proposed"}
+            )
+            app.busy = True
+            task = asyncio.create_task(app.finalize_goal(final_goal_interrupt("Goal B")))
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            provisional_id = str(app._pending_artifact_review.artifact["id"])
+            await app._handle_goal_action("clear", provisional_id)
+            self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "clear")
+
+        self.assertEqual(current_goal(app.session)["id"], "goal-a")
+
+    async def test_pending_revision_feedback_escape_keeps_same_review_unresolved(self) -> None:
+        app = make_app()
+        app.busy = True
+        async with app.run_test(size=(100, 30)) as pilot:
+            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            plan_id = str(app._pending_artifact_review.artifact["id"])
+            revise = asyncio.create_task(app._handle_plan_action("revise", plan_id))
+            await wait_until(lambda: app.query_one(PromptPanel).active)
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt-panel-input")
+            await pilot.press("escape")
+            await asyncio.wait_for(revise, timeout=2)
+            self.assertFalse(task.done())
+            self.assertTrue(app._pending_artifact_review.matches("plan", plan_id))
+
+            with patch.object(app, "_prompt_text", return_value="Change the deliverable."):
+                await app._handle_plan_action("revise", plan_id)
+            decision = await asyncio.wait_for(task, timeout=2)
+            self.assertEqual(decision["action"], "revise")
+            self.assertEqual(decision["feedback"], "Change the deliverable.")
+            self.assertIsNone(current_plan(app.session))
+
+    async def test_tool_approval_escape_keeps_interrupt_pending(self) -> None:
+        app = make_app()
+        interrupt = {
+            "action_requests": [{"name": "write_file", "args": {"file_path": "a.txt"}}],
+            "review_configs": [
+                {"action_name": "write_file", "allowed_decisions": ["approve", "edit", "reject"]}
+            ],
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            task = asyncio.create_task(app.ask_approvals([interrupt]))
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            await pilot.press("escape")
+            await wait_until(lambda: panel.active)
+            self.assertFalse(task.done())
+            await wait_until(lambda: str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            await pilot.press("a")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "approve"}])
+
+    async def test_approval_edit_escape_returns_to_same_approval(self) -> None:
+        app = make_app()
+        interrupt = {
+            "action_requests": [{"name": "write_file", "args": {"file_path": "a.txt"}}],
+            "review_configs": [
+                {"action_name": "write_file", "allowed_decisions": ["approve", "edit", "reject"]}
+            ],
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            task = asyncio.create_task(app.ask_approvals([interrupt]))
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            await pilot.press("e")
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt-panel-editor")
+            await pilot.press("escape")
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            self.assertFalse(task.done())
+            await pilot.press("r")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "reject"}])
+
+    async def test_ask_user_escape_and_freeform_escape_keep_question_pending(self) -> None:
+        app = make_app()
+        interrupt = {"type": "ask_user", "question": "Choose.", "options": ["Use A"]}
+        async with app.run_test(size=(100, 30)) as pilot:
+            panel = app.query_one(PromptPanel)
+            task = asyncio.create_task(app.ask_user(interrupt))
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            await pilot.press("escape")
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            self.assertFalse(task.done())
+
+            await pilot.press("2")
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt-panel-input")
+            await pilot.press("escape")
+            await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
+            self.assertFalse(task.done())
+            await pilot.press("1")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), "Use A")
+
+    async def test_whole_turn_cancellation_discards_pending_review(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(100, 30)):
+            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            worker = FakeWorker()
+            app.busy = True
+            app.turn_worker = worker
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            app._cancel_turn()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            app.busy = False
+            app.turn_worker = None
+
+        self.assertIsNone(current_plan(app.session))
+        self.assertIsNone(app._pending_artifact_review)
+        self.assertTrue(worker.cancelled)
 
     def test_normalize_plan_fills_all_structured_sections(self) -> None:
         """Partial plan payloads should not drop sections in logs or replay."""
@@ -9375,102 +9058,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["key_changes"], ["List the key implementation changes."])
         self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
         self.assertEqual(plan["assumptions"], ["No additional assumptions."])
-
-    async def test_finalize_plan_revise_cancel_keeps_plan_active(self) -> None:
-        """Cancelling a revision prompt should leave the current plan actionable."""
-        app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Palindrome Plan",
-            "key_changes": ["Add palindrome.py."],
-            "test_plan": ["Add unit tests for palindrome inputs."],
-            "assumptions": ["Use Python."],
-        }
-
-        with patch.object(app, "_prompt_text", return_value=None):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-
-                stage_plan(app)
-                await app.finalize_plan(interrupt)
-                await pilot.pause()
-                await app._handle_plan_action("revise", "plan-1")
-                await pilot.pause()
-
-                self.assertIsNotNone(app.mode["current_plan"])
-                self.assertEqual(len([button for button in app.query(".plan-action") if button.display]), 4)
-                rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-                self.assertNotIn("Status: revision requested", rendered)
-
-    async def test_finalize_plan_revise_runs_planning_turn_with_plan_context(self) -> None:
-        """Submitted revision feedback should become a visible planning turn with old-plan context."""
-        app = make_app()
-        calls: list[dict[str, Any]] = []
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Palindrome Plan",
-            "key_changes": ["Add palindrome.py."],
-            "test_plan": ["Add unit tests for palindrome inputs."],
-            "assumptions": ["Use Python."],
-        }
-
-        async def fake_run_user_turn(**kwargs: Any) -> None:
-            calls.append(kwargs)
-
-        with (
-            patch.object(app, "_prompt_text", return_value="include a testing plan"),
-            patch("ui.app.run_user_turn", fake_run_user_turn),
-        ):
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
-
-                stage_plan(app)
-                await app.finalize_plan(interrupt)
-                await pilot.pause()
-                await app._handle_plan_action("revise", "plan-1")
-                await wait_until(lambda: len(calls) == 1)
-
-                self.assertIsNotNone(app.mode["current_plan"])
-                self.assertTrue(app.mode["planning"])
-                self.assertEqual(calls[0]["display_text"], "Revise plan: include a testing plan")
-                self.assertTrue(calls[0]["record_user"])
-                self.assertIn("Revise this structured plan.", calls[0]["text"])
-                self.assertIn("Title: Palindrome Plan", calls[0]["text"])
-                self.assertIn("- Add palindrome.py.", calls[0]["text"])
-                self.assertIn("Test Plan:\n- Add unit tests for palindrome inputs.", calls[0]["text"])
-                self.assertIn("User feedback:\ninclude a testing plan", calls[0]["text"])
-                rendered = "\n".join(renderable_plain(block) for block in app.query(".plan-body"))
-                self.assertIn("Status: proposed", rendered)
-
-    async def test_finalize_plan_revise_button_opens_feedback_prompt(self) -> None:
-        """The Revise button should ask for feedback before resolving the plan."""
-        app = make_app()
-        interrupt = {
-            "type": "finalize_plan",
-            "title": "Palindrome Plan",
-            "key_changes": ["Add palindrome.py."],
-            "test_plan": ["Add unit tests for palindrome inputs."],
-            "assumptions": ["Use Python."],
-        }
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-
-            stage_plan(app)
-            await app.finalize_plan(interrupt)
-            await pilot.pause()
-            app.query_one("#plan-revise-plan-1", Button).press()
-            await wait_until(lambda: app.query_one(PromptPanel).display)
-
-            self.assertEqual(renderable_plain(app.query_one("#prompt-panel-title", Static)), "Revise Plan")
-            self.assertIn("What should MIRA change", renderable_plain(app.query_one("#prompt-panel-message", Static)))
-            await wait_until(lambda: len(list(app.query_one(PromptPanel).query("#prompt-cancel"))) > 0)
-            app.query_one("#prompt-cancel", Button).press()
-            await wait_until(lambda: not app.query_one(PromptPanel).display)
-            await wait_until(
-                lambda: "kept plan" in "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            )
-
     async def test_git_prompt_booleans_use_in_window_choices(self) -> None:
         """Startup Git prompts should keep returning the expected booleans."""
         app = make_app()

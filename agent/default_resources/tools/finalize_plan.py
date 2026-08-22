@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from langchain.tools import tool
+from typing import Any
+
+from langchain.tools import ToolRuntime, tool
 from langgraph.types import interrupt
 
 FINALIZE_PLAN_INTERRUPT_TYPE = "finalize_plan"
@@ -10,6 +12,7 @@ FINALIZE_PLAN_INTERRUPT_TYPE = "finalize_plan"
 
 @tool(
     "finalize_plan",
+    return_direct=True,
     description=(
         "Finalize the concise Plan after MIRA has generated Success Criteria. "
         "This tool is required in the formal finalisation stage and is unavailable during "
@@ -25,8 +28,10 @@ def finalize_plan(
     key_changes: list[str],
     test_plan: list[str],
     assumptions: list[str],
+    runtime: ToolRuntime[Any, dict],
 ) -> str:
     """Pause and present one complete Plan."""
+    state = runtime.state if isinstance(runtime.state, dict) else {}
     return str(
         interrupt(
             {
@@ -35,6 +40,11 @@ def finalize_plan(
                 "key_changes": clean_items(key_changes, fallback="List the key implementation changes."),
                 "test_plan": clean_items(test_plan, fallback="Describe the tests or checks to create."),
                 "assumptions": clean_items(assumptions, fallback="No additional assumptions."),
+                "objective": str(state.get("planning_objective") or ""),
+                "context_and_constraints": str(
+                    state.get("planning_context_and_constraints") or ""
+                ),
+                "success_criteria": str(state.get("planning_success_criteria") or ""),
             }
         )
     )
