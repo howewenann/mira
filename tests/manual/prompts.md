@@ -1525,9 +1525,11 @@ dependency error.
 
 With Phoenix selected, run a normal model turn followed by an `eval` that uses
 `Promise.all` to launch at least two `task()` subagents. Inspect the
-OpenInference span tree and verify it contains one root trace with each task
-under `eval` and each subagent under its task. Record the root, model, and tool
-span names; verify `openinference.span.kind`, `input.value`, `output.value`,
+OpenInference span tree and verify it contains exactly one top-level `MIRA Turn`
+with `LangGraph` beneath it, each task under `eval`, and each subagent under its
+task. Run a second prompt and confirm it creates a separate `MIRA Turn` rather
+than joining the first trace. Record the root, model, and tool span names;
+verify `openinference.span.kind`, `input.value`, `output.value`,
 structured messages and tool-call IDs, tool attributes, and token counts where
 the model reports them. Explicitly note any `wrap_model_call`,
 `awrap_model_call`, `wrap_tool_call`, or `awrap_tool_call` spans. Do not filter

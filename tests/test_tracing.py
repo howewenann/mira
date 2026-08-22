@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib.util
 import inspect
 import tempfile
 import unittest
+from contextvars import ContextVar
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
@@ -22,6 +25,12 @@ from config.tracing import (
     tracing_path,
 )
 from tracing import bootstrap
+
+
+_CURRENT_TURN_TRACE: ContextVar[str | None] = ContextVar(
+    "test_current_turn_trace",
+    default=None,
+)
 
 
 class _Resource:
@@ -108,6 +117,35 @@ class _Langsmith:
         cls.configure_calls.append(kwargs)
         if cls.fail_configure:
             raise RuntimeError("configuration failed")
+
+
+class _TurnTrace:
+    def __init__(self, owner: "_TurnLangsmith", trace_id: str) -> None:
+        self.owner = owner
+        self.trace_id = trace_id
+        self.token = None
+
+    async def __aenter__(self) -> "_TurnTrace":
+        self.token = _CURRENT_TURN_TRACE.set(self.trace_id)
+        self.owner.entered.append(self.trace_id)
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.owner.exited.append(self.trace_id)
+        assert self.token is not None
+        _CURRENT_TURN_TRACE.reset(self.token)
+
+
+class _TurnLangsmith:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, object]] = []
+        self.entered: list[str] = []
+        self.exited: list[str] = []
+
+    def trace(self, name: str, *, run_type: str, client: object) -> _TurnTrace:
+        trace_id = f"turn-{len(self.calls) + 1}"
+        self.calls.append((name, run_type, client))
+        return _TurnTrace(self, trace_id)
 
 
 def _runtime() -> tuple[object, ...]:
@@ -547,6 +585,81 @@ class TracingTests(unittest.TestCase):
         self.assertNotIn("langsmith", branch_conditions)
 
 
+class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        bootstrap._active_langsmith = None
+        bootstrap._active_client = None
+        bootstrap._active_provider = None
+        bootstrap._active_environment = None
+
+    def tearDown(self) -> None:
+        bootstrap._active_langsmith = None
+        bootstrap._active_client = None
+        bootstrap._active_provider = None
+        bootstrap._active_environment = None
+
+    async def _run_turn(self, child_parents: list[str | None]) -> None:
+        from runtime.runner import TurnResult
+        from ui import repl
+
+        async def fake_run_turn(**kwargs: object) -> TurnResult:
+            child_parents.append(_CURRENT_TURN_TRACE.get())
+            await asyncio.sleep(0)
+            child_parents.append(_CURRENT_TURN_TRACE.get())
+            return TurnResult(final_text="done")
+
+        class Store:
+            def save(self, session: dict[str, object]) -> None:
+                pass
+
+        session: dict[str, object] = {
+            "id": "thread-1",
+            "events": [],
+            "turns": 0,
+            "dashboard": {},
+        }
+        with patch.object(repl, "run_turn", side_effect=fake_run_turn):
+            await repl.run_user_turn(
+                agent=object(),
+                plan_agent=object(),
+                renderer=SimpleNamespace(),
+                store=Store(),
+                session=session,
+                mode={"planning": False},
+                text="hello",
+            )
+
+    async def test_run_user_turn_is_a_noop_when_tracing_is_inactive(self) -> None:
+        child_parents: list[str | None] = []
+
+        await self._run_turn(child_parents)
+
+        self.assertEqual(child_parents, [None, None])
+
+    async def test_one_parent_contains_all_work_and_consecutive_turns_are_separate(self) -> None:
+        langsmith = _TurnLangsmith()
+        client = object()
+        bootstrap._active_langsmith = langsmith
+        bootstrap._active_client = client
+        first_children: list[str | None] = []
+        second_children: list[str | None] = []
+
+        await self._run_turn(first_children)
+        await self._run_turn(second_children)
+
+        self.assertEqual(
+            langsmith.calls,
+            [
+                ("MIRA Turn", "chain", client),
+                ("MIRA Turn", "chain", client),
+            ],
+        )
+        self.assertEqual(langsmith.entered, ["turn-1", "turn-2"])
+        self.assertEqual(langsmith.exited, ["turn-1", "turn-2"])
+        self.assertEqual(first_children, ["turn-1", "turn-1"])
+        self.assertEqual(second_children, ["turn-2", "turn-2"])
+
+
 @unittest.skipUnless(_real_tracing_available(), "requires the mira[tracing] extra")
 class SemanticProcessorTests(unittest.TestCase):
     def _finished_spans(self, definitions: list[tuple[str, dict[str, object]]]):
@@ -788,7 +901,7 @@ class SemanticProcessorTests(unittest.TestCase):
         self.assertEqual(by_name["task"].parent.span_id, by_name["eval"].context.span_id)
         self.assertEqual(by_name["subagent"].parent.span_id, by_name["task"].context.span_id)
 
-    def test_real_langsmith_langchain_tree_is_enriched_without_duplicate_export(self) -> None:
+    def test_real_turn_parent_preserves_langsmith_tree_and_enrichment(self) -> None:
         import os
         from collections.abc import Callable, Sequence
         from typing import Any
@@ -863,12 +976,48 @@ class SemanticProcessorTests(unittest.TestCase):
                                 "total_tokens": 10,
                             },
                         ),
+                        AIMessage(
+                            content="",
+                            tool_calls=[
+                                {
+                                    "name": "double",
+                                    "args": {"value": 3},
+                                    "id": "call-double-again",
+                                    "type": "tool_call",
+                                }
+                            ],
+                            usage_metadata={
+                                "input_tokens": 3,
+                                "output_tokens": 2,
+                                "total_tokens": 5,
+                            },
+                        ),
+                        AIMessage(
+                            content="The answer is 6.",
+                            usage_metadata={
+                                "input_tokens": 6,
+                                "output_tokens": 4,
+                                "total_tokens": 10,
+                            },
+                        ),
                     ]
                 )
                 agent = create_agent(model, tools=[double], name="langsmith-smoke")
-                result = agent.invoke({"messages": [HumanMessage("Double 2.")]})
-                self.assertEqual(result["messages"][-1].content, "The answer is 4.")
+
+                @bootstrap.trace_user_turn
+                async def invoke_twice() -> tuple[dict[str, Any], dict[str, Any]]:
+                    first = agent.invoke({"messages": [HumanMessage("Double 2.")]})
+                    second = agent.invoke({"messages": [HumanMessage("Double 3.")]})
+                    return first, second
+
+                bootstrap._active_langsmith = langsmith
+                bootstrap._active_client = client
+                first, second = asyncio.run(invoke_twice())
+                self.assertEqual(first["messages"][-1].content, "The answer is 4.")
+                self.assertEqual(second["messages"][-1].content, "The answer is 6.")
         finally:
+            bootstrap._active_langsmith = None
+            bootstrap._active_client = None
             langsmith.configure(client=None, enabled=None)
             if client is not None:
                 client.close(timeout=1.0)
@@ -878,12 +1027,24 @@ class SemanticProcessorTests(unittest.TestCase):
 
         rest_request.assert_not_called()
         spans = list(exporter.get_finished_spans())
-        self.assertGreaterEqual(len(spans), 4)
+        self.assertEqual(sum(span.name == "MIRA Turn" for span in spans), 1)
+        self.assertGreaterEqual(len(spans), 9)
         self.assertEqual(len({span.context.trace_id for span in spans}), 1)
         self.assertEqual({span.instrumentation_scope.name for span in spans}, {"langsmith"})
-        self.assertEqual(sum(span.name == "double" for span in spans), 1)
+        self.assertEqual(sum(span.name == "double" for span in spans), 2)
         kinds = {span.attributes.get("openinference.span.kind") for span in spans}
         self.assertTrue({"CHAIN", "LLM", "TOOL"}.issubset(kinds))
+        parent = next(span for span in spans if span.name == "MIRA Turn")
+        self.assertIsNone(parent.parent)
+        self.assertEqual(parent.attributes.get("openinference.span.kind"), "CHAIN")
+        self.assertEqual(
+            sum(
+                span.parent is not None
+                and span.parent.span_id == parent.context.span_id
+                for span in spans
+            ),
+            2,
+        )
         span_ids = {span.context.span_id for span in spans}
         self.assertTrue(
             all(

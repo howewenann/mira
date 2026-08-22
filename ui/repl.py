@@ -49,6 +49,7 @@ from session.plans import (
 )
 from session.recorder import RecordingRenderer, SessionRecorder, call_renderer, poll_compactions
 from config.settings import rubric_enabled, rubric_max_iterations
+from tracing.bootstrap import trace_user_turn
 from ui.runtime_snapshot import resources_table, tools_table
 
 PLAN_CONTEXT_TEMPLATE = """Execute the exact retained Plan in Act mode.
@@ -208,6 +209,7 @@ def refresh_agent_specs(mode: dict[str, Any], agent: Any, plan_agent: Any) -> No
     mode["resources"] = resource_specs(agent)
 
 
+@trace_user_turn
 async def run_user_turn(
     *,
     agent: Any,

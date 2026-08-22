@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, MutableMapping
-from typing import Any
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from functools import wraps
+from typing import Any, ParamSpec, TypeVar
 
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
 from config.settings import tracing_enabled, tracing_settings
@@ -18,6 +19,25 @@ _active_client: Any = None
 _active_provider: Any = None
 _active_environment: MutableMapping[str, str] | None = None
 _saved_environment: dict[str, str | None] | None = None
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+def trace_user_turn(
+    function: Callable[_P, Awaitable[_T]],
+) -> Callable[_P, Awaitable[_T]]:
+    """Wrap one complete user turn in the active LangSmith trace context."""
+
+    @wraps(function)
+    async def traced(*args: _P.args, **kwargs: _P.kwargs) -> _T:
+        langsmith, client = _active_langsmith, _active_client
+        if langsmith is None or client is None:
+            return await function(*args, **kwargs)
+        async with langsmith.trace("MIRA Turn", run_type="chain", client=client):
+            return await function(*args, **kwargs)
+
+    return traced
 
 
 def configure_tracing(

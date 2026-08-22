@@ -830,6 +830,13 @@ bootstrapped `.mira/tracing.yml` profile registry. `settings.yml` retains only
 enablement and the selected profile. Only the selected runtime copy resolves
 environment references.
 
+`ui.repl.run_user_turn()` defines MIRA's semantic tracing boundary. While the
+MIRA-owned tracing runtime is active, each complete call opens one LangSmith
+`chain` run named `MIRA Turn`; every LangChain invocation in that call inherits
+the run through LangSmith context propagation. MIRA does not parent individual
+graph, model, tool, subagent, or rubric spans. Consecutive calls therefore
+produce separate roots, while all work inside one call shares one trace.
+
 **Why:** DeepAgents already emits the LangChain run structure users need.
 LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree
 cannot reliably recover. The small semantic processor only augments attributes;
@@ -843,7 +850,7 @@ performs a bounded provider flush and shutdown. Missing optional dependencies
 and initialization failures are non-fatal Issues.
 
 **Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
-`tracing/semantic_processor.py`,
+`tracing/semantic_processor.py`, `ui/repl.py`,
 `config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.
 
 **Update this when:** tracing ownership, OTLP transport, reload behavior, or
