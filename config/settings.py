@@ -15,6 +15,9 @@ from runtime.issues import Issue
 SETTINGS_FILE = "settings.yml"
 TRACING = "tracing"
 TRACING_DEFAULT_PROFILE = "phoenix"
+MIDDLEWARE_SPANS = "middleware_spans"
+MIDDLEWARE_SPAN_MODES = ("hidden", "full")
+MIDDLEWARE_SPANS_DEFAULT = "hidden"
 EXECUTE_TOOL = "execute"
 DELETE_TOOL = "delete"
 DYNAMIC_SUBAGENTS = "dynamic_subagents"
@@ -61,6 +64,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     TRACING: {
         "enabled": False,
         "profile": TRACING_DEFAULT_PROFILE,
+        MIDDLEWARE_SPANS: MIDDLEWARE_SPANS_DEFAULT,
     },
     MODELS: {
         CONTEXT_LIMIT_TOKENS: DEFAULT_CONTEXT_TOKENS,
@@ -164,6 +168,9 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         profile = tracing.get("profile")
         if isinstance(profile, str) and profile.strip():
             settings[TRACING]["profile"] = profile.strip()
+        middleware_spans = tracing.get(MIDDLEWARE_SPANS)
+        if middleware_spans in MIDDLEWARE_SPAN_MODES:
+            settings[TRACING][MIDDLEWARE_SPANS] = middleware_spans
 
     models = raw.get(MODELS)
     if isinstance(models, dict):
@@ -312,13 +319,20 @@ def settings_issues(raw: Any) -> list[Issue]:
         if not isinstance(tracing, dict):
             issues.append(_invalid_setting(TRACING, "must be a mapping"))
         else:
-            _unknown_settings(tracing, {"enabled", "profile"}, TRACING, issues)
+            _unknown_settings(tracing, {"enabled", "profile", MIDDLEWARE_SPANS}, TRACING, issues)
             if "enabled" in tracing and not isinstance(tracing["enabled"], bool):
                 issues.append(_invalid_setting(f"{TRACING}.enabled", "must be true or false"))
             if "profile" in tracing and (
                 not isinstance(tracing["profile"], str) or not tracing["profile"].strip()
             ):
                 issues.append(_invalid_setting(f"{TRACING}.profile", "must be a non-empty string"))
+            if MIDDLEWARE_SPANS in tracing and tracing[MIDDLEWARE_SPANS] not in MIDDLEWARE_SPAN_MODES:
+                issues.append(
+                    _invalid_setting(
+                        f"{TRACING}.{MIDDLEWARE_SPANS}",
+                        "must be hidden or full",
+                    )
+                )
 
     models = raw.get(MODELS)
     if models is not None:
@@ -512,6 +526,11 @@ def tracing_enabled(config_or_settings: dict[str, Any] | None) -> bool:
     return bool(tracing_settings(config_or_settings)["enabled"])
 
 
+def middleware_span_mode(config_or_settings: dict[str, Any] | None) -> str:
+    """Return the normalized AgentMiddleware tracing mode."""
+    return str(tracing_settings(config_or_settings)[MIDDLEWARE_SPANS])
+
+
 def set_tracing_enabled(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
     current = tracing_settings(settings)
     current["enabled"] = bool(enabled)
@@ -526,6 +545,17 @@ def set_tracing_profile(settings: dict[str, Any], profile: str) -> dict[str, Any
         raise ValueError("tracing profile is required")
     current = tracing_settings(settings)
     current["profile"] = profile.strip()
+    updated = normalize_settings(settings)
+    updated[TRACING] = current
+    return updated
+
+
+def set_middleware_span_mode(settings: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Return settings with the selected AgentMiddleware tracing mode."""
+    if mode not in MIDDLEWARE_SPAN_MODES:
+        raise ValueError("middleware span mode must be hidden or full")
+    current = tracing_settings(settings)
+    current[MIDDLEWARE_SPANS] = mode
     updated = normalize_settings(settings)
     updated[TRACING] = current
     return updated

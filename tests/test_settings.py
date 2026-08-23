@@ -32,6 +32,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.planning_response_status_max_retries(loaded), 2)
         self.assertFalse(settings.rubric_enabled(loaded))
         self.assertEqual(settings.rubric_max_iterations(loaded), 3)
+        self.assertEqual(settings.middleware_span_mode(loaded), "hidden")
         self.assertFalse(settings.tool_always_allow(loaded, "custom_search"))
         self.assertTrue(settings.tool_enabled(loaded, "custom_search"))
         self.assertTrue(settings.tool_enabled(loaded, "delete"))
@@ -78,6 +79,31 @@ class SettingsTests(unittest.TestCase):
             settings.execute_env_settings({"hitl": {"execute_env": {"mode": "venv", "path": ".venv"}}})["mode"],
             "venv",
         )
+
+    def test_middleware_span_mode_validates_normalizes_and_round_trips(self) -> None:
+        missing = settings.normalize_settings({"tracing": {"enabled": True, "profile": "phoenix"}})
+        self.assertEqual(settings.middleware_span_mode(missing), "hidden")
+
+        full = settings.set_middleware_span_mode(missing, "full")
+        self.assertEqual(settings.middleware_span_mode(full), "full")
+        with self.assertRaises(ValueError):
+            settings.set_middleware_span_mode(full, "custom")
+
+        issues = settings.settings_issues({"tracing": {"middleware_spans": "custom"}})
+        self.assertEqual(len(issues), 1)
+        self.assertIn("tracing.middleware_spans", issues[0].summary)
+        self.assertEqual(
+            settings.middleware_span_mode({"tracing": {"middleware_spans": "custom"}}),
+            "hidden",
+        )
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            self.assertTrue(settings.save_settings(workspace, full))
+            loaded = settings.load_settings(workspace)
+            text = settings.settings_path(workspace).read_text(encoding="utf-8")
+        self.assertEqual(settings.middleware_span_mode(loaded), "full")
+        self.assertIn("middleware_spans: full", text)
 
     def test_execute_env_allow_accepts_comma_separated_names(self) -> None:
         """The UI helper should save env var names without saving values."""

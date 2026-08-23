@@ -179,6 +179,7 @@ def tracing_yaml_fragment(
     *,
     enabled: bool,
     profile: str,
+    middleware_spans: str,
     endpoint: str,
     headers: Mapping[str, str],
 ) -> str:
@@ -190,6 +191,7 @@ def tracing_yaml_fragment(
             "tracing": {
                 "enabled": bool(enabled),
                 "profile": profile,
+                "middleware_spans": middleware_spans,
                 "endpoint": endpoint.strip(),
                 "headers": dict(headers),
             }

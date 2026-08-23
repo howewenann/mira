@@ -69,6 +69,7 @@ from config.settings import (
     subagent_enabled,
     subagent_model_assignment,
     set_tracing_enabled,
+    set_middleware_span_mode,
     set_tracing_profile,
     tracing_enabled,
     tracing_settings,
@@ -558,6 +559,23 @@ class SettingsPanel(Vertical):
             self._restore_select_value(event.select, current)
             return
         updated = set_tracing_profile(self.settings, selected)
+        ok, message = await self.apply_change(updated)
+        self._set_status(message)
+        if ok:
+            self.settings = updated
+            self._refresh_tracing_preview()
+        else:
+            self._restore_select_value(event.select, current)
+
+    @on(Select.Changed, "#settings-middleware-spans")
+    async def change_middleware_spans(self, event: Select.Changed) -> None:
+        """Persist middleware-span visibility and rebuild constructed graphs."""
+        event.stop()
+        selected = str(event.value) if event.value is not Select.NULL else ""
+        current = str(tracing_settings(self.settings)["middleware_spans"])
+        if not selected or selected == current:
+            return
+        updated = set_middleware_span_mode(self.settings, selected)
         ok, message = await self.apply_change(updated)
         self._set_status(message)
         if ok:
@@ -1065,6 +1083,19 @@ class SettingsPanel(Vertical):
                 id="settings-tracing-profile",
                 classes="settings-tracing-profile",
             ),
+            Static("Middleware spans", classes="settings-tracing-label"),
+            Select(
+                [("Hidden", "hidden"), ("Full", "full")],
+                value=str(values["middleware_spans"]),
+                allow_blank=False,
+                id="settings-middleware-spans",
+                classes="settings-tracing-profile",
+            ),
+            Static(
+                "Hidden removes LangChain middleware tracing noise.\n"
+                "Full preserves the complete framework trace.",
+                classes="settings-tracing-help",
+            ),
             Static("settings.yml preview", classes="settings-tracing-label"),
             Static(
                 self._tracing_preview_text(),
@@ -1088,6 +1119,7 @@ class SettingsPanel(Vertical):
         return tracing_yaml_fragment(
             enabled=bool(values["enabled"]),
             profile=selected,
+            middleware_spans=str(values["middleware_spans"]),
             endpoint=profile.endpoint,
             headers=profile.headers,
         )

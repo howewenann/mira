@@ -852,8 +852,8 @@ OTel-only mode. MIRA enriches those same LangSmith-created OpenTelemetry spans
 with OpenInference semantic conventions before one standard batch processor and
 OTLP/HTTP exporter. The backend-neutral endpoint and header templates stay in a
 bootstrapped `.mira/tracing.yml` profile registry. `settings.yml` retains only
-enablement and the selected profile. Only the selected runtime copy resolves
-environment references.
+enablement, the selected profile, and middleware-span visibility. Only the
+selected runtime copy resolves environment references.
 
 `ui.repl.run_user_turn()` defines MIRA's semantic tracing boundary. While the
 MIRA-owned tracing runtime is active, each complete call opens one LangSmith
@@ -881,8 +881,20 @@ restores the user's prior environment on teardown, closes the client, then
 performs a bounded provider flush and shutdown. Missing optional dependencies
 and initialization failures are non-fatal Issues.
 
+AgentMiddleware spans default to `hidden`; `full` preserves native
+LangChain/LangGraph tracing. Suppression happens only while agent graphs are
+constructed, at the two framework boundaries that create the noise:
+`langchain.agents.factory.traceable` for wrap hooks and the outer compiled
+`RunnableSeq` callback lifecycle for before/after nodes. Middleware callables,
+graph writers, useful child work, and their natural surviving parentage remain
+unchanged. Export-time filtering was rejected because it leaves broken parent
+topology or requires rewriting it, and LangGraph's `TAG_HIDDEN` was rejected
+because it does not suppress these raw spans. All private framework coupling,
+shape checks, scoped patching, and construction locking are intentionally
+quarantined in `tracing/middleware_spans.py`.
+
 **Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
-`tracing/semantic_processor.py`, `ui/repl.py`,
+`tracing/semantic_processor.py`, `tracing/middleware_spans.py`, `ui/repl.py`,
 `config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.
 
 **Update this when:** tracing ownership, OTLP transport, reload behavior, or

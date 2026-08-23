@@ -390,13 +390,16 @@ class TracingTests(unittest.TestCase):
         preview = bootstrap.tracing_yaml_fragment(
             enabled=True,
             profile="corporate",
+            middleware_spans="hidden",
             endpoint=profile.endpoint,
             headers=profile.headers,
         )
         self.assertIn("profile: corporate", persisted)
+        self.assertIn("middleware_spans: hidden", persisted)
         self.assertNotIn("endpoint:", persisted)
         self.assertNotIn("headers:", persisted)
         self.assertIn("${TRACE_TOKEN}", preview)
+        self.assertIn("middleware_spans: hidden", preview)
         self.assertNotIn("resolved-secret", preview)
 
     def test_client_processors_exporter_and_resource_receive_resolved_profile(self) -> None:

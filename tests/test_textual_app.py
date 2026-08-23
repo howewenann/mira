@@ -5243,6 +5243,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(app.query("#settings-tracing-close")), 0)
 
                 profile = app.query_one("#settings-tracing-profile", Select)
+                middleware_spans = app.query_one("#settings-middleware-spans", Select)
                 preview_widget = app.query_one("#settings-tracing-preview", Static)
                 self.assertEqual(profile.region.width, preview_widget.region.width)
                 self.assertEqual(
@@ -5252,7 +5253,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
                 self.assertIn("tracing:", preview)
                 self.assertIn("profile: phoenix", preview)
+                self.assertIn("middleware_spans: hidden", preview)
                 self.assertIn("headers: {}", preview)
+                self.assertEqual(
+                    [value for _label, value in middleware_spans._options],
+                    ["hidden", "full"],
+                )
+
+                rebuild = AsyncMock()
+                with patch.object(app, "_rebuild_agents", rebuild):
+                    middleware_spans.value = "full"
+                    await wait_until(
+                        lambda: load_settings(workspace)["tracing"]["middleware_spans"] == "full"
+                    )
+                    await wait_until(lambda: rebuild.await_count == 1)
+                preview = renderable_plain(preview_widget)
+                self.assertIn("middleware_spans: full", preview)
+                self.assertEqual(
+                    renderable_plain(app.query_one("#settings-status", Static)),
+                    "middleware span setting saved; agents rebuilt; no reload required",
+                )
 
                 tracing_path(workspace).write_text(
                     TRACING_REGISTRY_TEMPLATE
@@ -5295,7 +5315,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             loaded = load_settings(workspace)["tracing"]
-            self.assertEqual(loaded, {"enabled": True, "profile": "corporate"})
+            self.assertEqual(
+                loaded,
+                {"enabled": True, "profile": "corporate", "middleware_spans": "full"},
+            )
 
     async def test_settings_command_can_always_allow_delete(self) -> None:
         """Delete should use the same configurable approval toggle as other tools."""

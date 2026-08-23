@@ -59,7 +59,9 @@ from config.settings import (
     RUBRIC_MODEL,
     SUMMARIZATION_MODEL,
     model_assignment,
+    middleware_span_mode,
 )
+from tracing.middleware_spans import middleware_span_policy
 
 SETTINGS_INTERRUPTS = "__mira_settings_interrupts__"
 ACTION_EXCLUDED_TOOLS = (
@@ -251,46 +253,47 @@ def _build_agent(
     ]
     subagents = subagents_with_project_tool_errors(resources.subagents, project_tool_names)
     settings = (config or {}).get("settings")
-    if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
-        subagents = compile_dynamic_subagents(
-            subagents,
-            model=model,
-            tools=tools,
+    with middleware_span_policy(middleware_span_mode(settings)):
+        if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
+            subagents = compile_dynamic_subagents(
+                subagents,
+                model=model,
+                tools=tools,
+                backend=backend,
+                skills=resources.skills,
+                permissions=permissions,
+                interrupt_on=resolved_interrupt_on,
+                enable_todos=planning_todos_enabled(settings),
+            )
+
+        middleware_stack = build_agent_middleware(
+            model=summarization_model,
             backend=backend,
-            skills=resources.skills,
-            permissions=permissions,
-            interrupt_on=resolved_interrupt_on,
-            enable_todos=planning_todos_enabled(settings),
+            workspace=Path(workspace),
+            settings=settings,
+            ptc_tools=effective_ptc_tool_names(
+                config,
+                tools,
+                [*local_metadata, *mcp_metadata],
+                excluded_tools,
+            ),
+            extra_middleware=extra_middleware,
         )
 
-    middleware_stack = build_agent_middleware(
-        model=summarization_model,
-        backend=backend,
-        workspace=Path(workspace),
-        settings=settings,
-        ptc_tools=effective_ptc_tool_names(
-            config,
-            tools,
-            [*local_metadata, *mcp_metadata],
-            excluded_tools,
-        ),
-        extra_middleware=extra_middleware,
-    )
-
-    agent = create_deep_agent(
-        model=model,
-        backend=backend,
-        middleware=middleware_stack.items,
-        tools=tools,
-        skills=resources.skills,
-        memory=resources.memory,
-        subagents=subagents,
-        permissions=permissions,
-        system_prompt=system_prompt,
-        interrupt_on=resolved_interrupt_on,
-        checkpointer=checkpointer,
-        context_schema=PlanningToolContext if planning else None,
-    )
+        agent = create_deep_agent(
+            model=model,
+            backend=backend,
+            middleware=middleware_stack.items,
+            tools=tools,
+            skills=resources.skills,
+            memory=resources.memory,
+            subagents=subagents,
+            permissions=permissions,
+            system_prompt=system_prompt,
+            interrupt_on=resolved_interrupt_on,
+            checkpointer=checkpointer,
+            context_schema=PlanningToolContext if planning else None,
+        )
     _attach_tool_specs(
         agent,
         collect_tool_specs(

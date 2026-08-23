@@ -33,6 +33,7 @@ from config.settings import (
     EXECUTE_TOOL,
     git_protection_enabled,
     load_settings,
+    middleware_span_mode,
     rubric_enabled,
     rubric_max_iterations,
     save_settings,
@@ -2075,8 +2076,14 @@ class MiraApp(App[None]):
             if new_git_enabled:
                 return await self._ensure_git_after_enabling()
             return True, "git protection disabled; no reload required"
-        if old_settings.get("tracing") != settings.get("tracing"):
+        old_tracing = old_settings.get("tracing") or {}
+        new_tracing = settings.get("tracing") or {}
+        if (
+            old_tracing.get("enabled") != new_tracing.get("enabled")
+            or old_tracing.get("profile") != new_tracing.get("profile")
+        ):
             return True, "tracing settings saved; Reload Runtime required"
+        middleware_spans_changed = middleware_span_mode(old_settings) != middleware_span_mode(settings)
 
         try:
             if old_settings.get("models") != settings.get("models"):
@@ -2097,6 +2104,8 @@ class MiraApp(App[None]):
                 message += "; could not restore .mira/settings.yml"
             return False, message
         self._set_status(state="ready")
+        if middleware_spans_changed:
+            return True, "middleware span setting saved; agents rebuilt; no reload required"
         return True, "settings saved; agents rebuilt; no reload required"
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:

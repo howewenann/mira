@@ -1135,6 +1135,12 @@ Button.goal-action:focus {
     text-style: bold;
 }
 
+.settings-tracing-help {
+    color: #8f9aa1;
+    height: 2;
+    margin-bottom: 1;
+}
+
 .settings-tracing-profile {
     width: 1fr;
     height: 3;
