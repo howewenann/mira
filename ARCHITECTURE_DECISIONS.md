@@ -101,6 +101,9 @@ overrides share one assignment resolver. Null secondary assignments inherit
 Main; missing explicit assignments never fall back. Environment variables are
 secret/value inputs only. Generic configuration interpolation resolves `${NAME}`
 recursively and rejects alternate, escaped, malformed, or unresolved forms.
+The shared model-import boundary defaults `DEFER_PYDANTIC_BUILD=false` without
+overwriting an explicit environment value so streamed OpenAI-compatible model
+objects remain serializable by LangSmith.
 Immutable launch options are process-local and overlay freshly loaded values to
 form the effective runtime configuration. `/reload` reloads environment and
 workspace configuration, then reapplies the same launch options. Launch options
@@ -858,6 +861,10 @@ MIRA-owned tracing runtime is active, each complete call opens one LangSmith
 the run through LangSmith context propagation. MIRA does not parent individual
 graph, model, tool, subagent, or rubric spans. Consecutive calls therefore
 produce separate roots, while all work inside one call shares one trace.
+The root records the submitted visible text, the final visible aggregate
+response, and the existing aggregate `TurnResult` usage through LangSmith's
+RunTree API. OpenInference span kinds follow explicit LangSmith agent metadata
+or the LangSmith run type; middleware names are not classification signals.
 One call may now contain multiple PLAN revision graph runs followed by one ACT
 graph run; these remain internal phases of the same submitted MIRA interaction,
 with one persisted user message and one session turn increment.

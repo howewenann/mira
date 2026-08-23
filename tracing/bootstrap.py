@@ -34,8 +34,26 @@ def trace_user_turn(
         langsmith, client = _active_langsmith, _active_client
         if langsmith is None or client is None:
             return await function(*args, **kwargs)
-        async with langsmith.trace("MIRA Turn", run_type="chain", client=client):
-            return await function(*args, **kwargs)
+        visible_text = kwargs.get("display_text")
+        if visible_text is None:
+            visible_text = kwargs.get("text", "")
+        async with langsmith.trace(
+            "MIRA Turn",
+            run_type="chain",
+            inputs={"input": visible_text},
+            client=client,
+        ) as turn:
+            result = await function(*args, **kwargs)
+            turn.set(
+                outputs={"output": getattr(result, "final_text", "")},
+                usage_metadata={
+                    "input_tokens": getattr(result, "input_tokens", 0),
+                    "output_tokens": getattr(result, "output_tokens", 0),
+                    "total_tokens": getattr(result, "total_tokens", 0),
+                },
+            )
+            turn.end()
+            return result
 
     return traced
 

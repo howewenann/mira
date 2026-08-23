@@ -1537,12 +1537,19 @@ With Phoenix selected, run a normal model turn followed by an `eval` that uses
 OpenInference span tree and verify it contains exactly one top-level `MIRA Turn`
 with `LangGraph` beneath it, each task under `eval`, and each subagent under its
 task. Run a second prompt and confirm it creates a separate `MIRA Turn` rather
-than joining the first trace. Record the root, model, and tool span names;
-verify `openinference.span.kind`, `input.value`, `output.value`,
-structured messages and tool-call IDs, tool attributes, and token counts where
-the model reports them. Explicitly note any `wrap_model_call`,
+than joining the first trace. Confirm the root input is the submitted visible
+text, its output is the final visible response, and its
+`langsmith.metadata.usage_metadata` is the aggregate turn usage. Confirm this
+root metadata does not add to Phoenix's trace token total on top of child LLM
+usage. Record the root, model, and tool span names; verify
+`openinference.span.kind`, `input.value`, `output.value`, ordered structured
+reasoning/text contents and tool-call IDs, model/provider attributes, tool
+attributes, finish reason when supplied, and token counts/details where the
+model reports them. The real subagent span should be `AGENT` with `agent.name`;
+middleware and `rubric_grader` spans should remain `CHAIN`. Explicitly note any `wrap_model_call`,
 `awrap_model_call`, `wrap_tool_call`, or `awrap_tool_call` spans. Do not filter
-or reparent the observed tree.
+or reparent the observed tree. Verify the first tool-calling `ChatAnyLLM` ends
+normally and is neither orphaned nor duplicated.
 
 If LangSmith credentials are available, select its profile and repeat the same
 prompt. Confirm the hierarchy renders as one tree and the exporter sends the

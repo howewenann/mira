@@ -111,6 +111,27 @@ class ModelManagementTests(unittest.TestCase):
             )
             self.assertEqual(get_model_name(config), "[local] lmstudio:demo")
 
+    def test_openai_profiles_request_stream_usage(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            mira = workspace / ".mira"
+            mira.mkdir()
+            (mira / "models.yml").write_text(
+                "models:\n  cloud:\n    provider: openai\n    model: demo\n",
+                encoding="utf-8",
+            )
+            registry = load_model_registry(workspace)
+            settings = set_model_assignment(load_settings(workspace), "main", "cloud")
+            config = {"settings": settings, "model_registry": registry}
+            model = Mock(profile=None)
+            with patch("agent.llm.ChatAnyLLM", return_value=model) as constructor:
+                self.assertIs(get_llm(config), model)
+            constructor.assert_called_once_with(
+                provider="openai",
+                model="demo",
+                stream_options={"include_usage": True},
+            )
+
     def test_subagents_default_disabled_and_overrides_copy_raw_specs(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)

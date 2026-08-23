@@ -6,6 +6,9 @@ import ast
 import asyncio
 import importlib.util
 import inspect
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextvars import ContextVar
@@ -120,9 +123,12 @@ class _Langsmith:
 
 
 class _TurnTrace:
-    def __init__(self, owner: "_TurnLangsmith", trace_id: str) -> None:
+    def __init__(self, owner: "_TurnLangsmith", trace_id: str, inputs: dict[str, object]) -> None:
         self.owner = owner
         self.trace_id = trace_id
+        self.inputs = inputs
+        self.set_calls: list[dict[str, object]] = []
+        self.end_calls = 0
         self.token = None
 
     async def __aenter__(self) -> "_TurnTrace":
@@ -135,17 +141,33 @@ class _TurnTrace:
         assert self.token is not None
         _CURRENT_TURN_TRACE.reset(self.token)
 
+    def set(self, **kwargs: object) -> None:
+        self.set_calls.append(kwargs)
+
+    def end(self) -> None:
+        self.end_calls += 1
+
 
 class _TurnLangsmith:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, object]] = []
+        self.traces: list[_TurnTrace] = []
         self.entered: list[str] = []
         self.exited: list[str] = []
 
-    def trace(self, name: str, *, run_type: str, client: object) -> _TurnTrace:
+    def trace(
+        self,
+        name: str,
+        *,
+        run_type: str,
+        inputs: dict[str, object],
+        client: object,
+    ) -> _TurnTrace:
         trace_id = f"turn-{len(self.calls) + 1}"
         self.calls.append((name, run_type, client))
-        return _TurnTrace(self, trace_id)
+        trace = _TurnTrace(self, trace_id, inputs)
+        self.traces.append(trace)
+        return trace
 
 
 def _runtime() -> tuple[object, ...]:
@@ -585,6 +607,47 @@ class TracingTests(unittest.TestCase):
         self.assertNotIn("langsmith", branch_conditions)
 
 
+class ModelCompatibilityTests(unittest.TestCase):
+    def _import_value(self, explicit: str | None) -> str:
+        environment = dict(os.environ)
+        if explicit is None:
+            environment.pop("DEFER_PYDANTIC_BUILD", None)
+        else:
+            environment["DEFER_PYDANTIC_BUILD"] = explicit
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os; import agent.llm; print(os.environ['DEFER_PYDANTIC_BUILD'])",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return completed.stdout.strip()
+
+    def test_deferred_pydantic_build_defaults_before_anyllm_import(self) -> None:
+        source = Path("agent/__init__.py").read_text(encoding="utf-8")
+        self.assertIn('os.environ.setdefault("DEFER_PYDANTIC_BUILD", "false")', source)
+        self.assertEqual(self._import_value(None), "false")
+
+    def test_explicit_deferred_pydantic_build_value_is_preserved(self) -> None:
+        self.assertEqual(self._import_value("true"), "true")
+
+    def test_compatibility_fix_does_not_subclass_or_patch_chatanyllm(self) -> None:
+        tree = ast.parse(Path("agent/llm.py").read_text(encoding="utf-8"))
+        self.assertFalse(
+            any(
+                isinstance(node, ast.ClassDef)
+                and any(ast.unparse(base) == "ChatAnyLLM" for base in node.bases)
+                for node in ast.walk(tree)
+            )
+        )
+        self.assertNotIn("MockValSer", Path("agent/llm.py").read_text(encoding="utf-8"))
+
+
 class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         bootstrap._active_langsmith = None
@@ -598,7 +661,13 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
         bootstrap._active_provider = None
         bootstrap._active_environment = None
 
-    async def _run_turn(self, child_parents: list[str | None]) -> None:
+    async def _run_turn(
+        self,
+        child_parents: list[str | None],
+        *,
+        text: str = "hello",
+        display_text: str | None = None,
+    ) -> None:
         from runtime.runner import TurnResult
         from ui import repl
 
@@ -606,7 +675,12 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
             child_parents.append(_CURRENT_TURN_TRACE.get())
             await asyncio.sleep(0)
             child_parents.append(_CURRENT_TURN_TRACE.get())
-            return TurnResult(final_text="done")
+            return TurnResult(
+                final_text="done",
+                input_tokens=8,
+                output_tokens=3,
+                total_tokens=11,
+            )
 
         class Store:
             def save(self, session: dict[str, object]) -> None:
@@ -626,7 +700,8 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
                 store=Store(),
                 session=session,
                 mode={"planning": False},
-                text="hello",
+                text=text,
+                display_text=display_text,
             )
 
     async def test_run_user_turn_is_a_noop_when_tracing_is_inactive(self) -> None:
@@ -658,6 +733,55 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(langsmith.exited, ["turn-1", "turn-2"])
         self.assertEqual(first_children, ["turn-1", "turn-1"])
         self.assertEqual(second_children, ["turn-2", "turn-2"])
+        self.assertEqual([trace.inputs for trace in langsmith.traces], [{"input": "hello"}] * 2)
+
+    async def test_root_records_visible_input_final_output_and_aggregate_usage(self) -> None:
+        langsmith = _TurnLangsmith()
+        bootstrap._active_langsmith = langsmith
+        bootstrap._active_client = object()
+
+        await self._run_turn([], text="internal expanded prompt", display_text="visible text")
+
+        trace = langsmith.traces[0]
+        self.assertEqual(trace.inputs, {"input": "visible text"})
+        self.assertEqual(
+            trace.set_calls,
+            [
+                {
+                    "outputs": {"output": "done"},
+                    "usage_metadata": {
+                        "input_tokens": 8,
+                        "output_tokens": 3,
+                        "total_tokens": 11,
+                    },
+                }
+            ],
+        )
+        self.assertEqual(trace.end_calls, 1)
+
+    async def test_multi_phase_continuation_stays_under_one_root(self) -> None:
+        from runtime.runner import TurnResult
+
+        langsmith = _TurnLangsmith()
+        bootstrap._active_langsmith = langsmith
+        bootstrap._active_client = object()
+        child_parents: list[str | None] = []
+
+        @bootstrap.trace_user_turn
+        async def immediate_implement(**kwargs: object) -> TurnResult:
+            child_parents.append(_CURRENT_TURN_TRACE.get())
+            await asyncio.sleep(0)
+            child_parents.append(_CURRENT_TURN_TRACE.get())
+            return TurnResult(final_text="final Act response", total_tokens=9)
+
+        await immediate_implement(text="internal goal prompt", display_text="make it")
+
+        self.assertEqual(child_parents, ["turn-1", "turn-1"])
+        self.assertEqual(len(langsmith.traces), 1)
+        self.assertEqual(
+            langsmith.traces[0].set_calls[0]["outputs"],
+            {"output": "final Act response"},
+        )
 
 
 @unittest.skipUnless(_real_tracing_available(), "requires the mira[tracing] extra")
@@ -689,7 +813,6 @@ class SemanticProcessorTests(unittest.TestCase):
         spans = self._finished_spans(
             [
                 ("chain", {**common, "langsmith.span.kind": "chain"}),
-                ("research-agent", {**common, "langsmith.span.kind": "chain"}),
                 ("model", {**common, "langsmith.span.kind": "llm"}),
                 (
                     "weather",
@@ -703,18 +826,83 @@ class SemanticProcessorTests(unittest.TestCase):
                     },
                 ),
                 ("lookup", {**common, "langsmith.span.kind": "retriever"}),
+                ("vectors", {**common, "langsmith.span.kind": "embedding"}),
+                ("template", {**common, "langsmith.span.kind": "prompt"}),
+                ("parser", {**common, "langsmith.span.kind": "parser"}),
+                ("mystery", {**common, "langsmith.span.kind": "unknown"}),
+                (
+                    "general-purpose",
+                    {
+                        **common,
+                        "langsmith.span.kind": "chain",
+                        "langsmith.metadata.ls_agent_type": "subagent",
+                        "langsmith.metadata.lc_agent_name": "general-purpose",
+                    },
+                ),
+                (
+                    "subagent-model",
+                    {
+                        **common,
+                        "langsmith.span.kind": "llm",
+                        "langsmith.metadata.ls_agent_type": "subagent",
+                        "langsmith.metadata.lc_agent_name": "general-purpose",
+                    },
+                ),
+                (
+                    "subagent-tool",
+                    {
+                        **common,
+                        "langsmith.span.kind": "tool",
+                        "langsmith.metadata.ls_agent_type": "subagent",
+                    },
+                ),
+                (
+                    "SubAgentMiddleware.awrap_model_call",
+                    {**common, "langsmith.span.kind": "chain", "gen_ai.system": "langchain"},
+                ),
+                (
+                    "SkillsMiddleware.before_agent",
+                    {**common, "langsmith.span.kind": "chain", "gen_ai.system": "langchain"},
+                ),
+                ("rubric_grader", {**common, "langsmith.span.kind": "chain"}),
             ]
         )
         by_name = {span.name: span for span in spans}
 
         self.assertEqual(by_name["chain"].attributes["openinference.span.kind"], "CHAIN")
-        self.assertEqual(
-            by_name["research-agent"].attributes["openinference.span.kind"],
-            "AGENT",
-        )
         self.assertEqual(by_name["model"].attributes["openinference.span.kind"], "LLM")
         self.assertEqual(by_name["weather"].attributes["openinference.span.kind"], "TOOL")
         self.assertEqual(by_name["lookup"].attributes["openinference.span.kind"], "RETRIEVER")
+        self.assertEqual(by_name["vectors"].attributes["openinference.span.kind"], "EMBEDDING")
+        self.assertEqual(by_name["template"].attributes["openinference.span.kind"], "PROMPT")
+        self.assertEqual(by_name["parser"].attributes["openinference.span.kind"], "CHAIN")
+        self.assertEqual(by_name["mystery"].attributes["openinference.span.kind"], "CHAIN")
+        self.assertEqual(
+            by_name["general-purpose"].attributes["openinference.span.kind"],
+            "AGENT",
+        )
+        self.assertEqual(by_name["general-purpose"].attributes["agent.name"], "general-purpose")
+        self.assertEqual(by_name["subagent-model"].attributes["openinference.span.kind"], "LLM")
+        self.assertNotIn("agent.name", by_name["subagent-model"].attributes)
+        self.assertEqual(by_name["subagent-tool"].attributes["openinference.span.kind"], "TOOL")
+        self.assertEqual(
+            by_name["SubAgentMiddleware.awrap_model_call"].attributes[
+                "openinference.span.kind"
+            ],
+            "CHAIN",
+        )
+        self.assertEqual(
+            by_name["SkillsMiddleware.before_agent"].attributes["openinference.span.kind"],
+            "CHAIN",
+        )
+        self.assertEqual(by_name["rubric_grader"].attributes["openinference.span.kind"], "CHAIN")
+        self.assertNotIn("gen_ai.system", by_name["SkillsMiddleware.before_agent"].attributes)
+        self.assertFalse(
+            any(
+                key.startswith("llm.")
+                for key in by_name["SubAgentMiddleware.awrap_model_call"].attributes
+            )
+        )
         self.assertEqual(by_name["weather"].attributes["tool.name"], "weather")
         self.assertEqual(
             json.loads(by_name["weather"].attributes["input.value"]),
@@ -787,10 +975,34 @@ class SemanticProcessorTests(unittest.TestCase):
                         "langsmith.span.kind": "llm",
                         "langsmith.metadata.ls_provider": "anyllm",
                         "langsmith.metadata.provider": "openai",
+                        "langsmith.metadata.invocation_params": json.dumps(
+                            {
+                                "model": "request-model",
+                                "temperature": 0.2,
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "function": {
+                                            "name": "weather",
+                                            "parameters": {
+                                                "type": "object",
+                                                "properties": {"city": {"type": "string"}},
+                                            },
+                                        },
+                                    }
+                                ],
+                            }
+                        ),
                         "gen_ai.request.model": "model-1",
+                        "gen_ai.response.model": "model-2",
+                        "gen_ai.request.max_tokens": 250,
+                        "gen_ai.response.finish_reasons": "tool_calls, stop",
                         "gen_ai.usage.input_tokens": 11,
                         "gen_ai.usage.output_tokens": 7,
                         "gen_ai.usage.total_tokens": 18,
+                        "gen_ai.usage.input_token_details": "{'cache_read': 4, 'cache_creation': 2}",
+                        "gen_ai.usage.output_token_details": "{'reasoning': 3}",
+                        "langsmith.span.tags": "seq:step:1, smoke",
                         "gen_ai.prompt": json.dumps(prompt),
                         "gen_ai.completion": json.dumps(completion),
                     },
@@ -838,10 +1050,99 @@ class SemanticProcessorTests(unittest.TestCase):
             attributes["llm.output_messages.0.message.tool_calls.0.tool_call.id"],
             "call-weather-output",
         )
-        self.assertEqual(attributes["llm.model_name"], "model-1")
+        self.assertEqual(attributes["llm.model_name"], "model-2")
+        self.assertEqual(attributes["llm.provider"], "openai")
+        self.assertNotIn("llm.system", attributes)
+        self.assertEqual(
+            json.loads(attributes["llm.invocation_parameters"]),
+            {"temperature": 0.2, "max_tokens": 250},
+        )
+        self.assertEqual(attributes["llm.finish_reason"], "tool_calls, stop")
         self.assertEqual(attributes["llm.token_count.prompt"], 11)
         self.assertEqual(attributes["llm.token_count.completion"], 7)
         self.assertEqual(attributes["llm.token_count.total"], 18)
+        self.assertEqual(attributes["llm.token_count.prompt_details.cache_read"], 4)
+        self.assertEqual(attributes["llm.token_count.prompt_details.cache_write"], 2)
+        self.assertEqual(attributes["llm.token_count.completion_details.reasoning"], 3)
+        self.assertEqual(attributes["tag.tags"], ["seq:step:1", "smoke"])
+        tool_schema = json.loads(attributes["llm.tools.0.tool.json_schema"])
+        self.assertEqual(tool_schema["function"]["name"], "weather")
+
+    def test_reasoning_contents_preserve_order_fallback_and_tool_calls(self) -> None:
+        import json
+
+        def completion(content: object, **kwargs: object) -> str:
+            message = {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessage"],
+                "kwargs": {"type": "ai", "content": content, **kwargs},
+            }
+            return json.dumps({"generations": [[{"message": message}]]})
+
+        spans = self._finished_spans(
+            [
+                (
+                    "structured",
+                    {
+                        "langsmith.span.kind": "llm",
+                        "gen_ai.completion": completion(
+                            [
+                                {"type": "reasoning", "reasoning": "think", "index": 0},
+                                {"type": "text", "text": "answer", "index": 1},
+                                {
+                                    "type": "tool_call",
+                                    "name": "weather",
+                                    "args": {"city": "Paris"},
+                                    "id": "call-1",
+                                    "index": 2,
+                                },
+                            ],
+                            additional_kwargs={"reasoning_content": "think"},
+                            tool_calls=[],
+                        ),
+                    },
+                ),
+                (
+                    "plain",
+                    {
+                        "langsmith.span.kind": "llm",
+                        "gen_ai.completion": completion("plain answer"),
+                    },
+                ),
+                (
+                    "fallback",
+                    {
+                        "langsmith.span.kind": "llm",
+                        "gen_ai.completion": completion(
+                            "visible answer",
+                            additional_kwargs={"reasoning_content": "fallback thought"},
+                        ),
+                    },
+                ),
+            ]
+        )
+        by_name = {span.name: span.attributes for span in spans}
+        structured = by_name["structured"]
+        prefix = "llm.output_messages.0.message.contents"
+        self.assertEqual(structured[f"{prefix}.0.message_content.type"], "reasoning")
+        self.assertEqual(structured[f"{prefix}.0.message_content.text"], "think")
+        self.assertEqual(structured[f"{prefix}.1.message_content.type"], "text")
+        self.assertEqual(structured[f"{prefix}.1.message_content.text"], "answer")
+        self.assertNotIn("llm.output_messages.0.message.content", structured)
+        self.assertEqual(
+            structured[
+                "llm.output_messages.0.message.tool_calls.0.tool_call.function.name"
+            ],
+            "weather",
+        )
+        self.assertEqual(by_name["plain"]["llm.output_messages.0.message.content"], "plain answer")
+        self.assertFalse(any(key.startswith("llm.tools.") for key in by_name["plain"]))
+        fallback = by_name["fallback"]
+        self.assertEqual(fallback[f"{prefix}.0.message_content.type"], "reasoning")
+        self.assertEqual(fallback[f"{prefix}.0.message_content.text"], "fallback thought")
+        self.assertEqual(fallback[f"{prefix}.1.message_content.type"], "text")
+        self.assertEqual(fallback[f"{prefix}.1.message_content.text"], "visible answer")
 
     def test_processor_preserves_topology_and_exports_each_source_once(self) -> None:
         from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
@@ -902,6 +1203,7 @@ class SemanticProcessorTests(unittest.TestCase):
         self.assertEqual(by_name["subagent"].parent.span_id, by_name["task"].context.span_id)
 
     def test_real_turn_parent_preserves_langsmith_tree_and_enrichment(self) -> None:
+        import json
         import os
         from collections.abc import Callable, Sequence
         from typing import Any
@@ -915,6 +1217,7 @@ class SemanticProcessorTests(unittest.TestCase):
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from runtime.runner import TurnResult
         from tracing.semantic_processor import LangSmithOpenInferenceProcessor
 
         class ToolCallingModel(FakeMessagesListChatModel):
@@ -1004,17 +1307,32 @@ class SemanticProcessorTests(unittest.TestCase):
                 )
                 agent = create_agent(model, tools=[double], name="langsmith-smoke")
 
+                captured: dict[str, dict[str, Any]] = {}
+
                 @bootstrap.trace_user_turn
-                async def invoke_twice() -> tuple[dict[str, Any], dict[str, Any]]:
+                async def invoke_twice(**kwargs: object) -> TurnResult:
                     first = agent.invoke({"messages": [HumanMessage("Double 2.")]})
                     second = agent.invoke({"messages": [HumanMessage("Double 3.")]})
-                    return first, second
+                    captured["first"] = first
+                    captured["second"] = second
+                    return TurnResult(
+                        final_text="The final visible answer is 6.",
+                        input_tokens=18,
+                        output_tokens=12,
+                        total_tokens=30,
+                    )
 
                 bootstrap._active_langsmith = langsmith
                 bootstrap._active_client = client
-                first, second = asyncio.run(invoke_twice())
-                self.assertEqual(first["messages"][-1].content, "The answer is 4.")
-                self.assertEqual(second["messages"][-1].content, "The answer is 6.")
+                result = asyncio.run(
+                    invoke_twice(
+                        text="internal expanded text",
+                        display_text="Double twice visibly.",
+                    )
+                )
+                self.assertEqual(captured["first"]["messages"][-1].content, "The answer is 4.")
+                self.assertEqual(captured["second"]["messages"][-1].content, "The answer is 6.")
+                self.assertEqual(result.total_tokens, 30)
         finally:
             bootstrap._active_langsmith = None
             bootstrap._active_client = None
@@ -1037,6 +1355,27 @@ class SemanticProcessorTests(unittest.TestCase):
         parent = next(span for span in spans if span.name == "MIRA Turn")
         self.assertIsNone(parent.parent)
         self.assertEqual(parent.attributes.get("openinference.span.kind"), "CHAIN")
+        self.assertEqual(
+            json.loads(parent.attributes["input.value"]),
+            {"input": "Double twice visibly."},
+        )
+        self.assertEqual(
+            json.loads(parent.attributes["output.value"]),
+            {"output": "The final visible answer is 6."},
+        )
+        self.assertEqual(
+            json.loads(parent.attributes["langsmith.metadata.usage_metadata"]),
+            {"input_tokens": 18, "output_tokens": 12, "total_tokens": 30},
+        )
+        self.assertFalse(any(key.startswith("llm.") for key in parent.attributes))
+        self.assertNotIn("gen_ai.usage.input_tokens", parent.attributes)
+        self.assertEqual(
+            sum(
+                span.attributes.get("llm.token_count.total", 0)
+                for span in spans
+            ),
+            30,
+        )
         self.assertEqual(
             sum(
                 span.parent is not None

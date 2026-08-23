@@ -19,7 +19,7 @@ from config.settings import (
 from runtime.issues import Issue
 
 ModelRole = Literal["main", "rubric", "summarization"]
-STREAM_USAGE_PROVIDERS = {"lmstudio"}
+STREAM_USAGE_PROVIDERS = {"lmstudio", "openai"}
 
 
 def model_registry(config: dict[str, Any]) -> ModelRegistry:
