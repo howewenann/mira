@@ -5248,13 +5248,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(profile.region.width, preview_widget.region.width)
                 self.assertEqual(
                     [value for _label, value in profile._options],
-                    ["phoenix", "langsmith"],
+                    ["phoenix", "mlflow", "langsmith"],
                 )
                 preview = renderable_plain(app.query_one("#settings-tracing-preview", Static))
                 self.assertIn("tracing:", preview)
                 self.assertIn("profile: phoenix", preview)
                 self.assertIn("middleware_spans: hidden", preview)
                 self.assertIn("headers: {}", preview)
+                self.assertIn("span_attributes: {}", preview)
                 self.assertEqual(
                     [value for _label, value in middleware_spans._options],
                     ["hidden", "full"],

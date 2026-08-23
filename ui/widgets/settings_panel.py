@@ -1122,6 +1122,7 @@ class SettingsPanel(Vertical):
             middleware_spans=str(values["middleware_spans"]),
             endpoint=profile.endpoint,
             headers=profile.headers,
+            span_attributes=profile.span_attributes,
         )
 
     def _tracing_profile_options(self) -> list[tuple[str, str]]:

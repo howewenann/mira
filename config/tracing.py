@@ -11,10 +11,31 @@ import yaml
 from runtime.issues import Issue
 
 TRACING_FILE = "tracing.yml"
-TRACING_REGISTRY_TEMPLATE = """profiles:
+SpanAttributeValue = (
+    str | bool | int | float | list[str] | list[bool] | list[int] | list[float]
+)
+TRACING_REGISTRY_TEMPLATE = """# MIRA tracing configuration
+#
+# Each profile defines an OTLP/HTTP tracing destination.
+#
+# Profile fields:
+#   endpoint:         OTLP/HTTP trace endpoint
+#   headers:          Optional HTTP headers sent with trace exports
+#   span_attributes:  Optional attributes added to every exported span
+#
+# Environment variables can be referenced with ${NAME}.
+
+profiles:
   phoenix:
     endpoint: http://127.0.0.1:6006/v1/traces
     headers: {}
+
+  mlflow:
+    endpoint: http://127.0.0.1:5000/v1/traces
+    headers:
+      x-mlflow-experiment-id: "0"
+    span_attributes:
+      mlflow.message.format: langchain
 
   langsmith:
     endpoint: https://api.smith.langchain.com/otel/v1/traces
@@ -32,6 +53,7 @@ class TracingProfile:
     name: str
     endpoint: str
     headers: dict[str, str]
+    span_attributes: dict[str, SpanAttributeValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +116,7 @@ def load_tracing_registry(workspace: Path) -> TracingRegistry:
     for raw_name, raw_profile in entries.items():
         name = raw_name if isinstance(raw_name, str) else ""
         try:
-            endpoint, headers = _validate_profile(name, raw_profile)
+            endpoint, headers, span_attributes = _validate_profile(name, raw_profile)
         except ValueError as error:
             shown = name or repr(raw_name)
             invalid.append(name)
@@ -108,17 +130,25 @@ def load_tracing_registry(workspace: Path) -> TracingRegistry:
                 )
             )
             continue
-        profiles[name] = TracingProfile(name, endpoint, headers)
+        profiles[name] = TracingProfile(name, endpoint, headers, span_attributes)
     return TracingRegistry(profiles, tuple(invalid), tuple(issues))
 
 
-def _validate_profile(name: str, raw: Any) -> tuple[str, dict[str, str]]:
+def _validate_profile(
+    name: str,
+    raw: Any,
+) -> tuple[str, dict[str, str], dict[str, SpanAttributeValue]]:
     if not name.strip():
         raise ValueError("profile name must be a non-empty string")
     if not isinstance(raw, dict):
         raise ValueError("profile must be a mapping")
-    if set(raw) != {"endpoint", "headers"}:
-        raise ValueError("profile must contain exactly endpoint and headers")
+    required = {"endpoint", "headers"}
+    missing = required - set(raw)
+    if missing:
+        raise ValueError(f"profile is missing required field(s): {', '.join(sorted(missing))}")
+    unknown = set(raw) - required - {"span_attributes"}
+    if unknown:
+        raise ValueError(f"unsupported profile field(s): {', '.join(sorted(map(str, unknown)))}")
     endpoint = raw.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint.strip():
         raise ValueError("endpoint is required and must be a non-empty string")
@@ -130,7 +160,30 @@ def _validate_profile(name: str, raw: Any) -> tuple[str, dict[str, str]]:
         for key, value in headers.items()
     ):
         raise ValueError("headers must use non-empty string names and string values")
-    return endpoint.strip(), dict(headers)
+    span_attributes = raw.get("span_attributes", {})
+    if not isinstance(span_attributes, dict):
+        raise ValueError("span_attributes must be a mapping")
+    if not all(isinstance(key, str) and key.strip() for key in span_attributes):
+        raise ValueError("span_attributes must use non-empty string names")
+    invalid = [key for key, value in span_attributes.items() if not _is_span_attribute(value)]
+    if invalid:
+        raise ValueError(
+            "span_attributes values must be OpenTelemetry scalars or homogeneous scalar lists; "
+            f"invalid: {', '.join(invalid)}"
+        )
+    return endpoint.strip(), dict(headers), dict(span_attributes)
+
+
+def _is_span_attribute(value: Any) -> bool:
+    if isinstance(value, str | bool | int | float):
+        return True
+    if not isinstance(value, list):
+        return False
+    if not value:
+        return True
+    return all(type(item) is type(value[0]) for item in value) and all(
+        isinstance(item, str | bool | int | float) for item in value
+    )
 
 
 def _registry_issue(summary: str, details: str) -> Issue:

@@ -850,10 +850,10 @@ moves, todo defaults change, or filesystem/rubric semantics change.
 **Decision:** LangSmith owns LangChain run collection and trace topology in
 OTel-only mode. MIRA enriches those same LangSmith-created OpenTelemetry spans
 with OpenInference semantic conventions before one standard batch processor and
-OTLP/HTTP exporter. The backend-neutral endpoint and header templates stay in a
-bootstrapped `.mira/tracing.yml` profile registry. `settings.yml` retains only
-enablement, the selected profile, and middleware-span visibility. Only the
-selected runtime copy resolves environment references.
+OTLP/HTTP exporter. Backend-neutral endpoint, header, and profile-wide span
+attribute templates stay in a bootstrapped `.mira/tracing.yml` profile registry.
+`settings.yml` retains only enablement, the selected profile, and middleware-span
+visibility. Only the selected runtime copy resolves environment references.
 
 `ui.repl.run_user_turn()` defines MIRA's semantic tracing boundary. While the
 MIRA-owned tracing runtime is active, each complete call opens one LangSmith
@@ -874,12 +874,13 @@ LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree
 cannot reliably recover. The small semantic processor only augments attributes;
 it never creates or reparents spans. OTel freezes attributes before processor
 callbacks, so the processor uses the same `ReadableSpan._attributes` replacement
-pattern as OpenInference's upstream conversion processors. A fresh LangSmith
-client, provider, processor chain, exporter, and resource identity are installed
-on each full reload. MIRA temporarily enables LangSmith callback collection,
-restores the user's prior environment on teardown, closes the client, then
-performs a bounded provider flush and shutdown. Missing optional dependencies
-and initialization failures are non-fatal Issues.
+pattern as OpenInference's upstream conversion processors. That same processor
+adds configured profile attributes to every span before downstream export. A
+fresh LangSmith client, provider, processor chain, exporter, and resource
+identity are installed on each full reload. MIRA temporarily enables LangSmith
+callback collection, restores the user's prior environment on teardown, closes
+the client, then performs a bounded provider flush and shutdown. Missing
+optional dependencies and initialization failures are non-fatal Issues.
 
 AgentMiddleware spans default to `hidden`; `full` preserves native
 LangChain/LangGraph tracing. Suppression happens only while agent graphs are

@@ -91,7 +91,11 @@ def configure_tracing(
     assert profile is not None
     try:
         resolved = resolve_environment(
-            {"endpoint": profile.endpoint, "headers": profile.headers},
+            {
+                "endpoint": profile.endpoint,
+                "headers": profile.headers,
+                "span_attributes": profile.span_attributes,
+            },
             environ=target,
         )
     except EnvironmentInterpolationError as exc:
@@ -124,6 +128,7 @@ def configure_tracing(
 
     endpoint = str(resolved["endpoint"])
     headers = dict(resolved["headers"])
+    span_attributes = dict(resolved["span_attributes"])
     client = None
     provider = None
     try:
@@ -135,7 +140,7 @@ def configure_tracing(
         )
         provider = TracerProvider(resource=resource)
         exporter = OTLPSpanExporter(endpoint=endpoint, headers=headers)
-        provider.add_span_processor(LangSmithOpenInferenceProcessor())
+        provider.add_span_processor(LangSmithOpenInferenceProcessor(span_attributes))
         provider.add_span_processor(BatchSpanProcessor(exporter))
         _remember_environment(target)
         target.update(
@@ -182,6 +187,7 @@ def tracing_yaml_fragment(
     middleware_spans: str,
     endpoint: str,
     headers: Mapping[str, str],
+    span_attributes: Mapping[str, Any],
 ) -> str:
     """Render the unresolved effective tracing fragment used by the preview."""
     import yaml
@@ -194,6 +200,7 @@ def tracing_yaml_fragment(
                 "middleware_spans": middleware_spans,
                 "endpoint": endpoint.strip(),
                 "headers": dict(headers),
+                "span_attributes": dict(span_attributes),
             }
         },
         sort_keys=False,

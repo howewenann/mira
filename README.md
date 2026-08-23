@@ -69,7 +69,7 @@ Type `/` to autocomplete commands and `@` to autocomplete local files, tools,
 subagents, and MCP resources. Sessions are saved automatically; start with
 `--resume` to reopen the latest one.
 
-## Optional local tracing with Phoenix
+## Optional local tracing
 
 MIRA preserves LangChain/DeepAgents trace topology with LangSmith and enriches
 the same OpenTelemetry spans with OpenInference semantics before generic
@@ -78,13 +78,59 @@ OTLP/HTTP export. To try a local Phoenix backend:
 ```bash
 pip install "mira[tracing]"
 pip install arize-phoenix
-phoenix serve
 ```
 
 Open `MIRA → Settings → General → Tracing → Yes → Config`, select the
 bootstrapped `Phoenix` profile, and choose **Reload Runtime**. Then open the
 Phoenix UI at `http://127.0.0.1:6006`. Add any other compatible OTLP/HTTP
 profiles to `.mira/tracing.yml`; no MIRA code changes are required.
+
+### Local tracing storage
+
+Phoenix and MLflow manage their own local state independently of MIRA. Keeping
+that state inside the project's `.mira/` directory is optional. Add these
+backend settings to `.env`:
+
+```dotenv
+# Phoenix
+PHOENIX_WORKING_DIR=.mira/phoenix
+
+# MLflow
+MLFLOW_BACKEND_STORE_URI=sqlite:///.mira/mlflow/mlflow.db
+MLFLOW_ARTIFACTS_DESTINATION=.mira/mlflow/mlartifacts
+```
+
+An `.env` file does not configure independently launched CLI processes by
+itself. Install the optional `python-dotenv` CLI and use `dotenv run --` to
+inject those values when starting each backend:
+
+```bash
+pip install "python-dotenv[cli]"
+dotenv run -- phoenix serve
+dotenv run -- mlflow server
+```
+
+The `python-dotenv` CLI is a convenience for launching these servers, not a
+required MIRA dependency. Phoenix uses `PHOENIX_WORKING_DIR` for its local
+working data and may maintain multiple files there. Modern MLflow uses SQLite
+as its default local backend and otherwise creates `mlflow.db` in the current
+working directory. The settings above move that database and the tracking
+server's served artifact destination under `.mira/mlflow/`; MLflow creates the
+missing parent directories.
+
+The resulting layout is roughly:
+
+```text
+.mira/
+├── phoenix/
+│   └── ...
+└── mlflow/
+    ├── mlflow.db
+    └── mlartifacts/
+```
+
+These variables configure Phoenix and MLflow, not MIRA. MIRA still only
+exports traces to the OTLP endpoints configured in its tracing profile.
 
 ## More information
 

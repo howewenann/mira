@@ -114,9 +114,10 @@ tracing:
   profile: corporate
 ```
 
-MIRA bootstraps `.mira/tracing.yml` once with Phoenix and LangSmith profiles.
-Each profile contains only a complete OTLP/HTTP `endpoint` and a `headers`
-mapping. Add any number of profiles directly to that file:
+MIRA bootstraps `.mira/tracing.yml` once with Phoenix, MLflow, and LangSmith
+examples. Each profile defines a complete OTLP/HTTP `endpoint`, a `headers`
+mapping, and optional profile-wide `span_attributes`. Add any number of profiles
+directly to that file:
 
 ```yaml
 profiles:
@@ -125,6 +126,8 @@ profiles:
     headers:
       Authorization: "Bearer ${TRACE_TOKEN}"
       tenant: my-team
+    span_attributes:
+      deployment.environment: production
 ```
 
 Existing registries are never overwritten or extended automatically.
@@ -142,10 +145,11 @@ custom compatible destinations are transport profiles in the same registry.
 
 Reload Runtime closes the current OTel-only LangSmith client, drains and closes
 its MIRA-owned OTel provider, then rebuilds the processor chain with the selected
-profile's endpoint and headers. MIRA temporarily sets the LangSmith callback
-activation values required by LangChain and restores the launching process's
-previous values on reload, disable, or shutdown. If the extra is missing,
-tracing is disabled for that runtime and Issues shows the install command.
+profile's endpoint, headers, and span attributes. MIRA temporarily sets the
+LangSmith callback activation values required by LangChain and restores the
+launching process's previous values on reload, disable, or shutdown. If the
+extra is missing, tracing is disabled for that runtime and Issues shows the
+install command.
 Exporter connection failures follow normal OpenTelemetry behavior and do not
 disable the agent runtime.
 

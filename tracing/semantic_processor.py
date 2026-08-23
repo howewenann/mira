@@ -1,4 +1,4 @@
-"""Enrich LangSmith-created OpenTelemetry spans with OpenInference semantics."""
+"""Enrich OpenTelemetry spans before generic OTLP export."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from openinference.semconv.trace import (
     SpanAttributes,
 )
 from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.util.types import AttributeValue
 
 _ROLE_BY_MESSAGE_TYPE = {
     "ai": "assistant",
@@ -43,16 +44,21 @@ _ROLE_BY_MESSAGE_TYPE = {
 
 
 class LangSmithOpenInferenceProcessor(SpanProcessor):
-    """Augment the readable LangSmith span before downstream export."""
+    """Add OpenInference semantics and configured attributes before export."""
+
+    def __init__(self, span_attributes: Mapping[str, AttributeValue] | None = None) -> None:
+        self._profile_attributes = dict(span_attributes or {})
 
     def on_end(self, span: Any) -> None:
         attributes = dict(span.attributes or {})
-        if "langsmith.span.kind" not in attributes:
+        if "langsmith.span.kind" in attributes:
+            kind = _span_kind(attributes)
+            enriched = _openinference_attributes(span.name, attributes, kind)
+            _remove_misleading_genai_attributes(attributes, kind)
+            attributes.update(enriched)
+        elif not self._profile_attributes:
             return
-        kind = _span_kind(attributes)
-        enriched = _openinference_attributes(span.name, attributes, kind)
-        _remove_misleading_genai_attributes(attributes, kind)
-        attributes.update(enriched)
+        attributes.update(self._profile_attributes)
 
         # OTel SDK 1.37+ freezes the live span's BoundedAttributes before
         # processor callbacks. OpenInference's own conversion processors use

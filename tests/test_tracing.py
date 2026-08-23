@@ -94,7 +94,8 @@ class _Processor:
 class _SemanticProcessor:
     instances: list["_SemanticProcessor"] = []
 
-    def __init__(self) -> None:
+    def __init__(self, span_attributes: dict[str, object]) -> None:
+        self.span_attributes = span_attributes
         self.instances.append(self)
 
 
@@ -187,8 +188,14 @@ def _registry(
     name: str = "phoenix",
     endpoint: str = "http://127.0.0.1:6006/v1/traces",
     headers: dict[str, str] | None = None,
+    span_attributes: dict[str, object] | None = None,
 ) -> TracingRegistry:
-    profile = TracingProfile(name, endpoint, dict(headers or {}))
+    profile = TracingProfile(
+        name,
+        endpoint,
+        dict(headers or {}),
+        dict(span_attributes or {}),
+    )
     return TracingRegistry({name: profile})
 
 
@@ -242,7 +249,14 @@ class TracingTests(unittest.TestCase):
             path = bootstrap_tracing_registry(workspace)
 
             self.assertEqual(path, tracing_path(workspace))
-            self.assertEqual(path.read_text(encoding="utf-8"), TRACING_REGISTRY_TEMPLATE)
+            bootstrapped = path.read_text(encoding="utf-8")
+            self.assertEqual(bootstrapped, TRACING_REGISTRY_TEMPLATE)
+            for field in ("endpoint", "headers", "span_attributes"):
+                self.assertIn(f"#   {field}:", bootstrapped)
+            self.assertEqual(
+                list(load_tracing_registry(workspace).profiles),
+                ["phoenix", "mlflow", "langsmith"],
+            )
             self.assertEqual(
                 yaml.safe_load(path.read_text(encoding="utf-8")),
                 {
@@ -250,6 +264,11 @@ class TracingTests(unittest.TestCase):
                         "phoenix": {
                             "endpoint": "http://127.0.0.1:6006/v1/traces",
                             "headers": {},
+                        },
+                        "mlflow": {
+                            "endpoint": "http://127.0.0.1:5000/v1/traces",
+                            "headers": {"x-mlflow-experiment-id": "0"},
+                            "span_attributes": {"mlflow.message.format": "langchain"},
                         },
                         "langsmith": {
                             "endpoint": "https://api.smith.langchain.com/otel/v1/traces",
@@ -301,6 +320,37 @@ class TracingTests(unittest.TestCase):
             self.assertEqual(
                 registry.profiles["corporate"].headers["Authorization"],
                 "Bearer ${CORP_OTEL_TOKEN}",
+            )
+            self.assertEqual(registry.profiles["corporate"].span_attributes, {})
+
+    def test_span_attributes_parse_with_otel_compatible_values(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            path = tracing_path(workspace)
+            path.parent.mkdir()
+            path.write_text(
+                "profiles:\n"
+                "  corporate:\n"
+                "    endpoint: https://otel.example/v1/traces\n"
+                "    headers: {}\n"
+                "    span_attributes:\n"
+                "      deployment.environment: test\n"
+                "      mira.retry_count: 2\n"
+                "      mira.sampled: true\n"
+                "      mira.ratios: [0.25, 0.5]\n",
+                encoding="utf-8",
+            )
+
+            profile = load_tracing_registry(workspace).profiles["corporate"]
+
+            self.assertEqual(
+                profile.span_attributes,
+                {
+                    "deployment.environment": "test",
+                    "mira.retry_count": 2,
+                    "mira.sampled": True,
+                    "mira.ratios": [0.25, 0.5],
+                },
             )
 
     def test_invalid_headers_are_a_friendly_nonfatal_issue(self) -> None:
@@ -393,12 +443,14 @@ class TracingTests(unittest.TestCase):
             middleware_spans="hidden",
             endpoint=profile.endpoint,
             headers=profile.headers,
+            span_attributes=profile.span_attributes,
         )
         self.assertIn("profile: corporate", persisted)
         self.assertIn("middleware_spans: hidden", persisted)
         self.assertNotIn("endpoint:", persisted)
         self.assertNotIn("headers:", persisted)
         self.assertIn("${TRACE_TOKEN}", preview)
+        self.assertIn("span_attributes: {}", preview)
         self.assertIn("middleware_spans: hidden", preview)
         self.assertNotIn("resolved-secret", preview)
 
@@ -412,6 +464,10 @@ class TracingTests(unittest.TestCase):
                         "Authorization": "Bearer ${TRACE_TOKEN}",
                         "tenant": "my team",
                     },
+                    {
+                        "deployment.environment": "${DEPLOYMENT_ENV}",
+                        "mira.retry_count": 2,
+                    },
                 ),
                 "unused": TracingProfile(
                     "unused",
@@ -420,7 +476,7 @@ class TracingTests(unittest.TestCase):
                 ),
             }
         )
-        environ = {"TRACE_TOKEN": "resolved-secret"}
+        environ = {"TRACE_TOKEN": "resolved-secret", "DEPLOYMENT_ENV": "staging"}
 
         with patch.object(bootstrap, "_load_runtime", return_value=_runtime()):
             issues = bootstrap.configure_tracing(
@@ -448,6 +504,10 @@ class TracingTests(unittest.TestCase):
         )
         self.assertEqual(_Langsmith.configure_calls, [{"client": client, "enabled": True}])
         self.assertIsInstance(provider.processors[0], _SemanticProcessor)
+        self.assertEqual(
+            provider.processors[0].span_attributes,
+            {"deployment.environment": "staging", "mira.retry_count": 2},
+        )
         self.assertIsInstance(provider.processors[1], _Processor)
         self.assertIs(provider.processors[1].exporter, _Exporter.instances[0])
         self.assertEqual(
@@ -607,6 +667,7 @@ class TracingTests(unittest.TestCase):
             if isinstance(node, ast.If)
         )
         self.assertNotIn("phoenix", branch_conditions)
+        self.assertNotIn("mlflow", branch_conditions)
         self.assertNotIn("langsmith", branch_conditions)
 
 
@@ -789,7 +850,12 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(_real_tracing_available(), "requires the mira[tracing] extra")
 class SemanticProcessorTests(unittest.TestCase):
-    def _finished_spans(self, definitions: list[tuple[str, dict[str, object]]]):
+    def _finished_spans(
+        self,
+        definitions: list[tuple[str, dict[str, object]]],
+        *,
+        span_attributes: dict[str, object] | None = None,
+    ):
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -797,7 +863,7 @@ class SemanticProcessorTests(unittest.TestCase):
 
         exporter = InMemorySpanExporter()
         provider = TracerProvider()
-        provider.add_span_processor(LangSmithOpenInferenceProcessor())
+        provider.add_span_processor(LangSmithOpenInferenceProcessor(span_attributes))
         provider.add_span_processor(SimpleSpanProcessor(exporter))
         tracer = provider.get_tracer("mira.semantic-tests")
         for name, attributes in definitions:
@@ -805,6 +871,34 @@ class SemanticProcessorTests(unittest.TestCase):
                 pass
         provider.shutdown()
         return list(exporter.get_finished_spans())
+
+    def test_profile_attributes_reach_every_span_without_discarding_semantics(self) -> None:
+        spans = self._finished_spans(
+            [
+                (
+                    "chain",
+                    {
+                        "langsmith.span.kind": "chain",
+                        "existing.attribute": "preserved",
+                    },
+                ),
+                ("plain-otel", {"plain.attribute": 7}),
+            ],
+            span_attributes={
+                "deployment.environment": "test",
+                "mira.sampled": True,
+                "mira.owners": ["runtime", "observability"],
+            },
+        )
+
+        by_name = {span.name: span.attributes for span in spans}
+        for attributes in by_name.values():
+            self.assertEqual(attributes["deployment.environment"], "test")
+            self.assertIs(attributes["mira.sampled"], True)
+            self.assertEqual(attributes["mira.owners"], ["runtime", "observability"])
+        self.assertEqual(by_name["chain"]["existing.attribute"], "preserved")
+        self.assertEqual(by_name["chain"]["openinference.span.kind"], "CHAIN")
+        self.assertEqual(by_name["plain-otel"]["plain.attribute"], 7)
 
     def test_span_kinds_input_output_and_tool_semantics(self) -> None:
         import json
