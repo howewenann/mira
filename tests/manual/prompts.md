@@ -1418,6 +1418,19 @@ criterion names.
 7. Configure a complete cross-provider rubric profile (provider, model, key, and
    any endpoint/parameters it needs), then repeat. Expected: no main-provider
    credential, endpoint, sampling value, or JSON kwarg leaks into the grader.
+8. In a disposable workspace, create `rubric_probe.txt` containing exactly
+   `MIRA_RUBRIC_PROBE_7F3A`, then run:
+
+   `/goal Diagnostic test. Do not modify, read, list, grep, or otherwise inspect rubric_probe.txt. Its state is intentionally acceptance-checker-only evidence. Create only rubric_done.txt containing exactly DONE. The no-inspection instruction is diagnostic mechanics and must not become a Success Criterion. Success Criteria must describe the required final state: rubric_done.txt exists and contains exactly DONE; rubric_probe.txt exists and contains exactly MIRA_RUBRIC_PROBE_7F3A.`
+
+   Expected: Success Criteria contain only the required final states for
+   `rubric_done.txt` and `rubric_probe.txt`; the no-inspection instruction is not
+   a criterion. Implementing creates only `rubric_done.txt`; the isolated Rubric
+   verifier may read the probe, and the final result is satisfied. Repeat with
+   probe content `WRONG`; expected: `needs_revision`. Also make the main-agent
+   transcript claim the probe is correct while its real content remains
+   `WRONG`; expected: the fresh verifier result wins and grading still returns
+   `needs_revision`. Verifier calls/results never appear in the main transcript.
 
 Observed 2026-08-04 against LM Studio in a disposable workspace:
 

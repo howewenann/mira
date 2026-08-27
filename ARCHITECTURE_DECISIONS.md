@@ -510,7 +510,9 @@ context. It receives the effective Objective, previous criteria, feedback, and
 optional research context during revision, never a previous Plan. There is no
 semantic grading call between preparation and finalization; a material
 Objective change during revision is permitted only when explicit feedback
-changes the desired outcome.
+changes the desired outcome. Criteria describe required final state rather than
+diagnostic mechanics or instructions controlling how execution gathers
+evidence, unless that execution behavior is itself part of the required result.
 
 The durable `GoalArtifact` stores id, title, objective, Success Criteria,
 status, snapshotted rubric policy and cap, latest overall rubric result,
@@ -566,6 +568,24 @@ terminal statuses are accepted directly. Starts and animation ticks are
 transient. Completed evaluations, including identity and duration, are durable
 rubric events, never tools. Rubric colors are centralized as `#C58FD6` for
 headers/borders and `#F1DCF5` for body text and are isolated to rubric UI.
+
+Each DeepAgents 0.7.9 per-grader call runs two separate static nested agents
+with the configured Rubric model. The verifier has only the effective Rubric
+tool surface and its normal HITL middleware, has no response format, and may
+naturally finish without calling a tool. The final grader has no verification
+tools and uses `ToolStrategy(GraderResponse)`. Both receive the stock bounded,
+sanitized DeepAgents grading payload; coverage correction is included only for
+the final grader. Only matched verifier `AIMessage` tool calls and their real
+`ToolMessage` results are copied into a private evidence channel for that final
+grader call. Verifier prose and all verifier messages remain outside the main
+agent state and transcript.
+
+DeepAgents continues to own grading iterations, frozen criteria, coverage
+retry, revision injection, caps, and terminal status. MIRA does not summarize,
+truncate, or separately budget verifier tool results. Consequently a very large
+tool result can exceed the final grader provider's context window; that failure
+is surfaced through the stock grader-error lifecycle rather than silently
+making verification evidence lossy.
 
 **Why:** Outcome-focused work should not force users to approve an approach.
 Keeping Goals criteria-only makes execution flexible while retaining the same

@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
 
-from agent.planning.criteria import SUCCESS_CRITERIA_SOURCE, SuccessCriteriaService
+from agent.planning.criteria import (
+    INITIAL_CRITERIA_PROMPT,
+    REVISION_CRITERIA_PROMPT,
+    SUCCESS_CRITERIA_SOURCE,
+    SuccessCriteriaService,
+)
 
 
 class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
@@ -86,3 +91,41 @@ class GoalCriteriaTests(unittest.IsolatedAsyncioTestCase):
         with patch("agent.planning.criteria.get_llm", return_value=model):
             with self.assertRaisesRegex(RuntimeError, "empty response"):
                 await SuccessCriteriaService({}).generate("Do work")
+
+    async def test_diagnostic_mechanics_are_excluded_from_required_final_state(self) -> None:
+        expected = (
+            "- rubric_done.txt exists and contains exactly DONE\n"
+            "- rubric_probe.txt exists and contains exactly MIRA_RUBRIC_PROBE_7F3A"
+        )
+        model = type("Model", (), {})()
+        model.ainvoke = AsyncMock(return_value=AIMessage(content=expected))
+        request = (
+            "Diagnostic test. Do not modify, read, list, grep, or otherwise inspect "
+            "rubric_probe.txt. Its state is intentionally acceptance-checker-only evidence. "
+            "Create only rubric_done.txt containing exactly DONE. The no-inspection "
+            "instruction is diagnostic mechanics and must not become a Success Criterion. "
+            "Success Criteria must describe the required final state: rubric_done.txt exists "
+            "and contains exactly DONE; rubric_probe.txt exists and contains exactly "
+            "MIRA_RUBRIC_PROBE_7F3A."
+        )
+        objective = (
+            "rubric_done.txt exists and contains exactly DONE; rubric_probe.txt exists and "
+            "contains exactly MIRA_RUBRIC_PROBE_7F3A."
+        )
+
+        with patch("agent.planning.criteria.get_llm", return_value=model):
+            result = await SuccessCriteriaService({}).generate(
+                objective,
+                authoritative_request=request,
+            )
+
+        self.assertEqual(result, expected)
+        system_prompt = model.ainvoke.await_args.args[0][0].content
+        self.assertIn("required final state, not diagnostic mechanics", system_prompt)
+        self.assertIn("acceptance-checker-only evidence gap", system_prompt)
+        self.assertNotIn("Do not inspect rubric_probe.txt", result)
+
+    def test_initial_and_revision_prompts_share_final_state_guidance(self) -> None:
+        for prompt in (INITIAL_CRITERIA_PROMPT, REVISION_CRITERIA_PROMPT):
+            self.assertIn("required final state, not diagnostic mechanics", prompt)
+            self.assertIn("control how the task is carried out", prompt)

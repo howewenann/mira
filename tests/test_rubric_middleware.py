@@ -1,17 +1,28 @@
-"""Focused tests for MIRA rubric tools and nested approvals."""
+"""Focused tests for MIRA's isolated Rubric verifier and final grader."""
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import tempfile
 import unittest
 import warnings
 from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
 
 from deepagents import create_deep_agent
+from deepagents.backends.filesystem import FilesystemBackend
+from deepagents.middleware import rubric as deepagents_rubric
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain.agents.structured_output import ToolStrategy
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -19,13 +30,26 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import Field
 
-from agent.middleware.rubric import MiraRubricMiddleware
+from agent.middleware.rubric import (
+    FINAL_GRADER_SYSTEM_PROMPT,
+    VERIFICATION_EVIDENCE_MESSAGE,
+    VERIFIER_SYSTEM_PROMPT,
+    MiraRubricMiddleware,
+)
+
+
+def tool_names(tools: Sequence[dict[str, Any] | type | Callable | BaseTool]) -> list[str]:
+    return [
+        str(getattr(candidate, "name", getattr(candidate, "__name__", "tool")))
+        for candidate in tools
+    ]
 
 
 class FixedFakeChatModel(GenericFakeChatModel):
-    """Deterministic model whose structured-output binding returns itself."""
+    """Deterministic model that records every provider-facing tool binding."""
 
     messages: Iterator[AIMessage | str] = Field(exclude=True)
+    bindings: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
 
     def bind_tools(
         self,
@@ -34,19 +58,29 @@ class FixedFakeChatModel(GenericFakeChatModel):
         tool_choice: str | None = None,
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, AIMessage]:
+        self.bindings.append({"tools": tool_names(tools), "tool_choice": tool_choice})
         return self
 
 
-def grader_response() -> AIMessage:
+def grader_message(
+    *,
+    result: str = "satisfied",
+    criteria: Sequence[dict[str, Any]] | None = None,
+    explanation: str = "current state verified",
+) -> AIMessage:
     return AIMessage(
         content="",
         tool_calls=[
             {
                 "name": "GraderResponse",
                 "args": {
-                    "result": "satisfied",
-                    "explanation": "current state verified",
-                    "criteria": [{"name": "state current", "passed": True}],
+                    "result": result,
+                    "explanation": explanation,
+                    "criteria": list(
+                        criteria
+                        if criteria is not None
+                        else [{"name": "state current", "passed": True}]
+                    ),
                 },
                 "id": "grader-response",
                 "type": "tool_call",
@@ -55,18 +89,99 @@ def grader_response() -> AIMessage:
     )
 
 
-class RubricMiddlewareTests(unittest.TestCase):
-    """Nested rubric HITL should behave like normal MIRA tool approval."""
+def graded_result(
+    *,
+    result: str = "satisfied",
+    criteria: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "structured_response": deepagents_rubric.GraderResponse(
+            result=result,
+            explanation="graded",
+            criteria=list(criteria or []),
+        )
+    }
 
-    def _agent(self, observed: list[str], *, require_approval: bool) -> Any:
+
+class ProbeGraderModel(FixedFakeChatModel):
+    """Read the real probe, then grade only the evidence passed to the grader."""
+
+    active_tools: list[str] = Field(default_factory=list, exclude=True)
+    grader_observations: list[str] = Field(default_factory=list, exclude=True)
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        self.active_tools = tool_names(tools)
+        self.bindings.append({"tools": list(self.active_tools), "tool_choice": tool_choice})
+        return self
+
+    def _generate(self, messages: list[Any], **kwargs: Any) -> ChatResult:  # noqa: ARG002
+        if self.active_tools == ["read_file"]:
+            results = [message for message in messages if isinstance(message, ToolMessage)]
+            if not results:
+                response = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/rubric_probe.txt"},
+                            "id": "probe-read",
+                            "type": "tool_call",
+                        }
+                    ],
+                )
+            else:
+                response = AIMessage(content="VERIFICATION_COMPLETE")
+        elif self.active_tools == ["GraderResponse"]:
+            observations = [
+                str(message.content)
+                for message in messages
+                if isinstance(message, ToolMessage)
+            ]
+            observed = "\n".join(observations)
+            self.grader_observations.append(observed)
+            satisfied = "MIRA_RUBRIC_PROBE_7F3A" in observed
+            probe_criterion: dict[str, Any] = {
+                "name": "rubric_probe.txt exists and contains exactly MIRA_RUBRIC_PROBE_7F3A",
+                "passed": satisfied,
+            }
+            if not satisfied:
+                probe_criterion["gap"] = "Current content is WRONG."
+            response = grader_message(
+                result="satisfied" if satisfied else "needs_revision",
+                explanation="Fresh probe evidence evaluated.",
+                criteria=[
+                    {
+                        "name": "rubric_done.txt exists and contains exactly DONE",
+                        "passed": True,
+                    },
+                    probe_criterion,
+                ],
+            )
+        else:
+            raise AssertionError(f"Unexpected tool surface: {self.active_tools!r}")
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
+class RubricMiddlewareTests(unittest.TestCase):
+    def _agent(
+        self,
+        observed: list[str],
+        *,
+        require_approval: bool,
+    ) -> tuple[Any, FixedFakeChatModel]:
         @tool
         def inspect_external(resource_id: str) -> str:
             """Inspect an external resource."""
             observed.append(resource_id)
             return "current"
 
-        main_model = FixedFakeChatModel(messages=iter([AIMessage(content="done")]))
-        grader_model = FixedFakeChatModel(
+        verifier_and_grader_model = FixedFakeChatModel(
             messages=iter(
                 [
                     AIMessage(
@@ -80,15 +195,18 @@ class RubricMiddlewareTests(unittest.TestCase):
                             }
                         ],
                     ),
-                    grader_response(),
+                    AIMessage(content="VERIFICATION_COMPLETE"),
+                    grader_message(),
                 ]
             )
         )
-        nested = (
+        nested_middleware = (
             [
                 HumanInTheLoopMiddleware(
                     interrupt_on={
-                        "inspect_external": {"allowed_decisions": ["approve", "edit", "reject"]}
+                        "inspect_external": {
+                            "allowed_decisions": ["approve", "edit", "reject"]
+                        }
                     }
                 )
             ]
@@ -96,34 +214,84 @@ class RubricMiddlewareTests(unittest.TestCase):
             else []
         )
         rubric = MiraRubricMiddleware(
-            model=grader_model,
+            model=verifier_and_grader_model,
             tools=[inspect_external],
-            grader_middleware=nested,
+            grader_middleware=nested_middleware,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            return create_deep_agent(
-                model=main_model,
+            agent = create_deep_agent(
+                model=FixedFakeChatModel(messages=iter([AIMessage(content="done")])),
                 middleware=[rubric],
                 checkpointer=InMemorySaver(),
             )
+        return agent, verifier_and_grader_model
 
-    def test_always_allow_tools_bypass_nested_approval(self) -> None:
+    def test_agents_are_separate_static_surfaces_with_one_resolved_model(self) -> None:
+        verification_tool = Mock(name="verification_tool")
+        hitl = Mock(name="hitl")
+        resolved_model = Mock(name="resolved_model")
+        verifier = Mock(name="verifier")
+        final_grader = Mock(name="final_grader")
+        middleware = MiraRubricMiddleware(
+            model="provider:model",
+            tools=[verification_tool],
+            grader_middleware=[hitl],
+        )
+
+        with (
+            patch("deepagents._models.resolve_model", return_value=resolved_model) as resolve,
+            patch(
+                "agent.middleware.rubric.create_agent",
+                side_effect=[verifier, final_grader],
+            ) as create,
+        ):
+            self.assertIs(middleware._ensure_verifier(), verifier)
+            self.assertIs(middleware._ensure_final_grader(), final_grader)
+            self.assertIs(middleware._ensure_verifier(), verifier)
+            self.assertIs(middleware._ensure_final_grader(), final_grader)
+
+        resolve.assert_called_once_with("provider:model")
+        self.assertEqual(create.call_count, 2)
+        verifier_kwargs = create.call_args_list[0].kwargs
+        self.assertIs(verifier_kwargs["model"], resolved_model)
+        self.assertEqual(verifier_kwargs["tools"], [verification_tool])
+        self.assertEqual(verifier_kwargs["middleware"], [hitl])
+        self.assertIsNone(verifier_kwargs["response_format"])
+        self.assertEqual(verifier_kwargs["system_prompt"], VERIFIER_SYSTEM_PROMPT)
+        final_kwargs = create.call_args_list[1].kwargs
+        self.assertIs(final_kwargs["model"], resolved_model)
+        self.assertEqual(final_kwargs["tools"], [])
+        self.assertNotIn("middleware", final_kwargs)
+        self.assertIsInstance(final_kwargs["response_format"], ToolStrategy)
+        self.assertIs(final_kwargs["response_format"].schema, deepagents_rubric.GraderResponse)
+        self.assertEqual(final_kwargs["system_prompt"], FINAL_GRADER_SYSTEM_PROMPT)
+
+    def test_real_agents_leave_verifier_tool_choice_unforced_and_outer_state_private(self) -> None:
         observed: list[str] = []
-        agent = self._agent(observed, require_approval=False)
-        config = {"configurable": {"thread_id": "rubric-direct"}}
+        agent, model = self._agent(observed, require_approval=False)
+        config = {"configurable": {"thread_id": "rubric-static-agents"}}
+
         result = agent.invoke(
             {"messages": [HumanMessage(content="finish")], "rubric": "state current"},
             config=config,
         )
 
-        self.assertNotIn("__interrupt__", result)
         self.assertEqual(observed, ["page-123"])
+        self.assertEqual([message.content for message in result["messages"]], ["finish", "done"])
+        self.assertEqual(
+            model.bindings,
+            [
+                {"tools": ["inspect_external"], "tool_choice": None},
+                {"tools": ["inspect_external"], "tool_choice": None},
+                {"tools": ["GraderResponse"], "tool_choice": "any"},
+            ],
+        )
         self.assertEqual(agent.get_state(config).values["_rubric_status"], "satisfied")
 
-    def test_approval_resumes_nested_grader_without_grader_error(self) -> None:
+    def test_verifier_uses_existing_hitl_and_resumes_without_grader_error(self) -> None:
         observed: list[str] = []
-        agent = self._agent(observed, require_approval=True)
+        agent, _model = self._agent(observed, require_approval=True)
         config = {"configurable": {"thread_id": "rubric-approve"}}
         first = agent.invoke(
             {"messages": [HumanMessage(content="finish")], "rubric": "state current"},
@@ -136,40 +304,344 @@ class RubricMiddlewareTests(unittest.TestCase):
             ["approve", "edit", "reject"],
         )
 
-        result = agent.invoke(
+        agent.invoke(
             Command(resume={interrupt.id: {"decisions": [{"type": "approve"}]}}),
             config=config,
         )
 
         self.assertEqual(observed, ["page-123"])
-        state = agent.get_state(config).values
-        self.assertEqual(state["_rubric_status"], "satisfied")
-        self.assertNotEqual(state["_rubric_evaluations"][-1]["result"], "grader_error")
+        self.assertEqual(agent.get_state(config).values["_rubric_status"], "satisfied")
 
-    def test_rejection_returns_to_grader_without_executing_tool(self) -> None:
-        observed: list[str] = []
-        agent = self._agent(observed, require_approval=True)
-        config = {"configurable": {"thread_id": "rubric-reject"}}
-        first = agent.invoke(
-            {"messages": [HumanMessage(content="finish")], "rubric": "state current"},
-            config=config,
-        )
-        interrupt = first["__interrupt__"][0]
-
-        result = agent.invoke(
-            Command(
-                resume={interrupt.id: {"decisions": [{"type": "reject", "message": "do not inspect"}]}},
-            ),
-            config=config,
-        )
-
-        self.assertEqual(observed, [])
-        state = agent.get_state(config).values
-        self.assertEqual(state["_rubric_status"], "satisfied")
-        self.assertNotEqual(state["_rubric_evaluations"][-1]["result"], "grader_error")
-
-    def test_graph_interrupt_is_not_converted_to_grader_error(self) -> None:
+    def test_graph_bubble_up_behavior_is_inherited_sync_and_async(self) -> None:
         middleware = MiraRubricMiddleware(model="fake-model")
         interrupt = GraphInterrupt(())
-        with self.assertRaises(GraphInterrupt):
-            middleware._handle_grader_exception(None, {}, "run", 0, interrupt)
+        state = {
+            "rubric": "state current",
+            "messages": [],
+            "_current_grading_run_id": "run",
+            "_rubric_iterations": 0,
+        }
+        runtime = SimpleNamespace(context=None, stream_writer=lambda _event: None)
+        with patch.object(middleware, "_grade", side_effect=interrupt), self.assertRaises(
+            GraphInterrupt
+        ):
+            middleware.after_agent(state, runtime)
+
+        async def invoke() -> None:
+            with patch.object(
+                middleware,
+                "_agrade",
+                new=AsyncMock(side_effect=interrupt),
+            ), self.assertRaises(GraphInterrupt):
+                await middleware.aafter_agent(state, runtime)
+
+        asyncio.run(invoke())
+
+    def test_only_per_call_seams_replace_the_stock_lifecycle(self) -> None:
+        parent = deepagents_rubric.RubricMiddleware
+        for name in (
+            "_grade",
+            "_agrade",
+            "_grader_input",
+            "_build_grader_payload",
+            "_extract_graded",
+            "after_agent",
+            "aafter_agent",
+            "_handle_grader_exception",
+        ):
+            self.assertIs(getattr(MiraRubricMiddleware, name), getattr(parent, name))
+        self.assertIsNot(MiraRubricMiddleware._invoke_grader, parent._invoke_grader)
+        self.assertIsNot(MiraRubricMiddleware._ainvoke_grader, parent._ainvoke_grader)
+
+        source = inspect.getsource(MiraRubricMiddleware)
+        for abandoned_name in (
+            "_GraderPhaseMiddleware",
+            "_rubric_verification_complete",
+            "jump_to",
+            "ProviderStrategy",
+            "task(",
+        ):
+            self.assertNotIn(abandoned_name, source)
+
+    def test_evidence_keeps_complete_tool_pairs_and_discards_all_verifier_prose(self) -> None:
+        large_result = "x" * 100_000
+        success = ToolMessage(
+            content=large_result,
+            tool_call_id="read-1",
+            name="read_file",
+        )
+        failure = ToolMessage(
+            content="permission denied",
+            tool_call_id="read-2",
+            name="read_file",
+            status="error",
+        )
+        result = {
+            "messages": [
+                HumanMessage(content="stock payload"),
+                AIMessage(content="private verifier reasoning"),
+                AIMessage(
+                    content="commentary to discard",
+                    tool_calls=[
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/one"},
+                            "id": "read-1",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/two"},
+                            "id": "read-2",
+                            "type": "tool_call",
+                        },
+                        {
+                            "name": "read_file",
+                            "args": {"file_path": "/unfinished"},
+                            "id": "read-3",
+                            "type": "tool_call",
+                        },
+                    ],
+                ),
+                success,
+                failure,
+                AIMessage(content="VERIFICATION_COMPLETE"),
+            ]
+        }
+
+        evidence = MiraRubricMiddleware._verification_evidence(result)
+
+        self.assertEqual([type(message) for message in evidence], [AIMessage, ToolMessage, ToolMessage])
+        tool_call_message = evidence[0]
+        self.assertEqual(tool_call_message.content, "")
+        self.assertEqual(
+            [(call["name"], call["args"], call["id"]) for call in tool_call_message.tool_calls],
+            [
+                ("read_file", {"file_path": "/one"}, "read-1"),
+                ("read_file", {"file_path": "/two"}, "read-2"),
+            ],
+        )
+        self.assertIs(evidence[1], success)
+        self.assertEqual(evidence[1].content, large_result)
+        self.assertIs(evidence[2], failure)
+        self.assertEqual(evidence[2].status, "error")
+        self.assertNotIn("VERIFICATION_COMPLETE", repr(evidence))
+        self.assertNotIn("reasoning", repr(evidence))
+
+    def test_sync_call_uses_stock_inputs_and_separate_evidence_channel(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        tool_call = AIMessage(
+            content="verifier prose",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"file_path": "/result"},
+                    "id": "read-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        tool_result = ToolMessage(content="RAW", tool_call_id="read-1", name="read_file")
+        verifier = Mock()
+        verifier.invoke.return_value = {
+            "messages": [HumanMessage(content="input"), tool_call, tool_result, AIMessage(content="VERIFICATION_COMPLETE")]
+        }
+        final_grader = Mock()
+        final_grader.invoke.return_value = graded_result(
+            criteria=[{"name": "criterion", "passed": True}]
+        )
+        state = {
+            "rubric": "criterion",
+            "_rubric_criteria": ["criterion"],
+            "messages": [HumanMessage(content="original"), AIMessage(content="done")],
+        }
+        correction = "A previous attempt returned only 0 of the 1 criteria in the rubric."
+        context = object()
+
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=verifier),
+            patch.object(middleware, "_ensure_final_grader", return_value=final_grader),
+            patch.object(middleware, "_extract_graded", wraps=middleware._extract_graded) as extract,
+            patch("deepagents.middleware.rubric.secrets.token_hex", return_value="fixed"),
+        ):
+            graded = middleware._invoke_grader(
+                state,
+                2,
+                correction,
+                context=context,
+            )
+
+        self.assertEqual(graded.result, "satisfied")
+        extract.assert_called_once_with(final_grader.invoke.return_value)
+        verifier_input = verifier.invoke.call_args.args[0]
+        verifier_payload = verifier_input["messages"][0].content
+        self.assertIn("<rubric-fixed>\ncriterion", verifier_payload)
+        self.assertIn("<criteria-fixed>\n1. criterion", verifier_payload)
+        self.assertIn("[user] original", verifier_payload)
+        self.assertIn("[assistant] done", verifier_payload)
+        self.assertNotIn(correction, verifier_payload)
+        final_input = final_grader.invoke.call_args.args[0]
+        self.assertIn(correction, final_input["messages"][0].content)
+        self.assertEqual(final_input["messages"][1].content, VERIFICATION_EVIDENCE_MESSAGE)
+        self.assertEqual(final_input["messages"][2].content, "")
+        self.assertEqual(final_input["messages"][2].tool_calls, tool_call.tool_calls)
+        self.assertIs(final_input["messages"][3], tool_result)
+        self.assertEqual(state["messages"], [HumanMessage(content="original"), AIMessage(content="done")])
+        verifier.invoke.assert_called_once()
+        final_grader.invoke.assert_called_once()
+        self.assertIs(verifier.invoke.call_args.kwargs["context"], context)
+        self.assertIs(final_grader.invoke.call_args.kwargs["context"], context)
+
+    def test_async_call_matches_sync_evidence_and_context_behavior(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "inspect",
+                    "args": {"key": "value"},
+                    "id": "inspect-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        result = ToolMessage(content="current", tool_call_id="inspect-1", status="error")
+        verifier = Mock()
+        verifier.ainvoke = AsyncMock(return_value={"messages": [call, result]})
+        grader = Mock()
+        grader.ainvoke = AsyncMock(
+            return_value=graded_result(criteria=[{"name": "criterion", "passed": True}])
+        )
+        context = object()
+
+        async def invoke() -> deepagents_rubric.GraderResponse:
+            with (
+                patch.object(middleware, "_ensure_verifier", return_value=verifier),
+                patch.object(middleware, "_ensure_final_grader", return_value=grader),
+            ):
+                return await middleware._ainvoke_grader(
+                    {"rubric": "criterion", "messages": []},
+                    0,
+                    context=context,
+                )
+
+        graded = asyncio.run(invoke())
+
+        self.assertEqual(graded.result, "satisfied")
+        grader_input = grader.ainvoke.await_args.args[0]
+        self.assertEqual(grader_input["messages"][-1].status, "error")
+        self.assertIs(verifier.ainvoke.await_args.kwargs["context"], context)
+        self.assertIs(grader.ainvoke.await_args.kwargs["context"], context)
+
+    def test_stock_coverage_retry_reruns_both_agents_and_corrects_only_final_grader(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = Mock()
+        verifier.invoke.side_effect = [
+            {"messages": [AIMessage(content="VERIFICATION_COMPLETE")]},
+            {"messages": [AIMessage(content="VERIFICATION_COMPLETE")]},
+        ]
+        final_grader = Mock()
+        final_grader.invoke.side_effect = [
+            graded_result(criteria=[]),
+            graded_result(criteria=[{"name": "criterion", "passed": True}]),
+        ]
+        state = {"rubric": "criterion", "messages": [], "_rubric_criteria": []}
+
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=verifier),
+            patch.object(middleware, "_ensure_final_grader", return_value=final_grader),
+        ):
+            graded = middleware._grade(state, 0)
+
+        self.assertEqual(graded.criteria[0]["name"], "criterion")
+        self.assertEqual(verifier.invoke.call_count, 2)
+        self.assertEqual(final_grader.invoke.call_count, 2)
+        correction = "A previous attempt returned no per-criterion verdicts at all."
+        self.assertNotIn(correction, verifier.invoke.call_args_list[1].args[0]["messages"][0].content)
+        self.assertIn(correction, final_grader.invoke.call_args_list[1].args[0]["messages"][0].content)
+
+    def test_stock_async_coverage_retry_reruns_both_agents(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = Mock()
+        verifier.ainvoke = AsyncMock(
+            side_effect=[
+                {"messages": [AIMessage(content="VERIFICATION_COMPLETE")]},
+                {"messages": [AIMessage(content="VERIFICATION_COMPLETE")]},
+            ]
+        )
+        grader = Mock()
+        grader.ainvoke = AsyncMock(
+            side_effect=[
+                graded_result(criteria=[]),
+                graded_result(criteria=[{"name": "criterion", "passed": True}]),
+            ]
+        )
+
+        async def invoke() -> deepagents_rubric.GraderResponse:
+            with (
+                patch.object(middleware, "_ensure_verifier", return_value=verifier),
+                patch.object(middleware, "_ensure_final_grader", return_value=grader),
+            ):
+                return await middleware._agrade(
+                    {"rubric": "criterion", "messages": [], "_rubric_criteria": []},
+                    0,
+                )
+
+        graded = asyncio.run(invoke())
+        self.assertEqual(graded.criteria[0]["name"], "criterion")
+        self.assertEqual(verifier.ainvoke.await_count, 2)
+        self.assertEqual(grader.ainvoke.await_count, 2)
+
+    def test_golden_probe_positive_wrong_and_false_transcript_conflict(self) -> None:
+        rubric = (
+            "- rubric_done.txt exists and contains exactly DONE\n"
+            "- rubric_probe.txt exists and contains exactly MIRA_RUBRIC_PROBE_7F3A"
+        )
+        cases = (
+            ("MIRA_RUBRIC_PROBE_7F3A", "No claim about the probe.", "satisfied"),
+            ("WRONG", "No claim about the probe.", "needs_revision"),
+            ("WRONG", "rubric_probe.txt contains MIRA_RUBRIC_PROBE_7F3A.", "needs_revision"),
+        )
+        for index, (probe_content, transcript_claim, expected) in enumerate(cases):
+            with self.subTest(probe_content=probe_content, claim=transcript_claim), tempfile.TemporaryDirectory() as root:
+                Path(root, "rubric_done.txt").write_text("DONE", encoding="utf-8")
+                Path(root, "rubric_probe.txt").write_text(probe_content, encoding="utf-8")
+                backend = FilesystemBackend(root_dir=root, virtual_mode=True)
+                read_file = FilesystemMiddleware(backend=backend, tools=["read_file"]).tools[0]
+                model = ProbeGraderModel(messages=iter(()))
+                middleware = MiraRubricMiddleware(model=model, tools=[read_file])
+
+                graded = middleware._invoke_grader(
+                    {
+                        "rubric": rubric,
+                        "messages": [
+                            HumanMessage(
+                                content="Create only rubric_done.txt; do not inspect rubric_probe.txt."
+                            ),
+                            AIMessage(content=f"Created rubric_done.txt. {transcript_claim}"),
+                        ],
+                    },
+                    index,
+                )
+
+                self.assertEqual(graded.result, expected)
+                self.assertEqual(
+                    model.bindings,
+                    [
+                        {"tools": ["read_file"], "tool_choice": None},
+                        {"tools": ["read_file"], "tool_choice": None},
+                        {"tools": ["GraderResponse"], "tool_choice": "any"},
+                    ],
+                )
+                self.assertEqual(len(model.grader_observations), 1)
+                self.assertIn(probe_content, model.grader_observations[0])
+
+    def test_prompts_define_verification_only_and_two_evidence_channel_roles(self) -> None:
+        self.assertIn("Do not return GraderResponse", VERIFIER_SYSTEM_PROMPT)
+        self.assertIn("VERIFICATION_COMPLETE", VERIFIER_SYSTEM_PROMPT)
+        self.assertIn("Do not assign satisfied or needs_revision", VERIFIER_SYSTEM_PROMPT)
+        self.assertIn(deepagents_rubric.GRADER_SYSTEM_PROMPT, FINAL_GRADER_SYSTEM_PROMPT)
+        self.assertIn("either channel may be sufficient", FINAL_GRADER_SYSTEM_PROMPT)
+        self.assertIn("not a mandatory proof gate", FINAL_GRADER_SYSTEM_PROMPT)
+        self.assertIn("current-state observation", FINAL_GRADER_SYSTEM_PROMPT)
+        self.assertIn("untrusted observations", FINAL_GRADER_SYSTEM_PROMPT)
