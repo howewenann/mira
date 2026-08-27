@@ -20,7 +20,7 @@ from unittest.mock import patch
 from agent import factory as mira_factory
 from agent.resources import build_resources
 from langchain.agents import create_agent
-from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, omit_payload
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
@@ -473,9 +473,55 @@ class MiddlewareSpanPolicyLifecycleTests(unittest.TestCase):
 
         traceable = langchain_factory.traceable
         attach_node = CompiledStateGraph.attach_node
+        resolved_transform = langchain_factory._resolved_transform
+        node_trace_policy = langchain_factory._node_trace_policy
+        with patch("tracing.middleware_spans.TRACE_MIDDLEWARE_INPUTS", False):
+            with middleware_span_policy("full"):
+                self.assertIs(langchain_factory.traceable, traceable)
+                self.assertIs(CompiledStateGraph.attach_node, attach_node)
+                self.assertIs(langchain_factory._resolved_transform, resolved_transform)
+                self.assertIs(langchain_factory._node_trace_policy, node_trace_policy)
+
+    def test_middleware_inputs_are_restored_by_default(self) -> None:
+        import langchain.agents.factory as langchain_factory
+        from deepagents.middleware.rubric import RubricMiddleware
+
+        upstream = RubricMiddleware.trace_policy
+        self.assertIs(upstream.process_inputs, omit_payload)
+        payload = {"messages": ["visible"]}
         with middleware_span_policy("full"):
-            self.assertIs(langchain_factory.traceable, traceable)
-            self.assertIs(CompiledStateGraph.attach_node, attach_node)
+            wrap_processor = langchain_factory._resolved_transform(upstream, "process_inputs")
+            node_policy = langchain_factory._node_trace_policy(upstream)
+        self.assertEqual(wrap_processor(payload), payload)
+        self.assertEqual(node_policy.process_inputs(payload), payload)
+
+    def test_disabling_input_toggle_preserves_upstream_omission(self) -> None:
+        import langchain.agents.factory as langchain_factory
+        from deepagents.middleware.rubric import RubricMiddleware
+
+        upstream = RubricMiddleware.trace_policy
+        self.assertIs(upstream.process_inputs, omit_payload)
+        payload = {"messages": ["hidden"]}
+        with patch("tracing.middleware_spans.TRACE_MIDDLEWARE_INPUTS", False):
+            with middleware_span_policy("full"):
+                wrap_processor = langchain_factory._resolved_transform(upstream, "process_inputs")
+                node_policy = langchain_factory._node_trace_policy(upstream)
+        self.assertEqual(wrap_processor(payload), {})
+        self.assertEqual(node_policy.process_inputs(payload), {})
+
+    def test_span_visibility_and_input_payload_policies_are_independent(self) -> None:
+        import langchain.agents.factory as langchain_factory
+        from deepagents.middleware.rubric import RubricMiddleware
+        from langgraph.graph.state import CompiledStateGraph
+
+        traceable = langchain_factory.traceable
+        attach_node = CompiledStateGraph.attach_node
+        upstream = RubricMiddleware.trace_policy
+        with middleware_span_policy("hidden"):
+            self.assertIsNot(langchain_factory.traceable, traceable)
+            self.assertIsNot(CompiledStateGraph.attach_node, attach_node)
+            processor = langchain_factory._resolved_transform(upstream, "process_inputs")
+        self.assertEqual(processor({"input": "visible"}), {"input": "visible"})
 
     def test_hidden_construction_scopes_are_serialized(self) -> None:
         first_entered = threading.Event()

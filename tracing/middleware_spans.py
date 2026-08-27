@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import Any, Literal
 
-from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, TracePolicy, omit_payload
 from langchain_core.runnables.config import RunnableConfig, ensure_config
 from langgraph._internal._runnable import (
     ASYNCIO_ACCEPTS_CONTEXT,
@@ -26,6 +26,11 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.pregel._read import PregelNode
 
 MiddlewareSpanMode = Literal["hidden", "full"]
+
+# DeepAgents 0.7.9 omits middleware hook inputs from traces. MIRA keeps those
+# inputs visible by default for developer diagnostics. Flip this internal
+# compatibility toggle to False to retain the upstream omission behavior.
+TRACE_MIDDLEWARE_INPUTS = True
 
 _HOOK_NAMES = ("before_agent", "before_model", "after_model", "after_agent")
 _CONSTRUCTION_LOCK = RLock()
@@ -86,6 +91,13 @@ def _identity_traceable(*args: Any, **kwargs: Any) -> Any:
     return decorate
 
 
+def _trace_policy_with_inputs(policy: TracePolicy | None) -> TracePolicy | None:
+    """Remove only DeepAgents' input-omission transform from a trace policy."""
+    if policy is None or policy.process_inputs is not omit_payload:
+        return policy
+    return TracePolicy(process_outputs=policy.process_outputs)
+
+
 def _middleware_hook(node_name: object, action: object) -> str | None:
     """Structurally identify a compiled AgentMiddleware before/after hook."""
     if not isinstance(node_name, str) or not isinstance(action, RunnableCallable):
@@ -140,27 +152,47 @@ def _replace_node_sequences(nodes: list[tuple[PregelNode, str]]) -> None:
 @contextmanager
 def middleware_span_policy(mode: MiddlewareSpanMode) -> Generator[None, None, None]:
     """Apply the selected AgentMiddleware tracing policy during graph construction."""
-    if mode == "full":
+    if mode not in {"hidden", "full"}:
+        raise ValueError(f"unsupported middleware span mode: {mode!r}")
+    if mode == "full" and not TRACE_MIDDLEWARE_INPUTS:
         yield
         return
-    if mode != "hidden":
-        raise ValueError(f"unsupported middleware span mode: {mode!r}")
 
     import langchain.agents.factory as langchain_factory
 
     with _CONSTRUCTION_LOCK:
         original_traceable = getattr(langchain_factory, "traceable", None)
         original_attach_node = getattr(CompiledStateGraph, "attach_node", None)
-        if not callable(original_traceable):
+        original_resolved_transform = getattr(langchain_factory, "_resolved_transform", None)
+        original_node_trace_policy = getattr(langchain_factory, "_node_trace_policy", None)
+        if mode == "hidden" and not callable(original_traceable):
             raise MiddlewareSpanCompatibilityError(
                 "MIRA tracing compatibility requires langchain.agents.factory.traceable"
             )
-        if not callable(original_attach_node):
+        if mode == "hidden" and not callable(original_attach_node):
             raise MiddlewareSpanCompatibilityError(
                 "MIRA tracing compatibility requires CompiledStateGraph.attach_node"
             )
+        if TRACE_MIDDLEWARE_INPUTS and not callable(original_resolved_transform):
+            raise MiddlewareSpanCompatibilityError(
+                "MIRA tracing compatibility requires langchain.agents.factory._resolved_transform"
+            )
+        if TRACE_MIDDLEWARE_INPUTS and not callable(original_node_trace_policy):
+            raise MiddlewareSpanCompatibilityError(
+                "MIRA tracing compatibility requires langchain.agents.factory._node_trace_policy"
+            )
 
         middleware_nodes: list[tuple[PregelNode, str]] = []
+
+        def preserve_input_transform(
+            policy: TracePolicy | None,
+            field: Literal["process_inputs", "process_outputs"],
+        ) -> Callable[[Any], Any]:
+            effective = _trace_policy_with_inputs(policy) if field == "process_inputs" else policy
+            return original_resolved_transform(effective, field)
+
+        def preserve_node_inputs(policy: TracePolicy | None) -> TracePolicy:
+            return original_node_trace_policy(_trace_policy_with_inputs(policy))
 
         def capture_attach_node(graph: CompiledStateGraph, key: str, node: Any) -> None:
             action = getattr(node, "runnable", None)
@@ -175,11 +207,20 @@ def middleware_span_policy(mode: MiddlewareSpanMode) -> Generator[None, None, No
                 )
             middleware_nodes.append((compiled_node, hook_name))
 
-        langchain_factory.traceable = _identity_traceable
-        CompiledStateGraph.attach_node = capture_attach_node
+        if TRACE_MIDDLEWARE_INPUTS:
+            langchain_factory._resolved_transform = preserve_input_transform
+            langchain_factory._node_trace_policy = preserve_node_inputs
+        if mode == "hidden":
+            langchain_factory.traceable = _identity_traceable
+            CompiledStateGraph.attach_node = capture_attach_node
         try:
             yield
-            _replace_node_sequences(middleware_nodes)
+            if mode == "hidden":
+                _replace_node_sequences(middleware_nodes)
         finally:
-            CompiledStateGraph.attach_node = original_attach_node
-            langchain_factory.traceable = original_traceable
+            if mode == "hidden":
+                CompiledStateGraph.attach_node = original_attach_node
+                langchain_factory.traceable = original_traceable
+            if TRACE_MIDDLEWARE_INPUTS:
+                langchain_factory._node_trace_policy = original_node_trace_policy
+                langchain_factory._resolved_transform = original_resolved_transform
