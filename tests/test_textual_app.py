@@ -868,7 +868,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             disabled_hover = handle.styles.color
 
-            self.assertEqual(enabled_hover, Color.parse("#e8fffb"))
+            self.assertEqual(enabled_hover, Color.parse("#7ce3dc"))
             self.assertEqual(disabled_hover, enabled_hover)
             self.assertEqual(handle.styles.opacity, 1.0)
 

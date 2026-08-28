@@ -382,7 +382,7 @@ MCPPanelScreen {
 }
 
 #prompt-resize-handle:hover {
-    color: #e8fffb;
+    color: #7ce3dc;
     opacity: 100%;
 }
 
