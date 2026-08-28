@@ -246,13 +246,17 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)
 
-    def test_transient_resume_flag_is_not_persisted(self) -> None:
-        record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
-        record["resume_context_pending"] = True
+    def test_transient_resume_flag_survives_save_without_being_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            record = store.new(session_id="thread-1", workspace=Path("workspace"))
+            record["resume_context_pending"] = True
 
-        normalized = context.normalize_session(record)
+            store.save(record)
+            restored = store.read(store.path("thread-1"))
 
-        self.assertNotIn("resume_context_pending", normalized)
+        self.assertTrue(record["resume_context_pending"])
+        self.assertNotIn("resume_context_pending", restored)
 
     def test_current_goal_survives_save_load_and_old_events_are_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1813,6 +1817,45 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/.mira/conversation_history/thread-1.md", first)
         self.assertIn("recent request", first)
         self.assertEqual(second, "another request")
+
+    async def test_resumed_tui_turn_keeps_context_through_initial_session_save(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            record = store.new(session_id="thread-1", workspace=Path("workspace"))
+            context.append_event(
+                record,
+                {"type": "user", "mode": "action", "text": "Write a story about Elara."},
+            )
+            context.append_event(
+                record,
+                {"type": "assistant", "mode": "action", "text": "Elara protected the archive."},
+            )
+            store.save(record)
+            context.mark_resume_context_pending(record, resumed=True)
+            requests: list[str] = []
+
+            async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
+                requests.append(str(kwargs["text"]))
+                return runner.TurnResult(final_text="We were writing Elara's story.")
+
+            agent = AgentWithState({})
+            with patch("ui.repl.run_turn", fake_run_turn):
+                await run_user_turn(
+                    agent=agent,
+                    plan_agent=agent,
+                    renderer=RunTurnRenderer(),
+                    store=store,
+                    session=record,
+                    mode={"planning": False},
+                    text="What were we talking about?",
+                )
+
+        self.assertEqual(len(requests), 1)
+        self.assertIn("Previous MIRA session context:", requests[0])
+        self.assertIn("Write a story about Elara.", requests[0])
+        self.assertIn("Elara protected the archive.", requests[0])
+        self.assertIn("Current user request:\nWhat were we talking about?", requests[0])
+        self.assertFalse(record.get("resume_context_pending"))
 
     def test_old_historical_plan_events_are_discarded(self) -> None:
         record = {

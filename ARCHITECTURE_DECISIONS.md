@@ -947,6 +947,8 @@ Starting a new chat is therefore non-destructive: MIRA creates another session
 record and makes it active instead of clearing the previous one.
 Session records require the current fields; missing or conflicting formal
 artifacts are rejected rather than repaired. Transient fields are not saved.
+The in-memory resume-context marker survives transcript saves until the first
+model invocation after reopening a session, but it is never written to JSON.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
 summarization defaults, then observes that middleware's `_count_tokens` result

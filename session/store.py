@@ -76,11 +76,14 @@ class SessionStore:
 
     def save(self, record: dict[str, Any]) -> None:
         """Update the timestamp and write the session JSON file."""
+        resume_context_pending = record.get("resume_context_pending") is True
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
         normalized = normalize_session(record)
         self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         record.clear()
         record.update(normalized)
+        if resume_context_pending:
+            record["resume_context_pending"] = True
 
     def read(self, path: Path) -> dict[str, Any]:
         """Read a session record from a JSON file."""
