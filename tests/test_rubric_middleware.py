@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import tempfile
 import unittest
 import warnings
@@ -18,7 +19,7 @@ from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.middleware import rubric as deepagents_rubric
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -69,23 +70,17 @@ def grader_message(
     explanation: str = "current state verified",
 ) -> AIMessage:
     return AIMessage(
-        content="",
-        tool_calls=[
+        content=json.dumps(
             {
-                "name": "GraderResponse",
-                "args": {
-                    "result": result,
-                    "explanation": explanation,
-                    "criteria": list(
-                        criteria
-                        if criteria is not None
-                        else [{"name": "state current", "passed": True}]
-                    ),
-                },
-                "id": "grader-response",
-                "type": "tool_call",
+                "result": result,
+                "explanation": explanation,
+                "criteria": list(
+                    criteria
+                    if criteria is not None
+                    else [{"name": "state current", "passed": True}]
+                ),
             }
-        ],
+        )
     )
 
 
@@ -108,6 +103,7 @@ class ProbeGraderModel(FixedFakeChatModel):
 
     active_tools: list[str] = Field(default_factory=list, exclude=True)
     grader_observations: list[str] = Field(default_factory=list, exclude=True)
+    provider_output: bool = Field(default=False, exclude=True)
 
     def bind_tools(
         self,
@@ -117,6 +113,7 @@ class ProbeGraderModel(FixedFakeChatModel):
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, AIMessage]:
         self.active_tools = tool_names(tools)
+        self.provider_output = "response_format" in kwargs
         self.bindings.append({"tools": list(self.active_tools), "tool_choice": tool_choice})
         return self
 
@@ -137,7 +134,7 @@ class ProbeGraderModel(FixedFakeChatModel):
                 )
             else:
                 response = AIMessage(content="VERIFICATION_COMPLETE")
-        elif self.active_tools == ["GraderResponse"]:
+        elif not self.active_tools and self.provider_output:
             observations = [
                 str(message.content)
                 for message in messages
@@ -173,6 +170,7 @@ class TranscriptStoryGraderModel(FixedFakeChatModel):
 
     active_tools: list[str] = Field(default_factory=list, exclude=True)
     final_payloads: list[str] = Field(default_factory=list, exclude=True)
+    provider_output: bool = Field(default=False, exclude=True)
 
     def bind_tools(
         self,
@@ -182,13 +180,14 @@ class TranscriptStoryGraderModel(FixedFakeChatModel):
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, AIMessage]:
         self.active_tools = tool_names(tools)
+        self.provider_output = "response_format" in kwargs
         self.bindings.append({"tools": list(self.active_tools), "tool_choice": tool_choice})
         return self
 
     def _generate(self, messages: list[Any], **kwargs: Any) -> ChatResult:  # noqa: ARG002
         if self.active_tools == ["inspect_reference"]:
             response = AIMessage(content="VERIFICATION_COMPLETE")
-        elif self.active_tools == ["GraderResponse"]:
+        elif not self.active_tools and self.provider_output:
             payload = "\n".join(
                 str(message.content)
                 for message in messages
@@ -313,7 +312,7 @@ class RubricMiddlewareTests(unittest.TestCase):
         self.assertIs(final_kwargs["model"], resolved_model)
         self.assertEqual(final_kwargs["tools"], [])
         self.assertNotIn("middleware", final_kwargs)
-        self.assertIsInstance(final_kwargs["response_format"], ToolStrategy)
+        self.assertIsInstance(final_kwargs["response_format"], ProviderStrategy)
         self.assertIs(final_kwargs["response_format"].schema, deepagents_rubric.GraderResponse)
         self.assertEqual(final_kwargs["system_prompt"], FINAL_GRADER_SYSTEM_PROMPT)
 
@@ -334,7 +333,7 @@ class RubricMiddlewareTests(unittest.TestCase):
             [
                 {"tools": ["inspect_external"], "tool_choice": None},
                 {"tools": ["inspect_external"], "tool_choice": None},
-                {"tools": ["GraderResponse"], "tool_choice": "any"},
+                {"tools": [], "tool_choice": None},
             ],
         )
         self.assertEqual(agent.get_state(config).values["_rubric_status"], "satisfied")
@@ -408,7 +407,6 @@ class RubricMiddlewareTests(unittest.TestCase):
             "_GraderPhaseMiddleware",
             "_rubric_verification_complete",
             "jump_to",
-            "ProviderStrategy",
             "task(",
         ):
             self.assertNotIn(abandoned_name, source)
@@ -643,7 +641,7 @@ class RubricMiddlewareTests(unittest.TestCase):
             model.bindings,
             [
                 {"tools": ["inspect_reference"], "tool_choice": None},
-                {"tools": ["GraderResponse"], "tool_choice": "any"},
+                {"tools": [], "tool_choice": None},
             ],
         )
         self.assertEqual(len(model.final_payloads), 1)
@@ -803,7 +801,7 @@ class RubricMiddlewareTests(unittest.TestCase):
                     [
                         {"tools": ["read_file"], "tool_choice": None},
                         {"tools": ["read_file"], "tool_choice": None},
-                        {"tools": ["GraderResponse"], "tool_choice": "any"},
+                        {"tools": [], "tool_choice": None},
                     ],
                 )
                 self.assertEqual(len(model.grader_observations), 1)

@@ -6,7 +6,7 @@ from typing import Any
 from deepagents.middleware import rubric as deepagents_rubric
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain.agents.structured_output import ToolStrategy
+from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 VERIFIER_SYSTEM_PROMPT = """You are an evidence collector for Rubric evaluation.
@@ -82,7 +82,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
                 system_prompt=self._system_prompt,
                 tools=[],
                 name=deepagents_rubric.RUBRIC_GRADER_MESSAGE_SOURCE,
-                response_format=ToolStrategy(deepagents_rubric.GraderResponse),
+                response_format=ProviderStrategy(deepagents_rubric.GraderResponse),
             )
         return self._grader
 

@@ -573,7 +573,7 @@ Each DeepAgents 0.7.9 per-grader call runs two separate static nested agents
 with the configured Rubric model. The verifier has only the effective Rubric
 tool surface and its normal HITL middleware, has no response format, and may
 naturally finish without calling a tool. The final grader has no verification
-tools and uses `ToolStrategy(GraderResponse)`. Both receive the stock bounded,
+tools and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
 sanitized DeepAgents transcript view. The verifier receives that material in a
 dedicated evidence-only payload with no grading or structured-response
 instructions. Only the final grader receives the stock DeepAgents grading
