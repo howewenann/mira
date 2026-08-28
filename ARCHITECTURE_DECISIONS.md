@@ -554,20 +554,33 @@ completes as `rubric-verified`, and `max_iterations_reached` remains resumable.
 Runtime, grader, or cancellation failures pause the Goal.
 
 **Streaming and persistence:** One custom-event dispatcher independently
-routes QuickJS Eval subagent events and DeepAgents rubric start/end events.
-Rubric passes are displayed one-based. While DeepAgents grades, the TUI shows an
-animated spinner plus grader identity and monotonic elapsed time; an interactive
-one-shot terminal refreshes its elapsed line once per second, while redirected
-output and traces record only start and completion. The completed event includes
-the grader identity, duration, summary, every native model-generated criterion
-name, passed/failed marks, failure gaps, and terminal verdict. MIRA does not
-rename criteria to match Goal Success Criteria or introduce a second grading
-call. MIRA reads completed checkpoint `_rubric_status` because the final
-streamed event can still say `needs_revision` when the cap was reached; newer
-terminal statuses are accepted directly. Starts and animation ticks are
-transient. Completed evaluations, including identity and duration, are durable
-rubric events, never tools. Rubric colors are centralized as `#C58FD6` for
-headers/borders and `#F1DCF5` for body text and are isolated to rubric UI.
+routes QuickJS Eval subagent events and DeepAgents Rubric events. Rubric passes
+are displayed one-based in one non-collapsible Rubric bubble. Stock evaluation
+start/end events bracket explicit verifier and grader phases. The isolated
+verifier is consumed through LangGraph's nested `messages` and `values` stream
+modes: tool-call chunks reuse MIRA's `ToolCallDrafts` partial-JSON projection,
+while a verifier-only tool middleware emits authoritative call starts and real
+results with their LangChain call IDs. These custom events are Rubric-scoped and
+never enter the root `ChatLog.tool_call*()` path.
+
+Compact verifier rows reuse the normal tool argument editor, state colors,
+spinner, elapsed/final duration vocabulary, draft promotion, ID correlation,
+and pending-result behavior without mounting bordered transcript ToolBubbles.
+The verifier phase itself keeps a live `Verifying · elapsed` row visible until
+it transitions to `Verifier · Complete` or `Failed`.
+Only their one-line output preview is width-truncated. Full arguments and raw
+outputs remain in verifier ToolMessages, the private final-grader evidence, and
+the completed Rubric evaluation. Starts, chunks, and animation ticks are
+transient; completed evaluations are durable Rubric events, never root tools.
+The final bubble retains `Verifier · Complete` or `Failed`, `Grader · Complete`
+or `Failed`, and the existing criteria, gaps, explanation, and verdict.
+
+MIRA reads completed checkpoint `_rubric_status` because the final streamed
+event can still say `needs_revision` when the cap was reached; newer terminal
+statuses are accepted directly. MIRA does not rename criteria to match Goal
+Success Criteria or introduce a second grading call. Rubric colors are
+centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
+isolated to Rubric UI.
 
 Each DeepAgents 0.7.9 per-grader call runs two separate static nested agents
 with the configured Rubric model. The verifier has only the effective Rubric
@@ -596,8 +609,9 @@ durability, review, recall, replacement, and evaluation guarantees as Plans.
 **Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
 `agent/middleware/`, `agent/default_resources/tools/prepare_goal.py`,
 `agent/default_resources/tools/finalize_goal.py`, `runtime/runner.py`,
-`session/goals.py`, `session/context.py`, `ui/app.py`, `ui/repl.py`, and
-`ui/widgets/chat_log.py`.
+`runtime/rubric_events.py`, `runtime/subagent_events.py`, `session/goals.py`,
+`session/context.py`, `ui/app.py`, `ui/repl.py`, `ui/widgets/chat_log.py`, and
+`ui/widgets/rubric_bubble.py`.
 
 **Update this when:** Goal construction, persistence, replacement, review,
 recall, migration, or execution completion rules change.

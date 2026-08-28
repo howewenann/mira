@@ -1401,14 +1401,26 @@ criterion names.
    repeat the Goal. Expected: the action agent remains Gemma, the progress block
    identifies `[profile] lmstudio:prism-ml/bonsai-27b`, and grading completes through the
    same DeepAgents middleware.
-3. Inspect the completed bubble. Expected: it replaces live activity with the
-   grader identity, duration, `N of N criteria satisfied`, every native
-   model-generated criterion name marked `✓` or `✗`, each failed criterion's
-   exact gap, and the final explanation/verdict. Names may differ from the Goal
-   Success Criteria because the grader authors them.
-4. Reload the session and inspect the trace. Expected: the same completed
-   identity, duration, criteria, gaps, and verdict reappear. No animation ticks
-   are saved; the trace contains only rubric start and completion records.
+3. Inspect the live and completed bubble. Expected: one non-collapsible
+   `Rubric review · pass N of M` bubble first shows `Verifier` with a live
+   `Verifying · MM:SS elapsed` spinner; each verifier
+   tool appears live as one borderless row with streamed arguments, Running,
+   one width-aware output/error preview line, and Completed/Failed duration.
+   Expanding its first line exposes the full read-only arguments. Repeated calls
+   to the same tool remain separate. A failed tool does not mark the verifier
+   failed. When verification ends, `Verifier · Complete` remains visible (or
+   `No tools called.` appears), then `Grader` shows `Evaluating evidence`.
+   Completion retains `Verifier · Complete`, `Grader · Complete`, `N of N
+   criteria satisfied`, every native model-generated criterion name marked `✓`
+   or `✗`, each failed criterion's exact gap, and the final explanation/verdict.
+   Names may differ from the Goal Success Criteria because the grader authors
+   them. Verifier tools never appear as separate root tool bubbles.
+4. Resize the terminal while a verifier result with a long or multiline output
+   is visible. Expected: the preview stays one visual line and adapts its
+   ellipsis to available width. Reload the session and inspect the trace.
+   Expected: complete verifier arguments/raw output and the same phase identity,
+   duration, criteria, gaps, and verdict reappear; preview truncation never
+   changes grader evidence or durable data. No animation ticks are saved.
 5. Redirect a one-shot rubric run to a file. Expected: one start block and one
    completion block with no per-second output. Repeat in an interactive terminal;
    the elapsed line updates in place.

@@ -19,7 +19,12 @@ from textual.geometry import Size
 from textual.widgets import Button, Static
 
 from runtime.output_events import normalize_response_delta
-from runtime.rubric_events import elapsed_ms, format_elapsed, rubric_result_text
+from runtime.rubric_events import (
+    elapsed_ms,
+    format_elapsed,
+    rubric_result_body_text,
+    rubric_result_text,
+)
 from runtime.correction_events import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
@@ -28,15 +33,10 @@ from ui.spinners import SPINNER_FRAMES
 from ui.terminal_colors import (
     RUBRIC_BODY_COLOR,
     RUBRIC_HEADER_COLOR,
-    TOOL_CANCELLED_COLOR,
-    TOOL_COMPLETED_COLOR,
-    TOOL_DURATION_COLOR,
-    TOOL_FAILED_COLOR,
-    TOOL_PREPARING_COLOR,
-    TOOL_RUNNING_COLOR,
 )
 from ui.splash import loading_splash_text, splash_text
-from ui.widgets.tool_bubble import ToolBubble
+from ui.widgets.rubric_bubble import RubricBubble
+from ui.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -73,7 +73,7 @@ class ChatLog(VerticalScroll):
         self._compaction_running = False
         self._plan_widgets: dict[str, PlanBubble] = {}
         self._goal_widgets: dict[str, GoalBubble] = {}
-        self._rubric_widgets: dict[tuple[str, int], Static] = {}
+        self._rubric_widgets: dict[tuple[str, int], RubricBubble] = {}
         self._rubric_evaluations: dict[tuple[str, int], dict[str, Any]] = {}
         self._rubric_activity: dict[tuple[str, int], dict[str, Any]] = {}
         self._fallback_suffixes = count(1)
@@ -990,20 +990,80 @@ class ChatLog(VerticalScroll):
         max_iterations: int,
         *,
         grader_model: str = "",
+        phase: str = "verifying",
     ) -> None:
-        """Show immediate rubric grading activity."""
+        """Show one immediate, stable Rubric review bubble."""
         self.finish_main()
         key = (run_id, pass_number)
-        self._rubric_activity[key] = {
-            "started_at": time.monotonic(),
-            "grader_model": grader_model,
-            "max_iterations": max_iterations,
-            "frame": 0,
-            "last_second": 0,
-        }
-        body = self._render_rubric_activity(key)
-        widget = self._add_block("rubric review", body, "message rubric")
+        self._rubric_activity.setdefault(
+            key,
+            {
+                "started_at": time.monotonic(),
+                "grader_model": grader_model,
+                "max_iterations": max_iterations,
+                "phase": phase,
+                "last_second": -1,
+            },
+        )
+        if key in self._rubric_widgets:
+            return
+        widget = RubricBubble(
+            run_id,
+            pass_number,
+            max_iterations,
+            grader_model=grader_model,
+        )
+        widget.border_title = escape("rubric review")
+        self.mount(widget)
         self._rubric_widgets[key] = widget
+        self._scroll_to_end()
+
+    def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
+        """Project one nested verifier/grader event inside its Rubric bubble."""
+        key = (
+            str(event.get("grading_run_id") or ""),
+            int(event.get("iteration") or 0) + 1,
+        )
+        widget = self._rubric_widgets.get(key)
+        if widget is None:
+            self.rubric_evaluation_started(key[0], key[1], 1)
+            widget = self._rubric_widgets[key]
+        event_type = str(event.get("type") or "")
+        if event_type == "rubric_verification_start":
+            widget.verifier_started()
+        elif event_type == "rubric_tool_call_delta":
+            widget.tool_delta(
+                str(event.get("tool_name") or "tool"),
+                event.get("tool_args", {}),
+                str(event.get("tool_call_id") or ""),
+            )
+        elif event_type == "rubric_tool_start":
+            widget.tool_call(
+                str(event.get("tool_name") or "tool"),
+                event.get("tool_args", {}),
+                str(event.get("tool_call_id") or ""),
+            )
+        elif event_type == "rubric_tool_end":
+            widget.tool_result(
+                str(event.get("tool_name") or "tool"),
+                str(event.get("output") or ""),
+                call_id=str(event.get("tool_call_id") or ""),
+                is_error=bool(event.get("is_error")),
+                duration_ms=event.get("duration_ms"),
+            )
+        elif event_type == "rubric_verification_end":
+            widget.verifier_finished(
+                succeeded=bool(event.get("succeeded")),
+                duration_ms=event.get("duration_ms"),
+            )
+        elif event_type == "rubric_grading_start":
+            widget.grader_started()
+        elif event_type == "rubric_grading_end":
+            widget.grader_finished(
+                succeeded=bool(event.get("succeeded")),
+                duration_ms=event.get("duration_ms"),
+            )
+        self._scroll_to_end()
 
     def tick_rubrics(self) -> None:
         """Advance live rubric spinners and elapsed clocks."""
@@ -1012,33 +1072,17 @@ class ChatLog(VerticalScroll):
             if elapsed == int(activity.get("last_second") or 0):
                 continue
             activity["last_second"] = elapsed
-            activity["frame"] = int(activity.get("frame") or 0) + 1
             widget = self._rubric_widgets.get(key)
             if widget is not None:
-                widget.update(self._render_rubric_activity(key))
+                widget.tick()
 
     def rubric_evaluations_cancelled(self) -> None:
         """Stop any rubric animations left active by an interrupted invocation."""
         for key in list(self._rubric_activity):
             widget = self._rubric_widgets.get(key)
             if widget is not None:
-                widget.update(Text("Review interrupted.", style=RUBRIC_BODY_COLOR))
+                widget.interrupt()
         self._rubric_activity.clear()
-
-    def _render_rubric_activity(self, key: tuple[str, int]) -> Text:
-        """Return the current in-place rubric progress block."""
-        activity = self._rubric_activity[key]
-        pass_number = key[1]
-        max_iterations = int(activity.get("max_iterations") or 1)
-        duration_ms = elapsed_ms(float(activity["started_at"]))
-        frame = SPINNER_FRAMES[int(activity.get("frame") or 0) % len(SPINNER_FRAMES)]
-        text = Text()
-        text.append(f"Rubric review · pass {pass_number} of {max_iterations}", style=f"bold {RUBRIC_HEADER_COLOR}")
-        grader_model = str(activity.get("grader_model") or "").strip()
-        if grader_model:
-            text.append(f"\n\nGrader: {grader_model}", style=RUBRIC_BODY_COLOR)
-        text.append(f"\n{frame} Reviewing · {format_elapsed(duration_ms)} elapsed", style=RUBRIC_BODY_COLOR)
-        return text
 
     def rubric_evaluation_finished(
         self,
@@ -1053,14 +1097,20 @@ class ChatLog(VerticalScroll):
         self._rubric_activity.pop(key, None)
         self._rubric_evaluations[key] = dict(evaluation)
         widget = self._rubric_widgets.get(key)
-        body = self._render_rubric(evaluation, max_iterations)
+        body = self._render_rubric(evaluation, max_iterations, include_heading=False)
         if widget is None:
-            widget = self._add_block("rubric review", body, "message rubric", created_at=created_at)
+            widget = RubricBubble(
+                key[0],
+                pass_number,
+                max_iterations,
+                grader_model=str(evaluation.get("grader_model") or ""),
+            )
+            widget.border_title = escape("rubric review")
+            self.mount(widget)
             self._rubric_widgets[key] = widget
-            return
         if timestamp := timestamp_text(created_at):
             widget.border_subtitle = escape(timestamp)
-        widget.update(body)
+        widget.finish(evaluation, body)
         self._scroll_to_end()
 
     def rubric_evaluation_status(
@@ -1078,12 +1128,25 @@ class ChatLog(VerticalScroll):
         evaluation["result"] = status
         widget = self._rubric_widgets.get(key)
         if widget is not None:
-            widget.update(self._render_rubric(evaluation, max_iterations))
+            widget.finish(
+                evaluation,
+                self._render_rubric(evaluation, max_iterations, include_heading=False),
+            )
             self._scroll_to_end()
 
-    def _render_rubric(self, evaluation: dict[str, Any], max_iterations: int) -> Text:
+    def _render_rubric(
+        self,
+        evaluation: dict[str, Any],
+        max_iterations: int,
+        *,
+        include_heading: bool = True,
+    ) -> Text:
         text = Text()
-        lines = rubric_result_text(evaluation, max_iterations).splitlines()
+        lines = (
+            rubric_result_text(evaluation, max_iterations).splitlines()
+            if include_heading
+            else rubric_result_body_text(evaluation).splitlines()
+        )
         for index, line in enumerate(lines):
             if index:
                 text.append("\n")
@@ -1093,7 +1156,7 @@ class ChatLog(VerticalScroll):
             elif line.startswith("✗ "):
                 text.append("✗ ", style="bold red")
                 text.append(line[2:], style=RUBRIC_BODY_COLOR)
-            elif index == 0:
+            elif index == 0 and include_heading:
                 text.append(line, style=f"bold {RUBRIC_HEADER_COLOR}")
             else:
                 text.append(line, style=RUBRIC_BODY_COLOR)
@@ -1674,31 +1737,15 @@ class ChatLog(VerticalScroll):
             else:
                 output.append("\noutput:\n", style="bold cyan")
                 output.append(self.truncate_multiline(block["result"]), style="dim")
-        status = Text()
-        duration_ms = block.get("duration_ms")
-        if duration_ms is not None:
-            terminal_status = str(block.get("terminal_status") or "")
-            if terminal_status == "cancelled":
-                verb = "Cancelled after"
-                verb_color = TOOL_CANCELLED_COLOR
-            elif terminal_status == "interrupted":
-                verb = "Interrupted after"
-                verb_color = TOOL_FAILED_COLOR
-            else:
-                verb = "Failed after" if block.get("is_error") else "Completed in"
-                verb_color = TOOL_FAILED_COLOR if block.get("is_error") else TOOL_COMPLETED_COLOR
-            status.append(verb, style=verb_color)
-            status.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
-        elif block.get("started_at") is not None:
-            state = "Preparing" if block.get("draft") else "Running"
-            frame = SPINNER_FRAMES[int(block.get("frame") or 0) % len(SPINNER_FRAMES)]
-            state_color = TOOL_PREPARING_COLOR if block.get("draft") else TOOL_RUNNING_COLOR
-            status.append(f"{frame} ", style=TOOL_DURATION_COLOR)
-            status.append(state, style=state_color)
-            status.append(
-                f" · {format_elapsed(elapsed_ms(block['started_at']))} elapsed",
-                style=TOOL_DURATION_COLOR,
-            )
+        status = tool_lifecycle_status(
+            draft=bool(block.get("draft")),
+            started_at=block.get("started_at"),
+            duration_ms=block.get("duration_ms"),
+            is_error=bool(block.get("is_error")),
+            terminal_status=str(block.get("terminal_status") or ""),
+            frame=int(block.get("frame") or 0),
+            clock=time.monotonic,
+        )
         widget: ToolBubble = block["widget"]
         widget.update_call(block["name"], block["args"], draft=bool(block.get("draft")))
         widget.update_details(output, status)

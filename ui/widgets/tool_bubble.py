@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from typing import Any
 
 from rich.markup import escape
@@ -14,6 +15,17 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.events import Click
 from textual.widgets import Collapsible, Static, TextArea
+
+from runtime.rubric_events import elapsed_ms, format_elapsed
+from ui.spinners import SPINNER_FRAMES
+from ui.terminal_colors import (
+    TOOL_CANCELLED_COLOR,
+    TOOL_COMPLETED_COLOR,
+    TOOL_DURATION_COLOR,
+    TOOL_FAILED_COLOR,
+    TOOL_PREPARING_COLOR,
+    TOOL_RUNNING_COLOR,
+)
 
 
 TOOL_ARGS_PREVIEW_CHARS = 112
@@ -32,6 +44,43 @@ def compact_tool_args(args: Any, limit: int = TOOL_ARGS_PREVIEW_CHARS) -> str:
 def pretty_tool_args(args: Any) -> str:
     """Return readable complete arguments, preserving incomplete streamed JSON."""
     return _json_text(args, indent=2)
+
+
+def tool_lifecycle_status(
+    *,
+    draft: bool,
+    started_at: float | None,
+    duration_ms: int | float | None,
+    is_error: bool,
+    terminal_status: str = "",
+    frame: int = 0,
+    clock: Any = time.monotonic,
+) -> Text:
+    """Render the shared MIRA tool status vocabulary for any tool container."""
+    status = Text()
+    if duration_ms is not None:
+        if terminal_status == "cancelled":
+            verb = "Cancelled after"
+            verb_color = TOOL_CANCELLED_COLOR
+        elif terminal_status == "interrupted":
+            verb = "Interrupted after"
+            verb_color = TOOL_FAILED_COLOR
+        else:
+            verb = "Failed after" if is_error else "Completed in"
+            verb_color = TOOL_FAILED_COLOR if is_error else TOOL_COMPLETED_COLOR
+        status.append(verb, style=verb_color)
+        status.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
+    elif started_at is not None:
+        state = "Preparing" if draft else "Running"
+        state_color = TOOL_PREPARING_COLOR if draft else TOOL_RUNNING_COLOR
+        spinner = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
+        status.append(f"{spinner} ", style=TOOL_DURATION_COLOR)
+        status.append(state, style=state_color)
+        status.append(
+            f" · {format_elapsed(elapsed_ms(started_at, clock=clock))} elapsed",
+            style=TOOL_DURATION_COLOR,
+        )
+    return status
 
 
 def _json_text(value: Any, *, indent: int | None) -> str:

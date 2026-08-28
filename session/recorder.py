@@ -1010,6 +1010,7 @@ class RecordingRenderer:
         max_iterations: int,
         *,
         grader_model: str = "",
+        phase: str = "verifying",
     ) -> None:
         """Forward transient rubric activity without persisting a start event."""
         self.recorder.finish_main()
@@ -1021,7 +1022,14 @@ class RecordingRenderer:
                 pass_number,
                 max_iterations,
                 grader_model=grader_model,
+                phase=phase,
             )
+
+    def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
+        """Forward transient nested Rubric activity without root tool events."""
+        callback = getattr(self.renderer, "rubric_lifecycle_event", None)
+        if callable(callback):
+            callback(event)
 
     def correction(self, value: dict[str, Any]) -> None:
         """Persist and render one correction bubble in transcript order."""

@@ -6,26 +6,40 @@ import asyncio
 from contextlib import suppress
 from typing import Any
 
+from agent.internal_graphs import INTERNAL_RUBRIC_GRAPHS
 from runtime.output_events import message_text, visible_message_text
+from runtime.rubric_events import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer
 from runtime.tool_events import tool_output_text
 
 DYNAMIC_TOOL_SUBAGENT = "dynamic_tool_subagent"
 EVAL_SUBAGENT = "eval_subagent"
 
 
-async def consume_subagents(subagents: Any, renderer: Any) -> None:
+async def consume_subagents(
+    subagents: Any,
+    renderer: Any,
+    rubric: RubricEventRenderer | None = None,
+) -> None:
     """Consume subagent streams while the status animation is active."""
-    if hasattr(renderer, "start_subagent_live"):
-        renderer.start_subagent_live()
     animation = None
-    if not getattr(renderer, "manages_subagent_animation", False):
-        animation = asyncio.create_task(animate_subagents(renderer))
     tasks: list[asyncio.Task[None]] = []
     cancelled = False
+    visible_started = False
 
     try:
         async for subagent in subagents:
-            task = asyncio.create_task(consume_subagent(subagent, renderer))
+            if internal_rubric_subgraph(subagent):
+                task = asyncio.create_task(
+                    drain_internal_rubric_subgraph(subagent, rubric)
+                )
+            else:
+                if not visible_started:
+                    visible_started = True
+                    if hasattr(renderer, "start_subagent_live"):
+                        renderer.start_subagent_live()
+                    if not getattr(renderer, "manages_subagent_animation", False):
+                        animation = asyncio.create_task(animate_subagents(renderer))
+                task = asyncio.create_task(consume_subagent(subagent, renderer))
             tasks.append(task)
             await asyncio.sleep(0)
 
@@ -34,20 +48,54 @@ async def consume_subagents(subagents: Any, renderer: Any) -> None:
     except asyncio.CancelledError:
         cancelled = True
         await cancel_subagent_tasks(tasks)
-        call_renderer(renderer, "subagents_cancelled")
+        if visible_started:
+            call_renderer(renderer, "subagents_cancelled")
         raise
     except Exception:
         cancelled = True
         await cancel_subagent_tasks(tasks)
-        call_renderer(renderer, "subagents_cancelled")
+        if visible_started:
+            call_renderer(renderer, "subagents_cancelled")
         raise
     finally:
         if animation is not None:
             animation.cancel()
             with suppress(asyncio.CancelledError):
                 await animation
-        if not cancelled and hasattr(renderer, "stop_subagent_live"):
+        if visible_started and not cancelled and hasattr(renderer, "stop_subagent_live"):
             renderer.stop_subagent_live()
+
+
+def internal_rubric_subgraph(subagent: Any) -> bool:
+    """Identify verifier/grader implementation graphs from LangGraph metadata."""
+    graph_name = getattr(subagent, "graph_name", None)
+    if isinstance(graph_name, str) and graph_name in INTERNAL_RUBRIC_GRAPHS:
+        return True
+    path = getattr(subagent, "path", ())
+    return isinstance(path, (list, tuple)) and any(
+        str(part).split(":", 1)[0] in INTERNAL_RUBRIC_GRAPHS for part in path
+    )
+
+
+async def drain_internal_rubric_subgraph(
+    subagent: Any,
+    rubric: RubricEventRenderer | None,
+) -> None:
+    """Consume an internal Rubric graph without projecting root transcript UI."""
+
+    async def drain_custom() -> None:
+        custom = getattr(subagent, "custom", None)
+        if custom is None:
+            return
+        async for event in custom:
+            if (
+                rubric is not None
+                and isinstance(event, dict)
+                and event.get("type") in {RUBRIC_TOOL_START, RUBRIC_TOOL_END}
+            ):
+                rubric.handle(event)
+
+    await asyncio.gather(drain_custom(), subagent_result(subagent))
 
 
 async def cancel_subagent_tasks(tasks: list[asyncio.Task[None]]) -> None:

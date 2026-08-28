@@ -2603,6 +2603,7 @@ class MiraApp(App[None]):
         max_iterations: int,
         *,
         grader_model: str = "",
+        phase: str = "verifying",
     ) -> None:
         """Show live rubric activity in the TUI and trace sidecar."""
         self._finish_main_stream_activity()
@@ -2618,7 +2619,12 @@ class MiraApp(App[None]):
             pass_number,
             max_iterations,
             grader_model=grader_model,
+            phase=phase,
         )
+
+    def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
+        """Keep nested verifier activity inside the active Rubric bubble."""
+        self.query_one(ChatLog).rubric_lifecycle_event(event)
 
     def rubric_evaluation_finished(
         self,

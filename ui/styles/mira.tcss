@@ -790,8 +790,59 @@ Button.plan-action:focus {
 }
 
 .message.rubric {
+    height: auto;
     border: solid #C58FD6;
     color: #F1DCF5;
+}
+
+.rubric-header,
+.rubric-phase-heading,
+.rubric-result,
+.rubric-no-tools,
+.rubric-verifier-status,
+.rubric-grader-status,
+.rubric-tool-rows,
+.rubric-tool-row {
+    width: 1fr;
+    height: auto;
+    padding: 0;
+    margin: 0;
+    background: transparent;
+}
+
+.rubric-phase-heading {
+    margin-top: 1;
+}
+
+.rubric-tool-row {
+    border: none;
+}
+
+.rubric-tool-args > CollapsibleTitle {
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.rubric-tool-output,
+.rubric-tool-status,
+.rubric-verifier-status,
+.rubric-grader-status {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+    margin: 0;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.rubric-tool-output {
+    color: #B8C1C7;
+}
+
+.rubric-tool-status,
+.rubric-verifier-status,
+.rubric-grader-status {
+    color: #98A5AC;
 }
 
 .goal-body {

@@ -515,7 +515,7 @@ async def run_turn(
                     invocation_metadata=message_metadata,
                 ),
                 consume_tool_calls(stream.tool_calls, event_renderer, result),
-                consume_subagents(stream.subagents, event_renderer),
+                consume_subagents(stream.subagents, event_renderer, rubric_renderer),
                 capture_output(stream.output(), output),
             )
         except BaseException:

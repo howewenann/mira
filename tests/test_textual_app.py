@@ -73,6 +73,7 @@ from config.settings import (
 )
 from config.version import display_version
 from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
+from runtime.rubric_events import RubricEventRenderer
 from runtime.tool_events import CONTROL_TOOLS
 from runtime.trace_stream import TraceStream
 from session.goals import current_goal, goal_artifact
@@ -108,6 +109,7 @@ from ui.widgets.subagent_panel import (
     truncate_cells,
 )
 from ui.widgets.session_history import session_label
+from ui.widgets.rubric_bubble import RubricBubble, RubricToolRow
 from ui.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
 
@@ -2039,8 +2041,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(len(chat.children), initial_children + 1)
             activity_text = renderable_plain(chat.children[-1])
-            self.assertIn("Grader: lmstudio:bonsai", activity_text)
-            self.assertIn("Reviewing", activity_text)
+            self.assertIn("Model: lmstudio:bonsai", activity_text)
+            self.assertIn("Verifier", activity_text)
             app.rubric_evaluation_finished(
                 {
                     "grading_run_id": "grade-1",
@@ -2146,7 +2148,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+            with (
+                patch("ui.widgets.chat_log.time.monotonic", return_value=10.0),
+                patch("ui.widgets.rubric_bubble.time.monotonic", return_value=10.0),
+            ):
                 app.rubric_evaluation_started(
                     "grade-clock",
                     1,
@@ -2155,15 +2160,197 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
             await pilot.pause()
 
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=72.0):
+            initial = renderable_plain(chat.children[-1])
+            self.assertIn("Verifying ·", initial)
+            self.assertIn("elapsed", initial)
+
+            with (
+                patch("ui.widgets.chat_log.time.monotonic", return_value=72.0),
+                patch("ui.widgets.rubric_bubble.time.monotonic", return_value=72.0),
+            ):
                 chat.tick_rubrics()
             progress = renderable_plain(chat.children[-1])
-            self.assertIn("01:02 elapsed", progress)
+            self.assertIn("Verifying · 01:02 elapsed", progress)
 
             app.rubric_evaluations_cancelled()
             await pilot.pause()
             self.assertIn("Review interrupted.", renderable_plain(chat.children[-1]))
             self.assertEqual(chat._rubric_activity, {})
+
+    async def test_rubric_verifier_tools_stream_promote_and_finish_in_one_bubble(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(110, 38)) as pilot:
+            await pilot.pause()
+            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai")
+            identity = {"grading_run_id": "grade-tools", "iteration": 0}
+            projection.handle({"type": "rubric_evaluation_start", **identity})
+            projection.handle({"type": "rubric_verification_start", **identity})
+            projection.handle(
+                {
+                    "type": "rubric_tool_call_delta",
+                    **identity,
+                    "chunk": {
+                        "type": "tool_call_chunk",
+                        "index": 0,
+                        "name": "read_file",
+                        "args": '{"file_path": "/fo',
+                    },
+                }
+            )
+            await pilot.pause()
+
+            bubble = app.query_one(RubricBubble)
+            rows = list(bubble.query(RubricToolRow))
+            self.assertEqual(len(rows), 1)
+            draft_row = rows[0]
+            self.assertIn("draft:", renderable_plain(draft_row))
+
+            projection.handle(
+                {
+                    "type": "rubric_tool_call_delta",
+                    **identity,
+                    "chunk": {
+                        "type": "tool_call_chunk",
+                        "index": 0,
+                        "id": "read-1",
+                        "args": 'o"}',
+                    },
+                }
+            )
+            projection.handle(
+                {
+                    "type": "rubric_tool_start",
+                    **identity,
+                    "tool_call_id": "read-1",
+                    "tool_name": "read_file",
+                    "tool_args": {"file_path": "/foo"},
+                }
+            )
+            await pilot.pause()
+            rows = list(bubble.query(RubricToolRow))
+            self.assertEqual(rows, [draft_row])
+            self.assertIn('call: {"file_path": "/foo"}', renderable_plain(draft_row))
+            self.assertIn("Running", renderable_plain(draft_row))
+
+            raw_output = "first line\n" + "result " * 300
+            projection.handle(
+                {
+                    "type": "rubric_tool_end",
+                    **identity,
+                    "tool_call_id": "read-1",
+                    "tool_name": "read_file",
+                    "output": raw_output,
+                    "is_error": False,
+                    "duration_ms": 1_200,
+                }
+            )
+            projection.handle(
+                {
+                    "type": "rubric_tool_start",
+                    **identity,
+                    "tool_call_id": "read-2",
+                    "tool_name": "read_file",
+                    "tool_args": {"file_path": "/missing"},
+                }
+            )
+            projection.handle(
+                {
+                    "type": "rubric_tool_end",
+                    **identity,
+                    "tool_call_id": "read-2",
+                    "tool_name": "read_file",
+                    "output": "File not found",
+                    "is_error": True,
+                    "duration_ms": 10,
+                }
+            )
+            projection.handle({"type": "rubric_verification_end", **identity, "succeeded": True})
+            projection.handle({"type": "rubric_grading_start", **identity})
+            await pilot.pause()
+
+            rows = list(bubble.query(RubricToolRow))
+            self.assertEqual(len(rows), 2)
+            self.assertIn("Completed in 00:01", renderable_plain(rows[0]))
+            self.assertIn("File not found", renderable_plain(rows[1]))
+            self.assertIn("Failed after 00:00", renderable_plain(rows[1]))
+            live = renderable_plain(bubble)
+            self.assertIn("Verifier · Complete", live)
+            self.assertIn("Grader", live)
+            self.assertIn("Evaluating evidence", live)
+            self.assertEqual(len(list(app.query(ToolBubble))), 0)
+
+            wide_preview = rows[0].output.render().plain
+            await pilot.resize_terminal(58, 30)
+            await pilot.pause()
+            narrow_preview = rows[0].output.render().plain
+            self.assertLess(len(narrow_preview), len(wide_preview))
+            self.assertTrue(narrow_preview.endswith("…"))
+            self.assertEqual(rows[0].output.raw_output, raw_output)
+
+            projection.handle({"type": "rubric_grading_end", **identity, "succeeded": True})
+            projection.handle(
+                {
+                    "type": "rubric_evaluation_end",
+                    **identity,
+                    "result": "satisfied",
+                    "explanation": "Current state verified.",
+                    "criteria": [{"name": "Current", "passed": True, "gap": ""}],
+                }
+            )
+            await pilot.pause()
+
+            completed = renderable_plain(bubble)
+            self.assertIn("Rubric review · pass 1 of 3", completed)
+            self.assertIn("Verifier · Complete", completed)
+            self.assertIn("Grader · Complete", completed)
+            self.assertIn("1 of 1 criteria satisfied", completed)
+            self.assertIn("✓ Current", completed)
+            self.assertIn("Satisfied: Current state verified.", completed)
+            self.assertEqual(projection.evaluations[0]["verifier_tools"][0]["output"], raw_output)
+
+    async def test_rubric_zero_tools_and_verifier_failure_have_distinct_lifecycles(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            projection = RubricEventRenderer(app, 2)
+            zero = {"grading_run_id": "grade-zero", "iteration": 0}
+            for event in (
+                {"type": "rubric_evaluation_start", **zero},
+                {"type": "rubric_verification_start", **zero},
+                {"type": "rubric_verification_end", **zero, "succeeded": True},
+                {"type": "rubric_grading_start", **zero},
+                {"type": "rubric_grading_end", **zero, "succeeded": True},
+                {
+                    "type": "rubric_evaluation_end",
+                    **zero,
+                    "result": "satisfied",
+                    "explanation": "Transcript evidence was enough.",
+                    "criteria": [{"name": "Story", "passed": True, "gap": ""}],
+                },
+            ):
+                projection.handle(event)
+            failed = {"grading_run_id": "grade-failed", "iteration": 0}
+            for event in (
+                {"type": "rubric_evaluation_start", **failed},
+                {"type": "rubric_verification_start", **failed},
+                {"type": "rubric_verification_end", **failed, "succeeded": False},
+                {
+                    "type": "rubric_evaluation_end",
+                    **failed,
+                    "result": "grader_error",
+                    "explanation": "Verifier raised RuntimeError.",
+                    "criteria": [],
+                },
+            ):
+                projection.handle(event)
+            await pilot.pause()
+
+            bubbles = list(app.query(RubricBubble))
+            self.assertEqual(len(bubbles), 2)
+            self.assertIn("No tools called.", renderable_plain(bubbles[0]))
+            self.assertIn("Grader · Complete", renderable_plain(bubbles[0]))
+            self.assertIn("Verifier · Failed", renderable_plain(bubbles[1]))
+            self.assertNotIn("Grader · Complete", renderable_plain(bubbles[1]))
 
     async def test_goal_command_uses_transient_staging_without_switching_mode(self) -> None:
         app = make_app()

@@ -22,8 +22,8 @@ from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -31,12 +31,14 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import Field
 
+from agent.middleware import rubric as mira_rubric
 from agent.middleware.rubric import (
     FINAL_GRADER_SYSTEM_PROMPT,
     VERIFICATION_EVIDENCE_MESSAGE,
     VERIFIER_SYSTEM_PROMPT,
     MiraRubricMiddleware,
 )
+from runtime.runner import run_turn
 
 
 def tool_names(tools: Sequence[dict[str, Any] | type | Callable | BaseTool]) -> list[str]:
@@ -61,6 +63,38 @@ class FixedFakeChatModel(GenericFakeChatModel):
     ) -> Runnable[LanguageModelInput, AIMessage]:
         self.bindings.append({"tools": tool_names(tools), "tool_choice": tool_choice})
         return self
+
+    def _stream(
+        self,
+        messages: list[Any],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream fake tool calls in the normalized chunks real providers emit."""
+        result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        message = result.generations[0].message
+        tool_chunks = [
+            {
+                "name": call.get("name"),
+                "args": json.dumps(call.get("args", {})),
+                "id": call.get("id"),
+                "index": index,
+                "type": "tool_call_chunk",
+            }
+            for index, call in enumerate(message.tool_calls)
+        ]
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=message.content,
+                id=message.id,
+                tool_call_chunks=tool_chunks,
+                chunk_position="last",
+            )
+        )
+        if run_manager is not None:
+            run_manager.on_llm_new_token(str(message.content or ""), chunk=chunk)
+        yield chunk
 
 
 def grader_message(
@@ -305,7 +339,11 @@ class RubricMiddlewareTests(unittest.TestCase):
         verifier_kwargs = create.call_args_list[0].kwargs
         self.assertIs(verifier_kwargs["model"], resolved_model)
         self.assertEqual(verifier_kwargs["tools"], [verification_tool])
-        self.assertEqual(verifier_kwargs["middleware"], [hitl])
+        self.assertIs(verifier_kwargs["middleware"][0], hitl)
+        self.assertEqual(
+            type(verifier_kwargs["middleware"][1]).__name__,
+            "_VerifierToolObserver",
+        )
         self.assertIsNone(verifier_kwargs["response_format"])
         self.assertEqual(verifier_kwargs["system_prompt"], VERIFIER_SYSTEM_PROMPT)
         final_kwargs = create.call_args_list[1].kwargs
@@ -337,6 +375,105 @@ class RubricMiddlewareTests(unittest.TestCase):
             ],
         )
         self.assertEqual(agent.get_state(config).values["_rubric_status"], "satisfied")
+
+    def test_real_nested_agent_projects_live_custom_tool_events(self) -> None:
+        observed: list[str] = []
+        agent, _model = self._agent(observed, require_approval=False)
+
+        async def collect() -> list[dict[str, Any]]:
+            events: list[dict[str, Any]] = []
+            async for event in agent.astream(
+                {
+                    "messages": [HumanMessage(content="finish")],
+                    "rubric": "state current",
+                },
+                config={"configurable": {"thread_id": "rubric-live-custom"}},
+                stream_mode="custom",
+            ):
+                if isinstance(event, dict):
+                    events.append(event)
+            return events
+
+        events = asyncio.run(collect())
+        types = [event.get("type") for event in events]
+
+        self.assertLess(types.index("rubric_verification_start"), types.index("rubric_tool_start"))
+        self.assertIn("rubric_tool_call_delta", types)
+        self.assertLess(types.index("rubric_tool_start"), types.index("rubric_tool_end"))
+        self.assertLess(types.index("rubric_tool_end"), types.index("rubric_verification_end"))
+        self.assertLess(types.index("rubric_verification_end"), types.index("rubric_grading_start"))
+        start = next(event for event in events if event.get("type") == "rubric_tool_start")
+        end = next(event for event in events if event.get("type") == "rubric_tool_end")
+        self.assertEqual(start["tool_call_id"], "inspect-call")
+        self.assertEqual(start["tool_args"], {"resource_id": "page-123"})
+        self.assertEqual(end["tool_call_id"], "inspect-call")
+        self.assertEqual(end["output"], "current")
+        self.assertFalse(end["is_error"])
+
+    def test_runner_contains_verifier_tools_and_internal_graphs_in_rubric_ui(self) -> None:
+        class Renderer:
+            def __init__(self) -> None:
+                self.root_tools: list[str] = []
+                self.subagents: list[str] = []
+                self.rubric_events: list[dict[str, Any]] = []
+
+            def waiting_started(self) -> None:
+                return None
+
+            def waiting_finished(self) -> None:
+                return None
+
+            def finish_main(self) -> None:
+                return None
+
+            def text_delta(self, text: str) -> None:  # noqa: ARG002
+                return None
+
+            def reasoning_delta(self, text: str) -> None:  # noqa: ARG002
+                return None
+
+            def tool_call(self, name: str, args: Any, call_id: str = "") -> None:  # noqa: ARG002
+                self.root_tools.append(name)
+
+            def rubric_evaluation_started(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
+                self.rubric_events.append(dict(event))
+
+            def rubric_evaluation_finished(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            def subagent_label(self, subagent: Any) -> str:
+                return str(getattr(subagent, "graph_name", "subagent"))
+
+            def subagent_started(self, subagent: str, *args: Any, **kwargs: Any) -> None:
+                self.subagents.append(subagent)
+
+            def subagent_finished(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        observed: list[str] = []
+        agent, _model = self._agent(observed, require_approval=False)
+        renderer = Renderer()
+
+        result = asyncio.run(
+            run_turn(
+                agent,
+                "finish",
+                renderer,
+                "rubric-runner-containment",
+                rubric="state current",
+                include_rubric_state=True,
+            )
+        )
+
+        self.assertEqual(result.rubric_status, "satisfied")
+        self.assertEqual(renderer.root_tools, [])
+        self.assertEqual(renderer.subagents, [])
+        lifecycle_types = [event.get("type") for event in renderer.rubric_events]
+        self.assertEqual(lifecycle_types.count("rubric_tool_start"), 1)
+        self.assertEqual(lifecycle_types.count("rubric_tool_end"), 1)
 
     def test_verifier_uses_existing_hitl_and_resumes_without_grader_error(self) -> None:
         observed: list[str] = []
@@ -600,6 +737,107 @@ class RubricMiddlewareTests(unittest.TestCase):
         final_grader.invoke.assert_called_once()
         self.assertIs(verifier.invoke.call_args.kwargs["context"], context)
         self.assertIs(final_grader.invoke.call_args.kwargs["context"], context)
+
+    def test_phase_events_wrap_the_isolated_verifier_before_the_final_grader(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = Mock()
+        verifier.invoke.return_value = {"messages": [AIMessage(content="VERIFICATION_COMPLETE")]}
+        grader = Mock()
+        grader.invoke.return_value = graded_result()
+        events: list[dict[str, Any]] = []
+        state = {
+            "rubric": "criterion",
+            "messages": [],
+            "_current_grading_run_id": "grade-phases",
+            "_rubric_iterations": 0,
+        }
+        middleware._prepare_evaluation(
+            state,
+            SimpleNamespace(stream_writer=events.append),
+        )
+
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=verifier),
+            patch.object(middleware, "_ensure_final_grader", return_value=grader),
+        ):
+            middleware._invoke_grader(state, 0)
+
+        self.assertEqual(
+            [event["type"] for event in events],
+            [
+                "rubric_evaluation_start",
+                "rubric_verification_start",
+                "rubric_verification_end",
+                "rubric_grading_start",
+                "rubric_grading_end",
+            ],
+        )
+        self.assertTrue(events[2]["succeeded"])
+        self.assertTrue(events[4]["succeeded"])
+
+    def test_verifier_observer_preserves_ids_raw_results_and_tool_errors(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        events: list[dict[str, Any]] = []
+        middleware._prepare_evaluation(
+            {
+                "rubric": "criterion",
+                "messages": [],
+                "_current_grading_run_id": "grade-tools",
+                "_rubric_iterations": 0,
+            },
+            SimpleNamespace(stream_writer=events.append),
+        )
+        observer = mira_rubric._VerifierToolObserver()
+        raw = "line one\n" + "x" * 10_000
+        request = SimpleNamespace(
+            tool_call={
+                "id": "read-17",
+                "name": "read_file",
+                "args": {"file_path": "/full"},
+            }
+        )
+
+        returned = observer.wrap_tool_call(
+            request,
+            lambda _request: ToolMessage(
+                content=raw,
+                tool_call_id="read-17",
+                name="read_file",
+                status="error",
+            ),
+        )
+
+        self.assertIsInstance(returned, ToolMessage)
+        start, end = events[-2:]
+        self.assertEqual(start["tool_call_id"], "read-17")
+        self.assertEqual(start["tool_args"], {"file_path": "/full"})
+        self.assertEqual(end["tool_call_id"], "read-17")
+        self.assertEqual(end["output"], raw)
+        self.assertTrue(end["is_error"])
+
+    def test_verifier_failure_emits_failed_phase_without_starting_grader(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = Mock()
+        verifier.invoke.side_effect = RuntimeError("verifier broke")
+        events: list[dict[str, Any]] = []
+        state = {
+            "rubric": "criterion",
+            "messages": [],
+            "_current_grading_run_id": "grade-verifier-error",
+            "_rubric_iterations": 0,
+        }
+        middleware._prepare_evaluation(state, SimpleNamespace(stream_writer=events.append))
+
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=verifier),
+            self.assertRaisesRegex(RuntimeError, "verifier broke"),
+        ):
+            middleware._invoke_grader(state, 0)
+
+        types = [event["type"] for event in events]
+        self.assertEqual(types[-2:], ["rubric_verification_start", "rubric_verification_end"])
+        self.assertFalse(events[-1]["succeeded"])
+        self.assertNotIn("rubric_grading_start", types)
 
     def test_no_verifier_tool_call_still_grades_transcript_only_story(self) -> None:
         @tool

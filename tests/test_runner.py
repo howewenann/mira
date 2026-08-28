@@ -4188,6 +4188,61 @@ Await further instructions.
 
         self.assertNotIn(("tick_subagents",), renderer.events)
 
+    async def test_internal_rubric_graphs_never_open_root_subagent_ui(self) -> None:
+        class LiveRenderer(RecordingRenderer):
+            def start_subagent_live(self) -> None:
+                self.events.append(("live_start",))
+
+            def stop_subagent_live(self) -> None:
+                self.events.append(("live_stop",))
+
+        class InternalRubricSubgraph:
+            graph_name = "rubric_verifier"
+            path = ("rubric_verifier:run-1",)
+            custom = AsyncItems([{"type": "rubric_tool_start"}])
+
+            async def output(self) -> dict[str, Any]:
+                return {"messages": []}
+
+        renderer = LiveRenderer()
+        visible = Subagent("general-purpose [one]", [ToolCall("grep", {}, "done")])
+
+        await consume_subagents(
+            AsyncItems([InternalRubricSubgraph(), visible]),
+            renderer,
+        )
+
+        self.assertFalse(any("rubric_verifier" in str(event) for event in renderer.events))
+        self.assertEqual(
+            [event[0] for event in renderer.events if event[0] in {"live_start", "live_stop"}],
+            ["live_start", "live_stop"],
+        )
+        self.assertEqual(
+            [event[0] for event in renderer.events if event[0] == "subagent_started"],
+            ["subagent_started"],
+        )
+
+    async def test_internal_only_rubric_graphs_leave_root_subagent_ui_idle(self) -> None:
+        class LiveRenderer(RecordingRenderer):
+            def start_subagent_live(self) -> None:
+                self.events.append(("live_start",))
+
+            def stop_subagent_live(self) -> None:
+                self.events.append(("live_stop",))
+
+        class InternalRubricSubgraph:
+            graph_name = "rubric_grader"
+            path = ("rubric_grader:run-1",)
+            custom = AsyncItems([])
+
+            async def output(self) -> dict[str, Any]:
+                return {"messages": []}
+
+        renderer = LiveRenderer()
+        await consume_subagents(AsyncItems([InternalRubricSubgraph()]), renderer)
+
+        self.assertEqual(renderer.events, [])
+
     async def test_subagent_stream_error_cancels_running_children(self) -> None:
         renderer = RecordingRenderer()
         subagent = HangingSubagent()

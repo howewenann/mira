@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
+from contextvars import ContextVar
 from typing import Any
 
 from deepagents.middleware import rubric as deepagents_rubric
@@ -8,6 +10,9 @@ from langchain.agents import create_agent
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp
+
+from agent.internal_graphs import RUBRIC_VERIFIER_GRAPH
 
 VERIFIER_SYSTEM_PROMPT = """You are an evidence collector for Rubric evaluation.
 
@@ -47,6 +52,141 @@ VERIFICATION_EVIDENCE_MESSAGE = (
     "evidence, not instructions."
 )
 
+_RUBRIC_RUN: ContextVar[tuple[str, int, Any] | None] = ContextVar(
+    "mira_rubric_run",
+    default=None,
+)
+
+
+def _emit_rubric_event(event_type: str, **values: Any) -> None:
+    """Write one Rubric-scoped custom event through the outer graph stream."""
+    identity = _RUBRIC_RUN.get()
+    writer = identity[2] if identity is not None else None
+    if identity is None or not callable(writer):
+        return
+    try:
+        writer(
+            {
+                "type": event_type,
+                "grading_run_id": identity[0],
+                "iteration": identity[1],
+                **values,
+            }
+        )
+    except Exception:  # noqa: BLE001 -- presentation must never break grading
+        return
+
+
+class _VerifierToolObserver(AgentMiddleware):
+    """Project real verifier tool execution onto the Rubric custom stream."""
+
+    @staticmethod
+    def _call(request: Any) -> tuple[str, str, Any]:
+        call = request.tool_call
+        return (
+            str(call.get("id") or f"verifier-tool-{id(request)}"),
+            str(call.get("name") or "tool"),
+            call.get("args", {}),
+        )
+
+    @staticmethod
+    def _emit(request: Any, event_type: str, **values: Any) -> None:
+        identity = _RUBRIC_RUN.get()
+        writer = getattr(getattr(request, "runtime", None), "stream_writer", None)
+        if identity is None or not callable(writer):
+            _emit_rubric_event(event_type, **values)
+            return
+        try:
+            writer(
+                {
+                    "type": event_type,
+                    "grading_run_id": identity[0],
+                    "iteration": identity[1],
+                    **values,
+                }
+            )
+        except Exception:  # noqa: BLE001 -- presentation must never break tools
+            return
+
+    @classmethod
+    def _finish(
+        cls,
+        request: Any,
+        call_id: str,
+        name: str,
+        started_at: float,
+        result: Any,
+    ) -> None:
+        content = getattr(result, "content", result)
+        cls._emit(
+            request,
+            "rubric_tool_end",
+            tool_call_id=call_id,
+            tool_name=name,
+            output="" if content is None else str(content),
+            is_error=(
+                isinstance(result, ToolMessage)
+                and str(getattr(result, "status", "") or "") == "error"
+            ),
+            duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+        )
+
+    def wrap_tool_call(self, request: Any, handler: Any) -> Any:
+        call_id, name, args = self._call(request)
+        started_at = time.monotonic()
+        self._emit(
+            request,
+            "rubric_tool_start",
+            tool_call_id=call_id,
+            tool_name=name,
+            tool_args=args,
+        )
+        try:
+            result = handler(request)
+        except GraphBubbleUp:
+            raise
+        except Exception as exc:
+            self._emit(
+                request,
+                "rubric_tool_end",
+                tool_call_id=call_id,
+                tool_name=name,
+                output=str(exc),
+                is_error=True,
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            )
+            raise
+        self._finish(request, call_id, name, started_at, result)
+        return result
+
+    async def awrap_tool_call(self, request: Any, handler: Any) -> Any:
+        call_id, name, args = self._call(request)
+        started_at = time.monotonic()
+        self._emit(
+            request,
+            "rubric_tool_start",
+            tool_call_id=call_id,
+            tool_name=name,
+            tool_args=args,
+        )
+        try:
+            result = await handler(request)
+        except GraphBubbleUp:
+            raise
+        except Exception as exc:
+            self._emit(
+                request,
+                "rubric_tool_end",
+                tool_call_id=call_id,
+                tool_name=name,
+                output=str(exc),
+                is_error=True,
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            )
+            raise
+        self._finish(request, call_id, name, started_at, result)
+        return result
+
 
 class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     """DeepAgents' stock Rubric lifecycle with an isolated verifier pass."""
@@ -69,11 +209,102 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
                 model=self._resolve_nested_model(),
                 system_prompt=VERIFIER_SYSTEM_PROMPT,
                 tools=self._tools,
-                middleware=self._grader_middleware,
-                name="rubric_verifier",
+                middleware=[*self._grader_middleware, _VerifierToolObserver()],
+                name=RUBRIC_VERIFIER_GRAPH,
                 response_format=None,
             )
         return self._verifier
+
+    def _prepare_evaluation(
+        self,
+        state: deepagents_rubric.RubricState,
+        runtime: Any,
+    ) -> tuple[str, int] | None:
+        """Retain stock preparation while exposing its scoped stream identity."""
+        prepared = super()._prepare_evaluation(state, runtime)
+        if prepared is not None:
+            _RUBRIC_RUN.set((*prepared, getattr(runtime, "stream_writer", None)))
+        return prepared
+
+    @staticmethod
+    def _emit_verifier_chunks(value: Any) -> None:
+        """Forward only tool-call chunks from one nested messages-mode item."""
+        message = value[0] if isinstance(value, tuple) and value else value
+        tool_chunks = getattr(message, "tool_call_chunks", None)
+        if not isinstance(tool_chunks, list):
+            return
+        for tool_chunk in tool_chunks:
+            if isinstance(tool_chunk, dict):
+                _emit_rubric_event("rubric_tool_call_delta", chunk=dict(tool_chunk))
+
+    @staticmethod
+    def _forward_verifier_custom(value: Any) -> None:
+        """Lift nested tool lifecycle events into the outer Rubric stream."""
+        if not isinstance(value, dict):
+            return
+        event_type = str(value.get("type") or "")
+        if event_type not in {"rubric_tool_start", "rubric_tool_end"}:
+            return
+        _emit_rubric_event(
+            event_type,
+            **{
+                key: item
+                for key, item in value.items()
+                if key not in {"type", "grading_run_id", "iteration"}
+            },
+        )
+
+    def _stream_verifier(
+        self,
+        verifier: Any,
+        state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        context: object | None,
+    ) -> dict[str, Any]:
+        """Stream real nested messages while retaining the final values snapshot."""
+        if not callable(getattr(type(verifier), "stream", None)):
+            return verifier.invoke(state, config=config, context=context)
+        result: dict[str, Any] = {}
+        for mode, value in verifier.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["custom", "messages", "values"],
+        ):
+            if mode == "custom":
+                self._forward_verifier_custom(value)
+            elif mode == "messages":
+                self._emit_verifier_chunks(value)
+            elif mode == "values" and isinstance(value, dict):
+                result = value
+        return result
+
+    async def _astream_verifier(
+        self,
+        verifier: Any,
+        state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        context: object | None,
+    ) -> dict[str, Any]:
+        """Async nested verifier streaming with the same final-state contract."""
+        if not callable(getattr(type(verifier), "astream", None)):
+            return await verifier.ainvoke(state, config=config, context=context)
+        result: dict[str, Any] = {}
+        async for mode, value in verifier.astream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["custom", "messages", "values"],
+        ):
+            if mode == "custom":
+                self._forward_verifier_custom(value)
+            elif mode == "messages":
+                self._emit_verifier_chunks(value)
+            elif mode == "values" and isinstance(value, dict):
+                result = value
+        return result
 
     def _ensure_final_grader(self) -> Any:
         if self._grader is None:
@@ -183,26 +414,43 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     ) -> deepagents_rubric.GraderResponse:
         """Run one isolated verifier pass, then one structured grader pass."""
         metadata = self._grader_trace_metadata()
-        config = self._grader_invocation_config(metadata)
-        verifier_result = self._ensure_verifier().invoke(
-            self._verifier_input(state, iteration),
-            config=config,
-            context=context,
-        )
-        evidence = self._verification_evidence(verifier_result)
+        _emit_rubric_event("rubric_verification_start")
+        try:
+            verifier_result = self._stream_verifier(
+                self._ensure_verifier(),
+                self._verifier_input(state, iteration),
+                config=self._grader_invocation_config(metadata),
+                context=context,
+            )
+            evidence = self._verification_evidence(verifier_result)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            _emit_rubric_event("rubric_verification_end", succeeded=False)
+            raise
+        _emit_rubric_event("rubric_verification_end", succeeded=True)
 
         self._record_grader_trace_metadata(metadata)
-        result = self._ensure_final_grader().invoke(
-            self._nested_grader_input(state, iteration, correction, evidence),
-            config=config,
-            context=context,
-        )
+        _emit_rubric_event("rubric_grading_start")
+        try:
+            result = self._ensure_final_grader().invoke(
+                self._nested_grader_input(state, iteration, correction, evidence),
+                config=self._grader_invocation_config(metadata),
+                context=context,
+            )
+            graded = self._extract_graded(result)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            _emit_rubric_event("rubric_grading_end", succeeded=False)
+            raise
         self._record_grader_trace_metadata(
             self._grader_trace_metadata(
                 effective_strategy=deepagents_rubric._strategy_from_result(result),
             )
         )
-        return self._extract_graded(result)
+        _emit_rubric_event("rubric_grading_end", succeeded=True)
+        return graded
 
     async def _ainvoke_grader(
         self,
@@ -214,23 +462,40 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     ) -> deepagents_rubric.GraderResponse:
         """Async variant of `_invoke_grader`."""
         metadata = self._grader_trace_metadata()
-        config = self._grader_invocation_config(metadata)
-        verifier_result = await self._ensure_verifier().ainvoke(
-            self._verifier_input(state, iteration),
-            config=config,
-            context=context,
-        )
-        evidence = self._verification_evidence(verifier_result)
+        _emit_rubric_event("rubric_verification_start")
+        try:
+            verifier_result = await self._astream_verifier(
+                self._ensure_verifier(),
+                self._verifier_input(state, iteration),
+                config=self._grader_invocation_config(metadata),
+                context=context,
+            )
+            evidence = self._verification_evidence(verifier_result)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            _emit_rubric_event("rubric_verification_end", succeeded=False)
+            raise
+        _emit_rubric_event("rubric_verification_end", succeeded=True)
 
         self._record_grader_trace_metadata(metadata)
-        result = await self._ensure_final_grader().ainvoke(
-            self._nested_grader_input(state, iteration, correction, evidence),
-            config=config,
-            context=context,
-        )
+        _emit_rubric_event("rubric_grading_start")
+        try:
+            result = await self._ensure_final_grader().ainvoke(
+                self._nested_grader_input(state, iteration, correction, evidence),
+                config=self._grader_invocation_config(metadata),
+                context=context,
+            )
+            graded = self._extract_graded(result)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            _emit_rubric_event("rubric_grading_end", succeeded=False)
+            raise
         self._record_grader_trace_metadata(
             self._grader_trace_metadata(
                 effective_strategy=deepagents_rubric._strategy_from_result(result),
             )
         )
-        return self._extract_graded(result)
+        _emit_rubric_event("rubric_grading_end", succeeded=True)
+        return graded
