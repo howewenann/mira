@@ -204,9 +204,11 @@ class AutocompleteInput(Vertical):
         self.dismiss()
         self.mcp_manager = manager
 
-    def prompt_disabled(self) -> None:
-        """Make autocomplete inert whenever the underlying prompt is disabled."""
-        self.dismiss()
+    def prompt_disabled_changed(self, disabled: bool) -> None:
+        """Mirror prompt availability in the handle without disabling resizing."""
+        self.query_one(PromptResizeHandle).set_class(disabled, "-prompt-disabled")
+        if disabled:
+            self.dismiss()
 
     def dismiss(self, *, suppress_current: bool = False) -> None:
         """Close the popup and invalidate any pending discovery result."""

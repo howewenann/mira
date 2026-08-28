@@ -861,12 +861,21 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.hover("#status-row")
             prompt.disabled = True
+            await pilot.pause()
+            self.assertEqual(handle.styles.opacity, 0.5)
+
             await pilot.hover(handle)
             await pilot.pause()
             disabled_hover = handle.styles.color
 
             self.assertEqual(enabled_hover, Color.parse("#e8fffb"))
             self.assertEqual(disabled_hover, enabled_hover)
+            self.assertEqual(handle.styles.opacity, 1.0)
+
+            await pilot.hover("#status-row")
+            prompt.disabled = False
+            await pilot.pause()
+            self.assertEqual(handle.styles.opacity, 1.0)
 
     async def test_slash_completion_enter_inserts_without_submitting_and_space_dismisses(self) -> None:
         app = AutocompleteTestApp()

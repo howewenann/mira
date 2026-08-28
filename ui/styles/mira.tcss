@@ -377,8 +377,13 @@ MCPPanelScreen {
     pointer: ns-resize;
 }
 
+#prompt-resize-handle.-prompt-disabled {
+    opacity: 50%;
+}
+
 #prompt-resize-handle:hover {
     color: #e8fffb;
+    opacity: 100%;
 }
 
 #autocomplete-options {

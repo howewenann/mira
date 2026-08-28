@@ -128,8 +128,7 @@ class PromptBox(TextArea):
         self.cursor_location = self.document.end
 
     def watch_disabled(self, disabled: bool) -> None:
-        """Dismiss descendant autocomplete when the prompt becomes unavailable."""
-        if disabled:
-            callback = getattr(self.parent, "prompt_disabled", None)
-            if callable(callback):
-                callback()
+        """Notify the prompt wrapper whenever availability changes."""
+        callback = getattr(self.parent, "prompt_disabled_changed", None)
+        if callable(callback):
+            callback(disabled)
