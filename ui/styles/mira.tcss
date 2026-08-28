@@ -377,6 +377,10 @@ MCPPanelScreen {
     pointer: ns-resize;
 }
 
+#prompt-resize-handle:hover {
+    color: #e8fffb;
+}
+
 #autocomplete-options {
     display: none;
     width: 100%;

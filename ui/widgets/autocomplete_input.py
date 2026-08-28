@@ -12,6 +12,7 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.events import Key, MouseDown, MouseMove, MouseUp, Resize
 from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
@@ -66,7 +67,12 @@ class PromptResizeHandle(Static):
         self._prompt_start_height: int | None = None
 
     def render(self) -> str:
-        return "━" * self.size.width
+        width = self.size.width
+        grip = "[=]"
+        if width < len(grip):
+            return "━" * width
+        left = (width - len(grip)) // 2
+        return "━" * left + grip + "━" * (width - left - len(grip))
 
     def on_mouse_down(self, event: MouseDown) -> None:
         if event.button != 1:
@@ -83,8 +89,12 @@ class PromptResizeHandle(Static):
             return
         delta = self._drag_start_y - event.screen_y
         requested_height = self._prompt_start_height + delta
-        prompt = self.parent.query_one(PromptBox)
-        new_height = max(MIN_PROMPT_HEIGHT, requested_height)
+        autocomplete = self.parent
+        prompt = autocomplete.query_one(PromptBox)
+        new_height = min(
+            autocomplete.safe_prompt_height,
+            max(MIN_PROMPT_HEIGHT, requested_height),
+        )
         prompt.styles.height = new_height
         event.stop()
         event.prevent_default()
@@ -143,6 +153,11 @@ class AutocompleteInput(Vertical):
 
     def on_mount(self) -> None:
         self.query_one(OptionList).display = False
+        self.screen.screen_layout_refresh_signal.subscribe(
+            self,
+            self._shrink_prompt_to_fit,
+            immediate=True,
+        )
         self.call_after_refresh(self._sync_resize_handle_width)
 
     def on_resize(self, _event: Resize) -> None:
@@ -153,6 +168,31 @@ class AutocompleteInput(Vertical):
         width = self.query_one(PromptBox).region.width
         if width:
             self.query_one(PromptResizeHandle).styles.width = max(1, width - 2)
+
+    @property
+    def safe_prompt_height(self) -> int:
+        """Return the live prompt ceiling while preserving the main layout."""
+        prompt = self.query_one(PromptBox)
+        try:
+            chat = self.screen.query_one("#chat-log")
+            main_panel = self.screen.query_one("#main-panel")
+            telemetry = self.screen.query_one("#telemetry-row")
+        except NoMatches:
+            return max(MIN_PROMPT_HEIGHT, prompt.region.height)
+
+        bottom_space = main_panel.content_region.bottom - telemetry.region.bottom
+        reclaimable_chat = chat.content_region.height - 1
+        return max(
+            MIN_PROMPT_HEIGHT,
+            prompt.region.height + reclaimable_chat + bottom_space,
+        )
+
+    def _shrink_prompt_to_fit(self, _screen: Any) -> None:
+        """Shrink an oversized prompt after layout changes, without auto-growing."""
+        prompt = self.query_one(PromptBox)
+        safe_height = self.safe_prompt_height
+        if prompt.region.height > safe_height:
+            prompt.styles.height = safe_height
 
     def set_project_backend(self, backend: Any) -> None:
         """Switch discovery to a rebuilt project backend and clear old state."""

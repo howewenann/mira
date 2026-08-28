@@ -701,6 +701,173 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app.mouse_captured)
             self.assertEqual(prompt.region.height, resized_height)
 
+    async def test_prompt_resize_max_keeps_telemetry_visible(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt, _handle, x, _start_y = await start_prompt_resize(app, pilot)
+
+            await move_captured_mouse(pilot, x, 0)
+
+            main_panel = app.query_one("#main-panel")
+            status = app.query_one("#status-row")
+            telemetry = app.query_one("#telemetry-row")
+            self.assertEqual(status.region.height, 1)
+            self.assertGreaterEqual(status.region.y, main_panel.content_region.y)
+            self.assertEqual(telemetry.region.height, 1)
+            self.assertLessEqual(telemetry.region.bottom, main_panel.content_region.bottom)
+            self.assertEqual(prompt.region.height, app.query_one(AutocompleteInput).safe_prompt_height)
+
+    async def test_prompt_resize_max_keeps_one_chat_row(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            _prompt, _handle, x, _start_y = await start_prompt_resize(app, pilot)
+
+            await move_captured_mouse(pilot, x, 0)
+
+            self.assertGreaterEqual(app.query_one(ChatLog).content_region.height, 1)
+
+    async def test_visible_autocomplete_reduces_live_prompt_maximum(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            completion = app.query_one(AutocompleteInput)
+            prompt, handle, x, _start_y = await start_prompt_resize(app, pilot)
+            initial_maximum = completion.safe_prompt_height
+            prompt.value = "/"
+            await pilot.pause()
+
+            self.assertTrue(completion.active)
+            self.assertLess(completion.safe_prompt_height, initial_maximum)
+
+            await move_captured_mouse(pilot, x, 0)
+            self.assertEqual(prompt.region.height, completion.safe_prompt_height)
+            self.assertIs(app.mouse_captured, handle)
+
+    async def test_visible_subagents_and_prompt_panels_reduce_safe_maximum(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 34)) as pilot:
+            completion = app.query_one(AutocompleteInput)
+            initial_maximum = completion.safe_prompt_height
+            app.start_subagent_live()
+            app.subagent_started("general-purpose", "inspect resize layout")
+            await pilot.pause()
+
+            subagents_maximum = completion.safe_prompt_height
+            self.assertTrue(app.query_one(SubagentsPanel).display)
+            self.assertLess(subagents_maximum, initial_maximum)
+
+            panel = app.query_one(PromptPanel)
+            prompt_task = asyncio.create_task(panel.ask_text("Question", "Keep every row visible"))
+            await wait_until(lambda: panel.active)
+            await pilot.pause()
+
+            self.assertTrue(panel.display)
+            self.assertLess(completion.safe_prompt_height, subagents_maximum)
+
+            await wait_until(lambda: len(list(panel.query(Button))) == 2)
+            app.query_one("#prompt-cancel", Button).press()
+            self.assertIsNone(await asyncio.wait_for(prompt_task, timeout=2))
+
+    async def test_opening_panel_auto_shrinks_but_closing_does_not_grow_prompt(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            completion = app.query_one(AutocompleteInput)
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = completion.safe_prompt_height
+            await pilot.pause()
+            expanded_height = prompt.region.height
+
+            prompt.value = "/"
+            await pilot.pause()
+            shrunk_height = prompt.region.height
+
+            self.assertTrue(completion.active)
+            self.assertLess(shrunk_height, expanded_height)
+            self.assertEqual(shrunk_height, completion.safe_prompt_height)
+
+            prompt.value = ""
+            await pilot.pause()
+
+            self.assertFalse(completion.active)
+            self.assertEqual(prompt.region.height, shrunk_height)
+            self.assertGreater(completion.safe_prompt_height, shrunk_height)
+
+    async def test_terminal_shrink_auto_shrinks_but_growth_does_not_grow_prompt(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = 20
+            await pilot.pause()
+            self.assertEqual(prompt.region.height, 20)
+
+            await pilot.resize_terminal(80, 16)
+            await pilot.pause()
+            shrunk_height = prompt.region.height
+
+            self.assertLess(shrunk_height, 20)
+            self.assertEqual(shrunk_height, app.query_one(AutocompleteInput).safe_prompt_height)
+
+            await pilot.resize_terminal(80, 30)
+            await pilot.pause()
+
+            self.assertEqual(prompt.region.height, shrunk_height)
+
+    async def test_prompt_resize_grip_stays_centered_after_width_resize(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            handle = app.query_one("#prompt-resize-handle")
+            await pilot.pause()
+            initial_border = handle.render()
+
+            self.assertEqual(initial_border.index("[=]"), (len(initial_border) - 3) // 2)
+
+            await pilot.resize_terminal(120, 30)
+            await pilot.pause()
+            resized_border = handle.render()
+
+            self.assertNotEqual(len(resized_border), len(initial_border))
+            self.assertEqual(resized_border.index("[=]"), (len(resized_border) - 3) // 2)
+            self.assertEqual(handle.region.width, app.query_one(PromptBox).region.width - 2)
+
+    async def test_prompt_resize_remains_available_while_prompt_is_disabled(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.disabled = True
+            prompt, handle, x, start_y = await start_prompt_resize(app, pilot)
+
+            await move_captured_mouse(pilot, x, start_y - 2)
+
+            self.assertTrue(prompt.disabled)
+            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT + 2)
+            self.assertIs(app.mouse_captured, handle)
+
+    async def test_prompt_resize_hover_color_matches_when_prompt_is_disabled(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            handle = app.query_one("#prompt-resize-handle")
+            prompt = app.query_one(PromptBox)
+            await pilot.hover(handle)
+            await pilot.pause()
+            enabled_hover = handle.styles.color
+
+            await pilot.hover("#status-row")
+            prompt.disabled = True
+            await pilot.hover(handle)
+            await pilot.pause()
+            disabled_hover = handle.styles.color
+
+            self.assertEqual(enabled_hover, Color.parse("#e8fffb"))
+            self.assertEqual(disabled_hover, enabled_hover)
+
     async def test_slash_completion_enter_inserts_without_submitting_and_space_dismisses(self) -> None:
         app = AutocompleteTestApp()
 
