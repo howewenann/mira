@@ -712,6 +712,16 @@ Button.assistant-copy {
     width: 10;
     min-width: 10;
     max-width: 10;
+}
+
+Button.assistant-display {
+    width: 12;
+    min-width: 12;
+    max-width: 12;
+}
+
+Button.assistant-copy,
+Button.assistant-display {
     height: 1;
     min-height: 1;
     margin: 0;
@@ -724,8 +734,14 @@ Button.assistant-copy {
     text-style: none;
 }
 
+Button.assistant-display {
+    margin-left: 1;
+}
+
 Button.assistant-copy:focus,
-Button.assistant-copy:hover {
+Button.assistant-copy:hover,
+Button.assistant-display:focus,
+Button.assistant-display:hover {
     border: none;
     background: #1b3036;
     color: #eef7f8;

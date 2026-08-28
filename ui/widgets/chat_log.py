@@ -16,7 +16,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Click, DescendantFocus, Key, Resize
 from textual.geometry import Size
-from textual.widgets import Button, Static
+from textual.widgets import Button, Markdown, Static
 
 from runtime.output_events import normalize_response_delta
 from runtime.rubric_events import (
@@ -95,8 +95,11 @@ class ChatLog(VerticalScroll):
             self.focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Copy the response owned by an assistant-bubble footer button."""
-        if not event.button.has_class("assistant-copy"):
+        """Handle the action owned by an assistant-bubble footer button."""
+        if not (
+            event.button.has_class("assistant-copy")
+            or event.button.has_class("assistant-display")
+        ):
             return
         bubble = event.button.parent
         while bubble is not None and not isinstance(bubble, AssistantBubble):
@@ -104,8 +107,11 @@ class ChatLog(VerticalScroll):
         if bubble is None:
             return
         event.stop()
-        self.app.copy_to_clipboard(bubble.text)
-        bubble.show_copied()
+        if event.button.has_class("assistant-copy"):
+            self.app.copy_to_clipboard(bubble.text)
+            bubble.show_copied()
+        else:
+            bubble.toggle_display()
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Pause or resume tail-following when the user moves the viewport."""
@@ -1340,6 +1346,23 @@ class ChatLog(VerticalScroll):
         finally:
             self._programmatic_tail_scroll = False
 
+    def _preserve_screen_y(self, current_y: int, target_y: int) -> None:
+        """Keep a transcript control on the same screen row after layout."""
+        offset = current_y - target_y
+        if not offset:
+            return
+        self._programmatic_tail_scroll = True
+        try:
+            self.scroll_to(
+                y=self.scroll_y + offset,
+                animate=False,
+                force=True,
+                immediate=True,
+                release_anchor=False,
+            )
+        finally:
+            self._programmatic_tail_scroll = False
+
     def _delegation_details(self, calls: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         """Return valid task descriptions and compact parse errors."""
         descriptions: list[str] = []
@@ -1800,11 +1823,20 @@ class AssistantBubble(Vertical):
         self.text = text
         self.border_title = "mira"
         self._body = Static(Text(text), classes="assistant-body")
+        self._markdown_body = Markdown(text, classes="assistant-body")
+        self._markdown_body.display = False
         self._copy_button = Button(
             "Copy",
             classes="assistant-copy",
             compact=True,
         )
+        self._display_button = Button(
+            "Markdown",
+            classes="assistant-display",
+            compact=True,
+        )
+        self._markdown = False
+        self._display_anchor_y: int | None = None
         self._feedback_version = 0
 
     @property
@@ -1814,13 +1846,69 @@ class AssistantBubble(Vertical):
 
     def compose(self) -> Any:
         yield self._body
+        yield self._markdown_body
         with Horizontal(classes="assistant-actions"):
             yield self._copy_button
+            yield self._display_button
 
     def update(self, renderable: Text) -> None:
         """Update streamed assistant text without replacing the footer."""
         self.text = renderable.plain
-        self._body.update(renderable)
+        if self._markdown:
+            self._markdown_body.update(self.text)
+        else:
+            self._body.update(renderable)
+
+    def on_resize(self, event: Resize) -> None:
+        """Preserve the active viewport anchor as this bubble changes size."""
+        if isinstance(self.parent, ChatLog):
+            if self._display_anchor_y is not None:
+                self.parent.follow_tail = False
+            elif self.parent.follow_tail:
+                self.parent._scroll_to_end()
+
+    def toggle_display(self) -> None:
+        """Toggle this response between plain text and native Markdown."""
+        chat_log = self.parent if isinstance(self.parent, ChatLog) else None
+        self._display_anchor_y = (
+            self._display_button.region.y
+            if chat_log is not None and not chat_log.follow_tail
+            else None
+        )
+        self._markdown = not self._markdown
+        if self._markdown:
+            self._markdown_body.update(self.text)
+        else:
+            self._body.update(Text(self.text))
+        self._body.display = not self._markdown
+        self._markdown_body.display = self._markdown
+        self._display_button.label = "Text" if self._markdown else "Markdown"
+        if not self._markdown and self._display_anchor_y is not None:
+            self.call_after_refresh(self._finish_display_transition_after_refresh)
+
+    def on_markdown_table_of_contents_updated(
+        self,
+        event: Markdown.TableOfContentsUpdated,
+    ) -> None:
+        """Release the temporary display anchor after native Markdown layout."""
+        if (
+            event.markdown is self._markdown_body
+            and self._markdown
+            and self._display_anchor_y is not None
+        ):
+            self.call_after_refresh(self._finish_display_transition_after_refresh)
+
+    def _finish_display_transition_after_refresh(self) -> None:
+        self.call_after_refresh(self._finish_display_transition)
+
+    def _finish_display_transition(self) -> None:
+        if isinstance(self.parent, ChatLog) and self._display_anchor_y is not None:
+            self.parent.follow_tail = False
+            self.parent._preserve_screen_y(
+                self._display_button.region.y,
+                self._display_anchor_y,
+            )
+        self._display_anchor_y = None
 
     def show_copied(self) -> None:
         """Show transient feedback, restarting its timer on every click."""
