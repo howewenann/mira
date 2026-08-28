@@ -12,8 +12,8 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
-from textual.events import Key
-from textual.widgets import OptionList, TextArea
+from textual.events import Key, MouseDown, MouseMove, MouseUp, Resize
+from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from ui.command_help import command_help_entries, command_insertion
@@ -21,6 +21,7 @@ from ui.widgets.prompt_box import PromptBox
 
 
 MAX_COMPLETIONS = 5
+MIN_PROMPT_HEIGHT = 5
 FILE_DISCOVERY_CONCURRENCY = 32
 POPUP_BORDER_HEIGHT = 2
 EXCLUDED_FILE_COMPONENTS = {
@@ -52,6 +53,50 @@ class _CompletionFragment:
     start: int
     end: int
     query: str
+
+
+class PromptResizeHandle(Static):
+    """Drag target that redraws the prompt's top border."""
+
+    ALLOW_SELECT = False
+
+    def __init__(self) -> None:
+        super().__init__("", id="prompt-resize-handle")
+        self._drag_start_y: int | None = None
+        self._prompt_start_height: int | None = None
+
+    def render(self) -> str:
+        return "━" * self.size.width
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        prompt = self.parent.query_one(PromptBox)
+        self._drag_start_y = event.screen_y
+        self._prompt_start_height = prompt.region.height
+        self.capture_mouse()
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if self._drag_start_y is None or self._prompt_start_height is None:
+            return
+        delta = self._drag_start_y - event.screen_y
+        requested_height = self._prompt_start_height + delta
+        prompt = self.parent.query_one(PromptBox)
+        new_height = max(MIN_PROMPT_HEIGHT, requested_height)
+        prompt.styles.height = new_height
+        event.stop()
+        event.prevent_default()
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if self._drag_start_y is None or event.button != 1:
+            return
+        self._drag_start_y = None
+        self._prompt_start_height = None
+        self.release_mouse()
+        event.stop()
+        event.prevent_default()
 
 
 class AutocompleteInput(Vertical):
@@ -94,9 +139,20 @@ class AutocompleteInput(Vertical):
     def compose(self) -> ComposeResult:
         yield OptionList(id="autocomplete-options", compact=True)
         yield PromptBox()
+        yield PromptResizeHandle()
 
     def on_mount(self) -> None:
         self.query_one(OptionList).display = False
+        self.call_after_refresh(self._sync_resize_handle_width)
+
+    def on_resize(self, _event: Resize) -> None:
+        self.call_after_refresh(self._sync_resize_handle_width)
+
+    def _sync_resize_handle_width(self) -> None:
+        """Keep the border handle inset from the prompt's two corners."""
+        width = self.query_one(PromptBox).region.width
+        if width:
+            self.query_one(PromptResizeHandle).styles.width = max(1, width - 2)
 
     def set_project_backend(self, backend: Any) -> None:
         """Switch discovery to a rebuilt project backend and clear old state."""
@@ -126,6 +182,7 @@ class AutocompleteInput(Vertical):
             options = self.query_one(OptionList)
             options.clear_options()
             options.display = False
+            self.query_one(PromptResizeHandle).styles.offset = (1, 0)
 
     def handle_prompt_key(self, event: Key) -> bool:
         """Route popup controls while leaving keyboard focus on PromptBox."""
@@ -324,9 +381,12 @@ class AutocompleteInput(Vertical):
         options = self.query_one(OptionList)
         options.set_options([Option(_completion_row(item), disabled=not item.selectable) for item in self._items])
         options.display = bool(self._items)
+        options_height = 0
         if self._items:
             options.highlighted = 0
-            options.styles.height = min(len(self._items), MAX_COMPLETIONS) + POPUP_BORDER_HEIGHT
+            options_height = min(len(self._items), MAX_COMPLETIONS) + POPUP_BORDER_HEIGHT
+            options.styles.height = options_height
+        self.query_one(PromptResizeHandle).styles.offset = (1, options_height)
 
     def _hide_options(self) -> None:
         self._items = []
@@ -334,6 +394,7 @@ class AutocompleteInput(Vertical):
             options = self.query_one(OptionList)
             options.clear_options()
             options.display = False
+            self.query_one(PromptResizeHandle).styles.offset = (1, 0)
 
     def _accept(self, index: int | None) -> None:
         fragment = self._fragment

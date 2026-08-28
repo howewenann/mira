@@ -363,6 +363,18 @@ MCPPanelScreen {
 #autocomplete-input {
     width: 100%;
     height: auto;
+    layers: base resize;
+}
+
+#prompt-resize-handle {
+    layer: resize;
+    dock: left;
+    width: 1;
+    height: 1;
+    offset: 1 0;
+    background: transparent;
+    color: #5bb8b1;
+    pointer: ns-resize;
 }
 
 #autocomplete-options {

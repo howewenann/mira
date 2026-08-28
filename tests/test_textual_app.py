@@ -22,6 +22,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.events import MouseMove
 from textual.selection import SELECT_ALL
 from textual.widgets import (
     Button,
@@ -97,6 +98,7 @@ from ui.terminal_colors import (
     strip_ansi,
 )
 from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.status_bar import STATUS_STARTING_COLOR
 from ui.widgets.subagent_panel import (
@@ -315,6 +317,23 @@ async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError("condition was not met before timeout")
         await asyncio.sleep(0.02)
+
+
+async def start_prompt_resize(app: App[Any], pilot: Any) -> tuple[PromptBox, Any, int, int]:
+    """Press MIRA's prompt resize handle and return its screen coordinates."""
+    await pilot.pause()
+    prompt = app.query_one(PromptBox)
+    handle = app.query_one("#prompt-resize-handle")
+    x = handle.region.x + handle.region.width // 2
+    y = handle.region.y
+    await pilot.mouse_down(offset=(x, y))
+    await pilot.pause()
+    return prompt, handle, x, y
+
+
+async def move_captured_mouse(pilot: Any, x: int, y: int) -> None:
+    """Move the pointer while preserving Textual's active mouse capture."""
+    await pilot._post_mouse_events([MouseMove], offset=(x, y), button=1)
 
 
 def managed_model_config(
@@ -600,6 +619,87 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prompt.value, "first\nsec\nond")
             self.assertEqual(prompt.cursor_location, (2, 0))
             self.assertEqual(app.submissions, [])
+
+    async def test_dragging_prompt_border_up_increases_height(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt, handle, x, start_y = await start_prompt_resize(app, pilot)
+            start_height = prompt.region.height
+
+            await move_captured_mouse(pilot, x, start_y - 2)
+
+            self.assertEqual(start_height, MIN_PROMPT_HEIGHT)
+            self.assertEqual(handle.region.x, prompt.region.x + 1)
+            self.assertEqual(handle.region.width, prompt.region.width - 2)
+            self.assertIs(app.mouse_captured, handle)
+            self.assertEqual(prompt.region.height, start_height + 2)
+
+    async def test_dragging_prompt_border_down_decreases_height(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = 8
+            prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
+
+            await move_captured_mouse(pilot, x, start_y + 2)
+
+            self.assertEqual(prompt.region.height, 6)
+
+    async def test_prompt_resize_cannot_go_below_minimum(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = 8
+            prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
+
+            await move_captured_mouse(pilot, x, start_y + 4)
+
+            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT)
+
+    async def test_dragging_past_prompt_minimum_leaves_height_unchanged(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = 8
+            prompt, handle, x, start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, start_y + 4)
+
+            await move_captured_mouse(pilot, x, start_y + 6)
+
+            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT)
+            self.assertIs(app.mouse_captured, handle)
+
+    async def test_reversing_at_prompt_minimum_grows_during_same_drag(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.styles.height = 8
+            prompt, handle, x, start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, start_y + 4)
+
+            await move_captured_mouse(pilot, x, start_y + 1)
+
+            self.assertEqual(prompt.region.height, 7)
+            self.assertIs(app.mouse_captured, handle)
+
+    async def test_releasing_prompt_resize_ends_drag(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(80, 30)) as pilot:
+            prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, start_y - 2)
+            resized_height = prompt.region.height
+
+            await pilot.mouse_up(offset=(x, start_y - 2))
+            await move_captured_mouse(pilot, x, start_y - 4)
+
+            self.assertIsNone(app.mouse_captured)
+            self.assertEqual(prompt.region.height, resized_height)
 
     async def test_slash_completion_enter_inserts_without_submitting_and_space_dismisses(self) -> None:
         app = AutocompleteTestApp()
