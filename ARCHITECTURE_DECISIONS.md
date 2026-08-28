@@ -574,11 +574,13 @@ with the configured Rubric model. The verifier has only the effective Rubric
 tool surface and its normal HITL middleware, has no response format, and may
 naturally finish without calling a tool. The final grader has no verification
 tools and uses `ToolStrategy(GraderResponse)`. Both receive the stock bounded,
-sanitized DeepAgents grading payload; coverage correction is included only for
-the final grader. Only matched verifier `AIMessage` tool calls and their real
-`ToolMessage` results are copied into a private evidence channel for that final
-grader call. Verifier prose and all verifier messages remain outside the main
-agent state and transcript.
+sanitized DeepAgents transcript view. The verifier receives that material in a
+dedicated evidence-only payload with no grading or structured-response
+instructions. Only the final grader receives the stock DeepAgents grading
+payload and any coverage correction. Matched verifier `AIMessage` tool calls
+and their real `ToolMessage` results are copied into a private evidence channel
+for that final grader call. Verifier prose and all verifier messages remain
+outside the main agent state and transcript.
 
 DeepAgents continues to own grading iterations, frozen criteria, coverage
 retry, revision injection, caps, and terminal status. MIRA does not summarize,

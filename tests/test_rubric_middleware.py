@@ -168,6 +168,56 @@ class ProbeGraderModel(FixedFakeChatModel):
         return ChatResult(generations=[ChatGeneration(message=response)])
 
 
+class TranscriptStoryGraderModel(FixedFakeChatModel):
+    """Finish verification without tools, then grade the stock transcript."""
+
+    active_tools: list[str] = Field(default_factory=list, exclude=True)
+    final_payloads: list[str] = Field(default_factory=list, exclude=True)
+
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Callable | BaseTool],
+        *,
+        tool_choice: str | None = None,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, AIMessage]:
+        self.active_tools = tool_names(tools)
+        self.bindings.append({"tools": list(self.active_tools), "tool_choice": tool_choice})
+        return self
+
+    def _generate(self, messages: list[Any], **kwargs: Any) -> ChatResult:  # noqa: ARG002
+        if self.active_tools == ["inspect_reference"]:
+            response = AIMessage(content="VERIFICATION_COMPLETE")
+        elif self.active_tools == ["GraderResponse"]:
+            payload = "\n".join(
+                str(message.content)
+                for message in messages
+                if isinstance(message, HumanMessage)
+            )
+            self.final_payloads.append(payload)
+            story_is_visible = all(
+                theme in payload.lower()
+                for theme in ("lighthouse", "storm", "dog")
+            )
+            response = grader_message(
+                result="satisfied" if story_is_visible else "needs_revision",
+                explanation="The transcript contains the requested story.",
+                criteria=[
+                    {
+                        "name": "The final response is a story of approximately 200 words.",
+                        "passed": story_is_visible,
+                    },
+                    {
+                        "name": "The story includes a lighthouse, a storm, and a dog.",
+                        "passed": story_is_visible,
+                    },
+                ],
+            )
+        else:
+            raise AssertionError(f"Unexpected tool surface: {self.active_tools!r}")
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+
 class RubricMiddlewareTests(unittest.TestCase):
     def _agent(
         self,
@@ -428,6 +478,51 @@ class RubricMiddlewareTests(unittest.TestCase):
         self.assertNotIn("VERIFICATION_COMPLETE", repr(evidence))
         self.assertNotIn("reasoning", repr(evidence))
 
+    def test_verifier_input_reuses_bounded_transcript_without_grader_instructions(
+        self,
+    ) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        messages = [HumanMessage(content="original user request")]
+        messages.extend(AIMessage(content=f"assistant-{index}") for index in range(35))
+        state = {
+            "rubric": "The delivered report contains a conclusion.",
+            "_rubric_criteria": [
+                "The report exists.",
+                "The report contains a conclusion.",
+            ],
+            "messages": messages,
+        }
+        correction = "A previous attempt returned only 1 of the 2 criteria in the rubric."
+
+        with patch("deepagents.middleware.rubric.secrets.token_hex", return_value="fixed"):
+            verifier_input = middleware._verifier_input(state, 3)
+
+        payload = verifier_input["messages"][0].content
+        self.assertIn(
+            "<rubric-fixed>\nThe delivered report contains a conclusion.\n</rubric-fixed>",
+            payload,
+        )
+        self.assertIn(
+            "<criteria-fixed>\n1. The report exists.\n"
+            "2. The report contains a conclusion.\n</criteria-fixed>",
+            payload,
+        )
+        self.assertIn("[user] original user request", payload)
+        self.assertIn("[assistant] assistant-34", payload)
+        self.assertNotIn("[assistant] assistant-0", payload)
+        self.assertIn("The transcript is valid historical evidence", payload)
+        self.assertIn("return only VERIFICATION_COMPLETE", payload)
+        for grader_instruction in (
+            "Evaluate whether the agent transcript below satisfies",
+            "Return a GraderResponse",
+            "Break the rubric into its individual criteria and return one entry",
+            correction,
+            "satisfied",
+            "needs_revision",
+            "failed",
+        ):
+            self.assertNotIn(grader_instruction, payload)
+
     def test_sync_call_uses_stock_inputs_and_separate_evidence_channel(self) -> None:
         middleware = MiraRubricMiddleware(model="fake-model")
         tool_call = AIMessage(
@@ -461,6 +556,11 @@ class RubricMiddlewareTests(unittest.TestCase):
         with (
             patch.object(middleware, "_ensure_verifier", return_value=verifier),
             patch.object(middleware, "_ensure_final_grader", return_value=final_grader),
+            patch.object(
+                middleware,
+                "_grader_input",
+                wraps=middleware._grader_input,
+            ) as stock_input,
             patch.object(middleware, "_extract_graded", wraps=middleware._extract_graded) as extract,
             patch("deepagents.middleware.rubric.secrets.token_hex", return_value="fixed"),
         ):
@@ -473,6 +573,7 @@ class RubricMiddlewareTests(unittest.TestCase):
 
         self.assertEqual(graded.result, "satisfied")
         extract.assert_called_once_with(final_grader.invoke.return_value)
+        stock_input.assert_called_once_with(state, 2, correction)
         verifier_input = verifier.invoke.call_args.args[0]
         verifier_payload = verifier_input["messages"][0].content
         self.assertIn("<rubric-fixed>\ncriterion", verifier_payload)
@@ -480,7 +581,17 @@ class RubricMiddlewareTests(unittest.TestCase):
         self.assertIn("[user] original", verifier_payload)
         self.assertIn("[assistant] done", verifier_payload)
         self.assertNotIn(correction, verifier_payload)
+        self.assertNotIn(
+            "Evaluate whether the agent transcript below satisfies",
+            verifier_payload,
+        )
+        self.assertNotIn("Return a GraderResponse", verifier_payload)
         final_input = final_grader.invoke.call_args.args[0]
+        self.assertIn(
+            "Evaluate whether the agent transcript below satisfies",
+            final_input["messages"][0].content,
+        )
+        self.assertIn("Return a GraderResponse", final_input["messages"][0].content)
         self.assertIn(correction, final_input["messages"][0].content)
         self.assertEqual(final_input["messages"][1].content, VERIFICATION_EVIDENCE_MESSAGE)
         self.assertEqual(final_input["messages"][2].content, "")
@@ -491,6 +602,56 @@ class RubricMiddlewareTests(unittest.TestCase):
         final_grader.invoke.assert_called_once()
         self.assertIs(verifier.invoke.call_args.kwargs["context"], context)
         self.assertIs(final_grader.invoke.call_args.kwargs["context"], context)
+
+    def test_no_verifier_tool_call_still_grades_transcript_only_story(self) -> None:
+        @tool
+        def inspect_reference(reference: str) -> str:
+            """Inspect an external reference when one is relevant."""
+            raise AssertionError(f"Transcript-only rubric should not inspect {reference}")
+
+        story = " ".join(
+            [
+                "At the lighthouse, a dog watched the storm gather beyond the harbor.",
+                *[
+                    "Wind pressed salt against the windows while the keeper tended the lamp."
+                    for _ in range(15)
+                ],
+                "By dawn, the dog barked at calm water and guided the tired keeper home.",
+            ]
+        )
+        model = TranscriptStoryGraderModel(messages=iter(()))
+        middleware = MiraRubricMiddleware(model=model, tools=[inspect_reference])
+        rubric = (
+            "- The final response is a story of approximately 200 words.\n"
+            "- The story includes a lighthouse, a storm, and a dog."
+        )
+
+        graded = middleware._invoke_grader(
+            {
+                "rubric": rubric,
+                "messages": [
+                    HumanMessage(content="Write a 200-word story with three requested themes."),
+                    AIMessage(content=story),
+                ],
+            },
+            0,
+        )
+
+        self.assertEqual(graded.result, "satisfied")
+        self.assertTrue(all(criterion["passed"] for criterion in graded.criteria))
+        self.assertEqual(
+            model.bindings,
+            [
+                {"tools": ["inspect_reference"], "tool_choice": None},
+                {"tools": ["GraderResponse"], "tool_choice": "any"},
+            ],
+        )
+        self.assertEqual(len(model.final_payloads), 1)
+        self.assertIn(story, model.final_payloads[0])
+        self.assertIn(
+            "Evaluate whether the agent transcript below satisfies",
+            model.final_payloads[0],
+        )
 
     def test_async_call_matches_sync_evidence_and_context_behavior(self) -> None:
         middleware = MiraRubricMiddleware(model="fake-model")
@@ -528,7 +689,19 @@ class RubricMiddlewareTests(unittest.TestCase):
         graded = asyncio.run(invoke())
 
         self.assertEqual(graded.result, "satisfied")
+        verifier_payload = verifier.ainvoke.await_args.args[0]["messages"][0].content
+        self.assertIn("Gather useful current-state evidence", verifier_payload)
+        self.assertNotIn(
+            "Evaluate whether the agent transcript below satisfies",
+            verifier_payload,
+        )
+        self.assertNotIn("Return a GraderResponse", verifier_payload)
         grader_input = grader.ainvoke.await_args.args[0]
+        self.assertIn(
+            "Evaluate whether the agent transcript below satisfies",
+            grader_input["messages"][0].content,
+        )
+        self.assertIn("Return a GraderResponse", grader_input["messages"][0].content)
         self.assertEqual(grader_input["messages"][-1].status, "error")
         self.assertIs(verifier.ainvoke.await_args.kwargs["context"], context)
         self.assertIs(grader.ainvoke.await_args.kwargs["context"], context)
