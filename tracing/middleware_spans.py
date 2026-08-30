@@ -27,7 +27,7 @@ from langgraph.pregel._read import PregelNode
 
 MiddlewareSpanMode = Literal["hidden", "full"]
 
-# DeepAgents 0.7.9 omits middleware hook inputs from traces. MIRA keeps those
+# DeepAgents 0.7.11 omits middleware hook inputs from traces. MIRA keeps those
 # inputs visible by default for developer diagnostics. Flip this internal
 # compatibility toggle to False to retain the upstream omission behavior.
 TRACE_MIDDLEWARE_INPUTS = True

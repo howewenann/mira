@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "coolname>=5.0.0",
-    "deepagents==0.7.9",
+    "deepagents==0.7.11",
     "langchain-quickjs==0.3.5",
     "langgraph>=1.2.5",
     "langchain-anyllm>=0.0.1a2",
@@ -23,7 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tracing = [
-    "langsmith>=0.11.1,<0.12.0",
+    "langsmith>=0.11.2,<0.12.0",
     "openinference-instrumentation>=0.1.57,<0.2.0",
     "openinference-semantic-conventions>=0.1.32,<0.2.0",
     "opentelemetry-sdk>=1.44.0,<2.0.0",

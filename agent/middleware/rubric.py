@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import time
 from collections.abc import Sequence
 from contextvars import ContextVar
@@ -191,9 +192,23 @@ class _VerifierToolObserver(AgentMiddleware):
 class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     """DeepAgents' stock Rubric lifecycle with an isolated verifier pass."""
 
-    def __init__(self, *, grader_middleware: Sequence[AgentMiddleware] = (), **kwargs: Any) -> None:
-        super().__init__(system_prompt=FINAL_GRADER_SYSTEM_PROMPT, **kwargs)
-        self._grader_middleware = list(grader_middleware)
+    def __init__(
+        self,
+        *,
+        model: Any,
+        verifier_tools: Sequence[Any] = (),
+        verifier_middleware: Sequence[AgentMiddleware] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            model=model,
+            system_prompt=FINAL_GRADER_SYSTEM_PROMPT,
+            tools=[],
+            grader_middleware=[],
+            **kwargs,
+        )
+        self._verifier_tools = list(verifier_tools)
+        self._verifier_middleware = list(verifier_middleware)
         self._verifier: Any = None
 
     def _resolve_nested_model(self) -> Any:
@@ -208,8 +223,8 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
             self._verifier = create_agent(
                 model=self._resolve_nested_model(),
                 system_prompt=VERIFIER_SYSTEM_PROMPT,
-                tools=self._tools,
-                middleware=[*self._grader_middleware, _VerifierToolObserver()],
+                tools=self._verifier_tools,
+                middleware=[*self._verifier_middleware, _VerifierToolObserver()],
                 name=RUBRIC_VERIFIER_GRAPH,
                 response_format=None,
             )
@@ -328,7 +343,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         transcript = deepagents_rubric._build_grader_transcript(
             state.get("messages", [])
         )
-        nonce = deepagents_rubric.secrets.token_hex(8)
+        nonce = secrets.token_hex(8)
         safe_rubric = deepagents_rubric._sanitize_for_payload(rubric.strip())
         safe_transcript = deepagents_rubric._sanitize_for_payload(transcript)
 

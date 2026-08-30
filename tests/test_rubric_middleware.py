@@ -298,8 +298,8 @@ class RubricMiddlewareTests(unittest.TestCase):
         )
         rubric = MiraRubricMiddleware(
             model=verifier_and_grader_model,
-            tools=[inspect_external],
-            grader_middleware=nested_middleware,
+            verifier_tools=[inspect_external],
+            verifier_middleware=nested_middleware,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -318,9 +318,22 @@ class RubricMiddlewareTests(unittest.TestCase):
         final_grader = Mock(name="final_grader")
         middleware = MiraRubricMiddleware(
             model="provider:model",
-            tools=[verification_tool],
-            grader_middleware=[hitl],
+            verifier_tools=[verification_tool],
+            verifier_middleware=[hitl],
         )
+
+        self.assertEqual(middleware._verifier_tools, [verification_tool])
+        self.assertEqual(middleware._verifier_middleware, [hitl])
+        self.assertEqual(middleware._tools, [])
+        self.assertEqual(middleware._grader_middleware, ())
+        with patch.object(
+            deepagents_rubric,
+            "_strategy_from_model",
+            return_value="provider",
+        ) as strategy:
+            metadata = middleware._grader_trace_metadata()
+        strategy.assert_called_once_with("provider:model", has_tools=False)
+        self.assertEqual(metadata["rubric_grader_effective_strategy"], "provider")
 
         with (
             patch("deepagents._models.resolve_model", return_value=resolved_model) as resolve,
@@ -629,7 +642,7 @@ class RubricMiddlewareTests(unittest.TestCase):
         }
         correction = "A previous attempt returned only 1 of the 2 criteria in the rubric."
 
-        with patch("deepagents.middleware.rubric.secrets.token_hex", return_value="fixed"):
+        with patch("agent.middleware.rubric.secrets.token_hex", return_value="fixed"):
             verifier_input = middleware._verifier_input(state, 3)
 
         payload = verifier_input["messages"][0].content
@@ -697,7 +710,7 @@ class RubricMiddlewareTests(unittest.TestCase):
                 wraps=middleware._grader_input,
             ) as stock_input,
             patch.object(middleware, "_extract_graded", wraps=middleware._extract_graded) as extract,
-            patch("deepagents.middleware.rubric.secrets.token_hex", return_value="fixed"),
+            patch("agent.middleware.rubric.secrets.token_hex", return_value="fixed"),
         ):
             graded = middleware._invoke_grader(
                 state,
@@ -856,7 +869,7 @@ class RubricMiddlewareTests(unittest.TestCase):
             ]
         )
         model = TranscriptStoryGraderModel(messages=iter(()))
-        middleware = MiraRubricMiddleware(model=model, tools=[inspect_reference])
+        middleware = MiraRubricMiddleware(model=model, verifier_tools=[inspect_reference])
         rubric = (
             "- The final response is a story of approximately 200 words.\n"
             "- The story includes a lighthouse, a storm, and a dog."
@@ -1018,7 +1031,7 @@ class RubricMiddlewareTests(unittest.TestCase):
                 backend = FilesystemBackend(root_dir=root, virtual_mode=True)
                 read_file = FilesystemMiddleware(backend=backend, tools=["read_file"]).tools[0]
                 model = ProbeGraderModel(messages=iter(()))
-                middleware = MiraRubricMiddleware(model=model, tools=[read_file])
+                middleware = MiraRubricMiddleware(model=model, verifier_tools=[read_file])
 
                 graded = middleware._invoke_grader(
                     {

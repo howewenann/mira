@@ -238,8 +238,8 @@ def _build_agent(
         rubric_middleware.append(
             RubricMiddleware(
                 model=rubric_model,
-                tools=rubric_tools,
-                grader_middleware=(
+                verifier_tools=rubric_tools,
+                verifier_middleware=(
                     [HumanInTheLoopMiddleware(interrupt_on=rubric_interrupts)] if rubric_interrupts else []
                 ),
                 max_iterations=rubric_max_iterations(config),

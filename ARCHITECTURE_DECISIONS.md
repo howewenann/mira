@@ -582,25 +582,29 @@ Success Criteria or introduce a second grading call. Rubric colors are
 centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
 isolated to Rubric UI.
 
-Each DeepAgents 0.7.9 per-grader call runs two separate static nested agents
-with the configured Rubric model. The verifier has only the effective Rubric
-tool surface and its normal HITL middleware, has no response format, and may
-naturally finish without calling a tool. The final grader has no verification
-tools and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
+Each DeepAgents 0.7.11 per-grader call runs two separate static nested agents
+with the configured Rubric model. MIRA owns the verifier's effective Rubric
+tools and normal HITL middleware; the verifier has no response format and may
+naturally finish without calling a tool. DeepAgents' grader-owned tool and
+middleware fields truthfully describe MIRA's final grader, which is tool-free
+and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
 sanitized DeepAgents transcript view. The verifier receives that material in a
 dedicated evidence-only payload with no grading or structured-response
 instructions. Only the final grader receives the stock DeepAgents grading
 payload and any coverage correction. Matched verifier `AIMessage` tool calls
-and their real `ToolMessage` results are copied into a private evidence channel
-for that final grader call. Verifier prose and all verifier messages remain
-outside the main agent state and transcript.
+and their real `ToolMessage` results are copied without truncation into a
+private evidence channel for that final grader call. Verifier prose and all
+verifier messages remain outside the main agent state and transcript.
 
-DeepAgents continues to own grading iterations, frozen criteria, coverage
-retry, revision injection, caps, and terminal status. MIRA does not summarize,
-truncate, or separately budget verifier tool results. Consequently a very large
-tool result can exceed the final grader provider's context window; that failure
-is surfaced through the stock grader-error lifecycle rather than silently
-making verification evidence lossy.
+DeepAgents 0.7.11 continues to own grading iterations, frozen criteria,
+coverage retry, revision injection, caps, and terminal status. MIRA inserts its
+isolated verifier before each final grader call without replacing that stock
+lifecycle. Transcript and verifier evidence are independently valid; verifier
+evidence supplements rather than gates transcript evidence. MIRA does not
+summarize, truncate, or separately budget verifier tool results. Consequently a
+very large tool result can exceed the final grader provider's context window;
+that failure is surfaced through the stock grader-error lifecycle rather than
+silently making verification evidence lossy.
 
 **Why:** Outcome-focused work should not force users to approve an approach.
 Keeping Goals criteria-only makes execution flexible while retaining the same

@@ -406,8 +406,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             plan_kwargs = create.call_args.kwargs
 
         call = rubric.call_args.kwargs
-        self.assertEqual([tool.name for tool in call["tools"]], ["ls", "read_file", "glob", "grep"])
-        self.assertEqual(call["grader_middleware"], [])
+        self.assertEqual(
+            [tool.name for tool in call["verifier_tools"]],
+            ["ls", "read_file", "glob", "grep"],
+        )
+        self.assertEqual(call["verifier_middleware"], [])
         self.assertEqual(call["model"], "model")
         self.assertEqual(call["max_iterations"], 5)
         self.assertIn("rubric", action_middleware)
@@ -497,8 +500,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_llm.call_args_list[1].kwargs["role"], "rubric")
         call = rubric.call_args.kwargs
         self.assertEqual(call["model"], "grader-model")
-        self.assertEqual([tool.name for tool in call["tools"]], ["ls", "read_file", "glob", "grep"])
-        self.assertEqual(call["grader_middleware"], [])
+        self.assertEqual(
+            [tool.name for tool in call["verifier_tools"]],
+            ["ls", "read_file", "glob", "grep"],
+        )
+        self.assertEqual(call["verifier_middleware"], [])
         self.assertEqual(call["max_iterations"], 2)
         self.assertEqual(create.call_args.kwargs["model"], "main-model")
         self.assertEqual(agent.mira_rubric_model_name, "[grader] lmstudio:bonsai")
