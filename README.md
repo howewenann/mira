@@ -14,20 +14,15 @@ MIRA requires Python 3.11 or newer.
 pip install mira
 ```
 
-To install MIRA in a dedicated Conda environment:
+For development from this checkout, create the repository's Conda environment
+and activate it:
 
 ```bash
-conda create --name mira python=3.12
+conda env create -f environment.yml
 conda activate mira
-python -m pip install mira
 ```
 
-For development from this checkout, create and activate the environment above,
-then install the current checkout instead:
-
-```bash
-python -m pip install -e .
-```
+The environment file installs the current checkout in editable mode.
 
 ## Configure a model
 
