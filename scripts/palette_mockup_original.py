@@ -22,7 +22,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from ui.spinners import SPINNER_FRAMES  # noqa: E402
+from ui.shared.terminal.spinners import SPINNER_FRAMES  # noqa: E402
 
 
 ACTIVE_STATES = {"starting", "running", "cancelling"}

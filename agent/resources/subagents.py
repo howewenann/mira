@@ -18,7 +18,7 @@ from agent.resources.paths import (
 )
 from agent.resources.python_files import import_python_file
 from config.settings import subagent_enabled, subagent_model_assignment
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 
 @dataclass(frozen=True, slots=True)

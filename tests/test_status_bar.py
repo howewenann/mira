@@ -7,7 +7,7 @@ import unittest
 
 from rich.console import Console
 
-from ui.widgets.status_bar import context_bar, telemetry_row, truncate
+from ui.textual.widgets.status_bar import context_bar, telemetry_row, truncate
 
 
 def mojibake(text: str) -> str:

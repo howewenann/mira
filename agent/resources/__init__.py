@@ -18,7 +18,7 @@ from agent.resources.skills import load_skills
 from agent.resources.subagents import SubagentDiscovery, discover_subagents, effective_subagent_specs
 from agent.resources.tools import load_tools, tool_name
 from agent.resources.tool_failures import ToolLoadFailure, tool_failure_issues
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
 DEFAULT_EXECUTE_ENV_KEYS = (

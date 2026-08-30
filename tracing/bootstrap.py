@@ -10,7 +10,7 @@ from typing import Any, ParamSpec, TypeVar
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
 from config.settings import tracing_enabled, tracing_settings
 from config.tracing import TracingRegistry
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 _FLUSH_TIMEOUT_MILLIS = 1_000
 _OWNED_ENVIRONMENT_KEYS = ("LANGSMITH_TRACING", "LANGSMITH_TRACING_MODE")

@@ -1,4 +1,4 @@
-"""Session dashboard stats and display helpers."""
+"""Durable session dashboard statistics and accounting helpers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from runtime.usage import item_context_source, positive_int, select_context_usage
+from core.context.usage import item_context_source, positive_int, select_context_usage
 
 DEFAULT_DASHBOARD = {
     "model": "",

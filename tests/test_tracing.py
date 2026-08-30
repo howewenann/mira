@@ -732,8 +732,8 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
         text: str = "hello",
         display_text: str | None = None,
     ) -> None:
-        from runtime.runner import TurnResult
-        from ui import repl
+        from core.execution.runner import TurnResult
+        from tests.support.turns import run_user_turn
 
         async def fake_run_turn(**kwargs: object) -> TurnResult:
             child_parents.append(_CURRENT_TURN_TRACE.get())
@@ -756,8 +756,8 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
             "turns": 0,
             "dashboard": {},
         }
-        with patch.object(repl, "run_turn", side_effect=fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", side_effect=fake_run_turn):
+            await run_user_turn(
                 agent=object(),
                 plan_agent=object(),
                 renderer=SimpleNamespace(),
@@ -824,7 +824,7 @@ class TurnTracingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.end_calls, 1)
 
     async def test_multi_phase_continuation_stays_under_one_root(self) -> None:
-        from runtime.runner import TurnResult
+        from core.execution.runner import TurnResult
 
         langsmith = _TurnLangsmith()
         bootstrap._active_langsmith = langsmith
@@ -1314,7 +1314,7 @@ class SemanticProcessorTests(unittest.TestCase):
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-        from runtime.runner import TurnResult
+        from core.execution.runner import TurnResult
         from tracing.semantic_processor import LangSmithOpenInferenceProcessor
 
         class ToolCallingModel(FakeMessagesListChatModel):

@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage
 from agent.factory import _write_interrupts
 from agent.middleware import ModelResponseNormalizationMiddleware
 from agent.resources import build_resources
-from runtime.runner import run_turn
+from core.execution.runner import run_turn
 from session.checkpoint import make_checkpointer
 
 

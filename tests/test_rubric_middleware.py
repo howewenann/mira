@@ -38,7 +38,7 @@ from agent.middleware.rubric import (
     VERIFIER_SYSTEM_PROMPT,
     MiraRubricMiddleware,
 )
-from runtime.runner import run_turn
+from core.execution.runner import run_turn
 
 
 def tool_names(tools: Sequence[dict[str, Any] | type | Callable | BaseTool]) -> list[str]:

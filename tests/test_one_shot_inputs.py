@@ -15,7 +15,9 @@ from typer.testing import CliRunner
 from cli import commands
 from cli.commands import _read_text_input, _resolve_one_shot_inputs
 from cli.main import app as cli_app
-from runtime.runner import TurnResult
+from core.application import MiraApplication, MiraSession
+from core.execution.runner import TurnResult
+from ui.terminal.adapter import TerminalFrontend
 
 
 class Store:
@@ -159,7 +161,7 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
                     patch("config.runtime.load_effective_config", return_value=config),
-                    patch("ui.renderer.Renderer", return_value=object()),
+                    patch("ui.terminal.renderer.Renderer", return_value=object()),
                     patch(
                         "cli.git_guard.ensure_git_repository",
                         new=AsyncMock(return_value=True),
@@ -205,7 +207,7 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
         with (
             tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
             patch("config.runtime.load_effective_config", return_value=config),
-            patch("ui.renderer.Renderer", return_value=object()),
+            patch("ui.terminal.renderer.Renderer", return_value=object()),
             patch(
                 "cli.git_guard.ensure_git_repository",
                 new=AsyncMock(return_value=True),
@@ -239,22 +241,41 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_rubric_reaches_runner_without_goal_or_plan_state(self) -> None:
         session = {"id": "session-1", "events": [], "turns": 0}
         outcome_renderer = OutcomeRenderer()
-        app_state = {
-            "agent": object(),
-            "config": {
+        store = Store()
+        agent = object()
+        application = MiraApplication(
+            frontend=TerminalFrontend(outcome_renderer),
+            workspace=Path.cwd(),
+            agent=agent,
+            plan_agent=agent,
+            config={
                 "settings": {
                     "system": {"rubric": {"enabled": False, "max_iterations": 4}}
                 }
             },
+            model_name="test-model",
+            context_limit_tokens=4096,
+            context_limit_source="test",
+            store=store,
+            checkpointer=None,
+            mcp_manager=None,
+            agent_unavailable_message="",
+        )
+        core_session = MiraSession(application, session)
+        app_state = {
+            "application": application,
+            "core_session": core_session,
+            "agent": agent,
+            "config": application.config,
             "renderer": outcome_renderer,
             "session": session,
-            "store": Store(),
+            "store": store,
         }
         result = TurnResult(final_text="done", rubric_status="satisfied")
         run_turn = AsyncMock(return_value=result)
 
         with (
-            patch("runtime.runner.run_turn", new=run_turn),
+            patch("core.execution.turns.run_turn", new=run_turn),
             patch(
                 "session.context.sync_deepagents_compaction",
                 new=AsyncMock(return_value=False),
@@ -266,7 +287,8 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
                 rubric="  exact rubric\n",
             )
 
-        self.assertIs(returned, result)
+        self.assertEqual(returned.final_text, result.final_text)
+        self.assertEqual(returned.rubric_status, result.rubric_status)
         self.assertEqual(run_turn.await_args.kwargs["rubric"], "  exact rubric\n")
         self.assertEqual(run_turn.await_args.kwargs["rubric_max_iterations"], 4)
         self.assertTrue(run_turn.await_args.kwargs["include_rubric_state"])
@@ -285,7 +307,7 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
                     patch("config.runtime.load_effective_config", return_value=config),
-                    patch("ui.renderer.Renderer", return_value=object()),
+                    patch("ui.terminal.renderer.Renderer", return_value=object()),
                     patch(
                         "cli.git_guard.ensure_git_repository",
                         new=AsyncMock(return_value=True),

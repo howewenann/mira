@@ -14,10 +14,64 @@ agent is assembled. Small modules and plain control flow are preferred over
 clever abstractions.
 
 **Where to check:** `AGENTS.md`, `cli/`, `agent/factory.py`,
-`runtime/runner.py`, `ui/app.py`.
+`core/execution/runner.py`, `ui/textual/app.py`.
 
 **Update this when:** A new abstraction, framework layer, or package boundary
 changes how a reader should trace the system.
+
+## Repository Hierarchy
+
+**Decision:** The source tree expresses ownership directly: `agent/` contains
+DeepAgents-native machinery; `core/application/` contains the headless MIRA
+application; `core/execution/` interprets native turns; `core/api/` is the
+shared consumer contract; `session/` persists durable state; `ui/textual/` and
+`ui/terminal/` are MIRA-owned interfaces; `protocols/` is reserved for external
+interoperability; and `tracing/` remains an independent concern. The former
+miscellaneous `runtime/` package does not exist.
+
+**Why:** Directory ownership should be understandable to a person or a simple
+documentation generator without requiring a registry or reverse-engineering
+class names. `core/` is an organizational namespace, not a replacement agent
+framework: native DeepAgents, LangChain, and LangGraph objects remain native.
+
+**Where to check:** Package `README.md` files, `core/`, `ui/`, `protocols/`,
+`pyproject.toml`, and `tests/core/api/test_contract.py`.
+
+**Update this when:** A responsibility crosses package ownership or a new
+owned interface or external protocol adapter is introduced.
+
+## Core And Consumer Boundary
+
+**Decision:** MIRA's application lifecycle and complete turn orchestration are
+headless. `MiraApplication` owns shared agents, resources, checkpoints, MCP,
+and shutdown; each `MiraSession` owns one durable MIRA session projection and
+offers prompt, cancellation, mode, snapshot, and close operations. Textual and
+one-shot terminal output are adapters over the same small consumer contract:
+ordered event emission plus blocking interaction requests.
+
+**Why:** A frontend should render state and collect choices without owning
+agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,
+or resource lifecycle. Contract events retain native LangChain content blocks,
+structured tool arguments, message/tool identifiers, namespaces, and graph
+provenance. Interaction requests carry native LangGraph interrupts and return
+native decisions; MIRA does not translate them into a second execution model.
+MIRA-only Goal, Plan, Rubric, session, and MCP lifecycle data are explicit
+contract values and snapshots remain read-only projections of authoritative
+session/runtime state. A MIRA session id is not a generic graph thread id;
+planning continues to use its deliberately separate thread identity.
+
+**Dependency rule:** `agent/`, `core/`, and `session/` never import `ui/`;
+`core/` never imports `protocols/`. The contract under `core/api/` imports no
+consumer framework. Future consumers must depend inward on this boundary and must not change core event or
+interaction semantics merely to fit a transport.
+
+**Where to check:** `core/application/app.py`, `core/application/session.py`, `core/execution/turns.py`,
+`core/api/`, `session/recorder.py`, `ui/textual/adapter.py`, `ui/textual/app.py`,
+`cli/commands.py`.
+
+**Update this when:** Core lifecycle ownership changes, a new frontend-facing
+event or interaction family is added, or a frontend needs data not represented
+by the snapshot or native event projections.
 
 ## DeepAgents And LangGraph Ownership
 
@@ -30,7 +84,7 @@ reimplementing it. Local workarounds are kept narrow and tested when a real
 library or provider edge case is confirmed.
 
 **Where to check:** `agent/factory.py`, `agent/compaction.py`,
-`agent/context_overflow.py`, `runtime/runner.py`, `session/checkpoint.py`.
+`agent/context_overflow.py`, `core/execution/runner.py`, `session/checkpoint.py`.
 
 **Update this when:** MIRA takes ownership of behavior that DeepAgents or
 LangGraph used to handle, or when a workaround becomes part of the normal path.
@@ -38,8 +92,8 @@ LangGraph used to handle, or when a workaround becomes part of the normal path.
 ## Startup Flow
 
 **Decision:** Startup builds runtime state in one path: CLI command, Git guard,
-config, session store, model metadata, action agent, planning agent, and UI or
-one-shot renderer.
+config, headless `MiraApplication`, and headless `MiraSession`, followed by a
+Textual or one-shot frontend adapter.
 
 **Why:** A single startup shape keeps TUI and one-shot mode consistent. The Git
 guard runs before sessions and agents so MIRA does not begin work in an
@@ -55,7 +109,7 @@ the normal agent tool/HITL approval path. The initializer only creates the
 repository; it does not stage files or create an initial commit.
 
 **Where to check:** `cli/main.py`, `cli/commands.py`, `cli/git_guard.py`,
-`config/loader.py`, `config/metadata.py`.
+`core/application/app.py`, `core/application/session.py`, `config/loader.py`, `config/metadata.py`.
 
 **Update this when:** Startup order changes, a new runtime mode is added, or Git
 protection is moved later in the flow.
@@ -84,9 +138,9 @@ optional, so MIRA keeps running if that window cannot open or is closed, and
 normal non-trace TUI runs do not create live trace logs solely for successful
 activity.
 
-**Where to check:** `runtime/error_report.py`, `runtime/diagnostics.py`,
-`runtime/trace_stream.py`, `ui/terminal_transcript.py`, `cli/commands.py`,
-`ui/app.py`.
+**Where to check:** `core/diagnostics/error_report.py`, `core/diagnostics/logging.py`,
+`tracing/stream.py`, `ui/shared/terminal/transcript.py`, `cli/commands.py`,
+`ui/textual/app.py`.
 
 **Update this when:** Error artifact layout, reporting boundaries, diagnostic
 log behavior, or trace-window behavior changes.
@@ -161,9 +215,9 @@ defaults. Secrets are absent from persisted settings, model fingerprints, and
 Issue details.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
-`agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/app.py`,
-`ui/runtime_snapshot.py`, `agent/subagent_compilation.py`,
-`ui/widgets/settings_panel.py`.
+`agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/textual/app.py`,
+`ui/textual/runtime_report.py`, `agent/subagent_compilation.py`,
+`ui/textual/widgets/settings_panel.py`.
 
 **Update this when:** A value moves between reloadable and launch-scoped
 configuration, model profile fields change, or `/settings` changes ownership.
@@ -190,7 +244,7 @@ virtual paths such as `/tmp.py` are run from the project shell as
 workspace-relative paths instead of host-root absolute paths.
 
 **Where to check:** `agent/resources/__init__.py`, `config/settings.py`,
-`agent/factory.py`, `agent/middleware/`, `ui/app.py`.
+`agent/factory.py`, `agent/middleware/`, `ui/textual/app.py`.
 
 **Update this when:** `execute` is exposed by a different backend, default
 approval behavior changes, or shell environment inheritance changes.
@@ -330,7 +384,7 @@ decisions remain readable in narrow terminals.
 
 **Where to check:** `config/settings.py`, `agent/factory.py`,
 `agent/middleware/`, `agent/resources/__init__.py`, `ui/interrupts.py`,
-`runtime/runner.py`.
+`core/execution/runner.py`.
 
 **Update this when:** Approval defaults, interrupt payload handling, or
 settings-panel tool behavior changes.
@@ -462,8 +516,9 @@ MIRA constructs.
 
 **Where to check:** `agent/planning/policy.py`,
 `agent/planning/criteria.py`, `agent/middleware/`, `session/plans.py`,
-`runtime/runner.py`, `ui/app.py`, `ui/repl.py`, and
-`ui/widgets/chat_log.py`.
+`core/execution/runner.py`, `core/execution/turns.py`, `core/application/artifacts.py`,
+`ui/textual/app.py`, and
+`ui/textual/widgets/chat_log.py`.
 
 **Update this when:** Plan tools, construction stages, `current_plan` schema,
 review actions, recall commands, or execution completion rules change.
@@ -612,10 +667,11 @@ durability, review, recall, replacement, and evaluation guarantees as Plans.
 
 **Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
 `agent/middleware/`, `agent/default_resources/tools/prepare_goal.py`,
-`agent/default_resources/tools/finalize_goal.py`, `runtime/runner.py`,
-`runtime/rubric_events.py`, `runtime/subagent_events.py`, `session/goals.py`,
-`session/context.py`, `ui/app.py`, `ui/repl.py`, `ui/widgets/chat_log.py`, and
-`ui/widgets/rubric_bubble.py`.
+`agent/default_resources/tools/finalize_goal.py`, `core/execution/runner.py`,
+`core/execution/streams/rubric.py`, `core/execution/streams/subagents.py`, `session/goals.py`,
+`session/context.py`, `core/execution/turns.py`, `core/application/artifacts.py`,
+`ui/textual/app.py`, `ui/textual/widgets/chat_log.py`, and
+`ui/textual/widgets/rubric_bubble.py`.
 
 **Update this when:** Goal construction, persistence, replacement, review,
 recall, migration, or execution completion rules change.
@@ -673,7 +729,7 @@ reads the artifact directly from the session. `/plan-show` and `/goal-show`
 bypass model interpretation and read the same fields.
 
 **Where to check:** `agent/middleware/`, `agent/planning/response_status.py`,
-`runtime/correction_events.py`, `runtime/runner.py`, `session/context.py`.
+`core/execution/streams/corrections.py`, `core/execution/runner.py`, `session/context.py`.
 
 **Update this when:** A new correction rule is added, correction visibility or
 persistence changes, a control tool gains a stage precondition, or recoverable
@@ -796,7 +852,7 @@ state; MIRA changes only the renderer's sub-cell glyph table. This avoids tofu
 or mojibake in older console/font combinations without changing non-Windows
 rendering.
 
-TUI-only commands that need live app state stay in `ui/app.py`; for example,
+TUI-only commands that need live app state stay in `ui/textual/app.py`; for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
 rebuilding agents without restarting the session or MCP. `/reload-runtime`
@@ -849,10 +905,10 @@ the close control without changing the reported outcome of completed children.
 As the fixed panel opens or collapses, a tail-following transcript reanchors
 after layout while a transcript that the user scrolled upward remains paused.
 
-**Where to check:** `ui/app.py`, `ui/widgets/issues.py`,
-`ui/widgets/context_report.py`, `ui/styles/mira.tcss`, `ui/windows_input.py`,
-`ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
-`ui/renderer.py`, `runtime/*_events.py`, `tests/test_context_report.py`,
+**Where to check:** `ui/textual/app.py`, `ui/textual/widgets/issues.py`,
+`ui/textual/widgets/context_report.py`, `ui/textual/styles/mira.tcss`, `ui/textual/platform/windows/input.py`,
+`ui/textual/platform/windows/driver.py`, `ui/textual/platform/windows/clipboard.py`, `ui/textual/widgets/`,
+`ui/terminal/renderer.py`, `core/execution/streams/`, `tests/test_context_report.py`,
 `tests/test_textual_app.py`.
 
 **Update this when:** Rendering responsibility moves, a new UI mode appears,
@@ -892,8 +948,8 @@ explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
 not receive ambient filesystem, network, process, or clock access.
 
 **Where to check:** `agent/factory.py`, `agent/middleware/`,
-`agent/subagent_compilation.py`, `agent/tools/specs.py`, `runtime/runner.py`,
-`runtime/rubric_events.py`, `config/settings.py`.
+`agent/subagent_compilation.py`, `agent/tools/specs.py`, `core/execution/runner.py`,
+`core/execution/streams/rubric.py`, `config/settings.py`.
 
 **Update this when:** DeepAgents or QuickJS versions change, prompt ownership
 moves, todo defaults change, or filesystem/rubric semantics change.
@@ -948,8 +1004,8 @@ shape checks, scoped patching, and construction locking are intentionally
 quarantined in `tracing/middleware_spans.py`.
 
 **Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
-`tracing/semantic_processor.py`, `tracing/middleware_spans.py`, `ui/repl.py`,
-`config/runtime.py`, `ui/widgets/settings_panel.py`, `pyproject.toml`.
+`tracing/semantic_processor.py`, `tracing/middleware_spans.py`, `core/execution/turns.py`,
+`config/runtime.py`, `ui/textual/widgets/settings_panel.py`, `pyproject.toml`.
 
 **Update this when:** tracing ownership, OTLP transport, reload behavior, or
 secret-resolution boundaries change.
@@ -1012,7 +1068,7 @@ history is the surrounding eval tool call/result plus the assistant's summary.
 
 **Where to check:** `agent/compaction.py`, `agent/middleware/`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
-`runtime/context_usage.py`, `runtime/message_metadata.py`.
+`core/context/observation.py`, `core/execution/streams/message_metadata.py`.
 
 **Update this when:** Session JSON shape changes, compaction ownership changes,
 or replay context starts depending on a new source of truth.
@@ -1029,7 +1085,7 @@ Provider `In` and `Out` usage are cumulative session totals and are not used as
 current-context occupancy; after multiple turns they include repeated
 conversation history and are not expected to add up to the latest `Ctx` value.
 
-**Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/app.py`,
+**Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/textual/app.py`,
 `agent/context_overflow.py`.
 
 **Update this when:** New providers need special metadata handling, context
@@ -1092,7 +1148,7 @@ shutdown deterministic if the requesting panel recomposes or closes.
 
 **Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`,
 `agent/mcp/manager.py`, `agent/mcp/runtime.py`, `agent/factory.py`,
-`ui/app.py`, `ui/widgets/mcp_panel.py`, `ui/widgets/autocomplete_input.py`.
+`ui/textual/app.py`, `ui/textual/widgets/mcp_panel.py`, `ui/textual/widgets/autocomplete_input.py`.
 
 **Update this when:** MCP transport ownership, capability caching, attachment
 authorization, or the Act/Plan rebuild boundary changes.

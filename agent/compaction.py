@@ -15,7 +15,7 @@ from deepagents.middleware.summarization import (
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
 
-from runtime.context_usage import record_deepagents_context_tokens
+from core.context.observation import record_deepagents_context_tokens
 
 
 def create_mira_summarization_middleware(model: Any, backend: Any) -> Any:

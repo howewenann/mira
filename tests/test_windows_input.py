@@ -7,7 +7,7 @@ import unittest
 
 from textual._xterm_parser import XTermParser
 
-from ui.windows_input import (
+from ui.textual.platform.windows.input import (
     SHIFT_ENTER_SEQUENCE,
     SHIFT_PRESSED,
     VK_RETURN,
@@ -104,7 +104,7 @@ class WindowsInputTests(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "win32", "MIRA's Windows driver imports only on Windows")
     def test_windows_selects_mira_driver(self) -> None:
-        from ui.windows_driver import MiraWindowsDriver
+        from ui.textual.platform.windows.driver import MiraWindowsDriver
 
         self.assertIs(driver_class_for_platform("win32"), MiraWindowsDriver)
 

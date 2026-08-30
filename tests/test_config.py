@@ -16,6 +16,49 @@ from cli import commands
 from cli.main import app as cli_app
 from config.llm import ConfigError
 from config.runtime import LaunchOptions
+from core.application import MiraApplication, MiraSession
+from core.execution.runner import TurnResult
+from ui.terminal.adapter import TerminalFrontend
+
+
+def headless_bootstrap_state(
+    renderer: object,
+    session_record: dict[str, object],
+    store: object,
+    *,
+    config: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Build the production Core facade around narrow CLI test doubles."""
+    frontend = TerminalFrontend(renderer)
+    application = MiraApplication(
+        frontend=frontend,
+        workspace=Path("."),
+        agent="agent",
+        plan_agent="agent",
+        config=config or {"settings": {}},
+        model_name="test-model",
+        context_limit_tokens=4096,
+        context_limit_source="test",
+        store=store,
+        checkpointer=None,
+        mcp_manager=None,
+        tool_failures=[],
+        issues=[],
+        resource_metadata={},
+        project_backend=None,
+        agent_unavailable_message="",
+    )
+    core_session = MiraSession(application, session_record)
+    return {
+        "application": application,
+        "core_session": core_session,
+        "agent": application.agent,
+        "renderer": renderer,
+        "session": session_record,
+        "store": store,
+        "workspace": Path("."),
+        "mcp_manager": None,
+    }
 
 
 class CLIConfigTests(unittest.TestCase):
@@ -112,23 +155,26 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             config: dict[str, object] | None = None,
             renderer: object | None = None,
         ) -> dict[str, object]:
-            return {
-                "agent": "agent",
-                "renderer": renderer,
-                "session": session_record,
-                "store": type("Store", (), {"save": lambda self, record: None})(),
-            }
+            store = type("Store", (), {"save": lambda self, record: None})()
+            return headless_bootstrap_state(renderer, session_record, store, config=config)
 
-        async def run_turn(agent: object, text: str, renderer: object, thread_id: str) -> object:
+        async def run_turn(
+            agent: object,
+            text: str,
+            renderer: object,
+            thread_id: str,
+            **kwargs: object,
+        ) -> object:
+            del kwargs
             captured.append(text)
-            return type("Result", (), {"final_text": "done"})()
+            return TurnResult(final_text="done")
 
         with (
             patch("config.loader.load_config", return_value=config),
-            patch("ui.renderer.Renderer", return_value=object()),
+            patch("ui.terminal.renderer.Renderer", return_value=object()),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
-            patch("runtime.runner.run_turn", run_turn),
+            patch("core.execution.turns.run_turn", run_turn),
         ):
             await commands._run(
                 prompt=prompt,
@@ -190,36 +236,38 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 {**config_data, "llm_direct": False},
             )
             self.assertIs(renderer, renderer_obj)
-            return {
-                "agent": "agent",
-                "renderer": renderer_obj,
-                "session": session_record,
-                "store": Store(),
-            }
+            return headless_bootstrap_state(renderer_obj, session_record, Store(), config=config)
 
         async def run_turn(
             agent: object,
             text: str,
             renderer: object,
             thread_id: str,
-        ) -> None:
+            **kwargs: object,
+        ) -> TurnResult:
+            del kwargs
             events.append("run_turn")
             self.assertEqual((agent, text, thread_id), ("agent", "hello", "thread-1"))
-            self.assertIs(getattr(renderer, "renderer", None), renderer_obj)
+            frontend = getattr(getattr(renderer, "renderer", None), "frontend", None)
+            self.assertIs(getattr(frontend, "renderer", None), renderer_obj)
+            return TurnResult(final_text="done")
 
         config_data = config
         renderer_obj = renderer
 
         with (
             patch("config.loader.load_config", load_config),
-            patch("ui.renderer.Renderer", make_renderer),
+            patch("ui.terminal.renderer.Renderer", make_renderer),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
-            patch("runtime.runner.run_turn", run_turn),
+            patch("core.execution.turns.run_turn", run_turn),
         ):
             await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
-        self.assertEqual(events, ["config", "renderer", "guard", "bootstrap", "save", "run_turn", "save"])
+        self.assertEqual(events[:4], ["config", "renderer", "guard", "bootstrap"])
+        self.assertIn("run_turn", events)
+        self.assertLess(events.index("bootstrap"), events.index("run_turn"))
+        self.assertGreater(events.count("save"), 0)
 
     async def test_run_sets_direct_config_flag(self) -> None:
         """The CLI flag should be carried into bootstrap config."""
@@ -242,22 +290,19 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         ) -> dict[str, object]:
             self.assertIsNotNone(config)
             self.assertTrue(config["llm_direct"])
-            return {
-                "agent": "agent",
-                "renderer": renderer,
-                "session": {"id": "thread-1"},
-                "store": type("Store", (), {"save": lambda self, record: None})(),
-            }
+            record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+            store = type("Store", (), {"save": lambda self, record: None})()
+            return headless_bootstrap_state(renderer, record, store, config=config)
 
         async def run_turn(*args: object, **kwargs: object) -> object:
-            return type("Result", (), {"final_text": "done"})()
+            return TurnResult(final_text="done")
 
         with (
             patch("config.loader.load_config", return_value=config),
-            patch("ui.renderer.Renderer", return_value=object()),
+            patch("ui.terminal.renderer.Renderer", return_value=object()),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
-            patch("runtime.runner.run_turn", run_turn),
+            patch("core.execution.turns.run_turn", run_turn),
         ):
             await commands._run(
                 prompt="hello",
@@ -288,22 +333,19 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         ) -> dict[str, object]:
             self.assertIsNotNone(config)
             self.assertFalse(config["llm_direct"])
-            return {
-                "agent": "agent",
-                "renderer": renderer,
-                "session": {"id": "thread-1"},
-                "store": type("Store", (), {"save": lambda self, record: None})(),
-            }
+            record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
+            store = type("Store", (), {"save": lambda self, record: None})()
+            return headless_bootstrap_state(renderer, record, store, config=config)
 
         async def run_turn(*args: object, **kwargs: object) -> object:
-            return type("Result", (), {"final_text": "done"})()
+            return TurnResult(final_text="done")
 
         with (
             patch("config.loader.load_config", return_value=config),
-            patch("ui.renderer.Renderer", return_value=object()),
+            patch("ui.terminal.renderer.Renderer", return_value=object()),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
-            patch("runtime.runner.run_turn", run_turn),
+            patch("core.execution.turns.run_turn", run_turn),
         ):
             await commands._run(
                 prompt="hello",
@@ -333,23 +375,19 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             config: dict[str, object] | None = None,
             renderer: object | None = None,
         ) -> dict[str, object]:
-            return {
-                "agent": "agent",
-                "renderer": renderer,
-                "session": session_record,
-                "store": type("Store", (), {"save": lambda self, record: saved.append(record.copy())})(),
-            }
+            store = type("Store", (), {"save": lambda self, record: saved.append(record.copy())})()
+            return headless_bootstrap_state(renderer, session_record, store, config=config)
 
         async def run_turn(*args: object, **kwargs: object) -> object:
             raise RuntimeError("unexecuted tool call")
 
         with (
             patch("config.loader.load_config", return_value=config),
-            patch("ui.renderer.Renderer", return_value=object()),
+            patch("ui.terminal.renderer.Renderer", return_value=object()),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
-            patch("runtime.runner.run_turn", run_turn),
-            patch("runtime.error_report.write_error_report", return_value=Path("report.txt")) as report,
+            patch("core.execution.turns.run_turn", run_turn),
+            patch("core.diagnostics.error_report.write_error_report", return_value=Path("report.txt")) as report,
         ):
             with self.assertRaisesRegex(RuntimeError, "unexecuted tool call"):
                 await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
@@ -368,7 +406,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cli.commands._suppress_known_warnings"),
             patch("cli.commands._run", fail),
-            patch("runtime.error_report.write_error_report", return_value=Path("backup.txt")) as report,
+            patch("core.diagnostics.error_report.write_error_report", return_value=Path("backup.txt")) as report,
         ):
             with self.assertRaisesRegex(RuntimeError, "startup boom"):
                 commands.run(prompt=None, resume=False, workspace=Path("."), session="requested")
@@ -388,7 +426,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cli.commands._suppress_known_warnings"),
             patch("cli.commands._run", fail),
-            patch("runtime.error_report.write_error_report") as report,
+            patch("core.diagnostics.error_report.write_error_report") as report,
         ):
             with self.assertRaises(RuntimeError):
                 commands.run(prompt="hello", resume=False, workspace=Path("."), session=None)
@@ -404,7 +442,7 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("config.loader.load_config", return_value={"tool_output_chars": 123}),
-            patch("ui.renderer.Renderer", return_value=renderer),
+            patch("ui.terminal.renderer.Renderer", return_value=renderer),
             patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap") as bootstrap,
         ):

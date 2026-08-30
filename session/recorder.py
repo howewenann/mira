@@ -10,9 +10,14 @@ from inspect import Parameter, signature
 from typing import Any
 
 from agent.context_overflow import pop_context_overflow_notice
-from runtime.output_events import normalize_response_delta
-from runtime.correction_events import normalize_correction_event
-from runtime.rubric_events import elapsed_ms
+from core.application.artifacts import (
+    prepare_artifact_review,
+    resolve_artifact_review,
+    update_artifact_event_status,
+)
+from core.execution.streams.output import normalize_response_delta
+from core.execution.streams.corrections import normalize_correction_event
+from core.execution.streams.rubric import elapsed_ms
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 from session.goals import current_goal, goal_artifact_text
 from session.plans import current_plan, plan_artifact_text
@@ -512,8 +517,8 @@ class SessionRecorder:
             self.save()
 
 
-class RecordingRenderer:
-    """Forward renderer calls while recording the same visible transcript."""
+class SessionEventEmitter:
+    """Persist runtime updates, then forward them through the frontend emitter."""
 
     def __init__(
         self,
@@ -521,10 +526,12 @@ class RecordingRenderer:
         recorder: SessionRecorder,
         *,
         clock: Any = time.monotonic,
+        semantic_state: dict[str, Any] | None = None,
     ) -> None:
         self.renderer = renderer
         self.recorder = recorder
         self._clock = clock
+        self.semantic_state = semantic_state
         self._context_notice_rendered = False
         self._open_idless_tool_calls: list[tuple[int, str]] = []
         self._tool_timer_sequence = 0
@@ -566,6 +573,10 @@ class RecordingRenderer:
             )
         return "Current Plan rendered."
 
+    async def finalize_plan(self, interrupt: Any) -> dict[str, Any]:
+        """Create, review, and resolve a formal Plan outside presentation code."""
+        return await self._finalize_artifact("plan", interrupt)
+
     async def show_goal(self, interrupt: Any = None) -> str:
         """Render current_goal through the active UI, with a terminal fallback."""
         callback = getattr(self.renderer, "show_goal", None)
@@ -597,9 +608,67 @@ class RecordingRenderer:
             )
         return "Current Goal rendered."
 
-    def reasoning_delta(self, delta: str) -> None:
+    async def finalize_goal(self, interrupt: Any) -> dict[str, Any]:
+        """Create, review, and resolve a formal Goal outside presentation code."""
+        return await self._finalize_artifact("goal", interrupt)
+
+    async def _finalize_artifact(self, kind: str, interrupt: Any) -> dict[str, Any]:
+        if self.semantic_state is None:
+            callback = getattr(self.renderer, f"finalize_{kind}")
+            outcome = callback(interrupt)
+            return await outcome if hasattr(outcome, "__await__") else outcome
+        artifact, event = prepare_artifact_review(
+            kind,  # type: ignore[arg-type]
+            interrupt,
+            self.recorder.record,
+            self.semantic_state,
+        )
+        self.recorder.save()
+        self.renderer.artifact(
+            kind,
+            "proposed",
+            artifact,
+            created_at=event_created_at(event),
+        )
+        try:
+            decision = await getattr(self.renderer, f"finalize_{kind}")(interrupt, artifact)
+        except asyncio.CancelledError:
+            update_artifact_event_status(
+                self.recorder.record,
+                kind,  # type: ignore[arg-type]
+                str(artifact.get("id") or ""),
+                "cancelled",
+            )
+            self.recorder.save()
+            self.renderer.artifact(kind, "cancelled", artifact)
+            raise
+        if not isinstance(decision, dict):
+            raise RuntimeError(f"{kind} review must return a decision mapping")
+        resolved = {**decision, "artifact": artifact}
+        detail = resolve_artifact_review(
+            kind,  # type: ignore[arg-type]
+            artifact,
+            resolved,
+            self.recorder.record,
+            self.semantic_state,
+        )
+        self.recorder.save()
+        self.renderer.artifact(
+            kind,
+            str(resolved.get("action") or "reviewed"),
+            detail.get("accepted") or artifact,
+            {**resolved, **detail},
+        )
+        return resolved
+
+    def reasoning_delta(self, delta: str, **frontend_identity: Any) -> None:
         event = self.recorder.reasoning_delta(delta)
-        call_renderer(self.renderer.reasoning_delta, delta, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.reasoning_delta,
+            delta,
+            created_at=event_created_at(event),
+            **frontend_identity,
+        )
 
     def discard_reasoning(self) -> None:
         callback = getattr(self.renderer, "discard_reasoning", None)
@@ -607,19 +676,43 @@ class RecordingRenderer:
             callback()
         self.recorder.discard_reasoning()
 
-    def text_delta(self, delta: str) -> None:
+    def text_delta(self, delta: str, **frontend_identity: Any) -> None:
         event = self.recorder.text_delta(delta)
-        call_renderer(self.renderer.text_delta, delta, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.text_delta,
+            delta,
+            created_at=event_created_at(event),
+            **frontend_identity,
+        )
 
-    def tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         timer_token = self._start_tool_timer(name, call_id, preparing=False)
         event = self.recorder.tool_call(name, args, call_id=call_id)
         self._tool_timers[timer_token]["event_id"] = int(event["id"])
         if not call_id:
             self._open_idless_tool_calls.append((int(event["id"]), name))
-        call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
+        call_renderer(
+            self.renderer.tool_call,
+            name,
+            args,
+            call_id=call_id,
+            created_at=event_created_at(event),
+            **frontend_identity,
+        )
 
-    def tool_call_updated(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call_updated(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Update one durable call event and its existing visible block."""
         event_id = None
         if not call_id and self._open_idless_tool_calls:
@@ -641,6 +734,7 @@ class RecordingRenderer:
                 args,
                 call_id=call_id,
                 created_at=event_created_at(event),
+                **frontend_identity,
             )
         else:
             call_renderer(
@@ -649,6 +743,7 @@ class RecordingRenderer:
                 args,
                 call_id=call_id,
                 created_at=event_created_at(event),
+                **frontend_identity,
             )
 
     def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
@@ -659,7 +754,13 @@ class RecordingRenderer:
         if callable(callback):
             callback(name, call_id=call_id)
 
-    def tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         duration_ms = self._finish_tool_timer(name, call_id)
         event = self.recorder.tool_result(
             name,
@@ -676,6 +777,7 @@ class RecordingRenderer:
             call_id=call_id,
             created_at=event_created_at(event),
             duration_ms=duration_ms,
+            **frontend_identity,
         )
 
     def _discard_open_idless_tool_call(self, name: str) -> None:
@@ -684,7 +786,13 @@ class RecordingRenderer:
                 self._open_idless_tool_calls.pop(index)
                 return
 
-    def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def completed_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Record and update a completed tool without ending active model output."""
         duration_ms = self._finish_tool_timer(name, call_id)
         event = self.recorder.completed_tool_result(
@@ -704,6 +812,7 @@ class RecordingRenderer:
                 call_id=call_id,
                 created_at=event_created_at(event),
                 duration_ms=duration_ms,
+                **frontend_identity,
             )
         else:
             call_renderer(
@@ -713,9 +822,16 @@ class RecordingRenderer:
                 call_id=call_id,
                 created_at=event_created_at(event),
                 duration_ms=duration_ms,
+                **frontend_identity,
             )
 
-    def completed_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+    def completed_tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Record and update a failed tool without ending active model output."""
         duration_ms = self._finish_tool_timer(name, call_id)
         event = self.recorder.completed_tool_error(
@@ -735,6 +851,7 @@ class RecordingRenderer:
                 call_id=call_id,
                 created_at=event_created_at(event),
                 duration_ms=duration_ms,
+                **frontend_identity,
             )
         else:
             call_renderer(
@@ -744,54 +861,94 @@ class RecordingRenderer:
                 call_id=call_id,
                 created_at=event_created_at(event),
                 duration_ms=duration_ms,
+                **frontend_identity,
             )
 
-    def recovered_tool_result(self, name: str, result: str, call_id: str = "") -> None:
+    def recovered_tool_result(
+        self,
+        name: str,
+        result: str,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Render and record a late-discovered tool result."""
         callback = getattr(self.renderer, "recovered_tool_result", None)
         event = self.recorder.recovered_tool_result(name, result, call_id=call_id)
         if not call_id:
             self._discard_open_idless_tool_call(name)
         if callable(callback):
-            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
         else:
-            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
 
-    def recovered_tool_call(self, name: str, args: Any, call_id: str = "") -> None:
+    def recovered_tool_call(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Render and record a late-discovered executed tool call."""
         callback = getattr(self.renderer, "recovered_tool_call", None)
         event = self.recorder.recovered_tool_call(name, args, call_id=call_id)
         if callable(callback):
-            call_renderer(callback, name, args, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(callback, name, args, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
         else:
-            call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
 
-    def recovered_tool_error(self, name: str, error: str, call_id: str = "") -> None:
+    def recovered_tool_error(
+        self,
+        name: str,
+        error: str,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         """Render and record a late-discovered failed tool result."""
         callback = getattr(self.renderer, "recovered_tool_error", None)
         event = self.recorder.recovered_tool_error(name, error, call_id=call_id)
         if not call_id:
             self._discard_open_idless_tool_call(name)
         if callable(callback):
-            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
         else:
-            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event))
+            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
 
-    def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+    def delegation_started(
+        self,
+        calls: list[dict[str, Any]],
+        **frontend_identity: Any,
+    ) -> None:
         event = self.recorder.delegation_started(calls)
         if event is not None:
-            call_renderer(self.renderer.delegation_started, calls, created_at=event_created_at(event))
+            call_renderer(
+                self.renderer.delegation_started,
+                calls,
+                created_at=event_created_at(event),
+                **frontend_identity,
+            )
 
-    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
+    def delegation_delta(self, calls: list[dict[str, Any]], **frontend_identity: Any) -> None:
         callback = getattr(self.renderer, "delegation_delta", None)
         if callable(callback):
-            callback(calls)
+            call_renderer(callback, calls, **frontend_identity)
 
-    def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+    def tool_call_delta(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        **frontend_identity: Any,
+    ) -> None:
         self._start_tool_timer(name, call_id, preparing=True)
         callback = getattr(self.renderer, "tool_call_delta", None)
         if callable(callback):
-            callback(name, args, call_id=call_id)
+            call_renderer(
+                callback,
+                name,
+                args,
+                call_id=call_id,
+                **frontend_identity,
+            )
 
     def _start_tool_timer(self, name: str, call_id: str, *, preparing: bool) -> int:
         """Start or promote one independently keyed tool interaction clock."""
@@ -899,6 +1056,7 @@ class RecordingRenderer:
         eval_id: str = "",
         row_id: str = "",
         model: str = "",
+        **frontend_identity: Any,
     ) -> None:
         event = self.recorder.subagent_started(subagent, task_input, origin=origin)
         call_renderer(
@@ -910,6 +1068,7 @@ class RecordingRenderer:
             row_id=row_id,
             model=model,
             created_at=event_created_at(event),
+            **frontend_identity,
         )
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
@@ -926,6 +1085,7 @@ class RecordingRenderer:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        **frontend_identity: Any,
     ) -> None:
         event = self.recorder.subagent_finished(subagent, result)
         call_renderer(
@@ -936,6 +1096,7 @@ class RecordingRenderer:
             row_id=row_id,
             duration_ms=duration_ms,
             created_at=event_created_at(event),
+            **frontend_identity,
         )
 
     def subagent_cancelled(

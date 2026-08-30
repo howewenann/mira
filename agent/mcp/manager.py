@@ -48,7 +48,7 @@ from config.settings import (
     set_mcp_server_approved_fingerprint,
     set_mcp_server_enabled,
 )
-from runtime.diagnostics import get_diagnostics_logger
+from core.diagnostics.logging import get_diagnostics_logger
 
 ApprovalHandler = Callable[[MCPServerState, str], Awaitable[str]]
 ChangeHandler = Callable[[], Awaitable[None]]

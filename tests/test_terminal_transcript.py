@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from ui.terminal_transcript import TerminalTranscript
+from ui.shared.terminal.transcript import TerminalTranscript
 
 
 class TerminalTranscriptTests(unittest.TestCase):

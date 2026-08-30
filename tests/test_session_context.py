@@ -24,13 +24,13 @@ from session.goals import (
     start_goal_attempt,
 )
 from session.plans import plan_artifact
-from session.recorder import RecordingRenderer as SessionRecordingRenderer
+from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
 from session.store import SessionStore
-from runtime import runner
-from runtime.message_events import consume_messages
-from runtime.message_metadata import MessageInvocationMetadata
-from runtime.tool_events import CONTROL_TOOLS
+from core.execution import runner
+from core.execution.streams.messages import consume_messages
+from core.execution.streams.message_metadata import MessageInvocationMetadata
+from core.execution.streams.tools import CONTROL_TOOLS
 from tests.test_runner import (
     AsyncItems,
     COMPACTION_SUMMARY,
@@ -41,7 +41,7 @@ from tests.test_runner import (
     RunTurnRenderer,
     values_event,
 )
-from ui.repl import run_user_turn
+from tests.support.turns import run_user_turn
 
 
 class Snapshot:
@@ -816,7 +816,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.tool_call("execute", {"command": "conda env list"}, call_id="call-execute")
         recording.text_delta("The envs are ai_agents and base.")
@@ -831,7 +831,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.tool_call(
             "write_file",
@@ -866,7 +866,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     def test_recording_renderer_updates_ordered_idless_call_after_unchanged_approval(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
-        recording = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+        recording = SessionEventEmitter(RunTurnRenderer(), recorder)
 
         recording.tool_call("write_file", {"file_path": "/one", "content": "one"})
         recording.tool_call("write_file", {"file_path": "/two", "content": "two"})
@@ -884,7 +884,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.text_delta("I'll inspect next.\nRESPONSE_STATUS: NEEDS_RESEARCH")
         recording.correction(
@@ -922,7 +922,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     def test_complete_response_status_survives_session_and_resume_context(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
-        recording = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+        recording = SessionEventEmitter(RunTurnRenderer(), recorder)
 
         exact = "Navigation explained.\nRESPONSE_STATUS: COMPLETE"
         recording.text_delta(exact)
@@ -939,7 +939,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.text_delta("Still researching.\nRESPONSE_STATUS: NEEDS_RESEARCH")
         recording.correction(
@@ -975,7 +975,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.text_delta("Done.")
         recording.finish_main()
@@ -1001,7 +1001,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
         recording.text_delta("The answer")
@@ -1022,7 +1022,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         now = [10.0]
         recorder = SessionRecorder(record, Store(), "action")
-        recording = SessionRecordingRenderer(
+        recording = SessionEventEmitter(
             RunTurnRenderer(),
             recorder,
             clock=lambda: now[0],
@@ -1042,7 +1042,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         now = [10.0]
         recorder = SessionRecorder(record, Store(), "action")
-        recording = SessionRecordingRenderer(
+        recording = SessionEventEmitter(
             RunTurnRenderer(),
             recorder,
             clock=lambda: now[0],
@@ -1072,7 +1072,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         now = [2.0]
         recorder = SessionRecorder(record, Store(), "action")
-        recording = SessionRecordingRenderer(
+        recording = SessionEventEmitter(
             RunTurnRenderer(),
             recorder,
             clock=lambda: now[0],
@@ -1104,7 +1104,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
 
         recording.tool_call("read_file", {"path": "missing.txt"}, call_id="call-read")
         recording.text_delta("Trying the file")
@@ -1125,7 +1125,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         store = Store()
         recorder = SessionRecorder(record, store, "plan")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
         call = AIMessage(
             content="",
             tool_calls=[{"name": "finalize_plan", "args": {}, "id": "call-invalid"}],
@@ -1186,7 +1186,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "planning")
         renderer = RunTurnRenderer()
-        recording = SessionRecordingRenderer(renderer, recorder)
+        recording = SessionEventEmitter(renderer, recorder)
         completions = {
             "ask_user": "Use A",
             "prepare_goal": "Success Criteria ready; finalizing Goal.",
@@ -1245,7 +1245,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         )
         record = {"events": [], "current_plan": retained}
         renderer = TerminalFallback()
-        recording = SessionRecordingRenderer(
+        recording = SessionEventEmitter(
             renderer,
             SessionRecorder(record, Store(), "action"),
         )
@@ -1276,10 +1276,10 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             rubric_enabled=False,
             rubric_iterations=3,
         )
-        goal_recording = SessionRecordingRenderer(
+        goal_recording = SessionEventEmitter(
             object(), SessionRecorder({"events": [], "current_goal": goal}, Store(), "action")
         )
-        plan_recording = SessionRecordingRenderer(
+        plan_recording = SessionEventEmitter(
             object(), SessionRecorder({"events": [], "current_plan": plan}, Store(), "action")
         )
 
@@ -1484,7 +1484,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         record = {"events": []}
         renderer = EvalForwarder()
-        recorder = SessionRecordingRenderer(renderer, SessionRecorder(record, Store(), "action"))
+        recorder = SessionEventEmitter(renderer, SessionRecorder(record, Store(), "action"))
 
         recorder.eval_subagent_started(
             "general-purpose [one]",
@@ -1603,7 +1603,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_metadata_marked_summary_stream_is_not_recorded(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")
-        renderer = SessionRecordingRenderer(RunTurnRenderer(), recorder)
+        renderer = SessionEventEmitter(RunTurnRenderer(), recorder)
         registry = MessageInvocationMetadata()
         registry.record("summary-1", {"lc_source": "summarization"})
 
@@ -1769,7 +1769,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 usage_source="usage_metadata",
             )
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             result = await run_user_turn(
                 agent=agent,
                 plan_agent=agent,
@@ -1839,7 +1839,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 return runner.TurnResult(final_text="We were writing Elara's story.")
 
             agent = AgentWithState({})
-            with patch("ui.repl.run_turn", fake_run_turn):
+            with patch("tests.support.turns.run_turn", fake_run_turn):
                 await run_user_turn(
                     agent=agent,
                     plan_agent=agent,

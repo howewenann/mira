@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from runtime.rubric_events import RubricEventRenderer, format_elapsed, rubric_result_text
+from core.execution.streams.rubric import RubricEventRenderer, format_elapsed, rubric_result_text
 
 
 class RecordingRenderer:

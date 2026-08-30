@@ -20,19 +20,19 @@ from agent.compaction import (
 )
 from agent.middleware import CORRECTION_EVENT, CORRECTION_SOURCE
 from agent.planning.response_status import PLANNING_RESPONSE_STATUS_FAILURE
-from runtime.context_usage import context_usage_scope
-from runtime import runner
-from runtime.message_events import consume_messages
-from runtime.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
-from runtime.output_events import final_text
-from runtime.subagent_events import consume_subagent, consume_subagents
-from runtime.tool_events import CONTROL_TOOLS, consume_live_tool_errors, consume_tool_calls
-from runtime.usage import usage_from_message, usage_from_output
+from core.context.observation import context_usage_scope
+from core.execution import runner
+from core.execution.streams.messages import consume_messages
+from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
+from core.execution.streams.output import final_text
+from core.execution.streams.subagents import consume_subagent, consume_subagents
+from core.execution.streams.tools import CONTROL_TOOLS, consume_live_tool_errors, consume_tool_calls
+from core.context.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from agent.default_resources.tools.ask_user import normalize_options
-from ui.interrupts import ASK_USER_OPEN_OPTION, ask_user_options, ask_user_question
-from ui.renderer import Renderer
-from ui.terminal_colors import strip_ansi
+from ui.shared.interrupts import ASK_USER_OPEN_OPTION, ask_user_options, ask_user_question
+from ui.terminal.renderer import Renderer
+from ui.shared.terminal.colors import strip_ansi
 
 
 class AsyncItems:

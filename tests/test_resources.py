@@ -37,7 +37,7 @@ from agent.resources.project_setup import (
     ensure_project_examples,
 )
 from config.settings import load_settings, set_subagent_enabled
-from ui import repl
+from core.application import DEFAULT_TOOL_SPECS, resource_specs
 
 
 class ResourceDiscoveryTests(unittest.TestCase):
@@ -1073,7 +1073,7 @@ def project_lookup(query: str) -> str:
 
     def test_default_tool_specs_use_current_eval_name(self) -> None:
         """Fallback UI metadata should use the current interpreter tool name."""
-        names = [tool["name"] for tool in repl.DEFAULT_TOOL_SPECS]
+        names = [tool["name"] for tool in DEFAULT_TOOL_SPECS]
 
         self.assertIn("eval", names)
         self.assertNotIn("execute", names)
@@ -1098,7 +1098,7 @@ def project_lookup(query: str) -> str:
         )()
 
         self.assertEqual(
-            repl.resource_specs(agent)["memories"],
+            resource_specs(agent)["memories"],
             [
                 {
                     "name": "AGENTS.md",

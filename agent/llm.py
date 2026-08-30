@@ -16,7 +16,7 @@ from config.settings import (
     model_assignment,
     rubric_enabled,
 )
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 ModelRole = Literal["main", "rubric", "summarization"]
 STREAM_USAGE_PROVIDERS = {"lmstudio", "openai"}

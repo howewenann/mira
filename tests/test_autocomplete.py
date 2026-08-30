@@ -8,9 +8,9 @@ from types import SimpleNamespace
 from typing import Any
 
 from agent.mcp.models import MCPResource, PromptArgument, PromptSpec
-from ui.command_help import COMMAND_HELP_SECTIONS, command_help_entries
-from ui.repl import COMMAND_HELP_SECTIONS as REPL_COMMAND_HELP_SECTIONS
-from ui.widgets.autocomplete_input import (
+from ui.textual.commands.help import COMMAND_HELP_SECTIONS, command_help_entries
+from ui.textual.commands.dispatcher import COMMAND_HELP_SECTIONS as REPL_COMMAND_HELP_SECTIONS
+from ui.textual.widgets.autocomplete_input import (
     CompletionItem,
     _completion_row,
     attachment_items,

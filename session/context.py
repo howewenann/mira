@@ -9,7 +9,7 @@ from typing import Any
 from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
-from runtime.correction_events import correction_context_text, normalize_correction_event
+from core.execution.streams.corrections import correction_context_text, normalize_correction_event
 
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48

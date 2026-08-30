@@ -36,8 +36,8 @@
 - Use a disposable `--workspace` for smoke tests that may write `.mira/`,
   session files, or project artifacts.
 - For TUI changes, add or update `tests.test_textual_app`.
-- For one-shot terminal output, check `ui/renderer.py` behavior.
-- For streamed turn/HITL behavior, check `runtime/runner.py` and add focused
+- For one-shot terminal output, check `ui/terminal/renderer.py` behavior.
+- For streamed turn/HITL behavior, check `core/execution/runner.py` and add focused
   runner tests.
 - For behavior that needs user-driven manual verification, add or update
   prompts and expected results in `tests/manual/prompts.md` so the user can
@@ -46,8 +46,8 @@
 ## TUI Interaction Requirements
 
 - When a request says a disclosure or collapsible should behave like a tool
-  bubble, treat `ui/widgets/tool_bubble.py` and the
-  `.tool-args-collapsible > CollapsibleTitle` rules in `ui/styles/mira.tcss` as
+  bubble, treat `ui/textual/widgets/tool_bubble.py` and the
+  `.tool-args-collapsible > CollapsibleTitle` rules in `ui/textual/styles/mira.tcss` as
   the complete interaction reference, including its native glyph behavior,
   automatic title height, padding, focus treatment, and hover stability. Keep
   the target surface's requested colors unless the user also asks to copy the
@@ -135,10 +135,10 @@
 - `config/` loads `.env`, LLM settings, metadata, and `.mira/settings.yml`.
 - `agent/factory.py` builds action and planning agents.
 - `agent/resources/` loads backends, memories, skills, subagents, and tools.
-- `runtime/runner.py` streams one turn and handles HITL approval loops.
-- `runtime/*_events.py` handles stream event projections.
-- `ui/app.py` and `ui/widgets/` implement the Textual TUI.
-- `ui/renderer.py` implements plain `mira -p` terminal output.
+- `core/execution/runner.py` streams one turn and handles HITL approval loops.
+- `core/execution/streams/` handles stream event projections.
+- `ui/textual/app.py` and `ui/textual/widgets/` implement the Textual TUI.
+- `ui/terminal/renderer.py` implements plain `mira -p` terminal output.
 - `session/` stores durable session JSON, replay context, and checkpoints.
 
 ## Settings And Execute

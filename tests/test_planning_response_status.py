@@ -19,7 +19,7 @@ from agent.planning.response_status import (
     PLANNING_RESPONSE_STATUS_FAILURE,
     PlanningResponseStatusRule,
 )
-from runtime import runner
+from core.execution import runner
 from tests.test_runner import RunTurnRenderer
 
 

@@ -9,7 +9,7 @@ from rich.color import Color
 from rich.segment import Segment
 from textual.scrollbar import ScrollBar, ScrollBarRender
 
-from ui.windows_scrollbars import (
+from ui.textual.platform.windows.scrollbars import (
     SolidScrollBarRender,
     configure_scrollbars_for_platform,
 )
@@ -72,12 +72,12 @@ class WindowsScrollbarTests(unittest.TestCase):
             self.assertIs(ScrollBar.renderer, SolidScrollBarRender)
 
     def test_mira_app_configures_windows_renderer_at_startup(self) -> None:
-        from ui.app import MiraApp
+        from ui.textual.app import MiraApp
 
         with (
             patch.object(ScrollBar, "renderer", ScrollBarRender),
-            patch("ui.app.sys.platform", "win32"),
-            patch("ui.app.driver_class_for_platform", return_value=None),
+            patch("ui.textual.app.sys.platform", "win32"),
+            patch("ui.textual.app.driver_class_for_platform", return_value=None),
         ):
             MiraApp(config={})
 

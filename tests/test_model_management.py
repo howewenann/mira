@@ -19,7 +19,7 @@ from config.settings import (
     set_subagent_enabled,
     set_subagent_model_assignment,
 )
-from ui.widgets.autocomplete_input import _completion_row, attachment_items
+from ui.textual.widgets.autocomplete_input import _completion_row, attachment_items
 
 
 class ModelManagementTests(unittest.TestCase):

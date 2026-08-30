@@ -25,11 +25,20 @@ from config.metadata import ModelMetadata
 from config.llm import ModelProfile, ModelRegistry
 from config.runtime import RuntimeSnapshot
 from config.settings import DEFAULT_SETTINGS
-from runtime import runner
-from runtime.context_usage import record_deepagents_context_tokens
+from core.application import available_tools, initial_mode, normalize_tool_specs, tool_specs
+from core.execution import runner
+from core.context.observation import record_deepagents_context_tokens
+from core.execution.turns import (
+    goal_revision_text,
+    has_clean_plan,
+    plan_request_text,
+    plan_revision_text,
+    plan_thread_id,
+)
 from session.plans import plan_artifact
-from ui import repl
-from ui.runtime_snapshot import resources_table, runtime_report, tools_table
+from tests.support.turns import run_user_turn
+from ui.textual.commands import dispatcher as repl
+from ui.textual.runtime_report import resources_table, runtime_report, tools_table
 
 
 class RecordingConsole:
@@ -741,8 +750,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_available_tools_are_mode_specific_for_finalize_plan_and_execute(self) -> None:
         """Fallback tool display should keep plan-only and execute-only boundaries."""
-        action_names = [tool["name"] for tool in repl.available_tools({}, planning=False)]
-        planning_names = [tool["name"] for tool in repl.available_tools({}, planning=True)]
+        action_names = [tool["name"] for tool in available_tools({}, planning=False)]
+        planning_names = [tool["name"] for tool in available_tools({}, planning=True)]
 
         self.assertNotIn("finalize_plan", action_names)
         self.assertIn("finalize_plan", planning_names)
@@ -765,9 +774,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             "planning_stage": "plan_research",
         }
 
-        research = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
+        research = [tool["name"] for tool in available_tools(mode, planning=True)]
         mode["planning_stage"] = "plan_finalize"
-        finalize = [tool["name"] for tool in repl.available_tools(mode, planning=True)]
+        finalize = [tool["name"] for tool in available_tools(mode, planning=True)]
 
         self.assertEqual(research, ["show_plan", "read_file", "ask_user", "prepare_plan", "show_goal"])
         self.assertEqual(finalize, ["finalize_plan"])
@@ -827,8 +836,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertTrue(session["resume_context_pending"])
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -987,13 +996,13 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_available_tools_lists_action_tools(self) -> None:
         """Runtime reporting should receive the action-mode tool projection."""
-        names = {tool["name"] for tool in repl.available_tools({"planning": False}, planning=False)}
+        names = {tool["name"] for tool in available_tools({"planning": False}, planning=False)}
 
         self.assertTrue({"ask_user", "read_file", "write_file", "edit_file", "task"} <= names)
 
     def test_available_tools_hides_write_tools_in_planning_mode(self) -> None:
         """Runtime reporting should receive the planning-mode tool projection."""
-        names = {tool["name"] for tool in repl.available_tools({"planning": True}, planning=True)}
+        names = {tool["name"] for tool in available_tools({"planning": True}, planning=True)}
 
         self.assertIn("ask_user", names)
         self.assertIn("read_file", names)
@@ -1031,8 +1040,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             {"mira_tool_specs": [{"name": "custom_tool", "description": "custom description"}]},
         )()
 
-        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
-            specs = repl.tool_specs(agent)
+        with patch("core.application.app.mira_environment_label", return_value="ai_agents"):
+            specs = tool_specs(agent)
 
         self.assertEqual(
             specs,
@@ -1051,8 +1060,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Callable tool descriptions should fall back to docstrings."""
         agent = type("Agent", (), {"tools": [sample_tool]})()
 
-        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
-            specs = repl.tool_specs(agent)
+        with patch("core.application.app.mira_environment_label", return_value="ai_agents"):
+            specs = tool_specs(agent)
 
         self.assertEqual(
             specs,
@@ -1071,9 +1080,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """Tool display descriptions should be shortened for the table."""
         tools = [{"name": "read_file", "description": "Reads a file from the filesystem.\n\nUse this after listing files."}]
 
-        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
+        with patch("core.application.app.mira_environment_label", return_value="ai_agents"):
             self.assertEqual(
-                repl.normalize_tool_specs(tools),
+                normalize_tool_specs(tools),
                 [
                     {
                         "name": "read_file",
@@ -1099,8 +1108,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        with patch("ui.repl.mira_environment_label", return_value="ai_agents"):
-            normalized = repl.normalize_tool_specs(tools)
+        with patch("core.application.app.mira_environment_label", return_value="ai_agents"):
+            normalized = normalize_tool_specs(tools)
 
         self.assertEqual(normalized[0]["source"], "project")
         self.assertEqual(normalized[0]["runtime"], "Project")
@@ -1225,7 +1234,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
 
         async def fake_run_turn(
@@ -1239,9 +1248,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append((agent, text, thread_id))
             return runner.TurnResult()
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await repl.handle_command("/plan", renderer, session, "model", mode)
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1251,7 +1260,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="write a file",
             )
             await repl.handle_command("/act", renderer, session, "model", mode)
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1273,8 +1282,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
-        disabled = repl.initial_mode("action-agent", "plan-agent")
-        enabled = repl.initial_mode(
+        disabled = initial_mode("action-agent", "plan-agent")
+        enabled = initial_mode(
             "action-agent",
             "plan-agent",
             {"system": {"rubric": {"enabled": True, "max_iterations": 4}}},
@@ -1285,8 +1294,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs)
             return runner.TurnResult()
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1296,7 +1305,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="ordinary disabled turn",
             )
             await repl.handle_command("/plan", renderer, session, "model", enabled)
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1306,7 +1315,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="research a plan",
             )
             enabled["planning"] = False
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1330,7 +1339,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at": "2026-01-01T00:00:00+00:00",
             }
             enabled["executing_goal"] = True
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1353,7 +1362,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_plan_revision_starts_in_plan_finalize_stage(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
-        mode = repl.initial_mode(
+        mode = initial_mode(
             "action-agent",
             "plan-agent",
             {"system": {"rubric": {"enabled": True, "max_iterations": 3}}},
@@ -1371,8 +1380,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return runner.TurnResult()
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1390,7 +1399,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         pre_generation_state: dict[str, Any] = {}
 
         async def fake_run_turn(
@@ -1416,8 +1425,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             result.add_usage(usage)
             return result
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1443,7 +1452,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
         store = FakeStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         calls: list[tuple[Any, str, str]] = []
         results = [
             runner.TurnResult(
@@ -1465,9 +1474,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append((agent, text, thread_id))
             return results.pop(0)
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await repl.handle_command("/plan", renderer, session, "model", mode)
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1477,7 +1486,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="write a file",
             )
             await repl.handle_command("/act", renderer, session, "model", mode)
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1494,7 +1503,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
 
         async def fake_run_turn(
             agent: Any,
@@ -1508,9 +1517,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             renderer.completed_tool_error("read_file", "file not found", call_id="call-read")
             raise RuntimeError("model stopped")
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             with self.assertRaisesRegex(RuntimeError, "model stopped"):
-                await repl.run_user_turn(
+                await run_user_turn(
                     agent="action-agent",
                     plan_agent="plan-agent",
                     renderer=renderer,
@@ -1536,7 +1545,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         tool_started = asyncio.Event()
 
         async def fake_run_turn(
@@ -1551,9 +1560,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
             raise AssertionError("unreachable")
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             turn = asyncio.create_task(
-                repl.run_user_turn(
+                run_user_turn(
                     agent="action-agent",
                     plan_agent="plan-agent",
                     renderer=renderer,
@@ -1578,7 +1587,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         notice = "Context limit pressure detected. Compacting older context and retrying."
 
         async def fake_run_turn(
@@ -1590,9 +1599,9 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         ) -> runner.TurnResult:
             raise context_overflow_error("provider context limit reached", notice)
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             with self.assertRaises(ContextOverflowError):
-                await repl.run_user_turn(
+                await run_user_turn(
                     agent="action-agent",
                     plan_agent="plan-agent",
                     renderer=renderer,
@@ -1612,7 +1621,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0, "events": []}
         store = CapturingStore()
-        mode = repl.initial_mode("action-agent", "plan-agent")
+        mode = initial_mode("action-agent", "plan-agent")
         notice = "Provider context limit reached. Compacting older context and retrying."
 
         async def fake_run_turn(
@@ -1635,8 +1644,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 usage_source="usage_metadata",
             )
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            result = await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            result = await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1702,14 +1711,14 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_plan_thread_id_is_separate_from_action_thread(self) -> None:
         """Planning threads should be isolated from action memory."""
-        self.assertEqual(repl.plan_thread_id({"id": "thread-1"}), "thread-1:plan")
-        self.assertEqual(repl.plan_thread_id({"id": "thread-1"}, 2), "thread-1:plan:2")
+        self.assertEqual(plan_thread_id({"id": "thread-1"}), "thread-1:plan")
+        self.assertEqual(plan_thread_id({"id": "thread-1"}, 2), "thread-1:plan:2")
 
     def test_invalid_plan_result_when_write_tool_was_used(self) -> None:
         """A plan is invalid if the write tool was called."""
         result = runner.TurnResult(final_text="Nope", tool_calls=["write_file"])
 
-        self.assertFalse(repl.has_clean_plan(result))
+        self.assertFalse(has_clean_plan(result))
 
     def test_invalid_plan_result_when_project_write_was_blocked(self) -> None:
         """A plan is invalid if a write was blocked by permissions."""
@@ -1719,17 +1728,17 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             tool_results=["Error: permission denied for write on /test.txt"],
         )
 
-        self.assertFalse(repl.has_clean_plan(result))
+        self.assertFalse(has_clean_plan(result))
 
     def test_invalid_plan_result_when_final_text_mentions_permission_denied(self) -> None:
         """A plan is invalid if final text reports a blocked write."""
         result = runner.TurnResult(final_text="I hit permission denied for write on /test.txt.")
 
-        self.assertFalse(repl.has_clean_plan(result))
+        self.assertFalse(has_clean_plan(result))
 
     def test_plan_request_text_wraps_user_request(self) -> None:
         """Planning requests should include the non-mutating instructions."""
-        text = repl.plan_request_text("write a file")
+        text = plan_request_text("write a file")
 
         self.assertIn("You are in planning mode (Plan mode).", text)
         self.assertIn("DISCUSSION", text)
@@ -1747,7 +1756,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_plan_revision_text_includes_current_plan_and_feedback(self) -> None:
         """Revision requests should not depend on planning-thread memory."""
-        text = repl.plan_revision_text(
+        text = plan_revision_text(
             plan_artifact(
                 plan_id="plan-1",
                 title="Palindrome Plan",
@@ -1775,7 +1784,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("then call\nprepare_plan", text)
 
     def test_goal_revision_keeps_fields_delimited_and_feedback_identical(self) -> None:
-        text = repl.goal_revision_text(
+        text = goal_revision_text(
             {
                 "objective": "Build search.",
                 "success_criteria": "- Ranked results are returned.",
@@ -1791,7 +1800,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicit_goal_request_uses_plan_agent_without_persistent_plan_mode(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}
-        mode = repl.initial_mode(
+        mode = initial_mode(
             "action-agent",
             "plan-agent",
             {"system": {"rubric": {"enabled": True, "max_iterations": 3}}},
@@ -1807,8 +1816,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return runner.TurnResult()
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1847,7 +1856,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             },
             "events": [],
         }
-        mode = repl.initial_mode(
+        mode = initial_mode(
             "action-agent",
             "plan-agent",
             {"system": {"rubric": {"enabled": True, "max_iterations": 2}}},
@@ -1860,8 +1869,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs)
             return runner.TurnResult(rubric_status=next(statuses))
 
-        with patch("ui.repl.run_turn", fake_run_turn):
-            await repl.run_user_turn(
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,
@@ -1872,7 +1881,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(session["current_goal"]["status"], "max_iterations_reached")
             self.assertEqual(session["current_goal"]["last_rubric_status"], "max_iterations_reached")
-            await repl.run_user_turn(
+            await run_user_turn(
                 agent="action-agent",
                 plan_agent="plan-agent",
                 renderer=renderer,

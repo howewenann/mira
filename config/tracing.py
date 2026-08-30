@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 TRACING_FILE = "tracing.yml"
 SpanAttributeValue = (

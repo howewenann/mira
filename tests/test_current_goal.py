@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from runtime.runner import TurnResult
+from core.execution.runner import TurnResult
 from session.context import build_resume_context, normalize_session
 from session.goals import (
     clear_current_goal,
@@ -20,7 +20,8 @@ from session.goals import (
 )
 from session.plans import plan_artifact, replace_current_plan
 from session.store import SessionStore
-from ui.repl import action_request_text, run_user_turn
+from core.execution.turns import action_request_text
+from tests.support.turns import run_user_turn
 from agent.default_resources.tools.prepare_goal import prepare_goal
 from agent.planning.tool_context import PlanningToolContext
 
@@ -198,7 +199,7 @@ class GoalExecutionTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return TurnResult()
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(), plan_agent=SimpleNamespace(), renderer=SimpleNamespace(),
                 store=Store(), session=session, mode=mode, text="Implement.", record_user=False,

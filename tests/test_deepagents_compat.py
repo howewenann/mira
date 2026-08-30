@@ -17,9 +17,9 @@ from langchain_core.messages import AIMessage
 from agent.factory import _action_permissions, _write_interrupts
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs
-from runtime.runner import annotate_filesystem_approvals, run_turn
+from core.execution.runner import annotate_filesystem_approvals, run_turn
 from session.checkpoint import make_checkpointer
-from ui.interrupts import APPROVAL_CONSEQUENCE, action_preview, action_text
+from ui.shared.interrupts import APPROVAL_CONSEQUENCE, action_preview, action_text
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):

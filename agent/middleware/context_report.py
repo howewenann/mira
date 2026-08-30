@@ -6,7 +6,7 @@ from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware
 
-from runtime.context_usage import record_context_report_inputs
+from core.context.observation import record_context_report_inputs
 
 
 class ContextReportMiddleware(AgentMiddleware[Any, Any, Any]):

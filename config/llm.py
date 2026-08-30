@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 MODELS_FILE = "models.yml"
 DEFAULT_CONTEXT_TOKENS = 32768

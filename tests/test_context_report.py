@@ -15,7 +15,7 @@ from textual.widgets import Button, Collapsible, ProgressBar, Static
 from agent.middleware.context_report import ContextReportMiddleware
 from agent.mcp.manager import MCPManager
 from agent.mcp.models import MCPServerState
-from runtime.context_report import (
+from core.context.report import (
     ContextReportMCPServer,
     ContextReportObservation,
     build_context_report,
@@ -29,9 +29,9 @@ from runtime.context_report import (
     mcp_tool_metadata,
     split_system_prompt,
 )
-from runtime.context_usage import context_usage_scope
-from ui.command_help import command_help_entries
-from ui.widgets.context_report import ContextReportRow, ContextReportScreen, ContextReportTools
+from core.context.observation import context_usage_scope
+from ui.textual.commands.help import command_help_entries
+from ui.textual.widgets.context_report import ContextReportRow, ContextReportScreen, ContextReportTools
 
 
 def schema_tool(
@@ -295,7 +295,7 @@ class ContextReportTests(unittest.TestCase):
 
 
 class ContextReportHost(App[None]):
-    CSS_PATH = "../ui/styles/mira.tcss"
+    CSS_PATH = "../ui/textual/styles/mira.tcss"
 
     def __init__(self, report=None) -> None:
         super().__init__()

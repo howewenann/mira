@@ -34,14 +34,14 @@ from session.plans import (
 )
 from session.goals import goal_artifact, replace_current_goal, start_goal_attempt
 from session.store import SessionStore
-from ui.repl import plan_command_prompt, plan_thread_id
-from ui.repl import run_user_turn
+from core.execution.turns import plan_command_prompt, plan_thread_id
+from tests.support.turns import run_user_turn
 from langgraph.types import Command
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage
-from runtime.runner import TurnResult
+from core.execution.runner import TurnResult
 
 
 def artifact(*, rubric: bool = False) -> dict:
@@ -423,7 +423,7 @@ class CriteriaFirstPipelineTests(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return TurnResult(rubric_status="satisfied")
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),
@@ -502,7 +502,7 @@ class SingleTurnWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
             return TurnResult(rubric_status="satisfied")
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),
@@ -553,7 +553,7 @@ class SingleTurnWorkflowTests(unittest.IsolatedAsyncioTestCase):
             mode["current_plan"] = session["current_plan"]
             return TurnResult(formal_review={"action": "close", "artifact": accepted})
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),
@@ -610,7 +610,7 @@ class SingleTurnWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
             return TurnResult(formal_review={"action": "clear", "artifact": revised})
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),
@@ -656,7 +656,7 @@ class SingleTurnWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 formal_review={"action": "clear", "artifact": artifact()}
             )
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),
@@ -734,7 +734,7 @@ class SingleTurnWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
             return TurnResult(rubric_status="satisfied")
 
-        with patch("ui.repl.run_turn", fake_run_turn):
+        with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
                 agent=SimpleNamespace(),
                 plan_agent=SimpleNamespace(),

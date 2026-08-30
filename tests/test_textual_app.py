@@ -73,22 +73,25 @@ from config.settings import (
     tool_rubric_access,
 )
 from config.version import display_version
-from runtime.diagnostics import get_diagnostics_logger, setup_diagnostics_logging
-from runtime.rubric_events import RubricEventRenderer
-from runtime.tool_events import CONTROL_TOOLS
-from runtime.trace_stream import TraceStream
+from core.application import MiraSession
+from core.api import FrontendEmitter
+from core.diagnostics.logging import get_diagnostics_logger, setup_diagnostics_logging
+from core.execution.streams.rubric import RubricEventRenderer
+from core.execution.streams.tools import CONTROL_TOOLS
+from tracing.stream import TraceStream
 from session.goals import current_goal, goal_artifact
 from session.plans import current_plan, plan_artifact
-from session.recorder import RecordingRenderer as SessionRecordingRenderer
+from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
-from ui import repl
-from ui.command_help import command_help_entries
-from ui.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
-from ui.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
-from ui.renderer import Renderer
-from ui.runtime_snapshot import runtime_report
-from ui.splash import HINTS, VERSION, blocky_wordmark, splash_text
-from ui.terminal_colors import (
+from ui.textual.commands import dispatcher as repl
+from ui.textual.commands.help import command_help_entries
+from ui.shared.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
+from ui.textual.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
+from ui.textual.adapter import TextualFrontend
+from ui.terminal.renderer import Renderer
+from ui.textual.runtime_report import runtime_report
+from ui.textual.splash import HINTS, VERSION, blocky_wordmark, splash_text
+from ui.shared.terminal.colors import (
     TOOL_CANCELLED_COLOR,
     TOOL_COMPLETED_COLOR,
     TOOL_DURATION_COLOR,
@@ -97,11 +100,11 @@ from ui.terminal_colors import (
     TOOL_RUNNING_COLOR,
     strip_ansi,
 )
-from ui.widgets import AutocompleteInput, ChatLog, ContextReportScreen, ContextStatus, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
-from ui.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
-from ui.widgets.settings_panel import SettingsHeaderRow
-from ui.widgets.status_bar import STATUS_STARTING_COLOR
-from ui.widgets.subagent_panel import (
+from ui.textual.widgets import AutocompleteInput, ChatLog, ContextReportScreen, ContextStatus, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.textual.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
+from ui.textual.widgets.settings_panel import SettingsHeaderRow
+from ui.textual.widgets.status_bar import STATUS_STARTING_COLOR
+from ui.textual.widgets.subagent_panel import (
     PANEL_BODY_ROWS,
     STATUS_COL,
     TIME_COL,
@@ -110,9 +113,9 @@ from ui.widgets.subagent_panel import (
     group_status_icon,
     truncate_cells,
 )
-from ui.widgets.session_history import session_label
-from ui.widgets.rubric_bubble import RubricBubble, RubricToolRow
-from ui.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
+from ui.textual.widgets.session_history import session_label
+from ui.textual.widgets.rubric_bubble import RubricBubble, RubricToolRow
+from ui.textual.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
 
 PROMPT_BUTTON_FOCUS_BACKGROUND = Color.parse("#d2a957")
@@ -455,6 +458,21 @@ def final_goal_interrupt(title: str = "Reviewed Goal") -> dict[str, Any]:
     }
 
 
+def start_artifact_review(
+    app: MiraApp,
+    kind: str,
+    interrupt: dict[str, Any],
+) -> asyncio.Task[dict[str, Any]]:
+    """Start the same Core-owned artifact review used by real Textual turns."""
+    emitter = FrontendEmitter(
+        TextualFrontend(app),
+        session_id=str(app.session.get("id") or ""),
+    )
+    recorder = SessionRecorder(app.session, app.store, "planning")
+    bridge = SessionEventEmitter(emitter, recorder, semantic_state=app.mode)
+    return asyncio.create_task(getattr(bridge, f"finalize_{kind}")(interrupt))
+
+
 def fill_scrollable_chat(chat: ChatLog) -> None:
     """Add enough transcript history for Pilot scrolling tests."""
     for index in range(12):
@@ -535,7 +553,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         }
 
         async with app.run_test() as pilot:
-            renderer = SessionRecordingRenderer(
+            renderer = SessionEventEmitter(
                 app,
                 SessionRecorder(app.session, app.store, "planning"),
             )
@@ -1555,49 +1573,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Loading another conversation should retain process-local direct mode."""
         launch_options = LaunchOptions(llm_direct=True)
         effective_config = {"settings": {}, "llm_direct": True}
-        received_configs: list[dict[str, Any]] = []
-
-        async def bootstrap(
-            workspace: Path,
-            session_id: str | None,
-            resume: bool,
-            config: dict[str, Any] | None,
-            renderer: Any | None,
-        ) -> dict[str, Any]:
-            self.assertEqual(session_id, "thread-2")
-            self.assertTrue(resume)
-            self.assertIsNotNone(config)
-            received_configs.append(config)
-            return {
-                "agent": "new-agent",
-                "plan_agent": "new-plan-agent",
-                "config": config,
-                "store": FakeStore(),
-                "session": {
-                    "id": "thread-2",
-                    "workspace": str(workspace),
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "turns": 0,
-                    "events": [],
-                },
-                "model_name": "test-model",
-                "context_limit_tokens": 8192,
-                "context_limit_source": "test",
-                "checkpointer": "new-checkpointer",
-            }
 
         app = make_app(
             config=effective_config,
             launch_options=launch_options,
         )
-        app.bootstrap = bootstrap
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             await app._load_session("thread-2")
             await pilot.pause()
 
-        self.assertEqual(received_configs, [effective_config])
+        self.assertEqual(app.session["id"], "thread-2")
+        self.assertEqual(app.agent, "agent")
+        self.assertEqual(app.plan_agent, "plan-agent")
         self.assertIs(app.launch_options, launch_options)
         self.assertTrue(app.config["llm_direct"])
         self.assertTrue(app.runtime_snapshot.direct_effective)
@@ -1637,9 +1626,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_run_user_turn(**kwargs: Any) -> None:
             calls.append(kwargs["text"])
-            kwargs["renderer"].text_delta("done")
+            kwargs["frontend"].renderer.text_delta("done")
 
-        with patch("ui.app.run_user_turn", fake_run_user_turn):
+        with patch("core.application.session.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -1802,7 +1791,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs["text"])
             kwargs["renderer"].text_delta("done")
 
-        with patch("ui.app.run_user_turn", fake_run_user_turn):
+        with patch("core.application.session.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 chat = app.query_one(ChatLog)
@@ -1832,7 +1821,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             kwargs["session"]["dashboard"]["tokens"]["out"] += 20
             kwargs["renderer"].usage_updated()
 
-        with patch("ui.app.run_user_turn", fake_run_user_turn):
+        with patch("core.application.session.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -1851,8 +1840,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("turn boom")
 
         with (
-            patch("ui.app.run_user_turn", fake_run_user_turn),
-            patch("ui.app.write_error_report", return_value=Path("turn-report.txt")) as report,
+            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("ui.textual.app.write_error_report", return_value=Path("turn-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -1875,8 +1864,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("plan boom")
 
         with (
-            patch("ui.app.run_user_turn", fake_run_user_turn),
-            patch("ui.app.write_error_report", return_value=Path("plan-report.txt")) as report,
+            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("ui.textual.app.write_error_report", return_value=Path("plan-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -1897,8 +1886,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("revision boom")
 
         with (
-            patch("ui.app.run_user_turn", fake_run_user_turn),
-            patch("ui.app.write_error_report", return_value=Path("revision-report.txt")) as report,
+            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("ui.textual.app.write_error_report", return_value=Path("revision-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -1926,7 +1915,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             ensure_git_repository=ensure_git_repository,
         )
 
-        with patch("ui.app.write_error_report", return_value=Path("startup-report.txt")) as report:
+        with patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")) as report:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 await wait_until(lambda: app.status_state == "error")
@@ -1969,7 +1958,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             }
 
         app = MiraApp(workspace=Path("."), config={}, bootstrap=bootstrap)
-        with patch("ui.app.write_error_report", return_value=Path("startup-report.txt")):
+        with patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")):
             async with app.run_test(size=(100, 30)) as pilot:
                 await wait_until(lambda: app.status_state == "error")
                 prompt = app.query_one(PromptBox)
@@ -1996,16 +1985,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Session-switch failures should show the generated report path."""
         app = make_app()
 
-        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            raise RuntimeError("load boom")
-
-        app.bootstrap = bootstrap
-
-        with patch("ui.app.write_error_report", return_value=Path("load-report.txt")) as report:
+        with patch("ui.textual.app.write_error_report", return_value=Path("load-report.txt")) as report:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
 
-                await app._load_session("thread-2")
+                with patch.object(
+                    app.application,
+                    "open_session",
+                    new=AsyncMock(side_effect=RuntimeError("load boom")),
+                ):
+                    await app._load_session("thread-2")
                 await pilot.pause()
 
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
@@ -2425,8 +2414,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             chat = app.query_one(ChatLog)
             with (
-                patch("ui.widgets.chat_log.time.monotonic", return_value=10.0),
-                patch("ui.widgets.rubric_bubble.time.monotonic", return_value=10.0),
+                patch("ui.textual.widgets.chat_log.time.monotonic", return_value=10.0),
+                patch("ui.textual.widgets.rubric_bubble.time.monotonic", return_value=10.0),
             ):
                 app.rubric_evaluation_started(
                     "grade-clock",
@@ -2441,8 +2430,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("elapsed", initial)
 
             with (
-                patch("ui.widgets.chat_log.time.monotonic", return_value=72.0),
-                patch("ui.widgets.rubric_bubble.time.monotonic", return_value=72.0),
+                patch("ui.textual.widgets.chat_log.time.monotonic", return_value=72.0),
+                patch("ui.textual.widgets.rubric_bubble.time.monotonic", return_value=72.0),
             ):
                 chat.tick_rubrics()
             progress = renderable_plain(chat.children[-1])
@@ -2638,7 +2627,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.mode["rubric_enabled"] = True
-            with patch("ui.app.run_user_turn", side_effect=run_goal) as run:
+            with patch("core.application.session.run_user_turn", side_effect=run_goal) as run:
                 await app._run_goal_command("Write a professional announcement.")
 
         self.assertFalse(app.mode["planning"])
@@ -2655,7 +2644,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def cancel_goal(**_kwargs: Any) -> None:
             raise asyncio.CancelledError
 
-        with patch("ui.app.run_user_turn", side_effect=cancel_goal):
+        with patch("core.application.session.run_user_turn", side_effect=cancel_goal):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.busy = True
@@ -2900,7 +2889,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
-                    patch("ui.app.run_user_turn", side_effect=show_retained_goal),
+                    patch("core.application.session.run_user_turn", side_effect=show_retained_goal),
                 ):
                     async with app.run_test(size=(100, 35)) as pilot:
                         await pilot.pause()
@@ -2948,7 +2937,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
-            patch("ui.app.run_user_turn", side_effect=finish_paused),
+            patch("core.application.session.run_user_turn", side_effect=finish_paused),
         ):
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.pause()
@@ -2986,7 +2975,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.session["current_plan"] = plan
-            with patch("ui.app.run_user_turn", new_callable=AsyncMock) as run:
+            with patch("core.application.session.run_user_turn", new_callable=AsyncMock) as run:
                 await app._run_goal_command("Create a replacement Goal.")
 
         run.assert_not_awaited()
@@ -3632,7 +3621,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run_user_turn(**kwargs: Any) -> None:
             raise context_overflow_error("provider context limit reached", notice)
 
-        with patch("ui.app.run_user_turn", fake_run_user_turn):
+        with patch("core.application.session.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -4042,7 +4031,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_windows_clipboard_updates_textual_state_and_writes_once(self) -> None:
         app = make_app()
 
-        with patch("ui.app.set_windows_clipboard") as native_copy:
+        with patch("ui.textual.app.set_windows_clipboard") as native_copy:
             app.copy_to_clipboard("native copy")
 
         self.assertEqual(app.clipboard, "native copy")
@@ -4051,7 +4040,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_windows_clipboard_failure_does_not_escape(self) -> None:
         app = make_app()
 
-        with patch("ui.app.set_windows_clipboard", side_effect=OSError("busy")):
+        with patch("ui.textual.app.set_windows_clipboard", side_effect=OSError("busy")):
             app.copy_to_clipboard("kept internally")
 
         self.assertEqual(app.clipboard, "kept internally")
@@ -4060,7 +4049,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
 
         with (
-            patch("ui.app.sys.platform", "linux"),
+            patch("ui.textual.app.sys.platform", "linux"),
             patch.object(App, "copy_to_clipboard") as textual_copy,
         ):
             app.copy_to_clipboard("portable copy")
@@ -4134,26 +4123,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             ],
         }
 
-        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            return {
-                "agent": "agent",
-                "plan_agent": "plan-agent",
-                "config": {},
-                "store": FakeStore(),
-                "session": past_session,
-                "model_name": "test-model",
-                "context_limit_tokens": 8192,
-                "context_limit_source": "test",
-                "checkpointer": "checkpointer",
-            }
-
         app = make_app(workspace=workspace)
-        app.bootstrap = bootstrap
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            await app._load_session("past-1")
+            past_core = MiraSession(app.application, past_session)
+            with patch.object(
+                app.application,
+                "open_session",
+                new=AsyncMock(return_value=past_core),
+            ):
+                await app._load_session("past-1")
             await pilot.pause()
 
             blocks = list(app.query_one(ChatLog).children)
@@ -4456,7 +4437,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_mira_command_appends_fresh_unpersisted_splash(self) -> None:
         app = make_app(workspace=Path("current-workspace"))
 
-        with patch("ui.app.run_user_turn", new=AsyncMock()) as run_turn:
+        with patch("core.application.session.run_user_turn", new=AsyncMock()) as run_turn:
             async with app.run_test(size=(80, 20)) as pilot:
                 await pilot.pause()
                 chat = app.query_one(ChatLog)
@@ -4497,7 +4478,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_command_runs_with_rubrics_disabled(self) -> None:
         app = make_app()
         app.mode["rubric_enabled"] = False
-        with patch("ui.app.run_user_turn", new=AsyncMock()) as run:
+        with patch("core.application.session.run_user_turn", new=AsyncMock()) as run:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 await app._run_goal_command("add search")
@@ -4511,7 +4492,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run_user_turn(**kwargs: Any) -> None:
             captured.update(kwargs)
 
-        with patch("ui.app.run_user_turn", fake_run_user_turn):
+        with patch("core.application.session.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -4530,8 +4511,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         compact_result = PostTurnCompactionResult(compacted=True, reason="compacted")
 
         with (
-            patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact,
-            patch("ui.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
+            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact,
+            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -4553,7 +4534,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
-        with patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact:
+        with patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.mode["planning"] = True
@@ -4572,8 +4553,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
         with (
-            patch("ui.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
-            patch("ui.app.sync_deepagents_compaction", new=AsyncMock()) as sync,
+            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
+            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock()) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -4593,7 +4574,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
 
         with (
-            patch("ui.app.compact_after_turn", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
+            patch("ui.textual.app.compact_after_turn", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
             patch.object(app, "_write_error_report", return_value=Path("compaction-error.json")),
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -4686,7 +4667,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             patch("config.metadata.infer_model_metadata", new_callable=AsyncMock) as infer_metadata,
             patch("agent.factory.build_agent") as build_agent,
             patch("agent.factory.build_plan_agent") as build_plan_agent,
-            patch("ui.app.run_user_turn", new_callable=AsyncMock) as run_turn,
+            patch("core.application.session.run_user_turn", new_callable=AsyncMock) as run_turn,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -7607,7 +7588,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             chat = app.query_one(ChatLog)
             started_at = time.monotonic()
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=started_at):
                 app.tool_call_delta("eval", {"code": "1"}, call_id="call-eval")
                 app.tool_call_delta("eval", {"code": "1 + 1"}, call_id="call-eval")
             await pilot.pause()
@@ -7618,14 +7599,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assert_styled_text(tools[0], "Preparing", TOOL_PREPARING_COLOR)
             self.assert_styled_text(tools[0], " · 00:00 elapsed", TOOL_DURATION_COLOR)
 
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 19):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=started_at + 19):
                 app.tool_call("eval", {"code": "1 + 1"}, call_id="call-eval")
                 chat.tick_tools()
             running = renderable_plain(tools[0])
             self.assertIn("Running · 00:19 elapsed", running)
             self.assert_styled_text(tools[0], "Running", TOOL_RUNNING_COLOR)
 
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=started_at + 31):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=started_at + 31):
                 app.completed_tool_result("eval", "2", call_id="call-eval")
             completed = renderable_plain(tools[0])
             self.assertIn("output:\n2", completed)
@@ -7640,10 +7621,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=10.0):
                 app.tool_call("eval", {"code": "while (true) {}"}, call_id="call-eval")
                 app.tool_call("read_file", {"path": "README.md"}, call_id="call-read")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=17.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=17.0):
                 app.finish_turn(cancelled=True)
             await pilot.pause()
 
@@ -7656,7 +7637,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(chat.has_live_tools())
             self.assertTrue(all(not queue for queue in chat._tool_name_queues.values()))
 
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=70.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=70.0):
                 chat.tick_tools()
             self.assertEqual([renderable_plain(block) for block in tools], frozen)
 
@@ -7672,9 +7653,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=20.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=20.0):
                 app.tool_call("execute", {"command": "slow"}, call_id="call-execute")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=32.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=32.0):
                 app.finish_turn(cancelled=True, tool_status="interrupted")
             await pilot.pause()
 
@@ -7710,7 +7691,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             tool = [block for block in chat.children if "tool-call" in block.classes][-1]
             before = renderable_plain(tool)
             self.assertIn("Cancelled after 00:14", before)
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=1000.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=1000.0):
                 chat.tick_tools()
             self.assertEqual(renderable_plain(tool), before)
 
@@ -7720,9 +7701,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=50.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=50.0):
                 app.tool_call("read_file", {"path": "missing"}, call_id="call-read")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=62.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=62.0):
                 app.completed_tool_error("read_file", "not found", call_id="call-read")
             await pilot.pause()
 
@@ -7744,13 +7725,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=10.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=10.0):
                 app.tool_call("eval", {"code": "slow"}, call_id="call-slow")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=20.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=20.0):
                 app.tool_call("eval", {"code": "fast"}, call_id="call-fast")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=25.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=25.0):
                 app.completed_tool_result("eval", "fast result", call_id="call-fast")
-            with patch("ui.widgets.chat_log.time.monotonic", return_value=40.0):
+            with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=40.0):
                 app.completed_tool_result("eval", "slow result", call_id="call-slow")
             await pilot.pause()
 
@@ -8612,28 +8593,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Group time should span the whole batch instead of using the longest row."""
         panel = SubagentsPanel()
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             panel.start_subagent("general-purpose [one]", "first", eval_id="eval-a", row_id="row-a")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=25.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=25.0):
             panel.finish_subagent(
                 "general-purpose [one]",
                 eval_id="eval-a",
                 row_id="row-a",
                 duration_ms=15_000,
             )
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=26.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=26.0):
             panel.start_subagent("general-purpose [two]", "second", eval_id="eval-a", row_id="row-b")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=30.0):
             self.assertIn("Group 1 1/2  20.0s", subagent_groups_plain(panel))
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=40.0):
             panel.finish_subagent(
                 "general-purpose [two]",
                 eval_id="eval-a",
                 row_id="row-b",
                 duration_ms=14_000,
             )
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=100.0):
             self.assertIn("Group 1 2/2  30.0s", subagent_groups_plain(panel))
 
         self.assertEqual(panel._records["row-a"].elapsed_seconds(), 15.0)
@@ -8643,12 +8624,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """Concurrent row runtimes should collapse to their shared wall-clock span."""
         panel = SubagentsPanel()
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             panel.start_subagent("general-purpose [one]", "first", eval_id="eval-a", row_id="row-a")
             panel.start_subagent("general-purpose [two]", "second", eval_id="eval-a", row_id="row-b")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=20.0):
             panel.finish_subagent("general-purpose [one]", eval_id="eval-a", row_id="row-a", duration_ms=10_000)
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=22.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=22.0):
             panel.finish_subagent("general-purpose [two]", eval_id="eval-a", row_id="row-b", duration_ms=12_000)
 
         self.assertIn("Group 1 2/2  12.0s", subagent_groups_plain(panel))
@@ -8656,9 +8637,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_subagent_group_time_freezes_for_error_and_cancel_and_resets_for_retry(self) -> None:
         """Terminal groups should stop ticking, and a reused retry group should start fresh."""
         error_panel = SubagentsPanel()
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             error_panel.start_subagent("general-purpose [error]", "fail", eval_id="eval-error", row_id="row-error")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=15.0):
             error_panel.finish_subagent(
                 "general-purpose [error]",
                 "failed",
@@ -8666,46 +8647,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 row_id="row-error",
                 status="ERROR",
             )
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=100.0):
             self.assertIn("Group 1 1/1  5.0s", subagent_groups_plain(error_panel))
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=100.0):
             error_panel.start_subagent("general-purpose [retry]", "retry", eval_id="eval-retry", row_id="row-retry")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=105.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=105.0):
             retry_groups = subagent_groups_plain(error_panel)
         self.assertIn("Group 1 0/1  5.0s", retry_groups)
         self.assertNotIn("Group 2", retry_groups)
 
         cancelled_panel = SubagentsPanel()
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=30.0):
             cancelled_panel.start_subagent(
                 "general-purpose [cancelled]",
                 "cancel",
                 eval_id="eval-cancelled",
                 row_id="row-cancelled",
             )
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=37.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=37.0):
             cancelled_panel.cancel_running()
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=80.0):
             self.assertIn("Group 1 1/1  7.0s", subagent_groups_plain(cancelled_panel))
 
     def test_eval_group_completion_reconciles_only_matching_orphans(self) -> None:
         """A parent eval completion should freeze only its own unfinished rows."""
         panel = SubagentsPanel()
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             panel.start_subagent("general-purpose [a-one]", "one", eval_id="eval-a", row_id="a-one")
             panel.start_subagent("general-purpose [a-two]", "two", eval_id="eval-a", row_id="a-two")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=11.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=11.0):
             panel.start_subagent("general-purpose [b-one]", "other", eval_id="eval-b", row_id="b-one")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=12.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=12.0):
             panel.finish_subagent("general-purpose [a-one]", eval_id="eval-a", row_id="a-one")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=15.0):
             panel.finish_eval_group("eval-a")
 
         self.assertEqual(panel._records["a-one"].status, "DONE")
         self.assertEqual(panel._records["a-two"].status, "CANCELLED")
         self.assertEqual(panel._records["b-one"].status, "RUNNING")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=100.0):
             groups = subagent_groups_plain(panel)
         self.assertIn("Group 1 2/2  5.0s", groups)
         self.assertIn("Group 2 0/1  1m29s", groups)
@@ -8713,13 +8694,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_terminal_eval_handles_late_events_and_retired_retry_events(self) -> None:
         """Late lifecycle events should refine fallbacks without corrupting a retry."""
         panel = SubagentsPanel()
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=5.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=5.0):
             panel.finish_eval_group("eval-old", failed=True)
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             panel.start_subagent("general-purpose [old]", "late start", eval_id="eval-old", row_id="old")
 
         self.assertEqual(panel._records["old"].status, "CANCELLED")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=20.0):
             panel.finish_subagent(
                 "general-purpose [old]",
                 eval_id="eval-old",
@@ -8729,7 +8710,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(panel._records["old"].status, "DONE")
         self.assertEqual(panel._records["old"].finished_at, 12.5)
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=30.0):
             panel.start_subagent("general-purpose [retry]", "retry", eval_id="eval-retry", row_id="retry")
         panel.finish_subagent(
             "general-purpose [old]",
@@ -8746,18 +8727,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         """The regular Tasks aggregate should use the same first-start-to-last-finish clock."""
         panel = SubagentsPanel()
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
             panel.start_subagent("general-purpose [regular]", "regular")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=20.0):
             panel.start_subagent("general-purpose [eval]", "eval", eval_id="eval-a", row_id="row-eval")
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=30.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=30.0):
             groups = subagent_groups_plain(panel)
         self.assertIn("Tasks 0/1  20.0s", groups)
         self.assertIn("Group 1 0/1  10.0s", groups)
 
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=40.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=40.0):
             panel.finish_subagent("general-purpose [regular]", duration_ms=30_000)
-        with patch("ui.widgets.subagent_panel.time.monotonic", return_value=80.0):
+        with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=80.0):
             self.assertIn("Tasks 1/1  30.0s", subagent_groups_plain(panel))
 
     def test_subagent_group_status_spans_colour_only_the_icon(self) -> None:
@@ -9011,7 +8992,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(160, 30)) as pilot:
             await pilot.pause()
             app.tool_call("eval", {"code": "Promise.all(...)"}, call_id="eval-failed")
-            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=10.0):
+            with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=10.0):
                 for index in range(8):
                     app.eval_subagent_started(
                         f"general-purpose [task-{index}]",
@@ -9019,14 +9000,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         eval_id="eval-failed",
                         row_id=f"row-{index}",
                     )
-            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=15.0):
+            with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=15.0):
                 app.eval_subagent_cancelled(
                     "general-purpose [task-0]",
                     "context size exceeded",
                     eval_id="eval-failed",
                     row_id="row-0",
                 )
-            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=20.0):
+            with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=20.0):
                 app.completed_tool_error("eval", "context size exceeded", call_id="eval-failed")
             await pilot.pause()
 
@@ -9043,7 +9024,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("1 failed", header)
             self.assertIn("7 cancelled", header)
             self.assertTrue(close.display)
-            with patch("ui.widgets.subagent_panel.time.monotonic", return_value=100.0):
+            with patch("ui.textual.widgets.subagent_panel.time.monotonic", return_value=100.0):
                 self.assertIn("Group 1 8/8  10.0s", subagent_groups_plain(panel))
 
             panel.close()
@@ -9530,7 +9511,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         app.busy = True
         async with app.run_test(size=(100, 30)) as pilot:
-            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            task = start_artifact_review(app, "plan", final_plan_interrupt())
             await wait_until(lambda: app._pending_artifact_review is not None)
             provisional = app._pending_artifact_review.artifact
             self.assertIsNone(current_plan(app.session))
@@ -9565,7 +9546,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "plan", "plan": previous, "status": "proposed"}
             )
             app.busy = True
-            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt("Plan B")))
+            task = start_artifact_review(app, "plan", final_plan_interrupt("Plan B"))
             await wait_until(lambda: app._pending_artifact_review is not None)
             provisional_id = str(app._pending_artifact_review.artifact["id"])
             await app._handle_plan_action("clear", provisional_id)
@@ -9593,7 +9574,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "goal", "goal": previous, "status": "proposed"}
             )
             app.busy = True
-            task = asyncio.create_task(app.finalize_goal(final_goal_interrupt("Goal B")))
+            task = start_artifact_review(app, "goal", final_goal_interrupt("Goal B"))
             await wait_until(lambda: app._pending_artifact_review is not None)
             provisional_id = str(app._pending_artifact_review.artifact["id"])
             await app._handle_goal_action("clear", provisional_id)
@@ -9607,7 +9588,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         app.busy = True
         async with app.run_test(size=(100, 30)) as pilot:
-            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            task = start_artifact_review(app, "plan", final_plan_interrupt())
             await wait_until(lambda: app._pending_artifact_review is not None)
             plan_id = str(app._pending_artifact_review.artifact["id"])
             revise = asyncio.create_task(app._handle_plan_action("revise", plan_id))
@@ -9686,7 +9667,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_whole_turn_cancellation_discards_pending_review(self) -> None:
         app = make_app()
         async with app.run_test(size=(100, 30)):
-            task = asyncio.create_task(app.finalize_plan(final_plan_interrupt()))
+            task = start_artifact_review(app, "plan", final_plan_interrupt())
             worker = FakeWorker()
             app.busy = True
             app.turn_worker = worker

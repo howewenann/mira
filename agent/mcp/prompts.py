@@ -11,7 +11,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from agent.mcp.models import PreparedPrompt, PromptArgument, PromptSpec
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 _MUSTACHE = re.compile(r"{{{?\s*([#^/!>&]?)\s*([A-Za-z_][\w.]*)\s*}?}}")
 

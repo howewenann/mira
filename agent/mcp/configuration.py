@@ -12,7 +12,7 @@ from typing import Any
 from agent.mcp.models import MCPServerState
 from agent.resources.paths import MCP_DIR, PROJECT_DIR
 from config.interpolation import resolve_environment
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 MCP_FILE = "mcp.json"
 

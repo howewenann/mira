@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 
 @dataclass(frozen=True)

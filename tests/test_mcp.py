@@ -65,8 +65,8 @@ from config.settings import (
 )
 from config.interpolation import resolve_environment
 from session.context import normalize_events, session_mcp_attachments
-from ui.spinners import SPINNER_FRAMES
-from ui.widgets.mcp_panel import (
+from ui.shared.terminal.spinners import SPINNER_FRAMES
+from ui.textual.widgets.mcp_panel import (
     MCPPanelScreen,
     capability_metric,
     capability_summary,
@@ -75,7 +75,7 @@ from ui.widgets.mcp_panel import (
     status_badge,
     status_class,
 )
-from ui.widgets import PromptBox, PromptPanel
+from ui.textual.widgets import PromptBox, PromptPanel
 
 
 def write_config(root: Path, servers: dict) -> None:
@@ -1376,7 +1376,7 @@ class PanelManager:
 
 
 class PanelApp(App[None]):
-    CSS_PATH = "../ui/styles/mira.tcss"
+    CSS_PATH = "../ui/textual/styles/mira.tcss"
 
     def __init__(self, manager: PanelManager) -> None:
         super().__init__()
@@ -1695,7 +1695,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_reload_button_uses_full_runtime_path_and_close_dismisses(self) -> None:
         """MCP footer actions should reload the full runtime and close the panel."""
         from tests.test_textual_app import make_app, renderable_plain, wait_until
-        from ui.widgets import ChatLog
+        from ui.textual.widgets import ChatLog
 
         manager = PanelManager()
         app = make_app(mcp_manager=manager)
@@ -1777,7 +1777,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
     async def test_reload_during_existing_approval_reveals_prompt_without_reloading(self) -> None:
         """Reload should not create a second prompt over an existing MCP approval."""
         from tests.test_textual_app import make_app, renderable_plain, wait_until
-        from ui.widgets import ChatLog
+        from ui.textual.widgets import ChatLog
 
         manager = PanelManager()
         app = make_app(mcp_manager=manager)

@@ -99,12 +99,12 @@ async def _run(
 
     if prompt is None:
         if trace:
-            from runtime.diagnostics import get_diagnostics_logger, open_trace_window, setup_diagnostics_logging
+            from core.diagnostics.logging import get_diagnostics_logger, open_trace_window, setup_diagnostics_logging
 
             log_path = setup_diagnostics_logging(workspace)
             if not open_trace_window(log_path):
                 get_diagnostics_logger().warning("trace window could not be opened")
-        from ui.app import MiraApp
+        from ui.textual.app import MiraApp
 
         tui = MiraApp(
             workspace=workspace,
@@ -117,13 +117,13 @@ async def _run(
             tool_output_chars=config["tool_output_chars"],
         )
         if trace:
-            from runtime.trace_stream import TraceStream
+            from tracing.stream import TraceStream
 
             tui.trace = TraceStream(get_diagnostics_logger(), output_chars=config["tool_output_chars"])
         await tui.run_async()
         return
 
-    from ui.renderer import Renderer
+    from ui.terminal.renderer import Renderer
 
     renderer = Renderer(tool_output_chars=config["tool_output_chars"])
     if not await ensure_git_repository(workspace, renderer):
@@ -141,9 +141,13 @@ async def _run(
             raise typer.Exit(code=3)
     finally:
         try:
-            manager = app.get("mcp_manager")
-            if manager is not None:
-                await manager.shutdown()
+            application = app.get("application")
+            if application is not None:
+                await application.shutdown()
+            else:
+                manager = app.get("mcp_manager")
+                if manager is not None:
+                    await manager.shutdown()
         finally:
             from tracing.bootstrap import shutdown_tracing
 
@@ -221,27 +225,28 @@ async def _run_one_shot(
     *,
     rubric: str | None = None,
 ) -> Any:
-    """Run one prompt and persist the visible transcript."""
+    """Run one prompt through the same headless session contract as Textual."""
     if app.get("agent") is None:
         from config.llm import ConfigError
 
         raise ConfigError(str(app.get("agent_unavailable_message") or "Main model is not configured. Run /models."))
-    import typer
+    if app.get("core_session") is None:
+        raise RuntimeError("one-shot execution requires a headless MIRA session")
+    return await _run_one_shot_core(app, prompt, rubric=rubric)
 
-    from runtime.runner import run_turn
-    from runtime.context_usage import context_usage_scope
-    from runtime.error_report import write_error_report
-    from runtime.diagnostics import get_diagnostics_logger
-    from session.dashboard import apply_context_usage, apply_turn_usage
-    from session.context import sync_deepagents_compaction, update_title, with_resume_context
-    from session.recorder import RecordingRenderer, SessionRecorder
-    from agent.context_overflow import (
-        context_notice_rendered,
-        mark_context_notice_rendered,
-        pop_context_overflow_notice,
-    )
+
+async def _run_one_shot_core(
+    app: dict[str, Any],
+    prompt: str,
+    *,
+    rubric: str | None = None,
+) -> Any:
+    """Run the normal one-shot path through the headless session facade."""
+    import typer
     from langchain_core.exceptions import ContextOverflowError
-    from config.settings import rubric_enabled, rubric_max_iterations
+    from core.diagnostics.logging import get_diagnostics_logger
+    from core.diagnostics.error_report import write_error_report
+    from core.api import FrontendEmitter
 
     manager = app.get("mcp_manager")
     prepared = None
@@ -250,85 +255,18 @@ async def _run_one_shot(
             await manager.discover_prompts()
         prepared = await manager.prompt_registry.resolve(prompt)
     attachments = manager.attachments_from_text(prompt) if manager is not None else []
-    request_text = with_resume_context(app["session"], prompt)
-    settings = (app.get("config") or {}).get("settings")
-    rubric_kwargs = {}
-    if rubric is not None:
-        rubric_kwargs = {
-            "rubric": rubric,
-            "rubric_max_iterations": rubric_max_iterations(settings),
-            "include_rubric_state": True,
-        }
-    elif rubric_enabled(settings):
-        rubric_kwargs = {
-            "rubric": None,
-            "rubric_max_iterations": rubric_max_iterations(settings),
-            "include_rubric_state": True,
-        }
-    recorder = SessionRecorder(app["session"], app["store"], "action")
-    recorder.user_message(prompt, attachments=attachments)
-    update_title(app["session"])
-    recorder.save()
-    renderer = RecordingRenderer(app["renderer"], recorder)
-    from langchain_core.messages import HumanMessage
-    from session.context import session_mcp_attachments
-
-    all_attachments = session_mcp_attachments(app["session"])
-    messages = list(prepared.messages) if prepared is not None else [
-        HumanMessage(
-            content=request_text,
-            additional_kwargs={"mira_mcp_attachments": all_attachments} if all_attachments else {},
-        )
-    ]
-    if prepared is not None and all_attachments:
-        for index, message in enumerate(messages):
-            if isinstance(message, HumanMessage):
-                extra = dict(message.additional_kwargs)
-                extra["mira_mcp_attachments"] = all_attachments
-                messages[index] = message.model_copy(update={"additional_kwargs": extra})
-                break
-
-    def apply_deepagents_context_usage(usage: dict[str, Any]) -> None:
-        apply_context_usage(
-            app["session"],
-            usage.get("context_tokens", 0),
-            model_name=app.get("model_name", ""),
-            context_limit_tokens=app.get("context_limit_tokens"),
-            context_limit_source=app.get("context_limit_source", "unknown"),
-            source=str(usage.get("context_source") or "unknown"),
-        )
-
     try:
-        with context_usage_scope(apply_deepagents_context_usage):
-            turn_kwargs = dict(rubric_kwargs)
-            if manager is not None:
-                turn_kwargs["messages"] = messages
-            result = await run_turn(
-                agent=app["agent"],
-                text=request_text,
-                renderer=renderer,
-                thread_id=app["session"]["id"],
-                **turn_kwargs,
-            )
-    except asyncio.CancelledError:
-        renderer.stop_active_tools("cancelled")
-        raise
+        result = await app["core_session"].prompt(
+            prompt,
+            prepared_messages=list(prepared.messages) if prepared is not None else None,
+            attachments=attachments,
+            rubric_override=rubric,
+        )
     except ContextOverflowError as exc:
-        renderer.stop_active_tools("interrupted")
-        with suppress(Exception):
-            await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"])
-        notice = pop_context_overflow_notice(exc)
-        if notice and not context_notice_rendered(exc):
-            system_message = getattr(renderer, "system_message", None)
-            if callable(system_message):
-                system_message(notice, kind="info")
-            else:
-                recorder.info(notice)
-            mark_context_notice_rendered(exc)
-        app["store"].save(app["session"])
         raise typer.Exit(code=1) from exc
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:
-        renderer.stop_active_tools("interrupted")
         report_workspace = Path(app.get("workspace") or app["session"].get("workspace") or ".")
         error_path = write_error_report(
             exc,
@@ -341,28 +279,35 @@ async def _run_one_shot(
                 "workspace": str(report_workspace),
             },
         )
-        get_diagnostics_logger().exception("one-shot turn failed; error report: %s", error_path)
-        recorder.system_error(f"turn error: {exc}; error report: {error_path}")
-        raise
-    recorder.ensure_assistant(getattr(result, "final_text", ""))
-    if rubric is not None:
-        renderer.system_message(
-            _rubric_outcome_text(str(getattr(result, "rubric_status", "") or "")),
-            kind="info",
-        )
-    app["session"]["turns"] = int(app["session"].get("turns") or 0) + 1
-    update_title(app["session"])
-    with suppress(Exception):
-        if await sync_deepagents_compaction(app["session"], app["agent"], app["session"]["id"]):
+        message = f"turn error: {exc}; error report: {error_path}"
+        events = app["session"].setdefault("events", [])
+        if events and events[-1].get("type") == "system_error":
+            events[-1]["text"] = message
+            app["store"].save(app["session"])
+        else:
+            from session.recorder import SessionRecorder
+
+            recorder = SessionRecorder(app["session"], app["store"], "action")
+            recorder.system_error(message)
             recorder.save()
-    apply_turn_usage(
-        app["session"],
-        result,
-        model_name=app.get("model_name", ""),
-        context_limit_tokens=app.get("context_limit_tokens"),
-        context_limit_source=app.get("context_limit_source", "unknown"),
-    )
-    app["store"].save(app["session"])
+        get_diagnostics_logger().exception("one-shot turn failed; error report: %s", error_path)
+        FrontendEmitter(app["application"].frontend).system_message(
+            message,
+            kind="error",
+        )
+        raise
+    if rubric is not None:
+        from session.recorder import SessionRecorder
+
+        outcome = _rubric_outcome_text(str(getattr(result, "rubric_status", "") or ""))
+        recorder = SessionRecorder(app["session"], app["store"], "action")
+        info = recorder.info(outcome)
+        recorder.save()
+        FrontendEmitter(app["application"].frontend).system_message(
+            outcome,
+            kind="info",
+            created_at=str(info.get("created_at") or ""),
+        )
     return result
 
 
@@ -383,132 +328,55 @@ async def _bootstrap(
     config: dict[str, Any] | None = None,
     renderer: Any | None = None,
 ) -> dict[str, Any]:
-    """Build config, persistence, renderer, and both action/planning agents."""
-    from agent.factory import build_agent, build_plan_agent
-    from agent.mcp import MCPManager
-    from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
-    from agent.resources import build_resources, configure_subagents
-    from agent.resources.subagents import subagent_model_issues
-    from config.metadata import ModelMetadata, infer_model_metadata
-    from config.runtime import LaunchOptions, load_effective_config
-    from session.checkpoint import make_checkpointer
-    from session.context import mark_resume_context_pending
-    from session.dashboard import ensure_dashboard
-    from session.store import SessionStore
-    from ui.renderer import Renderer
+    """Build the headless application/session and expose legacy state aliases."""
+    from core.application import MiraApplication
+    from core.api import FrontendEmitter
+    from ui.terminal.adapter import TerminalFrontend
+    from ui.terminal.renderer import Renderer
 
     workspace = workspace.expanduser().resolve()
     if config is None:
+        from config.runtime import LaunchOptions, load_effective_config
+
         config = load_effective_config(workspace, LaunchOptions())
     if renderer is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
-    startup_progress(renderer, "loading session...")
-    store = SessionStore(Path(config["session_dir"]))
-    record = store.load(session, resume=resume, workspace=workspace)
-    mark_resume_context_pending(record, resumed=bool(session or resume))
-    checkpointer = make_checkpointer()
-    mcp_manager = getattr(renderer, "mcp_manager", None)
-    if mcp_manager is None:
-        mcp_manager = MCPManager(workspace)
-        setattr(renderer, "mcp_manager", mcp_manager)
-        approval = getattr(renderer, "approve_mcp_server", None)
-        await mcp_manager.initialize(approval if callable(approval) else None)
-    startup_progress(renderer, "discovering resources...")
-    resources = build_resources(workspace, settings=config.get("settings"), config=None)
-    if resources.subagent_discovery.complete and config.get("settings_valid", True):
-        from config.settings import prune_subagent_settings, save_settings
 
-        current_settings = config.get("settings") or {}
-        pruned = prune_subagent_settings(
-            current_settings,
-            {item.name for item in resources.subagent_discovery.items},
-        )
-        if pruned != current_settings and save_settings(workspace, pruned):
-            config["settings"] = pruned
-    assignment_issues = [
-        *active_model_issues(config),
-        *subagent_model_issues(resources.subagent_discovery, config),
-    ]
-    issues = [
-        *(config.get("issues") or []),
-        *mcp_manager.issues,
-        *mcp_manager.prompt_registry.issues,
-        *resources.issues,
-        *assignment_issues,
-    ]
-    blocking = not config.get("settings_valid", True) or bool(assignment_issues)
-    metadata = ModelMetadata(
-        context_tokens=int((config.get("settings") or {}).get("models", {}).get("context_limit_tokens", 32768)),
-        context_source="settings.models.context_limit_tokens",
+    frontend = TerminalFrontend(renderer)
+    progress = FrontendEmitter(frontend)
+    progress.startup_progress("loading session...")
+    progress.startup_progress("discovering resources...")
+    application = await MiraApplication.start(
+        workspace=workspace,
+        frontend=frontend,
+        config=config,
     )
-    agent = None
-    plan_agent = None
-    if not blocking:
-        action_resources = configure_subagents(resources, config)
-        plan_resources = build_resources(
-            workspace,
-            create_examples=False,
-            settings=config.get("settings"),
-            enable_execute=False,
-            config=config,
-            subagent_discovery=resources.subagent_discovery,
-        )
-        startup_progress(renderer, "loading model metadata...")
-        inspect_model = get_llm(config, metadata=ModelMetadata())
-        metadata = await infer_model_metadata(config, model=inspect_model)
-        startup_progress(renderer, "building agents...")
-        agent = build_agent(
-            config=config,
-            workspace=workspace,
-            checkpointer=checkpointer,
-            metadata=metadata,
-            mcp_manager=mcp_manager,
-            resources=action_resources,
-        )
-        plan_agent = build_plan_agent(
-            config=config,
-            workspace=workspace,
-            checkpointer=checkpointer,
-            metadata=metadata,
-            mcp_manager=mcp_manager,
-            resources=plan_resources,
-        )
-    model_name = get_model_name(config)
-    context_limit_tokens = metadata.context_tokens
-    context_limit_source = metadata.context_source
-    ensure_dashboard(
-        record,
-        model_name=model_name,
-        context_limit_tokens=context_limit_tokens,
-        context_limit_source=context_limit_source,
-    )
+    progress.startup_progress("loading model metadata...")
+    progress.startup_progress("building agents...")
+    core_session = await application.open_session(session, resume=resume)
+    setattr(renderer, "mcp_manager", application.mcp_manager)
 
     return {
-        "agent": agent,
-        "plan_agent": plan_agent,
-        "config": config,
-        "model_name": model_name,
-        "context_limit_tokens": context_limit_tokens,
-        "context_limit_source": context_limit_source,
+        "application": application,
+        "core_session": core_session,
+        "agent": application.agent,
+        "plan_agent": application.plan_agent,
+        "config": application.config,
+        "model_name": application.model_name,
+        "context_limit_tokens": application.context_limit_tokens,
+        "context_limit_source": application.context_limit_source,
         "renderer": renderer,
-        "session": record,
-        "store": store,
-        "workspace": workspace,
-        "checkpointer": checkpointer,
-        "tool_failures": resources.tool_failures,
-        "issues": issues,
-        "resource_metadata": resources.metadata,
-        "project_backend": resources.project_backend,
-        "agent_unavailable_message": model_unavailable_message(config) if blocking else "",
-        "mcp_manager": mcp_manager,
+        "session": core_session.record,
+        "store": application.store,
+        "workspace": application.workspace,
+        "checkpointer": application.checkpointer,
+        "tool_failures": application.tool_failures,
+        "issues": application.issues,
+        "resource_metadata": application.resource_metadata,
+        "project_backend": application.project_backend,
+        "agent_unavailable_message": application.agent_unavailable_message,
+        "mcp_manager": application.mcp_manager,
     }
-
-
-def startup_progress(renderer: Any, state: str) -> None:
-    """Notify renderers that expose startup progress."""
-    callback = getattr(renderer, "startup_progress", None)
-    if callable(callback):
-        callback(state)
 
 
 def _write_backup_error_report(
@@ -524,8 +392,8 @@ def _write_backup_error_report(
     if isinstance(exc, typer.Exit):
         return
 
-    from runtime.diagnostics import get_diagnostics_logger
-    from runtime.error_report import error_report_path, write_error_report
+    from core.diagnostics.logging import get_diagnostics_logger
+    from core.diagnostics.error_report import error_report_path, write_error_report
 
     if error_report_path(exc) is not None:
         return

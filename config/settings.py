@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from config.llm import DEFAULT_CONTEXT_TOKENS
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 
 SETTINGS_FILE = "settings.yml"
 TRACING = "tracing"

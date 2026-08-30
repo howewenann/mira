@@ -11,12 +11,12 @@ from textual.app import App, ComposeResult
 from textual.widgets import Button, Collapsible, Static
 
 from agent.resources.tool_failures import ToolLoadFailure, tool_failure_issues
-from runtime.issues import Issue
-from ui.widgets import IssuesScreen
+from core.diagnostics.issues import Issue
+from ui.textual.widgets import IssuesScreen
 
 
 class IssuesApp(App[None]):
-    CSS_PATH = "../ui/styles/mira.tcss"
+    CSS_PATH = "../ui/textual/styles/mira.tcss"
 
     def __init__(self, issues: list[Issue]) -> None:
         super().__init__()

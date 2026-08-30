@@ -25,11 +25,11 @@ from config.settings import (
     set_subagent_model_assignment,
     subagent_model_assignment,
 )
-from runtime.issues import Issue
+from core.diagnostics.issues import Issue
 from tests.test_textual_app import make_app, renderable_plain, wait_until
-from ui.command_help import command_help_entries
-from ui.widgets import IssuesScreen, PromptBox, SettingsPanel
-from ui.widgets.settings_panel import INHERIT_VALUE
+from ui.textual.commands.help import command_help_entries
+from ui.textual.widgets import IssuesScreen, PromptBox, SettingsPanel
+from ui.textual.widgets.settings_panel import INHERIT_VALUE
 from textual.color import Color
 from textual.geometry import Region
 from textual.widgets import Button, Collapsible, ContentSwitcher, Select, Static

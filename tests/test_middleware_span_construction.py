@@ -25,7 +25,7 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool, tool
-from runtime.runner import TurnResult
+from core.execution.runner import TurnResult
 from tracing import bootstrap
 from tracing.middleware_spans import middleware_span_policy
 
