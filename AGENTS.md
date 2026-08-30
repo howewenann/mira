@@ -78,6 +78,26 @@
 - Review the staged diff and relevant recent commits before writing the message
   so the commit accurately describes everything being committed.
 
+## Releases
+
+- Bump the single source of truth in `config/version.py` and commit all release
+  preparation changes before drafting release notes.
+- Draft release notes from the exact committed comparison range: use the base
+  commit or tag supplied by the user and compare it with the resulting release
+  HEAD.
+- Review recent releases at `https://github.com/howewenann/mira/releases` and
+  follow their established template, tone, and purpose.
+- Write for MIRA users. Lead with outcomes and select only changes that affect
+  installation, configuration, common workflows, reliability, safety, or the
+  visible experience. Do not dump internal architecture, refactors, tests, or a
+  commit-by-commit changelog unless they materially affect users.
+- Use the established release shape: `# MIRA vX.Y.Z - <title>`, a short summary,
+  `This release includes:`, concise user-facing bullets, migration or
+  compatibility guidance only when needed, local and Conda install commands, a
+  short `Happy coding.` close, and the GitHub compare link.
+- Keep claims grounded in the committed diff. Do not invent features,
+  migration steps, or compatibility requirements.
+
 ## Documentation
 
 - Treat `README.md` as a concise user quick-start, not a changelog, behavioral
