@@ -40,3 +40,21 @@ def record_deepagents_context_tokens(tokens: int) -> None:
             "source": DEEPAGENTS_CONTEXT_SOURCE,
         }
     )
+
+
+def record_context_report_inputs(messages: Any, system_message: Any, tools: Any) -> None:
+    """Capture the effective request through the active context callback."""
+    callback = _context_usage_callback.get()
+    if callback is None:
+        return
+    from runtime.context_report import observe_context_inputs
+
+    callback(
+        {
+            "context_report_observation": observe_context_inputs(
+                messages,
+                system_message,
+                tools,
+            )
+        }
+    )

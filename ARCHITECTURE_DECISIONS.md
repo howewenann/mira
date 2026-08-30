@@ -703,6 +703,17 @@ their rendered content up to a bounded height, and then scroll internally so
 large file writes or eval programs remain selectable without dominating the
 chat. Tool output stays compact and non-expandable. One-shot rendering remains
 separate and unchanged.
+
+Non-input menus, panels, reports, and diagnostic modals are passive when they
+open: no widget receives initial keyboard focus, including a close control.
+Surfaces whose purpose is immediate input, such as prompt/HITL editors, may
+focus that input. Native disclosure interactions follow the proven tool-bubble
+title behavior: automatic title height, stable padding and text style, and no
+focus cursor styling. A target surface keeps its own requested hover palette;
+the disclosure glyph, label, and row geometry remain fixed. Do not remove hover
+feedback to address a glyph-rendering issue. Align the title sizing and state
+rules with the tool-bubble disclosure instead.
+
 When HITL edits a call, MIRA binds the decision back to the current-loop call
 by stable id, with ordered tool-name matching only for idless compatibility.
 The TUI and saved event replace the proposed arguments in place; immutable
@@ -834,9 +845,11 @@ the close control without changing the reported outcome of completed children.
 As the fixed panel opens or collapses, a tail-following transcript reanchors
 after layout while a transcript that the user scrolled upward remains paused.
 
-**Where to check:** `ui/app.py`, `ui/widgets/issues.py`, `ui/windows_input.py`,
+**Where to check:** `ui/app.py`, `ui/widgets/issues.py`,
+`ui/widgets/context_report.py`, `ui/styles/mira.tcss`, `ui/windows_input.py`,
 `ui/windows_driver.py`, `ui/windows_clipboard.py`, `ui/widgets/`,
-`ui/renderer.py`, `runtime/*_events.py`, `tests/test_textual_app.py`.
+`ui/renderer.py`, `runtime/*_events.py`, `tests/test_context_report.py`,
+`tests/test_textual_app.py`.
 
 **Update this when:** Rendering responsibility moves, a new UI mode appears,
 keyboard or clipboard ownership changes, or tool/subagent events are projected

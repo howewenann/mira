@@ -18,6 +18,7 @@ from agent.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware.execute_tool_description_rewrite import (
     ExecuteToolDescriptionRewriteMiddleware,
 )
+from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware.file_references import FileReferenceMiddleware
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
 from config.settings import dynamic_subagents_enabled, planning_todos_enabled
@@ -65,6 +66,7 @@ def build_agent_middleware(
         ExecuteToolDescriptionRewriteMiddleware(),
     ]
     middleware.extend(extra_middleware or [])
+    middleware.append(ContextReportMiddleware())
     return AgentMiddlewareBundle(items=middleware, summarization=summarization_middleware)
 
 

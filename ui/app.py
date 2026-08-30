@@ -40,6 +40,12 @@ from config.settings import (
     tool_enabled,
 )
 from runtime.diagnostics import get_diagnostics_logger
+from runtime.context_report import (
+    ContextReportMCPServer,
+    ContextReportObservation,
+    build_agent_context_report,
+    mcp_tool_metadata,
+)
 from runtime.error_report import clear_error_reports, write_error_report
 from runtime.trace_stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -92,6 +98,8 @@ from ui.runtime_snapshot import runtime_report
 from ui.widgets import (
     AutocompleteInput,
     ChatLog,
+    ContextReportScreen,
+    ContextStatus,
     PromptBox,
     PromptPanel,
     SessionHistory,
@@ -2016,6 +2024,72 @@ class MiraApp(App[None]):
             return
         self.command_output(runtime_report(snapshot))
 
+    async def open_context_report(self) -> None:
+        """Build and present the shared Context Report modal."""
+        if self.busy or isinstance(self.screen, ContextReportScreen):
+            return
+        dashboard = normalize_dashboard(self.session.get("dashboard"))
+        context = dict(dashboard.get("context") or {})
+        observation = self.mode.get("context_report_observation")
+        if not isinstance(observation, ContextReportObservation):
+            observation = None
+
+        planning = bool(self.mode.get("context_report_planning", self.mode.get("planning")))
+        active_agent = self.mode.get("context_report_agent")
+        if active_agent is None:
+            active_agent = self.plan_agent if planning else self.agent
+        thread_id = str(
+            self.mode.get("context_report_thread_id")
+            or (self.mode.get("plan_thread_id") if planning else self.session.get("id"))
+            or ""
+        )
+        tool_metadata = tuple(
+            dict(item)
+            for item in available_tools(self.mode, planning=planning)
+            if isinstance(item, dict)
+        )
+        selected_mcp_tools: dict[str, list[Any]] = {}
+        if self.mcp_manager is not None:
+            selected_tools, _ = self.mcp_manager.tools_for_mode(
+                (self.config or {}).get("settings"),
+                planning=planning,
+            )
+            for tool in selected_tools:
+                ownership = mcp_tool_metadata(tool)
+                if ownership is None:
+                    continue
+                selected_mcp_tools.setdefault(
+                    str(ownership.get("server") or "unknown"),
+                    [],
+                ).append(tool)
+        mcp_servers = tuple(
+            ContextReportMCPServer(
+                name=str(state.name),
+                status=str(state.status),
+                error=str(state.error or ""),
+                tools=tuple(selected_mcp_tools.get(str(state.name), ())),
+            )
+            for state in (
+                self.mcp_manager.servers.values()
+                if self.mcp_manager is not None
+                else ()
+            )
+        )
+
+        # These values are copied before the checkpoint read so one report
+        # cannot mix telemetry or registry changes from another turn.
+        report = await build_agent_context_report(
+            agent=active_agent,
+            thread_id=thread_id,
+            observation=observation,
+            current_tokens=context.get("used_tokens"),
+            limit_tokens=context.get("limit_tokens"),
+            tool_metadata=tool_metadata,
+            mcp_servers=mcp_servers,
+        )
+        if not self.busy:
+            self.push_screen(ContextReportScreen(report))
+
     def _refresh_startup_splash(self) -> None:
         """Refresh the visible startup metadata block after runtime changes."""
         if not self.is_mounted:
@@ -2910,6 +2984,7 @@ class MiraApp(App[None]):
             state=state,
             dashboard=self.session.get("dashboard"),
             turns=int(self.session.get("turns") or 0),
+            busy=self.busy,
         )
         self.query_one(TelemetryBar).set_state(
             model_name=self.model_name or "loading",
@@ -2929,6 +3004,14 @@ class MiraApp(App[None]):
     def press_mcp_status(self, event: Button.Pressed) -> None:
         event.stop()
         self.open_mcp_panel()
+
+    @on(ContextStatus.Pressed)
+    async def press_context_status(self, event: ContextStatus.Pressed) -> None:
+        """Open the same Context Report modal used by the slash command."""
+        event.stop()
+        if self.busy:
+            return
+        await self.open_context_report()
 
     @on(Button.Pressed, "#model-settings-button")
     def press_model_settings(self, event: Button.Pressed) -> None:

@@ -6,8 +6,11 @@ from typing import Any
 
 from rich.table import Table
 from rich.text import Text
+from textual import events
 from textual.app import ComposeResult
+from textual.message import Message
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.widgets import Button, Static
 
 from ui.spinners import SPINNER_FRAMES
@@ -23,7 +26,22 @@ STATUS_STARTING_COLOR = TOOL_PREPARING_COLOR
 ANIMATED_STATES = {"starting", "running", "cancelling"}
 
 
-class StatusBar(Static):
+class ContextStatus(Static):
+    """Mouse-only context status control with no keyboard focus behavior."""
+
+    can_focus = False
+
+    class Pressed(Message):
+        """Posted when the idle context group is clicked."""
+
+    def on_click(self, event: events.Click) -> None:
+        if self.disabled:
+            return
+        event.stop()
+        self.post_message(self.Pressed())
+
+
+class StatusBar(Horizontal):
     """Top operational session and activity status."""
 
     def __init__(self, **kwargs: Any) -> None:
@@ -32,6 +50,17 @@ class StatusBar(Static):
         self._state = "starting"
         self._dashboard: dict[str, Any] = {}
         self._spinner_index = 0
+        self._busy = False
+        self._combined_renderable = Text()
+
+    @property
+    def renderable(self) -> Text:
+        """Return the combined header projection for tests and inspection."""
+        return self._combined_renderable
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="status-primary")
+        yield ContextStatus(id="context-status")
 
     def set_state(
         self,
@@ -41,6 +70,7 @@ class StatusBar(Static):
         state: str,
         dashboard: dict[str, Any] | None = None,
         turns: int = 0,
+        busy: bool = False,
     ) -> None:
         """Update the status bar text."""
         normalized_state = str(state or "").strip().lower()
@@ -49,6 +79,7 @@ class StatusBar(Static):
         self._mode = mode
         self._state = normalized_state
         self._dashboard = dashboard if isinstance(dashboard, dict) else {}
+        self._busy = bool(busy)
         self._render_status()
 
     def tick(self) -> None:
@@ -60,12 +91,22 @@ class StatusBar(Static):
 
     def _render_status(self) -> None:
         """Render the current operational state without refreshing telemetry."""
-        text = Text()
-        append_part(text, "MIRA", "bold #d6fff6")
-        append_part(text, self._mode)
-        append_operational_state(text, self._state, self._spinner_index)
-        append_context(text, self._dashboard.get("context"))
-        self.update(text)
+        primary = Text()
+        append_part(primary, "MIRA", "bold #d6fff6")
+        append_part(primary, self._mode)
+        append_operational_state(primary, self._state, self._spinner_index)
+        primary.append(" | ", style="#6f8389")
+        context = Text()
+        append_context(context, self._dashboard.get("context"))
+        self._combined_renderable = primary.copy()
+        self._combined_renderable.append_text(context)
+        try:
+            self.query_one("#status-primary", Static).update(primary)
+            context_status = self.query_one("#context-status", ContextStatus)
+        except NoMatches:
+            return
+        context_status.update(context)
+        context_status.disabled = self._busy
 
 
 class TelemetryBar(Horizontal):

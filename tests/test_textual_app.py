@@ -97,7 +97,7 @@ from ui.terminal_colors import (
     TOOL_RUNNING_COLOR,
     strip_ansi,
 )
-from ui.widgets import AutocompleteInput, ChatLog, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.widgets import AutocompleteInput, ChatLog, ContextReportScreen, ContextStatus, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
 from ui.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
 from ui.widgets.settings_panel import SettingsHeaderRow
 from ui.widgets.status_bar import STATUS_STARTING_COLOR
@@ -3270,6 +3270,83 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("?/10.0k", status)
             self.assertNotIn("14/10.0k", status)
             self.assertNotIn("Ctx", telemetry)
+
+    async def test_context_report_slash_and_header_share_one_open_action(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.open_context_report = AsyncMock()  # type: ignore[method-assign]
+            prompt = app.query_one(PromptBox)
+            before = len(app.query_one(ChatLog).children)
+
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/context-report"))
+            await pilot.click("#context-status")
+            await pilot.pause()
+
+            self.assertEqual(app.open_context_report.await_count, 2)
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+
+    async def test_context_report_slash_opens_modal_without_chat_output(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            before = len(app.query_one(ChatLog).children)
+
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/context-report"))
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, ContextReportScreen)
+            self.assertEqual(app.screen.report.current_tokens, 5512)
+            self.assertNotEqual(app.screen.report.current_tokens, 45230)
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+
+    async def test_context_group_is_disabled_while_busy(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            context = app.query_one(ContextStatus)
+            app.open_context_report = AsyncMock()  # type: ignore[method-assign]
+            app.busy = True
+            app._set_status(state="running")
+
+            self.assertTrue(context.disabled)
+            await pilot.click("#context-status")
+            await pilot.pause()
+            app.open_context_report.assert_not_awaited()
+
+    async def test_pending_context_group_remains_clickable_while_idle(self) -> None:
+        session = {
+            "id": "thread-pending-click",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "events": [],
+        }
+        app = make_app(session=session, context_limit_tokens=10000)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            context = app.query_one(ContextStatus)
+            self.assertFalse(context.disabled)
+
+            await pilot.click("#context-status")
+            await pilot.pause()
+
+            self.assertIsInstance(app.screen, ContextReportScreen)
+            current = app.screen.query_one("#context-report-current")
+            self.assertIn(
+                "Current context",
+                renderable_plain(current.query_one(".context-report-label", Static)),
+            )
+            self.assertIn(
+                "pending",
+                renderable_plain(current.query_one(".context-report-value", Static)),
+            )
 
     async def test_header_badge_colours_terminal_states_and_animates_active_states(self) -> None:
         """The fixed operational badge should make every state immediately visible."""

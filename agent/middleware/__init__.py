@@ -8,6 +8,7 @@ from agent.middleware.correction import (
     CorrectionRule,
     CorrectionState,
 )
+from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware.execute_tool_description_rewrite import (
     MIRA_EXECUTE_TOOL_DESCRIPTION,
     ExecuteToolDescriptionRewriteMiddleware,
@@ -39,6 +40,7 @@ __all__ = [
     "CorrectionMiddleware",
     "CorrectionRule",
     "CorrectionState",
+    "ContextReportMiddleware",
     "ExecuteToolDescriptionRewriteMiddleware",
     "FileReferenceMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",

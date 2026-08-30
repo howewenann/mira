@@ -244,7 +244,20 @@ async def run_user_turn(
         if callable(usage_updated):
             usage_updated()
 
-    def apply_deepagents_context_usage(usage: dict[str, Any]) -> None:
+    def apply_deepagents_context_usage(
+        usage: dict[str, Any],
+        *,
+        phase_agent: Any,
+        thread_id: str,
+    ) -> None:
+        observation = usage.get("context_report_observation")
+        if observation is not None:
+            mode["context_report_observation"] = observation
+            mode["context_report_agent"] = phase_agent
+            mode["context_report_thread_id"] = thread_id
+            mode["context_report_planning"] = phase_agent is plan_agent
+        if not usage.get("context_tokens"):
+            return
         apply_context_usage(
             session,
             usage.get("context_tokens", 0),
@@ -315,7 +328,13 @@ async def run_user_turn(
         wrapped_renderer = RecordingRenderer(renderer, phase_recorder)
         poller = asyncio.create_task(poll_compactions(phase_recorder, phase_agent, thread_id))
         try:
-            with context_usage_scope(apply_deepagents_context_usage):
+            with context_usage_scope(
+                lambda usage: apply_deepagents_context_usage(
+                    usage,
+                    phase_agent=phase_agent,
+                    thread_id=thread_id,
+                )
+            ):
                 phase_result = await run_turn(
                     agent=phase_agent,
                     text=request_text,
@@ -579,6 +598,16 @@ async def handle_command(
 
     if text == "/tools":
         print_tools(renderer, mode)
+        return True
+
+    if text == "/context-report":
+        callback = getattr(renderer, "open_context_report", None)
+        if callable(callback):
+            outcome = callback()
+            if inspect.isawaitable(outcome):
+                await outcome
+        else:
+            write_line(renderer, "Context Report is unavailable in this interface.", kind="warning")
         return True
 
     if text == "/memories":

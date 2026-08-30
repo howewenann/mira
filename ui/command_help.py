@@ -18,6 +18,7 @@ COMMAND_HELP_SECTIONS = (
     (
         "Inspect",
         (
+            ("/context-report", "inspect current context usage"),
             ("/runtime", "inspect the active model, connection, and launch options"),
             ("/tools", "list tools available in the current mode"),
             ("/memories", "list loaded memory files and replacements"),

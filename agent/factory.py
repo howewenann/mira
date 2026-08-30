@@ -306,6 +306,12 @@ def _build_agent(
     )
     combined_metadata = {**resources.metadata, "tools": [*local_metadata, *mcp_metadata]}
     _attach_resources(agent, combined_metadata)
+    _attach_context_report_config(
+        agent,
+        system_prompt=system_prompt or "",
+        memory_sources=resources.memory,
+        skill_sources=resources.skills,
+    )
     _attach_tool_failures(agent, resources.tool_failures)
     _attach_resource_issues(agent, resources.issues, resources.subagent_discovery)
     _attach_backend(agent, backend, resources.project_backend)
@@ -603,6 +609,24 @@ def _attach_resources(agent: Any, resources: dict[str, list[dict[str, str]]]) ->
     """Attach resource display metadata used by the REPL."""
     try:
         agent.mira_resources = resources
+    except AttributeError:
+        return
+
+
+def _attach_context_report_config(
+    agent: Any,
+    *,
+    system_prompt: str,
+    memory_sources: list[str],
+    skill_sources: list[str],
+) -> None:
+    """Attach the exact construction inputs needed for local context audits."""
+    try:
+        agent.mira_context_report_config = {
+            "system_prompt": system_prompt,
+            "memory_sources": tuple(memory_sources),
+            "skill_sources": tuple(skill_sources),
+        }
     except AttributeError:
         return
 

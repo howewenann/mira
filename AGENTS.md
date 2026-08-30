@@ -43,6 +43,25 @@
   prompts and expected results in `tests/manual/prompts.md` so the user can
   run the manual checks.
 
+## TUI Interaction Requirements
+
+- When a request says a disclosure or collapsible should behave like a tool
+  bubble, treat `ui/widgets/tool_bubble.py` and the
+  `.tool-args-collapsible > CollapsibleTitle` rules in `ui/styles/mira.tcss` as
+  the complete interaction reference, including its native glyph behavior,
+  automatic title height, padding, focus treatment, and hover stability. Keep
+  the target surface's requested colors unless the user also asks to copy the
+  tool-bubble palette. Do not remove hover feedback to hide a glyph-rendering
+  problem; align the title sizing and state rules, then test the collapsed and
+  expanded glyph geometry before and during hover.
+- Non-input menus, panels, reports, and diagnostic modals open without initial
+  keyboard focus. In Textual, disable automatic focus and clear any framework-
+  assigned focus after refresh when necessary; tests must assert that the
+  screen has no focused widget and that a close button is not focused. Give a
+  widget initial focus only when the surface exists to collect immediate user
+  input, such as a prompt/HITL editor, or when the behavior is explicitly
+  requested.
+
 ## Commits
 
 - Use a concise, imperative, sentence-case subject that describes the complete

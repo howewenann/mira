@@ -1538,6 +1538,30 @@ Use a disposable workspace with no existing `.mira/`.
    MCP, TOOL. Expanded rows show location, details, and guidance; there are no
    package inputs or install controls.
 
+## Context Report
+
+Launch MIRA in a disposable workspace with at least one memory file, one skill,
+one project tool, and one configured MCP server. Before the first model turn,
+hover and click anywhere across the complete `Ctx` label, bar, percentage, and
+count region. Expected: the whole region receives one subtle hover highlight,
+keeps the existing header layout and colors, takes no keyboard focus, and opens
+the Context Report modal with `pending / <limit>` and no inner context bar.
+Confirm Instructions, Memory, Skills, and Conversation are plain rows, while
+Tools and its nested MCP aggregate are disclosure rows. Hover each disclosure
+and verify the subtle highlight appears without changing the arrow size, label,
+numeric columns, height, or padding. Expand Tools to reveal Built-in,
+Custom, and MCP, then expand MCP to reveal its server rows. Top-level contributor
+values and MCP are white; Built-in, Custom, and server values are gray. The
+active server shows its model-visible tool count and disabled or failed servers
+have no token/share value. Confirm the footer Close button is gone and the
+Settings-style top-right `x` closes the modal. Reopen it and confirm no widget,
+including the `x`, receives initial focus. Run a model turn, then compare the
+modal from the header and
+`/context-report`; both use the same popup, leave the chat log unchanged, show
+live Used / Limit and Usage separately from estimated Tokens / Share, and never
+use cumulative In / Out as current context. While a turn is active, confirm the
+complete context region is disabled.
+
 ## Generic OTLP tracing
 
 Install `mira[tracing]`, start a disposable OTLP/HTTP backend, and open
