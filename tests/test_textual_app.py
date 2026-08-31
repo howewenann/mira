@@ -76,10 +76,11 @@ from config.settings import (
 )
 from config.version import display_version
 from core.application import MiraSession
-from core.interface import FrontendEmitter
+from core.diagnostics.issues import Issue
 from core.diagnostics.logging import get_diagnostics_logger, setup_diagnostics_logging
 from core.execution.streams.rubric import RubricEventRenderer
 from core.execution.streams.tools import CONTROL_TOOLS
+from core.interface import FrontendEmitter
 from tracing.stream import TraceStream
 from session.goals import current_goal, goal_artifact
 from session.plans import current_plan, plan_artifact
@@ -4959,7 +4960,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 launch_options=launch_options,
                 mcp_manager=mcp_manager,
             )
-            action_agent = type("Agent", (), {"mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}]})()
+            subagent_issue = Issue(
+                "TOOL",
+                "Subagent tool allowlist is unavailable: reload-reviewer",
+            )
+            action_agent = type(
+                "Agent",
+                (),
+                {
+                    "mira_tool_specs": [{"name": "fresh_tool", "description": "Fresh."}],
+                    "mira_resource_issues": [subagent_issue],
+                },
+            )()
             plan_agent = type("PlanAgent", (), {"mira_tool_specs": [{"name": "plan_tool", "description": "Plan."}]})()
 
             async def infer_metadata(config: dict[str, Any], model: Any | None = None) -> ModelMetadata:
@@ -5039,6 +5051,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("- starting", rendered)
             self.assertEqual(model_button_label, "model: [visual] lmstudio:visual-model")
             self.assertEqual(len(reload_info_blocks), 1)
+            self.assertIn(subagent_issue, app.issues)
             self.assertIn("agent reloaded", renderable_plain(reload_info_blocks[0]))
             self.assertEqual(reload_command_blocks, [])
             self.assertEqual(len(command_blocks), 1)

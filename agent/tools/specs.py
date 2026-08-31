@@ -116,7 +116,13 @@ def mira_environment_label() -> str:
 def tool_name(tool: Any) -> str | None:
     if isinstance(tool, dict):
         name = tool.get("name")
-        return name if isinstance(name, str) else None
+        if isinstance(name, str):
+            return name
+        function = tool.get("function")
+        if isinstance(function, dict) and isinstance(function.get("name"), str):
+            return function["name"]
+        tool_type = tool.get("type")
+        return tool_type if isinstance(tool_type, str) else None
 
     name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
     return name if isinstance(name, str) else None

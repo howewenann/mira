@@ -153,6 +153,14 @@ class MiraApplication:
                 mcp_manager=mcp_manager,
                 resources=plan_resources,
             )
+        from core.diagnostics.issues import unique_issues
+
+        issues = unique_issues(
+            [
+                *issues,
+                *getattr(agent, "mira_resource_issues", []),
+            ]
+        )
         return cls(
             frontend=frontend,
             workspace=workspace,

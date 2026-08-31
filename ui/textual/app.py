@@ -1803,6 +1803,14 @@ class MiraApp(App[None]):
                 metadata=metadata,
                 action_resources=action_resources,
             )
+        from core.diagnostics.issues import unique_issues
+
+        issues = unique_issues(
+            [
+                *issues,
+                *getattr(agent, "mira_resource_issues", []),
+            ]
+        )
         model_name = get_model_name(config)
         mode_updates = self._agent_mode_updates(agent, plan_agent, config)
         mode_updates["resources"] = resources.metadata
@@ -3155,19 +3163,24 @@ class MiraApp(App[None]):
                 metadata=metadata,
                 action_resources=action_resources,
             )
+        from core.diagnostics.issues import unique_issues
+
         mode_updates = self._agent_mode_updates(agent, plan_agent, self.config)
         mode_updates["resources"] = resources.metadata
         self.agent = agent
         self.plan_agent = plan_agent
         self.agent_unavailable_message = model_unavailable_message(self.config) if agent is None else ""
         self.tool_failures = resources.tool_failures
-        self.issues = [
-            *(self.config.get("issues") or []),
-            *(self.mcp_manager.issues if self.mcp_manager is not None else []),
-            *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
-            *resources.issues,
-            *assignment_issues,
-        ]
+        self.issues = unique_issues(
+            [
+                *(self.config.get("issues") or []),
+                *(self.mcp_manager.issues if self.mcp_manager is not None else []),
+                *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
+                *resources.issues,
+                *assignment_issues,
+                *getattr(agent, "mira_resource_issues", []),
+            ]
+        )
         self.mode.update(mode_updates)
         self._sync_core_application()
         self.query_one(AutocompleteInput).set_project_backend(resources.project_backend)

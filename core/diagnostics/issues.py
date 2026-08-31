@@ -30,4 +30,13 @@ def sort_issues(issues: list[Issue]) -> list[Issue]:
     return sorted(issues, key=lambda issue: CATEGORY_ORDER[issue.category])
 
 
-__all__ = ["CATEGORY_ORDER", "Issue", "IssueCategory", "sort_issues"]
+def unique_issues(issues: list[Issue]) -> list[Issue]:
+    """Return issues in discovery order without repeated diagnostics."""
+    unique: list[Issue] = []
+    for issue in issues:
+        if issue not in unique:
+            unique.append(issue)
+    return unique
+
+
+__all__ = ["CATEGORY_ORDER", "Issue", "IssueCategory", "sort_issues", "unique_issues"]

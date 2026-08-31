@@ -34,6 +34,7 @@ from agent.planning.policy import (
     plan_system_prompt,
 )
 from agent.resources import build_resources
+from agent.resources.subagents import resolve_subagent_tool_allowlists
 from agent.subagent_compilation import compile_dynamic_subagents
 from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_name
 from config.metadata import ModelMetadata
@@ -232,6 +233,18 @@ def _build_agent(
         and (not planning or _local_tool_available_in_plan(config, local_metadata, tool_name(tool)))
     ]
     tools.extend(mcp_tools)
+    builtin_tool_names = {
+        name
+        for tool in FilesystemMiddleware(backend=backend).tools
+        if (name := tool_name(tool)) is not None
+    }
+    subagents, subagent_tool_issues = resolve_subagent_tool_allowlists(
+        resources.subagents,
+        tools,
+        builtin_tool_names,
+        resources.subagent_discovery,
+        excluded_tools,
+    )
     rubric_middleware: list[AgentMiddleware] = []
     if enable_rubric:
         rubric_tools, rubric_interrupts = effective_rubric_tools(
@@ -257,7 +270,7 @@ def _build_agent(
         *([ProjectToolErrorMiddleware(project_tool_names)] if project_tool_names else []),
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
-    subagents = subagents_with_project_tool_errors(resources.subagents, project_tool_names)
+    subagents = subagents_with_project_tool_errors(subagents, project_tool_names)
     settings = (config or {}).get("settings")
     with middleware_span_policy(middleware_span_mode(settings)):
         if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
@@ -319,7 +332,11 @@ def _build_agent(
         skill_sources=resources.skills,
     )
     _attach_tool_failures(agent, resources.tool_failures)
-    _attach_resource_issues(agent, resources.issues, resources.subagent_discovery)
+    _attach_resource_issues(
+        agent,
+        [*resources.issues, *subagent_tool_issues],
+        resources.subagent_discovery,
+    )
     _attach_backend(agent, backend, resources.project_backend)
     _attach_summarization(agent, middleware_stack.summarization)
     if enable_rubric:

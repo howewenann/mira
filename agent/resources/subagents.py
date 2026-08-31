@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain_core.language_models import BaseChatModel
 
+from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
 from agent.resources.paths import (
     SUBAGENTS_DIR,
     default_dir,
@@ -17,6 +19,7 @@ from agent.resources.paths import (
     project_virtual_dir,
 )
 from agent.resources.python_files import import_python_file
+from agent.tools.specs import tool_name
 from config.settings import subagent_enabled, subagent_model_assignment
 from core.diagnostics.issues import Issue
 
@@ -140,6 +143,133 @@ def subagent_model_issues(discovery: SubagentDiscovery, config: dict[str, Any]) 
             )
         )
     return issues
+
+
+def resolve_subagent_tool_allowlists(
+    subagents: Sequence[Any],
+    active_tools: Sequence[Any],
+    builtin_tool_names: Iterable[str],
+    discovery: SubagentDiscovery | None = None,
+    excluded_tool_names: Iterable[str] = (),
+) -> tuple[list[Any], list[Issue]]:
+    """Resolve explicit raw-subagent tool declarations against live tools.
+
+    Built-in filesystem tools are already registered by DeepAgents, so their
+    names are allowed without adding duplicate tool objects. Project and MCP
+    references resolve to the exact active objects assembled for this agent.
+    """
+    excluded = {str(name) for name in excluded_tool_names if str(name)}
+    builtins = {
+        str(name)
+        for name in builtin_tool_names
+        if str(name) and str(name) not in excluded
+    }
+    active_by_name: dict[str, list[Any]] = {}
+    for tool in active_tools:
+        name = tool_name(tool)
+        if name and name not in excluded:
+            active_by_name.setdefault(name, []).append(tool)
+
+    resolved_subagents: list[Any] = []
+    issues: list[Issue] = []
+    for spec in subagents:
+        if not _is_raw_spec(spec) or "tools" not in spec:
+            resolved_subagents.append(spec)
+            continue
+
+        declared = spec.get("tools")
+        if not isinstance(declared, Sequence) or isinstance(declared, str | bytes):
+            issues.append(_subagent_tool_issue(spec, discovery, invalid=True))
+            continue
+
+        resolved_tools: list[Any] = []
+        resolved_names: list[str] = []
+        missing: list[str] = []
+        ambiguous: list[str] = []
+        for entry in declared:
+            if isinstance(entry, str):
+                candidates = active_by_name.get(entry, [])
+                candidate_count = len(candidates) + (1 if entry in builtins else 0)
+                if candidate_count == 0:
+                    missing.append(entry)
+                    continue
+                if candidate_count > 1:
+                    ambiguous.append(entry)
+                    continue
+                if candidates:
+                    resolved_tools.append(candidates[0])
+                resolved_names.append(entry)
+                continue
+
+            name = tool_name(entry)
+            if not name:
+                missing.append(repr(entry))
+                continue
+            if name in excluded:
+                missing.append(name)
+                continue
+            resolved_tools.append(entry)
+            resolved_names.append(name)
+
+        duplicates = sorted({name for name in resolved_names if resolved_names.count(name) > 1})
+        if missing or ambiguous or duplicates:
+            issues.append(
+                _subagent_tool_issue(
+                    spec,
+                    discovery,
+                    missing=missing,
+                    ambiguous=ambiguous,
+                    duplicates=duplicates,
+                )
+            )
+            continue
+
+        copied = dict(spec)
+        copied["tools"] = resolved_tools
+        middleware = list(spec.get("middleware") or [])
+        middleware.append(ModelToolVisibilityMiddleware(allowed_tools=tuple(resolved_names)))
+        copied["middleware"] = middleware
+        resolved_subagents.append(copied)
+
+    return resolved_subagents, issues
+
+
+def _is_raw_spec(spec: Any) -> bool:
+    return isinstance(spec, dict) and "graph_id" not in spec and "runnable" not in spec
+
+
+def _subagent_tool_issue(
+    spec: dict[str, Any],
+    discovery: SubagentDiscovery | None,
+    *,
+    missing: list[str] | None = None,
+    ambiguous: list[str] | None = None,
+    duplicates: list[str] | None = None,
+    invalid: bool = False,
+) -> Issue:
+    name = str(spec.get("name") or "unnamed")
+    location = ".mira/subagents"
+    if discovery is not None:
+        location = next(
+            (item.path for item in discovery.items if item.name == name),
+            location,
+        )
+    details: list[str] = []
+    if invalid:
+        details.append("The tools field must be a list or tuple.")
+    if missing:
+        details.append("Unavailable references: " + ", ".join(missing))
+    if ambiguous:
+        details.append("Ambiguous references: " + ", ".join(sorted(set(ambiguous))))
+    if duplicates:
+        details.append("Duplicate resolved names: " + ", ".join(duplicates))
+    return Issue(
+        "TOOL",
+        f"Subagent tool allowlist is unavailable: {name}",
+        location,
+        "\n".join(details),
+        f"Correct the tools list for '{name}', restore its dependencies, or disable the subagent and run /reload.",
+    )
 
 
 def _discover_tier(
@@ -275,5 +405,6 @@ __all__ = [
     "discover_subagents",
     "effective_subagent_specs",
     "load_subagents",
+    "resolve_subagent_tool_allowlists",
     "subagent_model_issues",
 ]
