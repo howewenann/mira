@@ -63,6 +63,7 @@ from config.settings import (
     set_mcp_server_always_allow,
     set_mcp_server_enabled,
     set_mcp_tool_policy_value,
+    set_tool_enabled,
     set_tool_plan_access,
     set_tool_ptc,
     set_tool_rubric_access,
@@ -6161,13 +6162,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
                 self.assertTrue(
-                    str(buttons["settings-access-policy-plan"].label).endswith("4 selected      >")
+                    str(buttons["settings-access-policy-plan"].label).endswith("4 allowed      >")
                 )
                 self.assertTrue(
-                    str(buttons["settings-access-policy-ptc"].label).endswith("4 selected      >")
+                    str(buttons["settings-access-policy-ptc"].label).endswith("4 allowed      >")
                 )
                 self.assertTrue(
-                    str(buttons["settings-access-policy-rubric"].label).endswith("4 selected      >")
+                    str(buttons["settings-access-policy-rubric"].label).endswith("4 allowed      >")
                 )
                 self.assertNotIn("Adds write_todos", rendered)
                 self.assertNotIn("Enter a whole number", rendered)
@@ -6469,15 +6470,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(app.screen.focused)
                 self.assertEqual(
                     renderable_plain(panel.query_one(".settings-access-description", Static)),
-                    "Choose which enabled tools are available to each policy.",
+                    "Review and configure tool access for each policy.",
                 )
                 labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
                 self.assertTrue(labels["settings-access-policy-plan"].startswith("Plan"))
-                self.assertTrue(labels["settings-access-policy-plan"].endswith("5 selected      >"))
+                self.assertTrue(labels["settings-access-policy-plan"].endswith("5 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-ptc"].startswith("PTC"))
-                self.assertTrue(labels["settings-access-policy-ptc"].endswith("4 selected      >"))
+                self.assertTrue(labels["settings-access-policy-ptc"].endswith("4 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-rubric"].startswith("Rubric"))
-                self.assertTrue(labels["settings-access-policy-rubric"].endswith("5 selected      >"))
+                self.assertTrue(labels["settings-access-policy-rubric"].endswith("5 allowed      >"))
                 plan_button = panel.query_one("#settings-access-policy-plan", Button)
                 execute_select = panel.query_one("#settings-execute-env-mode", Select)
                 self.assertEqual(plan_button.region.width, 56)
@@ -6520,8 +6521,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 guidance = panel.query_one(".settings-access-guidance", Static)
                 self.assertEqual(
                     renderable_plain(guidance),
-                    "Only enabled tools are shown. Enable tools in the relevant "
-                    "Settings tab to make them available here.",
+                    "Only enabled tools are shown. Choose which tools the Rubric verifier can use; "
+                    "some tools are blocked by policy.",
                 )
                 self.assertEqual(guidance.styles.background, Color.parse("#122023"))
                 self.assertEqual(guidance.styles.border_left, ("solid", Color.parse("#5bb8b1")))
@@ -6561,9 +6562,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 )
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
-                    fixed = panel.query_one(f"#settings-toggle-rubric_access-{read_tool}", Button)
-                    self.assertEqual(str(fixed.label), "yes")
-                    self.assertTrue(fixed.disabled)
+                    editable = panel.query_one(f"#settings-toggle-rubric_access-{read_tool}", Button)
+                    self.assertEqual(str(editable.label), "yes")
+                    self.assertFalse(editable.disabled)
+                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task"):
+                    fixed = panel.query_one(
+                        f"#settings-access-fixed-rubric-{blocked_tool}", Static
+                    )
+                    self.assertEqual(renderable_plain(fixed), "blocked")
+                    self.assertEqual(fixed.styles.color, Color.parse("#7A858C"))
+                    self.assertEqual(fixed.styles.background.a, 0)
+                    self.assertEqual(len(panel.query(f"#settings-toggle-rubric_access-{blocked_tool}")), 0)
                 self.assertEqual(len(panel.query("#settings-toggle-rubric_access-disabled_custom")), 0)
                 self.assertEqual(len(panel.query("#settings-toggle-rubric_access-execute")), 0)
                 self.assertEqual(len(panel.query("#settings-toggle-mcp_tool_rubric-off-hidden")), 0)
@@ -6580,7 +6589,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(
                     str(panel.query_one("#settings-access-policy-rubric", Button).label).endswith(
-                        "6 selected      >"
+                        "6 allowed      >"
                     )
                 )
 
@@ -6599,11 +6608,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(app.query(SettingsPanel)), 1)
                 self.assertIsNone(app.screen.focused)
 
-    async def test_settings_access_plan_shows_fixed_reads_in_contiguous_builtin_list(self) -> None:
-        """Plan Access should show fixed read grants beside the other enabled built-ins."""
+    async def test_settings_access_plan_shows_editable_reads_and_static_blocked_actions(self) -> None:
+        """Plan Access should keep one aligned list of editable reads and blocked actions."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
-            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            configured = set_tool_enabled(load_settings(workspace), "execute", True)
+            configured = set_tool_plan_access(configured, "read_file", False)
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
 
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.pause()
@@ -6621,6 +6633,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "Plan Access",
                 )
                 self.assertEqual(len(detail.query(".settings-access-guidance")), 1)
+                self.assertEqual(
+                    renderable_plain(detail.query_one(".settings-access-guidance", Static)),
+                    "Only enabled tools are shown. Read-only access can be changed; action tools "
+                    "are blocked in Plan mode.",
+                )
                 self.assertEqual(len(detail.query(".settings-access-header")), 1)
                 self.assertEqual(len(detail.query(".settings-empty")), 0)
                 rows = list(detail.query(".settings-access-tool-row"))
@@ -6638,6 +6655,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "write_file",
                         "edit_file",
                         "delete",
+                        "execute",
                         "eval",
                         "task",
                     ],
@@ -6647,9 +6665,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     list(range(rows[0].region.y, rows[0].region.y + len(rows) * 2, 2)),
                 )
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
-                    fixed = detail.query_one(f"#settings-toggle-plan_access-{read_tool}", Button)
-                    self.assertEqual(str(fixed.label), "yes")
-                    self.assertTrue(fixed.disabled)
+                    editable = detail.query_one(f"#settings-toggle-plan_access-{read_tool}", Button)
+                    self.assertEqual(str(editable.label), "no" if read_tool == "read_file" else "yes")
+                    self.assertFalse(editable.disabled)
+                first_editable = detail.query_one("#settings-toggle-plan_access-ls", Button)
+                for blocked_tool in ("write_file", "edit_file", "delete", "execute", "eval", "task"):
+                    fixed = detail.query_one(f"#settings-access-fixed-plan-{blocked_tool}", Static)
+                    self.assertEqual(renderable_plain(fixed), "blocked")
+                    self.assertEqual(fixed.region.x, first_editable.region.x)
+                    self.assertEqual(len(detail.query(f"#settings-toggle-plan_access-{blocked_tool}")), 0)
+
+                detail.query_one("#settings-toggle-plan_access-read_file", Button).press()
+                await wait_until(lambda: tool_plan_access(load_settings(workspace), "read_file"))
 
     async def test_settings_access_hides_globally_disabled_read_tool(self) -> None:
         """A disabled safe read should disappear from every policy detail page."""
@@ -6685,6 +6712,45 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         lambda: panel.query_one("#settings-access-switcher", ContentSwitcher).current
                         == "settings-access-landing"
                     )
+
+    async def test_settings_access_rubric_keeps_reads_and_execute_editable(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_tool_rubric_access(load_settings(workspace), "read_file", False)
+            configured = set_tool_enabled(configured, "execute", True)
+            configured = set_tool_rubric_access(configured, "execute", True)
+            self.assertTrue(save_settings(workspace, configured))
+            app = make_app(workspace=workspace, config={"settings": configured})
+
+            async with app.run_test(size=(100, 35)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command("access")
+                await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-access-policy-rubric")) == 1)
+                panel.query_one("#settings-access-policy-rubric", Button).press()
+                await wait_until(
+                    lambda: panel.query_one("#settings-access-switcher", ContentSwitcher).current
+                    == "settings-access-detail"
+                )
+                await pilot.pause()
+
+                read_file = panel.query_one("#settings-toggle-rubric_access-read_file", Button)
+                execute = panel.query_one("#settings-toggle-rubric_access-execute", Button)
+                self.assertEqual(str(read_file.label), "no")
+                self.assertFalse(read_file.disabled)
+                self.assertEqual(str(execute.label), "yes")
+                self.assertFalse(execute.disabled)
+                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task"):
+                    self.assertEqual(
+                        renderable_plain(
+                            panel.query_one(f"#settings-access-fixed-rubric-{blocked_tool}", Static)
+                        ),
+                        "blocked",
+                    )
+
+                read_file.press()
+                await wait_until(lambda: tool_rubric_access(load_settings(workspace), "read_file"))
 
     async def test_settings_panel_groups_mcp_server_and_tool_policies(self) -> None:
         """MCP settings should render one transparent policy group per server."""
@@ -6994,6 +7060,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             configured = set_dynamic_subagents(load_settings(workspace), True)
+            configured = set_tool_ptc(configured, "grep", False)
             self.assertTrue(save_settings(workspace, configured))
             app = make_app(workspace=workspace, config={"settings": configured})
 
@@ -7013,13 +7080,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(panel.query("#settings-toggle-ptc-write_file")) == 1)
 
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
-                    fixed = panel.query_one(f"#settings-toggle-ptc-{read_tool}", Button)
-                    self.assertEqual(str(fixed.label), "yes")
-                    self.assertTrue(fixed.disabled)
+                    editable = panel.query_one(f"#settings-toggle-ptc-{read_tool}", Button)
+                    self.assertEqual(str(editable.label), "no" if read_tool == "grep" else "yes")
+                    self.assertFalse(editable.disabled)
                 for gateway in ("eval", "task"):
-                    inapplicable = panel.query_one(f"#settings-toggle-ptc-{gateway}", Button)
-                    self.assertEqual(str(inapplicable.label), "-")
-                    self.assertTrue(inapplicable.disabled)
+                    inapplicable = panel.query_one(f"#settings-access-fixed-ptc-{gateway}", Static)
+                    self.assertEqual(renderable_plain(inapplicable), "-")
+                    self.assertEqual(len(panel.query(f"#settings-toggle-ptc-{gateway}")), 0)
+                self.assertEqual(
+                    renderable_plain(panel.query_one(".settings-access-guidance", Static)),
+                    "Only enabled tools are shown. Choose which tools can be called "
+                    "programmatically through eval.",
+                )
 
                 panel.query_one("#settings-toggle-ptc-write_file", Button).press()
                 await wait_until(lambda: tool_ptc(load_settings(workspace), "write_file"))

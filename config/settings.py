@@ -101,10 +101,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "allow": [],
         },
         "tools": {
-            "ls": {"enabled": True},
-            "read_file": {"enabled": True},
-            "glob": {"enabled": True},
-            "grep": {"enabled": True},
+            "ls": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            "read_file": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            "glob": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            "grep": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
@@ -251,6 +251,9 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
             if name in READ_ONLY_BUILTIN_TOOLS:
                 if isinstance(spec.get("enabled"), bool):
                     normalized_tools[name]["enabled"] = spec["enabled"]
+                for key in ("plan_access", "ptc", "rubric"):
+                    if isinstance(spec.get(key), bool):
+                        normalized_tools[name][key] = spec[key]
                 continue
             always_allow = spec.get("always_allow")
             enabled = spec.get("enabled")
@@ -446,7 +449,7 @@ def settings_issues(raw: Any) -> list[Issue]:
                     "hitl.tools",
                     issues,
                     include_plan=True,
-                    fixed_read_only_builtins=True,
+                    intrinsic_read_only_approval=True,
                 )
 
     mcp = raw.get("mcp")
@@ -516,7 +519,7 @@ def _validate_dynamic_policy_mapping(
     issues: list[Issue],
     *,
     include_plan: bool,
-    fixed_read_only_builtins: bool = False,
+    intrinsic_read_only_approval: bool = False,
 ) -> None:
     if not isinstance(raw, dict):
         issues.append(_invalid_setting(path, "must be a mapping"))
@@ -529,11 +532,9 @@ def _validate_dynamic_policy_mapping(
         if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
             issues.append(_invalid_setting(item_path, "must be a named mapping"))
             continue
-        item_allowed = (
-            {"enabled"}
-            if fixed_read_only_builtins and name in READ_ONLY_BUILTIN_TOOLS
-            else allowed
-        )
+        item_allowed = allowed
+        if intrinsic_read_only_approval and name in READ_ONLY_BUILTIN_TOOLS:
+            item_allowed = {"enabled", "plan_access", "ptc", "rubric"}
         _unknown_settings(spec, item_allowed, item_path, issues)
         for key in item_allowed:
             if key in spec and not isinstance(spec[key], bool):
@@ -884,14 +885,18 @@ def tool_policy(config_or_settings: dict[str, Any] | None, tool_name: str) -> To
 
 def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return tool_enabled(config_or_settings, tool_name)
+        return tool_enabled(config_or_settings, tool_name) and _tool_access_value(
+            config_or_settings, tool_name, "plan_access"
+        )
     return _tool_access_value(config_or_settings, tool_name, "plan_access")
 
 
 def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool may be called from eval."""
     if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return tool_enabled(config_or_settings, tool_name)
+        return tool_enabled(config_or_settings, tool_name) and _tool_access_value(
+            config_or_settings, tool_name, "ptc"
+        )
     if tool_name in PTC_INAPPLICABLE_TOOLS:
         return False
     return _tool_access_value(config_or_settings, tool_name, "ptc")
@@ -900,7 +905,9 @@ def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
 def tool_rubric_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool is available to the rubric grader."""
     if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return tool_enabled(config_or_settings, tool_name)
+        return tool_enabled(config_or_settings, tool_name) and _tool_access_value(
+            config_or_settings, tool_name, "rubric"
+        )
     if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
         return False
     return _tool_access_value(config_or_settings, tool_name, "rubric")
@@ -953,16 +960,12 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
 
 
 def set_tool_plan_access(settings: dict[str, Any], tool_name: str, plan_access: bool) -> dict[str, Any]:
-    """Return settings with explicit Custom Tool Plan trust."""
-    if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return normalize_settings(settings)
+    """Return settings with explicit local-tool Plan access."""
     return _set_tool_access_value(settings, tool_name, "plan_access", plan_access)
 
 
 def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[str, Any]:
     """Return settings with explicit local-tool PTC access."""
-    if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return normalize_settings(settings)
     if tool_name in PTC_INAPPLICABLE_TOOLS:
         return normalize_settings(settings)
     return _set_tool_access_value(settings, tool_name, "ptc", ptc)
@@ -970,8 +973,6 @@ def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[st
 
 def set_tool_rubric_access(settings: dict[str, Any], tool_name: str, value: bool) -> dict[str, Any]:
     """Return settings with explicit local-tool Rubric access."""
-    if tool_name in READ_ONLY_BUILTIN_TOOLS:
-        return normalize_settings(settings)
     if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
         return normalize_settings(settings)
     return _set_tool_access_value(settings, tool_name, "rubric", value)
@@ -981,7 +982,8 @@ def _set_tool_access_value(settings: dict[str, Any], tool_name: str, key: str, v
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {}))
     current.setdefault("enabled", True)
-    current.setdefault("always_allow", False)
+    if tool_name not in READ_ONLY_BUILTIN_TOOLS:
+        current.setdefault("always_allow", False)
     current[key] = bool(value)
     updated["hitl"]["tools"][tool_name] = current
     return updated

@@ -1303,6 +1303,18 @@ Button.goal-action:focus {
     background: #20272b;
 }
 
+.settings-access-fixed-value {
+    width: 12;
+    min-width: 12;
+    height: 1;
+    margin: 0 2 1 0;
+    color: #7A858C;
+    background: transparent;
+    content-align: center middle;
+    text-align: center;
+    text-style: none;
+}
+
 .settings-empty,
 .settings-status {
     color: #aeb8be;

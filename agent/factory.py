@@ -192,7 +192,12 @@ def _build_agent(
         if item.get("source") == "project" and item.get("name") in active_local_names
     )
     permissions = [] if enable_execute_backend else permissions
-    excluded_tools = effective_excluded_tools(config, excluded_tools, enable_execute_backend)
+    excluded_tools = effective_excluded_tools(
+        config,
+        excluded_tools,
+        enable_execute_backend,
+        planning=planning,
+    )
     if not backend_supports_delete(backend):
         excluded_tools = (*excluded_tools, "delete")
     rubric_model = model
@@ -509,7 +514,11 @@ def effective_ptc_tool_names(
     later middleware visibility changes remain authoritative.
     """
     excluded = set(excluded_tools)
-    names = [name for name in QUICKJS_PTC_TOOLS if name not in excluded]
+    names = [
+        name
+        for name in QUICKJS_PTC_TOOLS
+        if name not in excluded and tool_enabled(config, name) and tool_ptc(config, name)
+    ]
 
     for name in INBUILT_DANGEROUS_TOOLS:
         if name in PTC_INAPPLICABLE_TOOLS or name in excluded:
@@ -550,7 +559,13 @@ def effective_rubric_tools(
 ) -> tuple[list[Any], dict[str, Any]]:
     """Build the grader's enabled tool surface and normal HITL policy."""
     excluded = set(excluded_tools)
-    filesystem_names = [name for name in READ_ONLY_BUILTIN_TOOLS if name not in excluded]
+    filesystem_names = [
+        name
+        for name in READ_ONLY_BUILTIN_TOOLS
+        if name not in excluded
+        and tool_enabled(config, name)
+        and tool_rubric_access(config, name)
+    ]
     if (
         EXECUTE_TOOL not in excluded
         and tool_enabled(config, EXECUTE_TOOL)
@@ -594,6 +609,8 @@ def effective_excluded_tools(
     config: dict[str, Any] | None,
     excluded_tools: tuple[str, ...],
     enable_execute_backend: bool,
+    *,
+    planning: bool = False,
 ) -> tuple[str, ...]:
     """Return tool specs that should be hidden from the UI/model metadata."""
     blocked = set(excluded_tools)
@@ -606,6 +623,12 @@ def effective_excluded_tools(
         )
     if not enable_execute_backend or not tool_enabled(config, EXECUTE_TOOL):
         blocked.add(EXECUTE_TOOL)
+    if planning:
+        blocked.update(
+            name
+            for name in READ_ONLY_BUILTIN_TOOLS
+            if not tool_plan_access(config, name)
+        )
     return tuple(blocked)
 
 

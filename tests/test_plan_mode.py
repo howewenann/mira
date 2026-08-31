@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 import unittest
 from io import StringIO
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -526,6 +527,60 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         registered = FilesystemMiddleware(backend=StateBackend()).tools
         self.assertIn("read_file", [tool_name(tool) for tool in registered])
+
+    def test_read_only_access_independently_filters_plan_ptc_and_rubric_surfaces(self) -> None:
+        settings = deepcopy(DEFAULT_SETTINGS)
+        settings["hitl"]["tools"]["read_file"]["plan_access"] = False
+        settings["hitl"]["tools"]["glob"]["ptc"] = False
+        settings["hitl"]["tools"]["grep"]["rubric"] = False
+        config = {"settings": settings}
+
+        action_excluded = factory.effective_excluded_tools(config, (), True)
+        plan_excluded = factory.effective_excluded_tools(
+            config,
+            factory.PLAN_EXCLUDED_TOOLS,
+            False,
+            planning=True,
+        )
+        self.assertNotIn("read_file", action_excluded)
+        self.assertIn("read_file", plan_excluded)
+        self.assertEqual(
+            factory.effective_ptc_tool_names(config, [], [], action_excluded),
+            ["ls", "read_file", "grep"],
+        )
+
+        rubric_tools, _interrupts = factory.effective_rubric_tools(
+            config,
+            StateBackend(),
+            [],
+            [],
+            action_excluded,
+        )
+        self.assertEqual(
+            [tool_name(value) for value in rubric_tools],
+            ["ls", "read_file", "glob"],
+        )
+
+    def test_rubric_keeps_read_file_registered_when_policy_hides_it(self) -> None:
+        settings = deepcopy(DEFAULT_SETTINGS)
+        settings["hitl"]["tools"]["read_file"]["rubric"] = False
+        registrations: list[list[str]] = []
+
+        class CapturingFilesystemMiddleware:
+            def __init__(self, *, backend: object, tools: list[str]) -> None:
+                registrations.append(list(tools))
+                self.tools = [SimpleNamespace(name=name) for name in tools]
+
+        with patch("agent.factory.FilesystemMiddleware", CapturingFilesystemMiddleware):
+            rubric_tools, _interrupts = factory.effective_rubric_tools(
+                {"settings": settings},
+                StateBackend(),
+                [],
+                [],
+            )
+
+        self.assertIn("read_file", registrations[0])
+        self.assertNotIn("read_file", [tool_name(value) for value in rubric_tools])
 
     def test_rubric_override_builds_a_dedicated_grader_with_safe_reads(self) -> None:
         """A configured grader profile should not replace the action model."""

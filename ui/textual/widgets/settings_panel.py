@@ -14,11 +14,13 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.widgets import Button, ContentSwitcher, Input, Select, Static
 
+from agent.planning.policy import PLAN_DISABLED_TOOLS
 from config.settings import (
     DYNAMIC_SUBAGENTS,
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
+    INBUILT_DANGEROUS_TOOLS,
     INBUILT_TOOLS,
     PTC_INAPPLICABLE_TOOLS,
     READ_ONLY_BUILTIN_TOOLS,
@@ -109,6 +111,11 @@ SETTINGS_TAB_PAGES = {
 ACCESS_POLICIES = ("plan", "ptc", "rubric")
 ACCESS_POLICY_LABELS = {"plan": "Plan", "ptc": "PTC", "rubric": "Rubric"}
 ACCESS_POLICY_LABEL_WIDTH = 52
+ACCESS_POLICY_GUIDANCE = {
+    "plan": "Only enabled tools are shown. Read-only access can be changed; action tools are blocked in Plan mode.",
+    "ptc": "Only enabled tools are shown. Choose which tools can be called programmatically through eval.",
+    "rubric": "Only enabled tools are shown. Choose which tools the Rubric verifier can use; some tools are blocked by policy.",
+}
 
 
 @dataclass(frozen=True)
@@ -471,7 +478,7 @@ class SettingsPanel(Vertical):
                                 classes="settings-access-heading settings-access-landing-heading",
                             )
                             yield Static(
-                                "Choose which enabled tools are available to each policy.",
+                                "Review and configure tool access for each policy.",
                                 classes="settings-access-description",
                             )
                             for policy in ACCESS_POLICIES:
@@ -1045,7 +1052,7 @@ class SettingsPanel(Vertical):
         count = sum(
             value for _title, rows in self._access_groups(policy) for _name, _cell, value in rows
         )
-        suffix = f"{count} selected      >"
+        suffix = f"{count} allowed      >"
         label = ACCESS_POLICY_LABELS[policy]
         return f"{label}{suffix.rjust(ACCESS_POLICY_LABEL_WIDTH - len(label))}"
 
@@ -1170,12 +1177,7 @@ class SettingsPanel(Vertical):
         for name in INBUILT_TOOLS:
             if not tool_enabled(self.settings, name):
                 continue
-            locked = (
-                name in READ_ONLY_BUILTIN_TOOLS
-                or policy == "plan"
-                or (policy == "ptc" and name in PTC_INAPPLICABLE_TOOLS)
-                or (policy == "rubric" and name != EXECUTE_TOOL)
-            )
+            locked = fixed_builtin_access_value(policy, name) is not None
             cell = ToggleCell(local_kind, name, locked=locked)
             builtin_rows.append((name, cell, selected_value(self.settings, cell)))
         if builtin_rows:
@@ -1213,8 +1215,7 @@ class SettingsPanel(Vertical):
                 classes="settings-access-heading settings-access-detail-heading",
             ),
             Static(
-                "Only enabled tools are shown. Enable tools in the relevant "
-                "Settings tab to make them available here.",
+                ACCESS_POLICY_GUIDANCE[policy],
                 classes="settings-access-guidance",
             ),
         ]
@@ -1243,11 +1244,21 @@ class SettingsPanel(Vertical):
                 )
             )
             for name, cell, value in rows:
-                button = self._toggle_button(cell, value)
+                fixed = fixed_builtin_access_value(policy, name) if title == "Inbuilt Tools" else None
+                value_widget: Button | Static
+                if fixed is None:
+                    value_widget = self._toggle_button(cell, value)
+                else:
+                    fixed_class = "blocked" if fixed == "blocked" else "inapplicable"
+                    value_widget = Static(
+                        fixed,
+                        id=f"settings-access-fixed-{policy}-{safe_id(name)}",
+                        classes=f"settings-mode settings-access-fixed-value {fixed_class}",
+                    )
                 widgets.append(
                     Horizontal(
                         Static(name, classes="settings-label"),
-                        button,
+                        value_widget,
                         classes="settings-row settings-policy-row settings-access-tool-row",
                     )
                 )
@@ -1364,6 +1375,21 @@ def button_id_for(cell: ToggleCell) -> str:
     identity = f"{cell.server}-{cell.name}" if cell.server else cell.name
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "-", identity)
     return f"settings-toggle-{cell.kind}-{safe_name}"
+
+
+def fixed_builtin_access_value(policy: str, tool_name: str) -> str | None:
+    """Return the non-interactive value for a fixed built-in policy row."""
+    if policy == "plan" and tool_name in PLAN_DISABLED_TOOLS:
+        return "blocked"
+    if policy == "ptc" and tool_name in PTC_INAPPLICABLE_TOOLS:
+        return "-"
+    if (
+        policy == "rubric"
+        and tool_name in INBUILT_DANGEROUS_TOOLS
+        and tool_name != EXECUTE_TOOL
+    ):
+        return "blocked"
+    return None
 
 
 def button_label(cell: ToggleCell, value: bool) -> str:

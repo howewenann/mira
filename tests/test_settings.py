@@ -42,7 +42,10 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_rubric_access(loaded, "execute"))
         self.assertFalse(settings.tool_rubric_access(loaded, "custom_search"))
         for name in settings.READ_ONLY_BUILTIN_TOOLS:
-            self.assertEqual(loaded["hitl"]["tools"][name], {"enabled": True})
+            self.assertEqual(
+                loaded["hitl"]["tools"][name],
+                {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            )
             self.assertTrue(settings.tool_enabled(loaded, name))
             self.assertTrue(settings.tool_always_allow(loaded, name))
             self.assertTrue(settings.tool_plan_access(loaded, name))
@@ -53,8 +56,8 @@ class SettingsTests(unittest.TestCase):
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
         )
 
-    def test_read_only_builtin_tools_only_persist_global_enablement(self) -> None:
-        """Safe reads should expose one setting while keeping every access policy fixed."""
+    def test_read_only_builtin_access_persists_independently(self) -> None:
+        """Safe reads should persist independent Plan, PTC, and Rubric access."""
         configured = settings.normalize_settings(
             {
                 "hitl": {
@@ -71,23 +74,56 @@ class SettingsTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(configured["hitl"]["tools"]["read_file"], {"enabled": False})
+        self.assertEqual(
+            configured["hitl"]["tools"]["read_file"],
+            {"enabled": False, "plan_access": False, "ptc": False, "rubric": False},
+        )
         self.assertFalse(settings.tool_plan_access(configured, "read_file"))
         self.assertFalse(settings.tool_ptc(configured, "read_file"))
         self.assertFalse(settings.tool_rubric_access(configured, "read_file"))
-        for setter in (
-            settings.set_tool_always_allow,
-            settings.set_tool_plan_access,
-            settings.set_tool_ptc,
-            settings.set_tool_rubric_access,
-        ):
-            unchanged = setter(configured, "read_file", True)
-            self.assertEqual(unchanged["hitl"]["tools"]["read_file"], {"enabled": False})
+
+        enabled = settings.set_tool_enabled(configured, "read_file", True)
+        enabled = settings.set_tool_plan_access(enabled, "read_file", True)
+        enabled = settings.set_tool_ptc(enabled, "read_file", False)
+        enabled = settings.set_tool_rubric_access(enabled, "read_file", True)
+        self.assertTrue(settings.tool_plan_access(enabled, "read_file"))
+        self.assertFalse(settings.tool_ptc(enabled, "read_file"))
+        self.assertTrue(settings.tool_rubric_access(enabled, "read_file"))
+        self.assertTrue(settings.tool_always_allow(enabled, "read_file"))
+        self.assertNotIn("always_allow", enabled["hitl"]["tools"]["read_file"])
+
+        fixed_approval = settings.set_tool_always_allow(enabled, "read_file", False)
+        self.assertTrue(settings.tool_always_allow(fixed_approval, "read_file"))
+        self.assertNotIn("always_allow", fixed_approval["hitl"]["tools"]["read_file"])
+
+        globally_disabled = settings.set_tool_enabled(enabled, "read_file", False)
+        self.assertFalse(settings.tool_plan_access(globally_disabled, "read_file"))
+        self.assertFalse(settings.tool_ptc(globally_disabled, "read_file"))
+        self.assertFalse(settings.tool_rubric_access(globally_disabled, "read_file"))
+        self.assertTrue(globally_disabled["hitl"]["tools"]["read_file"]["plan_access"])
+        self.assertTrue(globally_disabled["hitl"]["tools"]["read_file"]["rubric"])
 
         issues = settings.settings_issues(
             {"hitl": {"tools": {"read_file": {"enabled": True, "ptc": True}}}}
         )
-        self.assertTrue(any("hitl.tools.read_file.ptc" in issue.summary for issue in issues))
+        self.assertEqual(issues, [])
+
+    def test_each_read_only_builtin_round_trips_each_access_policy(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = settings.load_settings(workspace)
+            for index, name in enumerate(settings.READ_ONLY_BUILTIN_TOOLS):
+                configured = settings.set_tool_plan_access(configured, name, index % 2 == 0)
+                configured = settings.set_tool_ptc(configured, name, index % 2 == 1)
+                configured = settings.set_tool_rubric_access(configured, name, index < 2)
+            self.assertTrue(settings.save_settings(workspace, configured))
+            loaded = settings.load_settings(workspace)
+
+        for index, name in enumerate(settings.READ_ONLY_BUILTIN_TOOLS):
+            self.assertEqual(settings.tool_plan_access(loaded, name), index % 2 == 0)
+            self.assertEqual(settings.tool_ptc(loaded, name), index % 2 == 1)
+            self.assertEqual(settings.tool_rubric_access(loaded, name), index < 2)
+            self.assertTrue(settings.tool_always_allow(loaded, name))
 
     def test_execute_env_settings_normalize_supported_modes(self) -> None:
         """Execute environment settings should keep names, paths, and allowlists only."""
