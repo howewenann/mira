@@ -13,7 +13,7 @@ from unittest.mock import patch
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent import factory
-from agent.context_overflow import ProviderContextOverflowMiddleware
+from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware import (
     ExecuteToolDescriptionRewriteMiddleware,
     FileReferenceMiddleware,

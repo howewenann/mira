@@ -10,7 +10,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Collapsible, Static
 
-from agent.resources.tool_failures import ToolLoadFailure, tool_failure_issues
+from agent.tools.failures import ToolLoadFailure, tool_failure_issues
 from core.diagnostics.issues import Issue
 from ui.textual.widgets import IssuesScreen
 

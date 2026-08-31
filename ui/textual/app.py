@@ -20,8 +20,8 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.widgets import Button, ListView, Static
 
-from agent.compaction import compact_after_turn
-from agent.context_overflow import context_notice_rendered, pop_context_overflow_notice
+from agent.middleware.compaction import compact_after_turn
+from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from agent.planning.policy import (
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
@@ -298,7 +298,7 @@ class MiraApp(App[None]):
             state.get("agent_unavailable_message") or "Main model is not configured. Run /models."
         )
         if not self.issues and self.tool_failures:
-            from agent.resources.tool_failures import tool_failure_issues
+            from agent.tools.failures import tool_failure_issues
 
             self.issues = tool_failure_issues(self.tool_failures)
         self.runtime_snapshot = build_runtime_snapshot(
@@ -1746,7 +1746,7 @@ class MiraApp(App[None]):
         """Build and install refreshed runtime state for the requested scope."""
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.resources import build_resources
-        from agent.resources.subagents import subagent_model_issues
+        from agent.subagents.discovery import subagent_model_issues
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import load_effective_config
 
@@ -3143,7 +3143,7 @@ class MiraApp(App[None]):
 
         from agent.llm import active_model_issues, model_unavailable_message
         from agent.resources import build_resources, configure_subagents
-        from agent.resources.subagents import subagent_model_issues
+        from agent.subagents.discovery import subagent_model_issues
 
         resources = build_resources(
             self.workspace,

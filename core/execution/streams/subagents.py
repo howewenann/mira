@@ -6,7 +6,7 @@ import asyncio
 from contextlib import suppress
 from typing import Any
 
-from agent.internal_graphs import INTERNAL_RUBRIC_GRAPHS
+from agent.rubric.graphs import INTERNAL_RUBRIC_GRAPHS
 from core.execution.streams.output import message_text, visible_message_text
 from core.execution.streams.output import call_renderer as call_frontend
 from core.execution.streams.rubric import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer

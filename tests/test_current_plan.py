@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, patch
 from agent.middleware import PlanningStageEnforcementMiddleware
 from agent.factory import ACT_SYSTEM_PROMPT
 from agent.planning.tool_context import PlanningToolContext
-from agent.default_resources.tools.prepare_goal import prepare_goal
-from agent.default_resources.tools.prepare_plan import prepare_plan
-from agent.default_resources.tools.finalize_plan import finalize_plan
-from agent.default_resources.tools.finalize_goal import finalize_goal
+from agent.resources.defaults.tools.finalize_goal import finalize_goal
+from agent.resources.defaults.tools.finalize_plan import finalize_plan
+from agent.resources.defaults.tools.prepare_goal import prepare_goal
+from agent.resources.defaults.tools.prepare_plan import prepare_plan
 from agent.planning.policy import (
     PLANNING_STAGE_PLAN_FINALIZE,
     PLANNING_STAGE_PLAN_RESEARCH,

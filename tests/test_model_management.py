@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from agent.llm import get_llm, get_model_name
 from agent.mcp.prompts import PromptRegistry
 from agent.resources.project_setup import ensure_project_examples
-from agent.resources.subagents import discover_subagents, effective_subagent_specs
+from agent.subagents.discovery import discover_subagents, effective_subagent_specs
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
 from config.llm import load_model_registry
 from config.settings import (

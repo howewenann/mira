@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from inspect import Parameter, signature
 from typing import Any
 
-from agent.context_overflow import pop_context_overflow_notice
+from agent.middleware.context_overflow import pop_context_overflow_notice
 from core.application.artifacts import (
     prepare_artifact_review,
     resolve_artifact_review,

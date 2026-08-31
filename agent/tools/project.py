@@ -88,7 +88,7 @@ def invoke_project_tool(
     from agent.resources import execute_env, project_environment_label, project_python_command
 
     bridge_path = Path(mira_tool_api.__file__ or "").resolve()
-    runner_path = Path(__file__).with_name("project_tool_runner.py").resolve()
+    runner_path = Path(__file__).with_name("project_runner.py").resolve()
     environment = project_environment_label(settings, workspace)
     request = {
         "source_path": str(source_path.resolve()),

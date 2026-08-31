@@ -10,11 +10,11 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 
-from agent.compaction import (
+from agent.middleware.compaction import (
     create_mira_summarization_middleware,
     create_mira_summarization_tool_middleware,
 )
-from agent.context_overflow import ProviderContextOverflowMiddleware
+from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware.execute_tool_description_rewrite import (
     ExecuteToolDescriptionRewriteMiddleware,
 )

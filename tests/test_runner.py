@@ -12,7 +12,7 @@ from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
-from agent.compaction import (
+from agent.middleware.compaction import (
     MiraSummarizationMiddleware,
     observe_summarization_counts,
     prepare_summarization_engine,
@@ -29,7 +29,7 @@ from core.execution.streams.subagents import consume_subagent, consume_subagents
 from core.execution.streams.tools import CONTROL_TOOLS, consume_live_tool_errors, consume_tool_calls
 from core.context.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
-from agent.default_resources.tools.ask_user import normalize_options
+from agent.resources.defaults.tools.ask_user import normalize_options
 from ui.shared.interrupts import ASK_USER_OPEN_OPTION, ask_user_options, ask_user_question
 from ui.terminal.renderer import Renderer
 from ui.shared.terminal.colors import strip_ansi

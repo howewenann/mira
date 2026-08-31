@@ -19,7 +19,7 @@ from agent.middleware import (
     QUICKJS_PTC_TOOLS,
     build_agent_middleware,
 )
-from agent.middleware.rubric import MiraRubricMiddleware as RubricMiddleware
+from agent.rubric.middleware import MiraRubricMiddleware as RubricMiddleware
 from agent.planning.response_status import PlanningResponseStatusRule
 from agent.planning.tool_context import PlanningToolContext
 from agent.planning.criteria import SuccessCriteriaService
@@ -34,8 +34,8 @@ from agent.planning.policy import (
     plan_system_prompt,
 )
 from agent.resources import build_resources
-from agent.resources.subagents import resolve_subagent_tool_allowlists
-from agent.subagent_compilation import compile_dynamic_subagents
+from agent.subagents.compilation import compile_dynamic_subagents
+from agent.subagents.discovery import resolve_subagent_tool_allowlists
 from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_name
 from config.metadata import ModelMetadata
 from config.settings import (

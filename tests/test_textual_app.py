@@ -36,8 +36,8 @@ from textual.widgets import (
     TextArea,
 )
 
-from agent.compaction import PostTurnCompactionResult
-from agent.context_overflow import context_overflow_error, set_context_overflow_notice
+from agent.middleware.compaction import PostTurnCompactionResult
+from agent.middleware.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent.mcp.prompts import PromptRegistry
 from agent.planning.policy import PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_PLAN_RESEARCH
 from agent.tools.specs import mira_environment_label

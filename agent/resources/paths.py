@@ -14,7 +14,7 @@ SKILLS_DIR = "skills"
 SUBAGENTS_DIR = "subagents"
 TOOLS_DIR = "tools"
 
-DEFAULTS_ROOT = Path(__file__).parents[1] / "default_resources"
+DEFAULTS_ROOT = Path(__file__).parent / "defaults"
 
 
 def default_dir(resource_dir: str) -> Path:

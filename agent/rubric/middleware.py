@@ -13,7 +13,7 @@ from langchain.agents.structured_output import ProviderStrategy
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 
-from agent.internal_graphs import RUBRIC_VERIFIER_GRAPH
+from agent.rubric.graphs import RUBRIC_VERIFIER_GRAPH
 
 VERIFIER_SYSTEM_PROMPT = """You are an evidence collector for Rubric evaluation.
 

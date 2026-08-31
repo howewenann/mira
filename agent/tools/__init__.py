@@ -1,1 +1,1 @@
-"""Tool helpers for MIRA agents."""
+"""Tool specs, discovery, project-runtime tooling, and failures."""

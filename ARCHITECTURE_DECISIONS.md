@@ -91,8 +91,8 @@ and runtime context compaction.
 reimplementing it. Local workarounds are kept narrow and tested when a real
 library or provider edge case is confirmed.
 
-**Where to check:** `agent/factory.py`, `agent/compaction.py`,
-`agent/context_overflow.py`, `core/execution/runner.py`, `session/checkpoint.py`.
+**Where to check:** `agent/factory.py`, `agent/middleware/compaction.py`,
+`agent/middleware/context_overflow.py`, `core/execution/runner.py`, `session/checkpoint.py`.
 
 **Update this when:** MIRA takes ownership of behavior that DeepAgents or
 LangGraph used to handle, or when a workaround becomes part of the normal path.
@@ -224,7 +224,7 @@ Issue details.
 
 **Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
 `agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/textual/app.py`,
-`ui/textual/runtime_report.py`, `agent/subagent_compilation.py`,
+`ui/textual/runtime_report.py`, `agent/subagents/compilation.py`,
 `ui/textual/widgets/settings_panel.py`.
 
 **Update this when:** A value moves between reloadable and launch-scoped
@@ -271,7 +271,7 @@ to inspect.
 
 **How it works at a high level:**
 
-- Defaults live under `agent/default_resources/` and are mounted read-only at
+- Defaults live under `agent/resources/defaults/` and are mounted read-only at
   `/mira-defaults/...`; only default memories and built-in tools are shipped
   there by default.
 - Project resources live under the workspace's `.mira/` folder and are mounted
@@ -348,9 +348,9 @@ to inspect.
 - Disabled project tools stay in metadata for the settings UI but are not
   exposed to the agent.
 
-**Where to check:** `mira_tool_api.py`, `agent/resources/tools.py`,
-`agent/resources/tool_failures.py`, `agent/resources/project_tools.py`,
-`agent/resources/project_tool_runner.py`, `agent/default_resources/`,
+**Where to check:** `mira_tool_api.py`, `agent/tools/discovery.py`,
+`agent/tools/failures.py`, `agent/tools/project.py`,
+`agent/tools/project_runner.py`, `agent/resources/defaults/`,
 `tests/test_resources.py`, `tests/test_project_tools.py`.
 
 **Update this when:** Resource locations, overwrite rules, display metadata, or
@@ -674,8 +674,8 @@ Keeping Goals criteria-only makes execution flexible while retaining the same
 durability, review, recall, replacement, and evaluation guarantees as Plans.
 
 **Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
-`agent/middleware/`, `agent/default_resources/tools/prepare_goal.py`,
-`agent/default_resources/tools/finalize_goal.py`, `core/execution/runner.py`,
+`agent/middleware/`, `agent/resources/defaults/tools/prepare_goal.py`,
+`agent/resources/defaults/tools/finalize_goal.py`, `core/execution/runner.py`,
 `core/execution/streams/rubric.py`, `core/execution/streams/subagents.py`, `session/goals.py`,
 `session/context.py`, `core/execution/turns.py`, `core/application/artifacts.py`,
 `ui/textual/app.py`, `ui/textual/widgets/chat_log.py`, and
@@ -956,7 +956,7 @@ explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
 not receive ambient filesystem, network, process, or clock access.
 
 **Where to check:** `agent/factory.py`, `agent/middleware/`,
-`agent/subagent_compilation.py`, `agent/tools/specs.py`, `core/execution/runner.py`,
+`agent/subagents/compilation.py`, `agent/tools/specs.py`, `core/execution/runner.py`,
 `core/execution/streams/rubric.py`, `config/settings.py`.
 
 **Update this when:** DeepAgents or QuickJS versions change, prompt ownership
@@ -1074,7 +1074,7 @@ events back into chat transcript blocks rather than reconstructing the old live
 panel. Eval-created subagent rows are not stored separately; their durable
 history is the surrounding eval tool call/result plus the assistant's summary.
 
-**Where to check:** `agent/compaction.py`, `agent/middleware/`, `session/store.py`,
+**Where to check:** `agent/middleware/compaction.py`, `agent/middleware/`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
 `core/context/observation.py`, `core/execution/streams/message_metadata.py`.
 
@@ -1094,7 +1094,7 @@ current-context occupancy; after multiple turns they include repeated
 conversation history and are not expected to add up to the latest `Ctx` value.
 
 **Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/textual/app.py`,
-`agent/context_overflow.py`.
+`agent/middleware/context_overflow.py`.
 
 **Update this when:** New providers need special metadata handling, context
 fallback rules change, or the dashboard changes how context is reported.

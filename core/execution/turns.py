@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import HumanMessage
 
-from agent.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
+from agent.middleware.context_overflow import mark_context_notice_rendered, pop_context_overflow_notice
 from agent.planning.policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
     OPTIONAL_RESEARCH_POLICY,

@@ -31,8 +31,8 @@ from langgraph.errors import GraphInterrupt
 from langgraph.types import Command
 from pydantic import Field
 
-from agent.middleware import rubric as mira_rubric
-from agent.middleware.rubric import (
+from agent.rubric import middleware as mira_rubric
+from agent.rubric.middleware import (
     FINAL_GRADER_SYSTEM_PROMPT,
     VERIFICATION_EVIDENCE_MESSAGE,
     VERIFIER_SYSTEM_PROMPT,
@@ -338,7 +338,7 @@ class RubricMiddlewareTests(unittest.TestCase):
         with (
             patch("deepagents._models.resolve_model", return_value=resolved_model) as resolve,
             patch(
-                "agent.middleware.rubric.create_agent",
+                "agent.rubric.middleware.create_agent",
                 side_effect=[verifier, final_grader],
             ) as create,
         ):
@@ -642,7 +642,7 @@ class RubricMiddlewareTests(unittest.TestCase):
         }
         correction = "A previous attempt returned only 1 of the 2 criteria in the rubric."
 
-        with patch("agent.middleware.rubric.secrets.token_hex", return_value="fixed"):
+        with patch("agent.rubric.middleware.secrets.token_hex", return_value="fixed"):
             verifier_input = middleware._verifier_input(state, 3)
 
         payload = verifier_input["messages"][0].content
@@ -710,7 +710,7 @@ class RubricMiddlewareTests(unittest.TestCase):
                 wraps=middleware._grader_input,
             ) as stock_input,
             patch.object(middleware, "_extract_graded", wraps=middleware._extract_graded) as extract,
-            patch("agent.middleware.rubric.secrets.token_hex", return_value="fixed"),
+            patch("agent.rubric.middleware.secrets.token_hex", return_value="fixed"),
         ):
             graded = middleware._invoke_grader(
                 state,

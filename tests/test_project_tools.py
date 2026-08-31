@@ -15,8 +15,8 @@ from agent import factory
 from agent.resources import build_resources, project_python_command
 from agent.resources.project_setup import ensure_project_examples
 from agent.resources.python_files import import_python_file
-from agent.resources.tool_failures import missing_requirements, one_shot_warning
-from agent.resources.tools import load_tools
+from agent.tools.discovery import load_tools
+from agent.tools.failures import missing_requirements, one_shot_warning
 from mira_tool_api import PROJECT_TOOL_METADATA_VERSION, project_tool
 
 
@@ -134,7 +134,7 @@ class ResilientToolLoadingTests(unittest.TestCase):
             root.mkdir()
             workspace.mkdir()
             (root / "bad.py").write_text("import mira_missing_builtin\n", encoding="utf-8")
-            with patch("agent.resources.tools.default_dir", return_value=root):
+            with patch("agent.tools.discovery.default_dir", return_value=root):
                 with self.assertRaises(ModuleNotFoundError):
                     load_tools(workspace, FilesystemBackend(root_dir=workspace, virtual_mode=True))
 

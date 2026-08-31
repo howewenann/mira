@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from agent.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
+from agent.middleware.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from session import context

@@ -22,7 +22,7 @@ from session.plans import plan_artifact, replace_current_plan
 from session.store import SessionStore
 from core.execution.turns import action_request_text
 from tests.support.turns import run_user_turn
-from agent.default_resources.tools.prepare_goal import prepare_goal
+from agent.resources.defaults.tools.prepare_goal import prepare_goal
 from agent.planning.tool_context import PlanningToolContext
 
 

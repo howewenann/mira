@@ -9,7 +9,7 @@ import time
 from itertools import count
 from typing import Any
 
-from agent.context_overflow import pop_context_overflow_notice
+from agent.middleware.context_overflow import pop_context_overflow_notice
 from session.plans import plan_artifact_text
 from ui.shared.terminal.colors import TerminalColorizer, enable_console_colors
 from ui.shared.interrupts import (

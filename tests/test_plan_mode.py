@@ -18,7 +18,7 @@ from deepagents.middleware import FilesystemMiddleware
 from rich.console import Console
 from rich.text import Text
 
-from agent.context_overflow import context_overflow_error, set_context_overflow_notice
+from agent.middleware.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
 from agent.middleware import CorrectionMiddleware, ModelToolVisibilityMiddleware, PlanningStageEnforcementMiddleware
 from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt

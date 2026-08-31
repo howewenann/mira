@@ -70,7 +70,7 @@ class MiraApplication:
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.mcp import MCPManager
         from agent.resources import build_resources, configure_subagents
-        from agent.resources.subagents import subagent_model_issues
+        from agent.subagents.discovery import subagent_model_issues
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import LaunchOptions, load_effective_config
         from session.checkpoint import make_checkpointer

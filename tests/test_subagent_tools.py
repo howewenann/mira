@@ -13,12 +13,12 @@ from langchain_core.tools import tool
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
 from agent import factory
 from agent.resources import ResourceBundle
-from agent.resources.subagents import (
+from agent.subagents.discovery import (
     DiscoveredSubagent,
     SubagentDiscovery,
     resolve_subagent_tool_allowlists,
 )
-from agent.subagent_compilation import compile_dynamic_subagents
+from agent.subagents.compilation import compile_dynamic_subagents
 
 
 @tool
@@ -287,9 +287,9 @@ class SubagentToolAllowlistTests(unittest.TestCase):
         )
 
         with (
-            patch("agent.subagent_compilation.resolve_subagent_model", side_effect=lambda value: value),
-            patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
-            patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda value: value) as create,
+            patch("agent.subagents.compilation.resolve_subagent_model", side_effect=lambda value: value),
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda value: value) as create,
         ):
             compile_dynamic_subagents(
                 resolved,

@@ -13,7 +13,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableLambda
 
-from agent.subagent_compilation import compile_dynamic_subagents
+from agent.subagents.compilation import compile_dynamic_subagents
 
 
 class SubagentCompilationTests(unittest.TestCase):
@@ -24,9 +24,9 @@ class SubagentCompilationTests(unittest.TestCase):
         interrupts = {"write_file": {"allowed_decisions": ["approve", "reject"]}}
 
         with (
-            patch("agent.subagent_compilation.resolve_subagent_model", side_effect=lambda value: value),
-            patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
-            patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
+            patch("agent.subagents.compilation.resolve_subagent_model", side_effect=lambda value: value),
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
         ):
             compiled = compile_dynamic_subagents(
                 [],
@@ -74,11 +74,11 @@ class SubagentCompilationTests(unittest.TestCase):
 
         with (
             patch(
-                "agent.subagent_compilation.resolve_subagent_model",
+                "agent.subagents.compilation.resolve_subagent_model",
                 side_effect=lambda value: f"resolved:{value}",
             ),
-            patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
-            patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
         ):
             compiled = compile_dynamic_subagents(
                 [raw, existing_compiled, asynchronous],
@@ -125,9 +125,9 @@ class SubagentCompilationTests(unittest.TestCase):
         }
 
         with (
-            patch("agent.subagent_compilation.resolve_subagent_model", side_effect=lambda value: value),
-            patch("agent.subagent_compilation.create_summarization_middleware", return_value="summary"),
-            patch("agent.subagent_compilation.create_sub_agent", side_effect=lambda spec: spec),
+            patch("agent.subagents.compilation.resolve_subagent_model", side_effect=lambda value: value),
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda spec: spec),
         ):
             compiled = compile_dynamic_subagents(
                 [existing],

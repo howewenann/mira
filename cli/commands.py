@@ -131,7 +131,7 @@ async def _run(
 
     app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
     try:
-        from agent.resources.tool_failures import one_shot_warning
+        from agent.tools.failures import one_shot_warning
 
         warning = one_shot_warning(app.get("tool_failures") or [])
         if warning:

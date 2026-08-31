@@ -16,8 +16,8 @@ from agent.resources.paths import (
     project_virtual_dir,
 )
 from agent.resources.python_files import import_python_file
-from agent.resources.project_tools import project_tools_from_module
-from agent.resources.tool_failures import ToolLoadFailure, tool_load_failure
+from agent.tools.failures import ToolLoadFailure, tool_load_failure
+from agent.tools.project import project_tools_from_module
 from mira_tool_api import PROJECT_TOOL_METADATA_ATTRIBUTE
 
 BUILT_IN_TOOL_NAMES = {

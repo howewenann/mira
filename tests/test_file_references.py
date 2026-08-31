@@ -8,8 +8,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agent.file_references import local_file_references
-from agent.middleware.file_references import FileReferenceMiddleware
+from agent.middleware.file_references import FileReferenceMiddleware, local_file_references
 
 
 class FakeModelRequest:
