@@ -12,7 +12,8 @@ Turn semantics, Goal/Plan state transitions, persistence, or native stream decod
 
 ## Depends on
 
-Textual, `core.application`, `core.api`, and narrow shared UI primitives.
+Textual, `mira`, `mira.api`, internal Core helpers, and narrow shared UI
+primitives.
 
 ## Public surface
 

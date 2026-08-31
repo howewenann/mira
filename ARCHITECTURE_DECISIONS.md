@@ -23,11 +23,12 @@ changes how a reader should trace the system.
 
 **Decision:** The source tree expresses ownership directly: `agent/` contains
 DeepAgents-native machinery; `core/application/` contains the headless MIRA
-application; `core/execution/` interprets native turns; `core/api/` is the
-shared consumer contract; `session/` persists durable state; `ui/textual/` and
-`ui/terminal/` are MIRA-owned interfaces; `protocols/` is reserved for external
-interoperability; and `tracing/` remains an independent concern. The former
-miscellaneous `runtime/` package does not exist.
+application; `core/execution/` interprets native turns; `core/interface/` is the
+internal Core Interface; `mira/` is the supported MIRA API facade; `session/`
+persists durable state; `ui/textual/` and `ui/terminal/` are MIRA-owned
+consumers; `protocols/` is reserved for external interoperability; and
+`tracing/` remains an independent concern. The former miscellaneous `runtime/`
+package does not exist.
 
 **Why:** Directory ownership should be understandable to a person or a simple
 documentation generator without requiring a registry or reverse-engineering
@@ -35,19 +36,21 @@ class names. `core/` is an organizational namespace, not a replacement agent
 framework: native DeepAgents, LangChain, and LangGraph objects remain native.
 
 **Where to check:** Package `README.md` files, `core/`, `ui/`, `protocols/`,
-`pyproject.toml`, and `tests/core/api/test_contract.py`.
+`pyproject.toml`, and `tests/core/interface/test_contract.py`.
 
 **Update this when:** A responsibility crosses package ownership or a new
 owned interface or external protocol adapter is introduced.
 
-## Core And Consumer Boundary
+## Core, MIRA API, And Consumer Boundary
 
 **Decision:** MIRA's application lifecycle and complete turn orchestration are
 headless. `MiraApplication` owns shared agents, resources, checkpoints, MCP,
 and shutdown; each `MiraSession` owns one durable MIRA session projection and
-offers prompt, cancellation, mode, snapshot, and close operations. Textual and
-one-shot terminal output are adapters over the same small consumer contract:
-ordered event emission plus blocking interaction requests.
+offers prompt, cancellation, mode, snapshot, and close operations. The Core
+Interface under `core/interface/` implements ordered event emission plus
+blocking interaction requests. The thin `mira` and `mira.api` facades expose
+those exact classes and types as the one supported MIRA API. Textual and
+one-shot terminal output consume that same public surface.
 
 **Why:** A frontend should render state and collect choices without owning
 agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,
@@ -61,12 +64,17 @@ session/runtime state. A MIRA session id is not a generic graph thread id;
 planning continues to use its deliberately separate thread identity.
 
 **Dependency rule:** `agent/`, `core/`, and `session/` never import `ui/`;
-`core/` never imports `protocols/`. The contract under `core/api/` imports no
-consumer framework. Future consumers must depend inward on this boundary and must not change core event or
-interaction semantics merely to fit a transport.
+`core/` never imports `protocols/`. The Core Interface under `core/interface/`
+imports no consumer framework. `mira.api` re-exports selected Interface types
+without copying or wrapping them. UI, protocol, and external consumers depend
+on `mira.api`; Core implementation modules continue to use the Interface
+directly to avoid an inward dependency on their public facade. Future
+consumers must not change event or interaction semantics merely to fit a
+transport.
 
-**Where to check:** `core/application/app.py`, `core/application/session.py`, `core/execution/turns.py`,
-`core/api/`, `session/recorder.py`, `ui/textual/adapter.py`, `ui/textual/app.py`,
+**Where to check:** `core/application/app.py`, `core/application/session.py`,
+`core/execution/turns.py`, `core/interface/`, `mira/api.py`,
+`session/recorder.py`, `ui/shared/adapter.py`, `ui/textual/app.py`, and
 `cli/commands.py`.
 
 **Update this when:** Core lifecycle ownership changes, a new frontend-facing

@@ -1,4 +1,4 @@
-"""Identity and provenance shared by all MIRA Core API events."""
+"""Identity and provenance shared by all MIRA Core Interface events."""
 
 from __future__ import annotations
 

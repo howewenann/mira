@@ -6,7 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from agent.planning.policy import PLANNING_STAGE_GOAL_RESEARCH, PLANNING_STAGE_PLAN_RESEARCH
-from core.api import FrontendEmitter, SessionSnapshot
+from core.interface import FrontendEmitter, SessionSnapshot
 from core.execution.turns import plan_thread_id, run_user_turn
 from session.dashboard import normalize_dashboard, update_duration
 from session.goals import clear_current_goal, current_goal, pause_current_goal, start_goal_attempt
@@ -39,7 +39,7 @@ class MiraSession:
         return str(self.record.get("id") or "")
 
     async def prompt(self, text: str, **kwargs: Any) -> Any:
-        """Execute one complete ACT/PLAN/Goal workflow through the consumer API."""
+        """Execute one complete ACT/PLAN/Goal workflow through the MIRA API."""
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
         if self._active_task is not None and not self._active_task.done():

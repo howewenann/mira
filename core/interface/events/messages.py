@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
-from core.api.events.base import EventIdentity
+from core.interface.events.base import EventIdentity
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

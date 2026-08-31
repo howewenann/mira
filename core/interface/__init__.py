@@ -1,6 +1,6 @@
-"""Public consumer contract for headless MIRA Core."""
+"""Internal Core Interface re-exported selectively by the public MIRA API."""
 
-from core.api.events import (
+from core.interface.events import (
     ArtifactEvent,
     CompactionEvent,
     FrontendEvent,
@@ -13,9 +13,9 @@ from core.api.events import (
     ToolEvent,
     UsageEvent,
 )
-from core.api.emitter import FrontendEmitter
-from core.api.protocol import Frontend, NullFrontend
-from core.api.requests import (
+from core.interface.emitter import FrontendEmitter
+from core.interface.protocol import Frontend, NullFrontend
+from core.interface.requests import (
     APPROVAL_CONSEQUENCE,
     ApprovalRequest,
     ArtifactDisplayRequest,
@@ -25,7 +25,7 @@ from core.api.requests import (
     FrontendRequest,
     MCPApprovalRequest,
 )
-from core.api.snapshot import SessionSnapshot
+from core.interface.snapshot import SessionSnapshot
 
 __all__ = [
     "APPROVAL_CONSEQUENCE",

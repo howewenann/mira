@@ -4,20 +4,24 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from core.api.events import (
+from core.interface.events import (
     ArtifactEvent,
+    ArtifactPhase,
+    ArtifactType,
     CompactionEvent,
     InformationEvent,
     MCPEvent,
+    MCPPhase,
     MessageEvent,
     RubricEvent,
+    RubricPhase,
     RuntimeEvent,
     SubagentEvent,
     ToolEvent,
     UsageEvent,
 )
-from core.api.protocol import Frontend
-from core.api.requests import (
+from core.interface.protocol import Frontend
+from core.interface.requests import (
     ApprovalRequest,
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
@@ -30,7 +34,7 @@ class FrontendEmitter:
 
     The narrow convenience methods keep stream consumers readable. They are not
     a second transport: every method immediately becomes one event or request
-    on the public ``Frontend`` contract.
+    on the Core Interface's ``Frontend`` contract.
     """
 
     def __init__(
@@ -290,7 +294,7 @@ class FrontendEmitter:
         max_iterations: int,
         *,
         grader_model: str = "",
-        phase: str = "verifying",
+        phase: RubricPhase = "verifying",
         **identity: Any,
     ) -> None:
         self.frontend.emit(
@@ -387,8 +391,8 @@ class FrontendEmitter:
 
     def artifact(
         self,
-        artifact_type: str,
-        phase: str,
+        artifact_type: ArtifactType,
+        phase: ArtifactPhase,
         artifact: Mapping[str, Any] | None = None,
         decision: Mapping[str, Any] | None = None,
         **identity: Any,
@@ -396,7 +400,7 @@ class FrontendEmitter:
         payload = dict(artifact) if artifact is not None else None
         self.frontend.emit(
             ArtifactEvent(
-                artifact_type=artifact_type,  # type: ignore[arg-type]
+                artifact_type=artifact_type,
                 phase=phase,
                 artifact=payload,
                 artifact_id=str((payload or {}).get("id") or ""),
@@ -405,7 +409,7 @@ class FrontendEmitter:
             )
         )
 
-    def mcp(self, phase: str, *, server: str = "", detail: Any = None) -> None:
+    def mcp(self, phase: MCPPhase, *, server: str = "", detail: Any = None) -> None:
         self.frontend.emit(
             MCPEvent(phase=phase, server=server, detail=detail, **self._identity())
         )

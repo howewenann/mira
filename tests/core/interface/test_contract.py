@@ -13,7 +13,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from core.application import MiraApplication, MiraSession
-from core.api import (
+from core.interface import (
     ApprovalRequest,
     ArtifactEvent,
     AskUserRequest,
@@ -370,10 +370,10 @@ class ArchitectureTests(unittest.TestCase):
                     offenders.append(str(path.relative_to(ROOT)))
         self.assertEqual(offenders, [])
 
-    def test_core_api_has_no_framework_or_acp_dependency(self) -> None:
+    def test_core_interface_has_no_framework_or_acp_dependency(self) -> None:
         forbidden_imports = ("textual", "pyside", "qt", "deepagents_acp")
         offenders: list[str] = []
-        for path in (ROOT / "core" / "api").rglob("*.py"):
+        for path in (ROOT / "core" / "interface").rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else ""

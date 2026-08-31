@@ -47,8 +47,9 @@ from core.context.report import (
     mcp_tool_metadata,
 )
 from core.diagnostics.error_report import clear_error_reports, write_error_report
-from core.application import MiraApplication, MiraSession, available_tools, initial_mode, refresh_agent_specs
+from core.application import available_tools, initial_mode, refresh_agent_specs
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
+from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import sync_deepagents_compaction
@@ -1021,6 +1022,16 @@ class MiraApp(App[None]):
             if isinstance(value, dict) and str(value.get("id") or "") == artifact_id:
                 created_at = str(event.get("created_at") or "")
                 break
+        review = PendingArtifactReview.create(
+            kind,  # type: ignore[arg-type]
+            artifact,
+        )
+        self._pending_artifact_review = review
+        # Reserve the header control slot before the provisional bubble is laid
+        # out. Implementing it then swaps review state for retained state
+        # without resizing the transcript; resumed artifacts already have this
+        # slot, which is why their transition was stable.
+        self._sync_header_control_visibility()
         if kind == "plan":
             self.query_one(ChatLog).present_plan(
                 artifact,
@@ -1035,16 +1046,12 @@ class MiraApp(App[None]):
                 status="proposed",
                 created_at=created_at,
             )
-        review = PendingArtifactReview.create(
-            kind,  # type: ignore[arg-type]
-            artifact,
-        )
-        self._pending_artifact_review = review
         try:
             return await review.wait()
         finally:
             if self._pending_artifact_review is review:
                 self._pending_artifact_review = None
+                self.call_after_refresh(self._sync_header_control_visibility)
 
     def artifact_state_changed(self, event: Any) -> None:
         """Project one authoritative Core artifact transition into chat widgets."""
@@ -2532,6 +2539,7 @@ class MiraApp(App[None]):
             max_iterations,
             created_at=created_at,
         )
+        self._rearm_waiting_if_busy()
 
     def rubric_evaluations_cancelled(self) -> None:
         """Stop transient rubric activity after an interrupted invocation."""
@@ -2966,7 +2974,10 @@ class MiraApp(App[None]):
             )
         except NoMatches:
             return
-        has_controls = any(wanted for _button, wanted in controls)
+        has_controls = (
+            any(wanted for _button, wanted in controls)
+            or self._pending_artifact_review is not None
+        )
         sidebar.display = self.size.width >= (90 if has_controls else 72)
         main_width = self.size.width - 42 if sidebar.display else self.size.width
         slots = max(0, (main_width - 40) // 13)

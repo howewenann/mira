@@ -11,7 +11,7 @@ ACTION_TEXT_LIMIT = 220
 ACTION_PREVIEW_VALUE_LIMIT = 68
 ACTION_PREVIEW_KEY_WIDTH = 10
 DEFAULT_APPROVAL_DECISIONS = ["approve", "edit", "reject"]
-from core.api.requests import APPROVAL_CONSEQUENCE
+from core.interface.requests import APPROVAL_CONSEQUENCE
 DECISION_LABELS = {
     "approve": ("a", "Approve (a)"),
     "edit": ("e", "Edit (e)"),

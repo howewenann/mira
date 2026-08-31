@@ -74,7 +74,7 @@ from config.settings import (
 )
 from config.version import display_version
 from core.application import MiraSession
-from core.api import FrontendEmitter
+from core.interface import FrontendEmitter
 from core.diagnostics.logging import get_diagnostics_logger, setup_diagnostics_logging
 from core.execution.streams.rubric import RubricEventRenderer
 from core.execution.streams.tools import CONTROL_TOOLS
@@ -2332,6 +2332,61 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("✓ Ranked", rubric_text)
             self.assertIn("✗ Tested", rubric_text)
             self.assertIn("No focused test.", rubric_text)
+
+    async def test_completed_rubric_rearms_working_indicator_during_next_model_pause(self) -> None:
+        """A silent model continuation after grading should remain visibly active."""
+        app = make_app()
+        app._waiting_delay_seconds = 0
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            app.rubric_evaluation_started("grade-wait", 1, 3)
+            app.rubric_evaluation_finished(
+                {
+                    "grading_run_id": "grade-wait",
+                    "iteration": 0,
+                    "result": "needs_revision",
+                    "criteria": [],
+                },
+                3,
+            )
+
+            await wait_until(lambda: app.query_one(ChatLog)._waiting_block is not None)
+            self.assertIn("working...", renderable_plain(app.query_one(ChatLog)._waiting_block))
+
+            app.busy = False
+            app.waiting_finished()
+
+    async def test_initial_artifact_implementation_keeps_review_layout_width(self) -> None:
+        """Accepting a provisional artifact must not resize its transcript bubble."""
+        for kind, interrupt in (
+            ("goal", final_goal_interrupt()),
+            ("plan", final_plan_interrupt()),
+        ):
+            with self.subTest(kind=kind):
+                app = make_app()
+                app.busy = True
+                async with app.run_test(size=(80, 30)) as pilot:
+                    task = start_artifact_review(app, kind, interrupt)
+                    await wait_until(lambda: app._pending_artifact_review is not None)
+                    await pilot.pause()
+                    await pilot.pause()
+                    chat = app.query_one(ChatLog)
+                    bubble = list(chat.query(f".{kind}"))[-1]
+                    before = (chat.region.width, bubble.region.width, bubble.region.height)
+
+                    artifact_id = str(app._pending_artifact_review.artifact["id"])
+                    await getattr(app, f"_handle_{kind}_action")("implement", artifact_id)
+                    self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "implement")
+                    await pilot.pause()
+                    await pilot.pause()
+
+                    self.assertEqual(
+                        (chat.region.width, bubble.region.width, bubble.region.height),
+                        before,
+                    )
+                app.busy = False
 
     async def test_artifact_presentations_replace_the_same_visible_identity(self) -> None:
         app = make_app()

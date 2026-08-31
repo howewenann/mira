@@ -4,7 +4,7 @@ MIRA's non-interactive `--prompt` interface.
 
 ## Owns
 
-Plain terminal rendering and its Core API adapter.
+Plain terminal rendering and its MIRA API adapter.
 
 ## Does not own
 
@@ -12,7 +12,7 @@ Application orchestration or Textual widgets.
 
 ## Depends on
 
-Rich, `core.api`, and narrow shared terminal primitives.
+Rich, `mira.api`, and narrow shared terminal primitives.
 
 ## Public surface
 

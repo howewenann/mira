@@ -1,30 +1,28 @@
-"""Shared projection from the MIRA Core API to owned UI presentation callbacks."""
+"""Shared projection from the public MIRA API to owned UI callbacks."""
 
 from __future__ import annotations
 
 from inspect import Parameter, signature
 from typing import Any, Callable
 
-from core.api.events import (
+from mira.api import (
+    ApprovalRequest,
     ArtifactEvent,
+    ArtifactDisplayRequest,
+    ArtifactReviewRequest,
+    AskUserRequest,
     CompactionEvent,
+    ConfirmationRequest,
     FrontendEvent,
+    FrontendRequest,
     InformationEvent,
+    MCPApprovalRequest,
     MessageEvent,
     RubricEvent,
     RuntimeEvent,
     SubagentEvent,
     ToolEvent,
     UsageEvent,
-)
-from core.api.requests import (
-    ApprovalRequest,
-    ArtifactDisplayRequest,
-    ArtifactReviewRequest,
-    AskUserRequest,
-    ConfirmationRequest,
-    FrontendRequest,
-    MCPApprovalRequest,
 )
 
 

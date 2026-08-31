@@ -12,8 +12,9 @@ Stream decoding, persistence schemas, or presentation.
 
 ## Depends on
 
-`agent`, `core.execution`, `core.api`, `session`, and `config`.
+`agent`, `core.execution`, `core.interface`, `session`, and `config`.
 
 ## Public surface
 
-`MiraApplication` and `MiraSession`.
+`MiraApplication` and `MiraSession` are supported externally through `mira`.
+The remaining helpers in this package are internal implementation details.

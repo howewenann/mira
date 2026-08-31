@@ -16,4 +16,5 @@ UI rendering, external protocol adapters, or durable session schemas.
 
 ## Public surface
 
-`core.application` and `core.api` are the supported headless entry points.
+External developers use `mira` and `mira.api`. This package remains MIRA's
+implementation; `core.interface` is the internal boundary behind that facade.

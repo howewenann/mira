@@ -1,4 +1,4 @@
-"""Public entry points for the headless MIRA application."""
+"""Internal application exports; public classes are available from ``mira``."""
 
 from core.application.app import (
     DEFAULT_TOOL_SPECS,

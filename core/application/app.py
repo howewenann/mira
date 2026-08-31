@@ -21,7 +21,7 @@ from agent.planning.policy import (
 )
 from agent.tools.specs import mira_environment_label
 from config.settings import rubric_enabled, rubric_max_iterations
-from core.api import Frontend, FrontendEmitter, MCPApprovalRequest
+from core.interface import Frontend, FrontendEmitter, MCPApprovalRequest
 from core.execution.turns import plan_thread_id
 from session.context import mark_resume_context_pending
 from session.dashboard import ensure_dashboard

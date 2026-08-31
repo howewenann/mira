@@ -12,7 +12,7 @@ Headless orchestration, durable state, or external interoperability protocols.
 
 ## Depends on
 
-`core.api` and interface-specific presentation libraries.
+`mira.api` and interface-specific presentation libraries.
 
 ## Public surface
 

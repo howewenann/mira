@@ -12,8 +12,8 @@ UI rendering, external protocols, or replacement graph/message abstractions.
 
 ## Depends on
 
-DeepAgents, LangChain/LangGraph, `core.api`, and session recording.
+DeepAgents, LangChain/LangGraph, `core.interface`, and session recording.
 
 ## Public surface
 
-`runner.run_turn` and `turns.run_user_turn`.
+None. Owned Core modules call `runner.run_turn` and `turns.run_user_turn`.

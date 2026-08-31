@@ -1,4 +1,4 @@
-"""Plain-terminal consumer of the shared MIRA Core API."""
+"""Plain-terminal consumer of the supported MIRA API."""
 
 from ui.shared.adapter import RendererAdapter
 

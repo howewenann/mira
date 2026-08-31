@@ -46,7 +46,7 @@ from core.context.usage import (
     select_context_usage,
     usage_from_output,
 )
-from core.api.requests import APPROVAL_CONSEQUENCE
+from core.interface.requests import APPROVAL_CONSEQUENCE
 
 
 @dataclass

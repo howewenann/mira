@@ -246,7 +246,7 @@ async def _run_one_shot_core(
     from langchain_core.exceptions import ContextOverflowError
     from core.diagnostics.logging import get_diagnostics_logger
     from core.diagnostics.error_report import write_error_report
-    from core.api import FrontendEmitter
+    from core.interface import FrontendEmitter
 
     manager = app.get("mcp_manager")
     prepared = None
@@ -330,7 +330,7 @@ async def _bootstrap(
 ) -> dict[str, Any]:
     """Build the headless application/session and expose legacy state aliases."""
     from core.application import MiraApplication
-    from core.api import FrontendEmitter
+    from core.interface import FrontendEmitter
     from ui.terminal.adapter import TerminalFrontend
     from ui.terminal.renderer import Renderer
 

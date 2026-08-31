@@ -137,6 +137,8 @@
 - `agent/resources/` loads backends, memories, skills, subagents, and tools.
 - `core/execution/runner.py` streams one turn and handles HITL approval loops.
 - `core/execution/streams/` handles stream event projections.
+- `core/interface/` implements the internal Core-to-consumer boundary.
+- `mira/` exposes the supported public Python API used by consumers.
 - `ui/textual/app.py` and `ui/textual/widgets/` implement the Textual TUI.
 - `ui/terminal/renderer.py` implements plain `mira -p` terminal output.
 - `session/` stores durable session JSON, replay context, and checkpoints.

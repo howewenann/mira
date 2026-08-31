@@ -12,7 +12,7 @@ Core behavior or MIRA-owned user interfaces.
 
 ## Depends on
 
-`core.api`; Core never depends inward on this package.
+`mira.api`; Core never depends inward on this package.
 
 ## Public surface
 

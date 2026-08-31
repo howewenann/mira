@@ -8,7 +8,17 @@ from typing import Any, Mapping
 
 @dataclass(frozen=True, slots=True)
 class SessionSnapshot:
-    """Current frontend state without exposing live agents or graph objects."""
+    """Current frontend state without exposing live agents or graph objects.
+
+    ``session_id`` is MIRA's durable session identity; ``workspace`` is its
+    absolute project root; ``mode`` is ``action`` or ``planning``;
+    ``runtime_state`` is ``ready``, ``running``, ``cancelling``, or ``closed``;
+    ``title`` and ``turns`` describe transcript history; ``current_goal`` and
+    ``current_plan`` contain at most one retained formal artifact; ``transcript``
+    is the tuple of persisted event mappings; and the remaining mappings project
+    dashboard usage, model metadata, tools, resources, Rubric settings, and MCP
+    state. Nested mappings intentionally remain lightweight projections.
+    """
 
     session_id: str
     workspace: str

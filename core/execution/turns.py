@@ -22,7 +22,7 @@ from agent.planning.policy import (
     plan_disabled_tools_text,
 )
 from core.context.observation import context_usage_scope
-from core.api import Frontend, FrontendEmitter
+from core.interface import Frontend, FrontendEmitter
 from core.execution.runner import TurnResult, run_turn
 from session.context import session_mcp_attachments, update_title, with_resume_context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard

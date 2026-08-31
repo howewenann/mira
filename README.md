@@ -54,6 +54,19 @@ Use `mira --help` for startup options, including workspace and session
 selection. `--direct` bypasses proxy settings and disables TLS verification for
 the current process, so use it only with a trusted local model endpoint.
 
+## Python API
+
+Run MIRA headlessly or build a frontend using the same supported API as the
+owned Textual and terminal consumers:
+
+```python
+from mira import MiraApplication
+from mira.api import Frontend, MessageEvent
+```
+
+See the [MIRA Python API guide](docs/frontend-api.md) for lifecycle, events,
+blocking requests, snapshots, and a complete runnable frontend.
+
 ## TUI basics
 
 | Action | Shortcut or command |

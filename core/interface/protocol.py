@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from core.api.events import FrontendEvent
-from core.api.requests import FrontendRequest
+from core.interface.events import FrontendEvent
+from core.interface.requests import FrontendRequest
 
 
 @runtime_checkable
 class Frontend(Protocol):
-    """Consume Core events and answer interactions that pause execution."""
+    """Consume Core events and answer interactions that pause execution.
+
+    The concrete response contract is determined by the request class; every
+    public request documents its exact expected return value.
+    """
 
     def emit(self, event: FrontendEvent) -> None:
         """Consume one ordered notification."""
