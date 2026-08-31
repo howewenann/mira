@@ -1000,6 +1000,10 @@ class MiraApp(App[None]):
                 return
             values["feedback"] = feedback
         if action == "implement":
+            self.query_one(ChatLog).begin_artifact_implementation(
+                review.kind,
+                str(artifact.get("id") or ""),
+            )
             self.system_message(f'implementing {review.kind} "{title}"', kind="status")
         review.resolve(action, **values)
 

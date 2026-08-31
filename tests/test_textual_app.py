@@ -2358,8 +2358,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = False
             app.waiting_finished()
 
-    async def test_initial_artifact_implementation_keeps_review_layout_width(self) -> None:
-        """Accepting a provisional artifact must not resize its transcript bubble."""
+    async def test_initial_artifact_implementation_keeps_review_layout_stable(self) -> None:
+        """Accepting a provisional artifact must remain tail-anchored while it resolves."""
         for kind, interrupt in (
             ("goal", final_goal_interrupt()),
             ("plan", final_plan_interrupt()),
@@ -2368,25 +2368,66 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app = make_app()
                 app.busy = True
                 async with app.run_test(size=(80, 30)) as pilot:
+                    chat = app.query_one(ChatLog)
+                    fill_scrollable_chat(chat)
+                    await wait_until(lambda: chat.max_scroll_y > 0 and chat.is_vertical_scroll_end)
+                    tool_name = f"finalize_{kind}"
+                    call_id = f"call-{kind}-transition"
+                    app.tool_call(tool_name, interrupt, call_id=call_id)
                     task = start_artifact_review(app, kind, interrupt)
                     await wait_until(lambda: app._pending_artifact_review is not None)
                     await pilot.pause()
                     await pilot.pause()
-                    chat = app.query_one(ChatLog)
                     bubble = list(chat.query(f".{kind}"))[-1]
                     before = (chat.region.width, bubble.region.width, bubble.region.height)
 
                     artifact_id = str(app._pending_artifact_review.artifact["id"])
                     await getattr(app, f"_handle_{kind}_action")("implement", artifact_id)
-                    self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "implement")
+                    self.assertTrue(chat.is_anchored)
+                    decision = await asyncio.wait_for(task, timeout=2)
+                    self.assertEqual(decision["action"], "implement")
+                    app.completed_tool_result(tool_name, str(decision), call_id=call_id)
                     await pilot.pause()
                     await pilot.pause()
 
+                    self.assertFalse(chat.is_anchored)
+                    self.assertTrue(chat.follow_tail)
+                    self.assertEqual(chat.scroll_y, chat.max_scroll_y)
                     self.assertEqual(
                         (chat.region.width, bubble.region.width, bubble.region.height),
                         before,
                     )
                 app.busy = False
+
+    async def test_initial_artifact_implementation_preserves_manual_scroll(self) -> None:
+        """The Implement transition must not anchor a transcript the user scrolled up."""
+        app = make_app()
+        app.busy = True
+        async with app.run_test(size=(80, 30)) as pilot:
+            chat = app.query_one(ChatLog)
+            fill_scrollable_chat(chat)
+            task = start_artifact_review(app, "goal", final_goal_interrupt())
+            await wait_until(
+                lambda: app._pending_artifact_review is not None
+                and chat.max_scroll_y > 0
+                and chat.is_vertical_scroll_end
+            )
+            chat.focus()
+            await pilot.press("up")
+            await wait_until(lambda: not chat.follow_tail and not chat.is_vertical_scroll_end)
+            await pilot.wait_for_animation()
+            paused_scroll_y = chat.scroll_y
+
+            artifact_id = str(app._pending_artifact_review.artifact["id"])
+            await app._handle_goal_action("implement", artifact_id)
+            self.assertFalse(chat.is_anchored)
+            self.assertEqual((await asyncio.wait_for(task, timeout=2))["action"], "implement")
+            await pilot.pause()
+            await pilot.pause()
+
+            self.assertFalse(chat.follow_tail)
+            self.assertEqual(chat.scroll_y, paused_scroll_y)
+        app.busy = False
 
     async def test_artifact_presentations_replace_the_same_visible_identity(self) -> None:
         app = make_app()
@@ -7574,15 +7615,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             chat = app.query_one(ChatLog)
             assistant = [block for block in chat.children if "assistant" in block.classes][-1]
-            scroll = Mock()
-            chat._scroll_to_end = scroll
+            # Isolate the tool update from the intentional busy-indicator rearm.
+            app.busy = False
 
-            app.completed_tool_result("read_file", "contents", call_id="call-read")
+            with patch.object(chat, "_scroll_to_end") as scroll:
+                app.completed_tool_result("read_file", "contents", call_id="call-read")
+                self.assertFalse(scroll.called)
             await pilot.pause()
 
             self.assertIs([block for block in chat.children if "assistant" in block.classes][-1], assistant)
             self.assertEqual(len([block for block in chat.children if "assistant" in block.classes]), 1)
-            self.assertFalse(scroll.called)
             tool = [block for block in chat.children if "tool-call" in block.classes][-1]
             self.assertIn("contents", renderable_plain(tool))
 

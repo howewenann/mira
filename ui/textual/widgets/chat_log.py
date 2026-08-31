@@ -47,6 +47,7 @@ class ChatLog(VerticalScroll):
     def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS, **kwargs: Any) -> None:
         self.follow_tail = True
         self._programmatic_tail_scroll = False
+        self._artifact_tail_anchor: tuple[str, str] | None = None
         self._last_region_size: Size | None = None
         super().__init__(**kwargs)
         self.can_focus = True
@@ -943,6 +944,7 @@ class ChatLog(VerticalScroll):
         if bubble is not None:
             bubble.resolve(status)
             self._scroll_to_end()
+        self._release_artifact_tail_anchor("plan", plan_id)
 
     def dismiss_plan(self, plan_id: str) -> None:
         """Remove one Plan bubble from the visible transcript."""
@@ -981,6 +983,7 @@ class ChatLog(VerticalScroll):
         if bubble is not None:
             bubble.resolve(status)
             self._scroll_to_end()
+        self._release_artifact_tail_anchor("goal", goal_id)
 
     def dismiss_goal(self, goal_id: str) -> None:
         """Remove one Goal bubble from the visible transcript."""
@@ -1329,6 +1332,27 @@ class ChatLog(VerticalScroll):
         """Keep new output visible."""
         if self.follow_tail:
             self.call_after_refresh(self._scroll_follow_tail)
+
+    def begin_artifact_implementation(self, kind: str, artifact_id: str) -> None:
+        """Keep a followed transcript at its tail throughout Implement layout."""
+        if not self.follow_tail:
+            return
+        self._artifact_tail_anchor = (kind, artifact_id)
+        self.anchor()
+
+    def _release_artifact_tail_anchor(self, kind: str, artifact_id: str) -> None:
+        """Release a matching Implement anchor after its final layout is painted."""
+        identity = (kind, artifact_id)
+        if self._artifact_tail_anchor != identity:
+            return
+
+        def release() -> None:
+            if self._artifact_tail_anchor != identity:
+                return
+            self.anchor(False)
+            self._artifact_tail_anchor = None
+
+        self.call_after_refresh(release)
 
     def _scroll_follow_tail(self) -> None:
         """Wait for new content to finish layout before applying a tail scroll."""
