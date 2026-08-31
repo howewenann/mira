@@ -36,7 +36,7 @@ from agent.resources.project_setup import (
     MCP_CONFIGURATION_SCHEMA,
     ensure_project_examples,
 )
-from config.settings import load_settings, set_subagent_enabled
+from config.settings import READ_ONLY_BUILTIN_TOOLS, load_settings, set_subagent_enabled
 from core.application import DEFAULT_TOOL_SPECS, resource_specs
 
 
@@ -916,7 +916,26 @@ def read_file_as_bytes(path: str) -> str:
         ptc_tools = set(QUICKJS_PTC_TOOLS)
 
         self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep"})
+        self.assertEqual(QUICKJS_PTC_TOOLS, READ_ONLY_BUILTIN_TOOLS)
         self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
+
+    def test_effective_ptc_tools_exclude_globally_disabled_reads(self) -> None:
+        """PTC should derive its safe reads from the same global exclusions as the model."""
+        config = {
+            "settings": {
+                "hitl": {
+                    "tools": {
+                        name: {"enabled": name != "grep"}
+                        for name in READ_ONLY_BUILTIN_TOOLS
+                    }
+                }
+            }
+        }
+        excluded = factory.effective_excluded_tools(config, (), True)
+
+        resolved = factory.effective_ptc_tool_names(config, [], [], excluded)
+
+        self.assertEqual(resolved, ["ls", "read_file", "glob"])
 
     def test_effective_ptc_tools_use_only_resolved_tools_and_runtime_names(self) -> None:
         """Saved PTC flags should not bypass effective local or MCP availability."""

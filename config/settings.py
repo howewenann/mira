@@ -36,7 +36,9 @@ RUBRIC_MODEL = "rubric"
 SUMMARIZATION_MODEL = "summarization"
 SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
+READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task")
+INBUILT_TOOLS = (*READ_ONLY_BUILTIN_TOOLS, *INBUILT_DANGEROUS_TOOLS)
 PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task"})
 
 
@@ -99,6 +101,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "allow": [],
         },
         "tools": {
+            "ls": {"enabled": True},
+            "read_file": {"enabled": True},
+            "glob": {"enabled": True},
+            "grep": {"enabled": True},
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
@@ -241,6 +247,10 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         normalized_tools = {name: dict(spec) for name, spec in settings["hitl"]["tools"].items()}
         for name, spec in tools.items():
             if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
+                continue
+            if name in READ_ONLY_BUILTIN_TOOLS:
+                if isinstance(spec.get("enabled"), bool):
+                    normalized_tools[name]["enabled"] = spec["enabled"]
                 continue
             always_allow = spec.get("always_allow")
             enabled = spec.get("enabled")
@@ -431,7 +441,13 @@ def settings_issues(raw: Any) -> list[Issue]:
                         issues.append(_invalid_setting("hitl.execute_env.allow", "must be a list of names"))
             tools = hitl.get("tools")
             if tools is not None:
-                _validate_dynamic_policy_mapping(tools, "hitl.tools", issues, include_plan=True)
+                _validate_dynamic_policy_mapping(
+                    tools,
+                    "hitl.tools",
+                    issues,
+                    include_plan=True,
+                    fixed_read_only_builtins=True,
+                )
 
     mcp = raw.get("mcp")
     if mcp is not None:
@@ -494,7 +510,14 @@ def _validate_boolean(system: dict[str, Any], section: str, key: str, issues: li
         issues.append(_invalid_setting(f"system.{section}.{key}", "must be true or false"))
 
 
-def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *, include_plan: bool) -> None:
+def _validate_dynamic_policy_mapping(
+    raw: Any,
+    path: str,
+    issues: list[Issue],
+    *,
+    include_plan: bool,
+    fixed_read_only_builtins: bool = False,
+) -> None:
     if not isinstance(raw, dict):
         issues.append(_invalid_setting(path, "must be a mapping"))
         return
@@ -506,8 +529,13 @@ def _validate_dynamic_policy_mapping(raw: Any, path: str, issues: list[Issue], *
         if not isinstance(name, str) or not name.strip() or not isinstance(spec, dict):
             issues.append(_invalid_setting(item_path, "must be a named mapping"))
             continue
-        _unknown_settings(spec, allowed, item_path, issues)
-        for key in allowed:
+        item_allowed = (
+            {"enabled"}
+            if fixed_read_only_builtins and name in READ_ONLY_BUILTIN_TOOLS
+            else allowed
+        )
+        _unknown_settings(spec, item_allowed, item_path, issues)
+        for key in item_allowed:
             if key in spec and not isinstance(spec[key], bool):
                 issues.append(_invalid_setting(f"{item_path}.{key}", "must be true or false"))
 
@@ -832,7 +860,9 @@ def valid_rubric_max_iterations(value: Any) -> bool:
 
 
 def tool_always_allow(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
-    """Return whether a tool is configured to skip HITL approval."""
+    """Return whether a tool intrinsically or explicitly skips HITL approval."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return True
     hitl = hitl_settings(config_or_settings)
     tools = hitl.get("tools", {})
     spec = tools.get(tool_name) if isinstance(tools, dict) else None
@@ -853,11 +883,15 @@ def tool_policy(config_or_settings: dict[str, Any] | None, tool_name: str) -> To
 
 
 def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return tool_enabled(config_or_settings, tool_name)
     return _tool_access_value(config_or_settings, tool_name, "plan_access")
 
 
 def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool may be called from eval."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return tool_enabled(config_or_settings, tool_name)
     if tool_name in PTC_INAPPLICABLE_TOOLS:
         return False
     return _tool_access_value(config_or_settings, tool_name, "ptc")
@@ -865,6 +899,8 @@ def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
 
 def tool_rubric_access(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool is available to the rubric grader."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return tool_enabled(config_or_settings, tool_name)
     if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
         return False
     return _tool_access_value(config_or_settings, tool_name, "rubric")
@@ -895,6 +931,8 @@ def set_git_protection(settings: dict[str, Any], enabled: bool) -> dict[str, Any
 
 def set_tool_always_allow(settings: dict[str, Any], tool_name: str, always_allow: bool) -> dict[str, Any]:
     """Return settings with one tool approval toggle updated."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return normalize_settings(settings)
     updated = normalize_settings(settings)
     current = dict(updated["hitl"].setdefault("tools", {}).get(tool_name, {"enabled": True}))
     current["always_allow"] = bool(always_allow)
@@ -916,11 +954,15 @@ def set_tool_enabled(settings: dict[str, Any], tool_name: str, enabled: bool) ->
 
 def set_tool_plan_access(settings: dict[str, Any], tool_name: str, plan_access: bool) -> dict[str, Any]:
     """Return settings with explicit Custom Tool Plan trust."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return normalize_settings(settings)
     return _set_tool_access_value(settings, tool_name, "plan_access", plan_access)
 
 
 def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[str, Any]:
     """Return settings with explicit local-tool PTC access."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return normalize_settings(settings)
     if tool_name in PTC_INAPPLICABLE_TOOLS:
         return normalize_settings(settings)
     return _set_tool_access_value(settings, tool_name, "ptc", ptc)
@@ -928,6 +970,8 @@ def set_tool_ptc(settings: dict[str, Any], tool_name: str, ptc: bool) -> dict[st
 
 def set_tool_rubric_access(settings: dict[str, Any], tool_name: str, value: bool) -> dict[str, Any]:
     """Return settings with explicit local-tool Rubric access."""
+    if tool_name in READ_ONLY_BUILTIN_TOOLS:
+        return normalize_settings(settings)
     if tool_name in INBUILT_DANGEROUS_TOOLS and tool_name != EXECUTE_TOOL:
         return normalize_settings(settings)
     return _set_tool_access_value(settings, tool_name, "rubric", value)

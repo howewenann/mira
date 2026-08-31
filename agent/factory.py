@@ -41,6 +41,7 @@ from config.settings import (
     EXECUTE_TOOL,
     INBUILT_DANGEROUS_TOOLS,
     PTC_INAPPLICABLE_TOOLS,
+    READ_ONLY_BUILTIN_TOOLS,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     hitl_settings,
@@ -458,6 +459,8 @@ def _write_interrupts(
     for name, spec in tools.items():
         if not isinstance(name, str) or not isinstance(spec, dict):
             continue
+        if name in READ_ONLY_BUILTIN_TOOLS:
+            continue
         if not tool_enabled(config, name):
             continue
         if planning and not tool_plan_access(config, name):
@@ -547,15 +550,24 @@ def effective_rubric_tools(
 ) -> tuple[list[Any], dict[str, Any]]:
     """Build the grader's enabled tool surface and normal HITL policy."""
     excluded = set(excluded_tools)
-    filesystem_names = list(QUICKJS_PTC_TOOLS)
+    filesystem_names = [name for name in READ_ONLY_BUILTIN_TOOLS if name not in excluded]
     if (
         EXECUTE_TOOL not in excluded
         and tool_enabled(config, EXECUTE_TOOL)
         and tool_rubric_access(config, EXECUTE_TOOL)
     ):
         filesystem_names.append(EXECUTE_TOOL)
-    resolved = list(FilesystemMiddleware(backend=backend, tools=filesystem_names).tools)
-    selected = set(filesystem_names) - set(QUICKJS_PTC_TOOLS)
+    # DeepAgents requires read_file to remain registered in FilesystemMiddleware;
+    # the verifier surface below still honors MIRA's global visibility setting.
+    registration_names = list(filesystem_names)
+    if "read_file" not in registration_names:
+        registration_names.insert(0, "read_file")
+    resolved = [
+        tool
+        for tool in FilesystemMiddleware(backend=backend, tools=registration_names).tools
+        if tool_name(tool) in filesystem_names
+    ]
+    selected = set(filesystem_names) - set(READ_ONLY_BUILTIN_TOOLS)
     metadata_by_name = {item.get("name", ""): item for item in metadata if item.get("name")}
 
     for tool in tools:

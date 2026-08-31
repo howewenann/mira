@@ -13,6 +13,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.tools import tool
 from deepagents.backends import StateBackend
+from deepagents.middleware import FilesystemMiddleware
 from rich.console import Console
 from rich.text import Text
 
@@ -24,7 +25,7 @@ from agent.tools.specs import mira_environment_label, tool_name
 from config.metadata import ModelMetadata
 from config.llm import ModelProfile, ModelRegistry
 from config.runtime import RuntimeSnapshot
-from config.settings import DEFAULT_SETTINGS
+from config.settings import DEFAULT_SETTINGS, READ_ONLY_BUILTIN_TOOLS
 from core.application import available_tools, initial_mode, normalize_tool_specs, tool_specs
 from core.execution import runner
 from core.context.observation import record_deepagents_context_tokens
@@ -232,6 +233,15 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["permissions"][1].operations, ["read", "write"])
         self.assertEqual(kwargs["permissions"][1].mode, "allow")
         self.assertTrue(any(tool_name(tool) == "grep" for tool in kwargs["tools"]))
+
+    def test_read_only_builtins_never_receive_hitl_interrupts(self) -> None:
+        """Persisted read visibility must not turn safe filesystem calls into approvals."""
+        settings = deepcopy(DEFAULT_SETTINGS)
+
+        self.assertFalse(
+            set(READ_ONLY_BUILTIN_TOOLS)
+            & set(factory._write_interrupts({"settings": settings}))
+        )
 
     def test_planning_todos_are_opt_in_for_action_and_plan_agents(self) -> None:
         """Todo middleware and metadata should appear exactly once only when enabled."""
@@ -478,6 +488,44 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             ["ls", "read_file", "glob", "grep", "approved_custom"],
         )
         self.assertEqual(set(interrupts), {"approved_custom"})
+
+    def test_disabled_read_only_builtins_are_hidden_from_every_model_surface(self) -> None:
+        """One global setting should govern action, Plan, PTC, and Rubric visibility."""
+        all_tools = [{"name": name} for name in READ_ONLY_BUILTIN_TOOLS]
+
+        for disabled_name in READ_ONLY_BUILTIN_TOOLS:
+            with self.subTest(tool=disabled_name):
+                settings = deepcopy(DEFAULT_SETTINGS)
+                settings["hitl"]["tools"][disabled_name]["enabled"] = False
+                config = {"settings": settings}
+                action_excluded = factory.effective_excluded_tools(config, (), True)
+                plan_excluded = factory.effective_excluded_tools(
+                    config,
+                    factory.PLAN_EXCLUDED_TOOLS,
+                    False,
+                )
+
+                for excluded in (action_excluded, plan_excluded):
+                    filtered = ModelToolVisibilityMiddleware(excluded)._filter_request(
+                        FakeModelRequest(all_tools)
+                    )
+                    self.assertNotIn(disabled_name, [tool_name(tool) for tool in filtered.tools])
+
+                ptc = factory.effective_ptc_tool_names(config, [], [], action_excluded)
+                self.assertNotIn(disabled_name, ptc)
+
+                rubric_tools, rubric_interrupts = factory.effective_rubric_tools(
+                    config,
+                    StateBackend(),
+                    [],
+                    [],
+                    action_excluded,
+                )
+                self.assertNotIn(disabled_name, [tool_name(tool) for tool in rubric_tools])
+                self.assertEqual(rubric_interrupts, {})
+
+        registered = FilesystemMiddleware(backend=StateBackend()).tools
+        self.assertIn("read_file", [tool_name(tool) for tool in registered])
 
     def test_rubric_override_builds_a_dedicated_grader_with_safe_reads(self) -> None:
         """A configured grader profile should not replace the action model."""

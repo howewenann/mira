@@ -41,10 +41,53 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_ptc(loaded, "custom_search"))
         self.assertFalse(settings.tool_rubric_access(loaded, "execute"))
         self.assertFalse(settings.tool_rubric_access(loaded, "custom_search"))
+        for name in settings.READ_ONLY_BUILTIN_TOOLS:
+            self.assertEqual(loaded["hitl"]["tools"][name], {"enabled": True})
+            self.assertTrue(settings.tool_enabled(loaded, name))
+            self.assertTrue(settings.tool_always_allow(loaded, name))
+            self.assertTrue(settings.tool_plan_access(loaded, name))
+            self.assertTrue(settings.tool_ptc(loaded, name))
+            self.assertTrue(settings.tool_rubric_access(loaded, name))
         self.assertEqual(
             settings.execute_env_settings(loaded),
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
         )
+
+    def test_read_only_builtin_tools_only_persist_global_enablement(self) -> None:
+        """Safe reads should expose one setting while keeping every access policy fixed."""
+        configured = settings.normalize_settings(
+            {
+                "hitl": {
+                    "tools": {
+                        "read_file": {
+                            "enabled": False,
+                            "always_allow": False,
+                            "plan_access": False,
+                            "ptc": False,
+                            "rubric": False,
+                        }
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(configured["hitl"]["tools"]["read_file"], {"enabled": False})
+        self.assertFalse(settings.tool_plan_access(configured, "read_file"))
+        self.assertFalse(settings.tool_ptc(configured, "read_file"))
+        self.assertFalse(settings.tool_rubric_access(configured, "read_file"))
+        for setter in (
+            settings.set_tool_always_allow,
+            settings.set_tool_plan_access,
+            settings.set_tool_ptc,
+            settings.set_tool_rubric_access,
+        ):
+            unchanged = setter(configured, "read_file", True)
+            self.assertEqual(unchanged["hitl"]["tools"]["read_file"], {"enabled": False})
+
+        issues = settings.settings_issues(
+            {"hitl": {"tools": {"read_file": {"enabled": True, "ptc": True}}}}
+        )
+        self.assertTrue(any("hitl.tools.read_file.ptc" in issue.summary for issue in issues))
 
     def test_execute_env_settings_normalize_supported_modes(self) -> None:
         """Execute environment settings should keep names, paths, and allowlists only."""

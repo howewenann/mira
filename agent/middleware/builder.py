@@ -21,9 +21,13 @@ from agent.middleware.execute_tool_description_rewrite import (
 from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware.file_references import FileReferenceMiddleware
 from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
-from config.settings import dynamic_subagents_enabled, planning_todos_enabled
+from config.settings import (
+    READ_ONLY_BUILTIN_TOOLS,
+    dynamic_subagents_enabled,
+    planning_todos_enabled,
+)
 
-QUICKJS_PTC_TOOLS = ("ls", "read_file", "glob", "grep")
+QUICKJS_PTC_TOOLS = READ_ONLY_BUILTIN_TOOLS
 QUICKJS_MEMORY_LIMIT = 64 * 1024 * 1024
 QUICKJS_TIMEOUT_SECONDS = 5.0
 QUICKJS_PERSISTENCE_MODE = "thread"

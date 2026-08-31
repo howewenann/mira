@@ -19,8 +19,9 @@ from config.settings import (
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
-    INBUILT_DANGEROUS_TOOLS,
+    INBUILT_TOOLS,
     PTC_INAPPLICABLE_TOOLS,
+    READ_ONLY_BUILTIN_TOOLS,
     PLANNING_RESPONSE_STATUS_MAX_RETRIES_LIMIT,
     PLANNING_TODOS,
     RUBRIC,
@@ -257,7 +258,7 @@ class SettingsPanel(Vertical):
 
                     yield Static("Inbuilt Tools", classes="settings-section inbuilt")
                     yield SettingsHeaderRow("")
-                    for tool_name in INBUILT_DANGEROUS_TOOLS:
+                    for tool_name in INBUILT_TOOLS:
                         enabled = tool_enabled(self.settings, tool_name)
                         with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
                             yield Static(tool_name, classes="settings-label")
@@ -266,7 +267,11 @@ class SettingsPanel(Vertical):
                                 enabled,
                             )
                             yield self._toggle_button(
-                                ToggleCell("always_allow", tool_name),
+                                ToggleCell(
+                                    "always_allow",
+                                    tool_name,
+                                    locked=tool_name in READ_ONLY_BUILTIN_TOOLS,
+                                ),
                                 tool_always_allow(self.settings, tool_name),
                             )
 
@@ -916,6 +921,8 @@ class SettingsPanel(Vertical):
             button.set_classes(toggle_classes(value, locked=locked))
 
     def _cell_locked(self, cell: ToggleCell) -> bool:
+        if cell.locked:
+            return True
         if cell.kind in {"mcp_tool_enabled", "mcp_tool_allow", "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric"}:
             if not mcp_server_enabled(self.settings, cell.server) or not self._mcp_tool_available(cell):
                 return True
@@ -1159,15 +1166,26 @@ class SettingsPanel(Vertical):
             cells = [ToggleCell(kind, name, server=server) for name in names]
             return [(cell.name, cell, selected_value(self.settings, cell)) for cell in cells]
 
-        builtins = (
-            [name for name in INBUILT_DANGEROUS_TOOLS if name not in PTC_INAPPLICABLE_TOOLS]
-            if policy == "ptc"
-            else [EXECUTE_TOOL] if policy == "rubric" else []
+        builtin_rows = []
+        for name in INBUILT_TOOLS:
+            if not tool_enabled(self.settings, name):
+                continue
+            locked = (
+                name in READ_ONLY_BUILTIN_TOOLS
+                or policy == "plan"
+                or (policy == "ptc" and name in PTC_INAPPLICABLE_TOOLS)
+                or (policy == "rubric" and name != EXECUTE_TOOL)
+            )
+            cell = ToggleCell(local_kind, name, locked=locked)
+            builtin_rows.append((name, cell, selected_value(self.settings, cell)))
+        if builtin_rows:
+            groups.append(("Inbuilt Tools", builtin_rows))
+
+        custom_rows = build_rows(
+            [name for name in custom_tool_names(self.tool_metadata) if tool_enabled(self.settings, name)]
         )
-        for title, names in (("Inbuilt Tools", builtins), ("Custom Tools", custom_tool_names(self.tool_metadata))):
-            enabled_rows = build_rows([name for name in names if tool_enabled(self.settings, name)])
-            if enabled_rows:
-                groups.append((title, enabled_rows))
+        if custom_rows:
+            groups.append(("Custom Tools", custom_rows))
         for state in getattr(self.mcp_manager, "servers", {}).values():
             if not mcp_server_enabled(self.settings, state.name):
                 continue
@@ -1350,6 +1368,8 @@ def button_id_for(cell: ToggleCell) -> str:
 
 def button_label(cell: ToggleCell, value: bool) -> str:
     """Return display text for a settings toggle."""
+    if cell.kind == "always_allow" and cell.name in READ_ONLY_BUILTIN_TOOLS and not cell.server:
+        return "-"
     if cell.kind == "ptc" and cell.name in PTC_INAPPLICABLE_TOOLS and not cell.server:
         return "-"
     return "yes" if value else "no"
