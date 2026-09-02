@@ -2,6 +2,27 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## Stock ACP stdio integration
+
+Install `mira[acp]` and configure an ACP client to launch `mira --acp` with a
+disposable workspace. Initialize the connection, create a session, send a text
+prompt, switch between ACT and PLAN, reload the returned MIRA session ID, and
+cancel an active turn. Expected: the same workspace reuses MIRA resources,
+reloading replays MIRA's transcript, and cancellation affects only its session.
+
+Trigger `ask_user` with two concrete suggestions. Expected: the question is
+visible before buttons for both suggestions and `Reply in chat`. A suggestion
+resumes with its exact text. `Reply in chat` ends the turn; send free text as
+the next prompt and confirm neither the button label nor an invented answer
+appears in the transcript. Cancelling the request behaves the same way.
+
+In PLAN mode, produce both a formal Plan and Goal. Expected: preceding thought
+and tool output finishes, the complete artifact appears as an ordinary message,
+then `Implement`, `Keep`, and `Revise in chat` appear. Formal artifacts never
+replace the ACP todo surface. Separately call `write_todos` and confirm only
+that tool updates the ACP Plan. Also verify edit diffs, failed execute output,
+HITL tool IDs, MCP approval, and Git confirmation buttons.
+
 ## TUI Autocomplete And File References
 
 Run the interactive TUI and verify `/he`, `/help`, and `Compare @auth`. Change

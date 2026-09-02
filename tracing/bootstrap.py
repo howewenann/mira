@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
@@ -13,7 +14,11 @@ from config.tracing import TracingRegistry
 from core.diagnostics.issues import Issue
 
 _FLUSH_TIMEOUT_MILLIS = 1_000
-_OWNED_ENVIRONMENT_KEYS = ("LANGSMITH_TRACING", "LANGSMITH_TRACING_MODE")
+_OWNED_ENVIRONMENT_KEYS = (
+    "LANGSMITH_TRACING",
+    "LANGSMITH_TRACING_MODE",
+    "LANGCHAIN_REVISION_ID",
+)
 _active_langsmith: Any = None
 _active_client: Any = None
 _active_provider: Any = None
@@ -143,6 +148,8 @@ def configure_tracing(
         provider.add_span_processor(LangSmithOpenInferenceProcessor(span_attributes))
         provider.add_span_processor(BatchSpanProcessor(exporter))
         _remember_environment(target)
+        if "LANGCHAIN_REVISION_ID" not in target:
+            target["LANGCHAIN_REVISION_ID"] = _safe_revision_id() or "unknown"
         target.update(
             {
                 "LANGSMITH_TRACING": "true",
@@ -226,6 +233,20 @@ def _load_runtime() -> tuple[Any, Any, Any, Any, Any, Any, Any]:
         BatchSpanProcessor,
         OTLPSpanExporter,
     )
+
+
+def _safe_revision_id() -> str | None:
+    """Read the Git revision without allowing the subprocess to inherit stdin."""
+    try:
+        revision = subprocess.check_output(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return revision.strip() or None
 
 
 def _teardown_runtime(

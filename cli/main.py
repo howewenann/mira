@@ -52,9 +52,26 @@ def main(
         "-t",
         help="Open a trace window that shows live MIRA diagnostics.",
     ),
+    acp: bool = typer.Option(False, "--acp", help="Run the stdio ACP server."),
 ) -> None:
     """Start MIRA unless Typer is dispatching to a subcommand."""
     if ctx.invoked_subcommand is None:
+        if acp:
+            if any((prompt, prompt_file, rubric, rubric_file, resume, session, direct, trace)):
+                raise typer.BadParameter("--acp cannot be combined with interactive or one-shot options")
+            try:
+                from protocols.acp import run_server
+
+                run_server()
+            except ModuleNotFoundError as exc:
+                if exc.name == "acp":
+                    typer.echo(
+                        "ACP support is not installed. Install MIRA with the 'acp' extra.",
+                        err=True,
+                    )
+                    raise typer.Exit(1) from exc
+                raise
+            return
         run(
             prompt=prompt,
             prompt_file=prompt_file,

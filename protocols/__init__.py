@@ -1,1 +1,1 @@
-"""External interoperability adapters; ACP is intentionally deferred to Patch 2."""
+"""External interoperability adapters for MIRA."""

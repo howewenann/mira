@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import runpy
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import mira
 import mira.api as public_api
@@ -129,7 +131,7 @@ class PublicAPITests(unittest.TestCase):
             self.assertIn("from ui.shared.adapter import RendererAdapter", owned_adapter)
             self.assertNotIn("from core.interface", owned_adapter)
 
-    def test_dependency_direction_and_future_consumer_placeholders(self) -> None:
+    def test_dependency_direction_and_protocol_consumer_boundary(self) -> None:
         offenders: list[str] = []
         for path in (ROOT / "core").rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -140,7 +142,21 @@ class PublicAPITests(unittest.TestCase):
                 if roots & {"mira", "ui", "protocols"}:
                     offenders.append(str(path.relative_to(ROOT)))
         self.assertEqual(offenders, [])
-        self.assertFalse((ROOT / "protocols" / "acp").exists())
+        acp_root = ROOT / "protocols" / "acp"
+        self.assertTrue(acp_root.is_dir())
+        prohibited: list[str] = []
+        for path in acp_root.glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                module = node.module if isinstance(node, ast.ImportFrom) else ""
+                names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else []
+                roots = {
+                    (module or "").split(".", 1)[0],
+                    *(name.split(".", 1)[0] for name in names),
+                }
+                if roots & {"core", "agent", "session", "ui"}:
+                    prohibited.append(str(path.relative_to(ROOT)))
+        self.assertEqual(prohibited, [])
         self.assertFalse((ROOT / "ui" / "qt").exists())
 
     def test_example_imports_without_starting_a_live_application(self) -> None:
@@ -151,6 +167,19 @@ class PublicAPITests(unittest.TestCase):
     def test_wheel_configuration_includes_public_package(self) -> None:
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"mira"', pyproject)
+
+    def test_application_can_distinguish_existing_explicit_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            application = CoreApplication(
+                frontend=object(),
+                workspace=root,
+                store=SimpleNamespace(path=lambda session_id: root / f"{session_id}.json"),
+            )
+            self.assertFalse(application.session_exists("known"))
+            (root / "known.json").write_text("{}", encoding="utf-8")
+            self.assertTrue(application.session_exists("known"))
+            self.assertFalse(application.session_exists(""))
 
 
 if __name__ == "__main__":

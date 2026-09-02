@@ -16,4 +16,6 @@ Core behavior or MIRA-owned user interfaces.
 
 ## Public surface
 
-Empty in Patch 1; the future ACP adapter belongs in `protocols/acp`.
+`protocols.acp` implements the stock Agent Client Protocol `Agent` interface
+over stdio. It consumes only MIRA's supported `mira` and `mira.api` facades;
+DeepAgents remains behind the application boundary.

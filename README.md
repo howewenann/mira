@@ -54,6 +54,17 @@ Use `mira --help` for startup options, including workspace and session
 selection. `--direct` bypasses proxy settings and disables TLS verification for
 the current process, so use it only with a trusted local model endpoint.
 
+To expose MIRA to an ACP-compatible editor, install the optional stock SDK
+adapter and launch its stdio server:
+
+```bash
+pip install "mira[acp]"
+mira --acp
+```
+
+The client supplies the workspace for each session. See the
+[ACP adapter guide](protocols/acp/README.md) for supported capabilities.
+
 ## Python API
 
 Run MIRA headlessly or build a frontend using the same supported API as the

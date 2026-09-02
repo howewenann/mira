@@ -380,6 +380,22 @@ class TracingTests(unittest.TestCase):
         self.assertEqual(issues, [])
         load_runtime.assert_not_called()
 
+    def test_safe_revision_lookup_detaches_git_from_stdin(self) -> None:
+        with patch.object(
+            bootstrap.subprocess,
+            "check_output",
+            return_value="v1.2.3-4-gabcdef\n",
+        ) as check_output:
+            revision = bootstrap._safe_revision_id()
+
+        self.assertEqual(revision, "v1.2.3-4-gabcdef")
+        check_output.assert_called_once_with(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+        )
+
     def test_missing_selected_profile_is_a_friendly_nonfatal_issue(self) -> None:
         issues = bootstrap.configure_tracing(
             _tracing_settings("corporate"),
@@ -609,6 +625,7 @@ class TracingTests(unittest.TestCase):
         environ = {
             "LANGSMITH_TRACING": "false",
             "LANGSMITH_TRACING_MODE": "langsmith",
+            "LANGCHAIN_REVISION_ID": "ci-revision",
             "LANGCHAIN_TRACING_V2": "1",
             "LANGSMITH_API_KEY": "secret-value",
         }
@@ -624,6 +641,7 @@ class TracingTests(unittest.TestCase):
         self.assertEqual(issues, [])
         self.assertEqual(environ["LANGSMITH_TRACING"], "true")
         self.assertEqual(environ["LANGSMITH_TRACING_MODE"], "otel")
+        self.assertEqual(environ["LANGCHAIN_REVISION_ID"], "ci-revision")
         self.assertEqual(environ["LANGCHAIN_TRACING_V2"], "1")
         self.assertIsNotNone(bootstrap._active_provider)
 
@@ -644,6 +662,41 @@ class TracingTests(unittest.TestCase):
         bootstrap.shutdown_tracing()
 
         self.assertEqual(environ, original)
+
+    def test_failed_revision_lookup_uses_nonempty_fallback_and_reload_restores_it(self) -> None:
+        environ: dict[str, str] = {}
+        failure = subprocess.CalledProcessError(128, ["git", "describe"])
+
+        with (
+            patch.object(bootstrap, "_load_runtime", return_value=_runtime()),
+            patch.object(
+                bootstrap.subprocess,
+                "check_output",
+                side_effect=[failure, "next-revision\n"],
+            ),
+        ):
+            self.assertEqual(
+                bootstrap.configure_tracing(
+                    _tracing_settings(),
+                    _registry(),
+                    environ=environ,
+                ),
+                [],
+            )
+            self.assertEqual(environ["LANGCHAIN_REVISION_ID"], "unknown")
+
+            self.assertEqual(
+                bootstrap.configure_tracing(
+                    _tracing_settings(),
+                    _registry(),
+                    environ=environ,
+                ),
+                [],
+            )
+            self.assertEqual(environ["LANGCHAIN_REVISION_ID"], "next-revision")
+
+        bootstrap.shutdown_tracing()
+        self.assertNotIn("LANGCHAIN_REVISION_ID", environ)
 
     def test_generic_profile_runtime_has_no_vendor_branching(self) -> None:
         corporate = _registry(

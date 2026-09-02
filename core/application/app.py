@@ -201,6 +201,10 @@ class MiraApplication:
         )
         return session
 
+    def session_exists(self, session_id: str) -> bool:
+        """Return whether an explicit durable session already exists."""
+        return bool(session_id) and self.store.path(session_id).is_file()
+
     async def shutdown(self, *, persist_sessions: bool = True) -> None:
         """Close sessions and shared external resources."""
         if self._closed:

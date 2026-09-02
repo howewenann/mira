@@ -5,6 +5,31 @@ why MIRA behaves a certain way, read this file first, then verify the current
 code. When code changes alter one of these decisions, update this file in the
 same change.
 
+## Stock ACP Adapter Boundary
+
+**Decision:** MIRA's optional stdio ACP integration implements the public
+`agent-client-protocol` Agent interface directly. ACP lifecycle calls terminate
+at `MiraApplication` and `MiraSession`; the adapter never treats the internal
+DeepAgents/LangGraph graph as its protocol surface.
+
+**Why:** MIRA must remain the single owner of normalized workspaces, shared
+application resources, durable sessions and transcript replay, modes,
+cancellation, permissions, MCP trust, and formal Goal/Plan state. Keeping ACP
+on the public frontend/application boundary preserves those semantics for every
+consumer.
+
+The adapter uses ordered frontend queues so streamed messages, reasoning, tool
+lifecycle updates, and formal artifacts are flushed before dependent review
+requests. Stable permission buttons provide all blocking interaction. The
+`Reply in chat`/`Revise in chat` paths raise an adapter control cancellation to
+end the current turn without resuming a graph with fabricated text. Formal
+MIRA Goals and Plans render as ordinary agent-message content after their
+finalizer tool is completed and flushed, giving clients an explicit non-message
+boundary instead of relying on optional message-id presentation. AskUser
+questions stay on their permission surface rather than becoming adjacent
+agent-message content. Only the DeepAgents `write_todos` tool maps to an ACP
+plan update.
+
 ## Project Shape
 
 **Decision:** MIRA stays small, direct, and educational.

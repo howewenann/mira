@@ -93,6 +93,9 @@ Or request a specific durable session ID:
 session = await app.open_session(session_id="existing-session-id", resume=True)
 ```
 
+Consumers that accept external session IDs can first call
+`app.session_exists(session_id)` so an unknown ID is not created implicitly.
+
 Keep the returned `MiraSession` if the frontend needs to call `snapshot()`
 while handling an `ArtifactDisplayRequest`.
 
