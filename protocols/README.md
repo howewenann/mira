@@ -17,5 +17,6 @@ Core behavior or MIRA-owned user interfaces.
 ## Public surface
 
 `protocols.acp` implements the stock Agent Client Protocol `Agent` interface
-over stdio. It consumes only MIRA's supported `mira` and `mira.api` facades;
-DeepAgents remains behind the application boundary.
+over stdio and experimental Streamable HTTP. Both transports consume only
+MIRA's supported `mira` and `mira.api` facades; DeepAgents remains behind the
+application boundary.

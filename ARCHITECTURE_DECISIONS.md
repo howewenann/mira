@@ -7,16 +7,25 @@ same change.
 
 ## Stock ACP Adapter Boundary
 
-**Decision:** MIRA's optional stdio ACP integration implements the public
-`agent-client-protocol` Agent interface directly. ACP lifecycle calls terminate
-at `MiraApplication` and `MiraSession`; the adapter never treats the internal
-DeepAgents/LangGraph graph as its protocol surface.
+**Decision:** MIRA's optional stdio and experimental Streamable HTTP ACP
+integrations implement the public `agent-client-protocol` Agent interface
+directly. ACP lifecycle calls terminate at `MiraApplication` and `MiraSession`;
+the adapter never treats the internal DeepAgents/LangGraph graph as its protocol
+surface. Stdio remains the default. HTTP is an optional localhost-only bootstrap
+over the SDK's public ASGI adapter and creates one MIRA agent per connection.
 
 **Why:** MIRA must remain the single owner of normalized workspaces, shared
 application resources, durable sessions and transcript replay, modes,
 cancellation, permissions, MCP trust, and formal Goal/Plan state. Keeping ACP
 on the public frontend/application boundary preserves those semantics for every
 consumer.
+
+The public ACP 0.12.1 HTTP API has no per-connection agent teardown callback,
+so the HTTP bootstrap owns all created agents until deterministic server
+shutdown. It does not inspect the SDK connection registry. The same SDK version
+can load and replay durable sessions on a new HTTP connection but does not make
+the loaded session routable for later session-scoped HTTP requests. MIRA exposes
+that limitation rather than adding private transport integration.
 
 The adapter uses ordered frontend queues so streamed messages, reasoning, tool
 lifecycle updates, and formal artifacts are flushed before dependent review

@@ -1,8 +1,14 @@
 """Optional Agent Client Protocol integration for MIRA."""
 
 
-def run_server() -> None:
-    """Launch MIRA's stdio ACP server without importing ACP during normal startup."""
+def run_server(*, listen: str | None = None) -> None:
+    """Launch stdio ACP, or the optional HTTP transport when requested."""
+    if listen is not None:
+        from protocols.acp.http import run_http_server as run
+
+        run(listen)
+        return
+
     from protocols.acp.server import run_server as run
 
     run()

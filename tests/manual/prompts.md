@@ -23,6 +23,17 @@ replace the ACP todo surface. Separately call `write_todos` and confirm only
 that tool updates the ACP Plan. Also verify edit diffs, failed execute output,
 HITL tool IDs, MCP approval, and Git confirmation buttons.
 
+## Experimental ACP Streamable HTTP
+
+Install `mira[acp-http]`, run
+`mira --acp --listen 127.0.0.1:8765`, and use
+`python examples/acp_client.py --http http://127.0.0.1:8765/acp "Reply only with PONG"`.
+Expected: the streamed reply is `PONG`, the server accepts only loopback binds,
+and stopping the server cleans all connection-owned MIRA resources. A repeated
+prompt supplied with `--follow-up` stays in the same live conversation. In ACP
+0.12.1, HTTP `session/load` can replay a saved transcript but cannot continue it;
+the example rejects `--http` with `--session` instead of using private SDK hooks.
+
 ## TUI Autocomplete And File References
 
 Run the interactive TUI and verify `/he`, `/help`, and `Compare @auth`. Change

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import runpy
 import sys
 import tempfile
 import unittest
@@ -631,6 +632,30 @@ class ACPWiringTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         run_server.assert_called_once_with()
 
+    def test_cli_dispatches_acp_http_for_loopback_listen(self) -> None:
+        with patch("protocols.acp.run_server") as run_server:
+            result = CliRunner().invoke(
+                cli_app,
+                ["--acp", "--listen", "127.0.0.1:8765"],
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        run_server.assert_called_once_with(listen="127.0.0.1:8765")
+
+    def test_listen_requires_acp(self) -> None:
+        result = CliRunner().invoke(cli_app, ["--listen", "127.0.0.1:8765"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--listen requires --acp", result.output)
+
+    def test_listen_rejects_malformed_and_non_loopback_addresses(self) -> None:
+        malformed = CliRunner().invoke(cli_app, ["--acp", "--listen", "localhost"])
+        exposed = CliRunner().invoke(cli_app, ["--acp", "--listen", "0.0.0.0:8765"])
+
+        self.assertNotEqual(malformed.exit_code, 0)
+        self.assertIn("HOST:PORT", malformed.output)
+        self.assertNotEqual(exposed.exit_code, 0)
+        self.assertIn("loopback", exposed.output)
+
     def test_cli_reports_missing_stock_sdk(self) -> None:
         missing = ModuleNotFoundError("No module named 'acp'")
         missing.name = "acp"
@@ -638,6 +663,17 @@ class ACPWiringTests(unittest.TestCase):
             result = CliRunner().invoke(cli_app, ["--acp"])
         self.assertEqual(result.exit_code, 1)
         self.assertIn("Install MIRA with the 'acp' extra", result.output)
+
+    def test_cli_reports_missing_http_extra(self) -> None:
+        missing = ModuleNotFoundError("No module named 'hypercorn'")
+        missing.name = "hypercorn"
+        with patch("protocols.acp.run_server", side_effect=missing):
+            result = CliRunner().invoke(
+                cli_app,
+                ["--acp", "--listen", "127.0.0.1:8765"],
+            )
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Install MIRA with the 'acp-http' extra", result.output)
 
     def test_architecture_uses_only_stock_stable_acp(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -647,6 +683,8 @@ class ACPWiringTests(unittest.TestCase):
             for path in (root / "protocols" / "acp").glob("*.py")
         )
         self.assertIn('"agent-client-protocol==0.12.1"', project)
+        self.assertIn('"agent-client-protocol[http]==0.12.1"', project)
+        self.assertIn('"hypercorn>=0.17"', project)
         self.assertNotIn("deepagents-acp", project.lower())
         self.assertNotIn("deepagents_acp", sources)
         self.assertNotIn("AgentServerACP", sources)
@@ -658,6 +696,22 @@ class ACPWiringTests(unittest.TestCase):
         )
         self.assertNotIn("acp.http", stdio_source)
         self.assertNotIn("hypercorn", stdio_source)
+        http_source = (root / "protocols" / "acp" / "http.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("create_asgi_app", http_source)
+        self.assertNotIn("numpy", http_source)
+
+    def test_example_imports_without_http_dependencies_or_starting_mira(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        namespace = runpy.run_path(
+            str(root / "examples" / "acp_client.py"),
+            run_name="acp_client_example",
+        )
+
+        self.assertTrue(callable(namespace["main"]))
+        self.assertTrue(callable(namespace["run_stdio"]))
+        self.assertTrue(callable(namespace["run_http"]))
 
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
