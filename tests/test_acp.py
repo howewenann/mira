@@ -702,16 +702,26 @@ class ACPWiringTests(unittest.TestCase):
         self.assertIn("create_asgi_app", http_source)
         self.assertNotIn("numpy", http_source)
 
-    def test_example_imports_without_http_dependencies_or_starting_mira(self) -> None:
+    def test_examples_import_without_starting_mira(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        namespace = runpy.run_path(
+        combined = runpy.run_path(
             str(root / "examples" / "acp_client.py"),
             run_name="acp_client_example",
         )
+        stdio = runpy.run_path(
+            str(root / "examples" / "acp_stdio_client.py"),
+            run_name="acp_stdio_client_example",
+        )
+        http = runpy.run_path(
+            str(root / "examples" / "acp_http_client.py"),
+            run_name="acp_http_client_example",
+        )
 
-        self.assertTrue(callable(namespace["main"]))
-        self.assertTrue(callable(namespace["run_stdio"]))
-        self.assertTrue(callable(namespace["run_http"]))
+        self.assertTrue(callable(combined["main"]))
+        self.assertTrue(callable(combined["run_stdio"]))
+        self.assertTrue(callable(combined["run_http"]))
+        self.assertTrue(callable(stdio["main"]))
+        self.assertTrue(callable(http["main"]))
 
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):

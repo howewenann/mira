@@ -47,17 +47,18 @@ MIRA does not use private transport hooks to bypass this limitation. New HTTP
 sessions and repeated prompts on the same live connection are supported; stdio
 continues to support full durable load-and-continue behavior.
 
-See `examples/acp_client.py` for a small stock-SDK client. It denies permission
-requests by default instead of auto-approving tool use:
+The bare-minimum stock-SDK examples send one prompt and deny permission requests
+instead of auto-approving tool use:
 
 ```text
-python examples/acp_client.py --stdio "Reply only with PONG"
-python examples/acp_client.py --http http://127.0.0.1:8765/acp "Reply only with PONG"
+python examples/acp_stdio_client.py
+python examples/acp_http_client.py
 ```
 
-Use `--follow-up "..."` to continue the same live conversation. `--session`
-loads a saved session over stdio; it is deliberately rejected with HTTP while
-the ACP 0.12.1 limitation above remains.
+Start `mira --acp --listen 127.0.0.1:8765` before running the HTTP example. For
+custom prompts, follow-up turns, and durable stdio session loading, use
+`examples/acp_client.py`. Its `--session` option is deliberately rejected with
+HTTP while the ACP 0.12.1 limitation above remains.
 
 ## Shared behavior
 
