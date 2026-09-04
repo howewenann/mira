@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from acp import schema, spawn_agent_process, text_block
+from acp import (
+    PROTOCOL_VERSION,
+    resource_link_block,
+    schema,
+    spawn_agent_process,
+    text_block,
+)
 from acp.exceptions import RequestError
 from typer.testing import CliRunner
 
@@ -164,12 +171,20 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
         await self.server.frontend.shutdown()
 
     async def test_implements_stock_agent_without_foreign_server_inheritance(self) -> None:
-        response = await self.server.initialize(1, schema.ClientCapabilities())
+        response = await self.server.initialize(
+            PROTOCOL_VERSION,
+            schema.ClientCapabilities(),
+        )
         self.assertEqual(MiraAgent.__bases__, (object,))
         self.assertTrue(response.agent_capabilities.load_session)
         self.assertFalse(response.agent_capabilities.prompt_capabilities.image)
         self.assertFalse(response.agent_capabilities.prompt_capabilities.audio)
         self.assertEqual(response.agent_info.name, "mira")
+
+    async def test_initialize_reports_the_supported_protocol_version(self) -> None:
+        response = await self.server.initialize(999, schema.ClientCapabilities())
+
+        self.assertEqual(response.protocol_version, PROTOCOL_VERSION)
 
     async def test_normalized_workspace_reuses_one_application_concurrently(self) -> None:
         applications: list[FakeApplication] = []
@@ -294,6 +309,13 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
                 await self.server.new_session(directory, mcp_servers=[object()])
         with self.assertRaises(RequestError):
             await self.server.prompt("missing", [])
+        with self.assertRaises(RequestError) as raised:
+            await self.server.prompt(
+                "missing",
+                [resource_link_block("file:///not-text", "not text")],
+            )
+        self.assertEqual(raised.exception.code, -32602)
+        self.assertIn("text content only", str(raised.exception.data))
 
     async def test_reply_in_chat_ends_turn_without_becoming_model_input(self) -> None:
         application = SimpleNamespace(frontend=self.server.frontend)
@@ -631,6 +653,11 @@ class ACPWiringTests(unittest.TestCase):
         self.assertNotIn("create_elicitation", sources)
         self.assertNotIn("use_unstable_protocol", sources)
         self.assertIn("await run_agent(server)", sources)
+        stdio_source = (root / "protocols" / "acp" / "server.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("acp.http", stdio_source)
+        self.assertNotIn("hypercorn", stdio_source)
 
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
@@ -688,6 +715,39 @@ class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ACPStdioSmokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stdout_contains_only_json_rpc_frames(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "cli.main",
+            "--acp",
+            cwd=root,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        request = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "clientCapabilities": {},
+            },
+        }
+        stdout, _stderr = await asyncio.wait_for(
+            process.communicate((json.dumps(request) + "\n").encode()),
+            timeout=30,
+        )
+
+        lines = stdout.decode().splitlines()
+        self.assertEqual(len(lines), 1, stdout.decode(errors="replace"))
+        response = json.loads(lines[0])
+        self.assertEqual(response["jsonrpc"], "2.0")
+        self.assertEqual(response["id"], 0)
+        self.assertEqual(response["result"]["protocolVersion"], PROTOCOL_VERSION)
+
     async def test_stock_client_initializes_real_stdio_runner_and_creates_session(self) -> None:
         client = SimpleNamespace(on_connect=lambda connection: None)
         root = Path(__file__).resolve().parents[1]
@@ -701,7 +761,10 @@ class ACPStdioSmokeTests(unittest.IsolatedAsyncioTestCase):
                 cwd=root,
             ) as (connection, _process):
                 initialized = await asyncio.wait_for(
-                    connection.initialize(1, schema.ClientCapabilities()),
+                    connection.initialize(
+                        PROTOCOL_VERSION,
+                        schema.ClientCapabilities(),
+                    ),
                     timeout=30,
                 )
                 created = await asyncio.wait_for(
@@ -709,7 +772,7 @@ class ACPStdioSmokeTests(unittest.IsolatedAsyncioTestCase):
                     timeout=30,
                 )
 
-        self.assertEqual(initialized.protocol_version, 1)
+        self.assertEqual(initialized.protocol_version, PROTOCOL_VERSION)
         self.assertTrue(initialized.agent_capabilities.load_session)
         self.assertTrue(created.session_id)
         self.assertEqual(created.modes.current_mode_id, "act")

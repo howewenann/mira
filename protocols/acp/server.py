@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from acp import run_agent
+from acp import PROTOCOL_VERSION, run_agent
 from acp.exceptions import RequestError
 from acp.schema import (
     AgentCapabilities,
@@ -63,9 +63,9 @@ class MiraAgent:
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        del client_capabilities, client_info, kwargs
+        del protocol_version, client_capabilities, client_info, kwargs
         return InitializeResponse(
-            protocol_version=protocol_version,
+            protocol_version=PROTOCOL_VERSION,
             agent_capabilities=AgentCapabilities(
                 load_session=True,
                 prompt_capabilities=PromptCapabilities(),
