@@ -8,6 +8,7 @@ import json
 import runpy
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -211,6 +212,18 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(applications), 1)
         self.assertEqual(applications[0].sessions[first.session_id].prompts, ["one"])
         self.assertEqual(applications[0].sessions[second.session_id].prompts, ["two"])
+
+    async def test_new_session_uses_mira_session_id_convention(self) -> None:
+        expected = "20260831-012003+0800-44e7b629"
+
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "protocols.acp.shared.agent.MiraApplication.new_session_id",
+            return_value=expected,
+        ) as generate_session_id:
+            response = await self.server.new_session(directory)
+
+        self.assertEqual(response.session_id, expected)
+        generate_session_id.assert_called_once_with()
 
     async def test_different_workspaces_stay_isolated(self) -> None:
         applications: list[FakeApplication] = []
@@ -627,6 +640,13 @@ class ACPFrontendTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ACPWiringTests(unittest.TestCase):
+    def test_all_extra_combines_http_acp_and_tracing(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        extras = project["project"]["optional-dependencies"]
+
+        self.assertEqual(extras["all"], [*extras["acp-http"], *extras["tracing"]])
+
     def test_cli_dispatches_acp_lazily(self) -> None:
         with patch("protocols.acp.run_server") as run_server:
             result = CliRunner().invoke(cli_app, ["--acp"])

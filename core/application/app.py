@@ -180,6 +180,13 @@ class MiraApplication:
             agent_unavailable_message=model_unavailable_message(config) if blocking else "",
         )
 
+    @staticmethod
+    def new_session_id() -> str:
+        """Return an ID using MIRA's durable session naming convention."""
+        from session.store import new_session_id
+
+        return new_session_id()
+
     async def open_session(self, session_id: str | None = None, resume: bool = False) -> MiraSession:
         """Load one MIRA session; its ID remains distinct from graph thread IDs."""
         from core.application.session import MiraSession

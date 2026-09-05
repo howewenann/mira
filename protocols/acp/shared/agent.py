@@ -6,7 +6,6 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from acp import PROTOCOL_VERSION
 from acp.exceptions import RequestError
@@ -81,7 +80,7 @@ class MiraAgent:
     ) -> NewSessionResponse:
         del kwargs
         self._reject_external_configuration(additional_directories, mcp_servers)
-        session_id = uuid4().hex
+        session_id = MiraApplication.new_session_id()
         self._initialize_session(session_id, self._workspace(cwd), "act")
         return NewSessionResponse(
             session_id=session_id,
