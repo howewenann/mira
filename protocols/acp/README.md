@@ -8,21 +8,31 @@ MIRA's public Python API instead.
 Install the lightweight extra and start MIRA as a stdio ACP agent:
 
 ```text
-conda run -n mira --no-capture-output python -m pip install "mira[acp]"
-conda run -n mira --no-capture-output mira --acp
+pip install "mira[acp]"
+mira --acp
 ```
 
 The client owns and spawns the MIRA child process. This is the normal choice
 for editors, CODA, and other local ACP hosts; stdio is not an attachment point
 for an already-running server.
 
+If a client cannot activate the environment and must launch MIRA through
+Conda, configure its stdio command as:
+
+```text
+conda run -n mira --no-capture-output mira --acp
+```
+
+`--no-capture-output` is essential only in this case because stdout is the live
+ACP JSON-RPC stream.
+
 ## Experimental Streamable HTTP
 
 Install the HTTP extra and start a persistent local process:
 
 ```text
-conda run -n mira --no-capture-output python -m pip install "mira[acp-http]"
-conda run -n mira --no-capture-output mira --acp --listen 127.0.0.1:8765
+pip install "mira[acp-http]"
+mira --acp --listen 127.0.0.1:8765
 ```
 
 Clients connect to `http://127.0.0.1:8765/acp`. HTTP uses the stock SDK's
@@ -51,8 +61,8 @@ The minimal stock-SDK examples send one prompt and deny permission requests
 instead of auto-approving tool use:
 
 ```text
-conda run -n mira --no-capture-output python examples/acp/stdio/minimal_client.py
-conda run -n mira --no-capture-output python examples/acp/http/minimal_client.py
+python examples/acp/stdio/minimal_client.py
+python examples/acp/http/minimal_client.py
 ```
 
 Start `mira --acp --listen 127.0.0.1:8765` before running an HTTP example. Full

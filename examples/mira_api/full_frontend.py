@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
-import sys
 from typing import Any
 
 from mira import MiraApplication, MiraSession
@@ -162,7 +162,10 @@ class FullFrontend:
 
 
 async def main() -> None:
-    # Application lifecycle -------------------------------------------------
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("prompt", nargs="?", help="Send one prompt and exit.")
+    arguments = parser.parse_args()
+
     frontend = FullFrontend()
 
     # The application owns resources shared by every session in this workspace.
@@ -173,10 +176,23 @@ async def main() -> None:
         session = await application.open_session()
         frontend.session = session
 
-        # A command-line argument makes the example convenient to adapt while
-        # keeping the public prompt lifecycle visible here.
-        prompt = " ".join(sys.argv[1:]).strip() or "Summarize this project."
-        await session.prompt(prompt)
+        if arguments.prompt is not None:
+            await session.prompt(arguments.prompt)
+        else:
+            # Reuse the same durable MiraSession for each message. Responses
+            # continue to arrive through FullFrontend.emit() and request().
+            print("Connected to MIRA's in-process Python API.")
+            print("Type /quit to stop.")
+            while True:
+                try:
+                    prompt = await asyncio.to_thread(input, "\n> ")
+                except (EOFError, KeyboardInterrupt):
+                    break
+                prompt = prompt.strip()
+                if prompt == "/quit":
+                    break
+                if prompt:
+                    await session.prompt(prompt)
     finally:
         # Application shutdown closes sessions and releases MCP/runtime resources.
         await application.shutdown()

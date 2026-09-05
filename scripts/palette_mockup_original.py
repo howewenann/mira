@@ -1,7 +1,7 @@
 r"""Textual mockup of MIRA's current lifecycle and MCP palette.
 
 Run from the repository root with:
-    conda run --no-capture-output -n mira python scripts\palette_mockup_original.py
+    python scripts\palette_mockup_original.py
 
 The production status bar uses inline Rich styles for its semantic spans.  This
 preview splits those spans into small widgets so the comparison variant can

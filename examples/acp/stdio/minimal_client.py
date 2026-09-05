@@ -7,7 +7,14 @@ from typing import Any
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.interfaces import Client
-from acp.schema import PermissionOption, ToolCallUpdate
+from acp.schema import (
+    AgentMessageChunk,
+    DeniedOutcome,
+    PermissionOption,
+    RequestPermissionResponse,
+    TextContentBlock,
+    ToolCallUpdate,
+)
 
 
 class MinimalClient(Client):
@@ -19,10 +26,10 @@ class MinimalClient(Client):
         # MIRA streams assistant text, thoughts, and tool updates through this
         # callback. The minimal client displays text content only.
         del session_id, kwargs
-        content = getattr(update, "content", None)
-        text = getattr(content, "text", None)
-        if text:
-            print(text, end="", flush=True)
+        if isinstance(update, AgentMessageChunk) and isinstance(
+            update.content, TextContentBlock
+        ):
+            print(update.content.text, end="", flush=True)
 
     async def request_permission(
         self,
@@ -30,11 +37,11 @@ class MinimalClient(Client):
         tool_call: ToolCallUpdate,
         options: list[PermissionOption],
         **kwargs: Any,
-    ) -> Any:
+    ) -> RequestPermissionResponse:
         # MIRA may pause for human approval. This minimal example has no
         # interaction UI, so it always cancels. See full_client.py for choices.
         del session_id, tool_call, options, kwargs
-        return {"outcome": {"outcome": "cancelled"}}
+        return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
 async def main() -> None:

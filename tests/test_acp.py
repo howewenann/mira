@@ -729,7 +729,7 @@ class ACPWiringTests(unittest.TestCase):
         for name, path in paths.items():
             namespace = runpy.run_path(str(path), run_name=f"{name}_example")
             self.assertTrue(callable(namespace["main"]))
-            expected_client = "MinimalClient" if "minimal" in name else "FullClient"
+            expected_client = "MinimalClient" if "minimal" in name else "MiraClient"
             self.assertIn(expected_client, namespace)
             if name.startswith("stdio"):
                 self.assertNotIn("acp.http", path.read_text(encoding="utf-8"))
@@ -737,10 +737,7 @@ class ACPWiringTests(unittest.TestCase):
         # ACP clients are external consumers. Keep their entire shared layer on
         # the stock public ACP SDK rather than MIRA modules or implementation
         # packages that another ACP agent would not provide.
-        client_paths = [
-            *paths.values(),
-            root / "examples" / "acp" / "client_common.py",
-        ]
+        client_paths = list(paths.values())
         prohibited_roots = {"mira", "core", "agent", "session", "protocols"}
         for path in client_paths:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -757,6 +754,10 @@ class ACPWiringTests(unittest.TestCase):
         self.assertFalse((root / "examples" / "acp_client.py").exists())
         self.assertFalse((root / "examples" / "acp_stdio_client.py").exists())
         self.assertFalse((root / "examples" / "acp_http_client.py").exists())
+        self.assertFalse((root / "examples" / "acp" / "client_common.py").exists())
+        self.assertFalse((root / "examples" / "acp" / "TESTING.md").exists())
+        for path in paths.values():
+            self.assertNotIn("client_common", path.read_text(encoding="utf-8"))
 
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):

@@ -16,14 +16,34 @@
 - Avoid MIRA-managed workarounds unless a real library/runtime edge case is
   confirmed. Keep any fallback narrow, documented by tests, and out of the
   normal path.
-- Treat code under `examples/` as developer-facing teaching documentation, not
-  code golf. Prefer readable names, explicit public lifecycle steps, obvious
-  control flow, and comments that explain ownership, callbacks, and non-obvious
-  behavior without narrating Python syntax. Keep important public API calls
-  visible instead of hiding the lifecycle behind convenience wrappers. Minimal
-  examples should teach the smallest understandable lifecycle; full and related
-  examples should remain easy to follow and structurally parallel where
-  practical.
+
+## Example Code
+
+- Code under `examples/` is developer-facing teaching documentation. Optimize
+  for a junior developer reading one file from top to bottom, not for DRYness or
+  architectural cleverness.
+- Keep important public lifecycle calls visible in the file that teaches them.
+  Do not hide the main lifecycle behind shared wrappers, helper frameworks,
+  generic base classes, factories, renderer systems, transport abstractions,
+  decorators, or dispatch frameworks created only to reduce duplication.
+- An executable example should normally be understandable without opening
+  another Python file. Prefer small amounts of duplication when that makes each
+  example independently understandable.
+- Minimal examples teach the smallest complete useful lifecycle. Full examples
+  may add realistic interaction, but remain linear, explicit, and easy to trace.
+  Extract only genuinely incidental code when doing so reduces cognitive load.
+- Prefer ordinary Python, descriptive names, explicit branches, and concrete
+  public types. Comments explain concepts, ownership, callbacks, lifecycle, and
+  non-obvious protocol behavior without narrating trivial Python syntax.
+- Example READMEs teach setup, purpose, limitations, and learning order; they
+  are not specifications or test matrices. Put manual verification procedures
+  under `tests/manual/` and automated protocol coverage in tests.
+- User-facing example commands assume an activated Python environment and use
+  `python ...` or `mira ...`. Contributor verification uses
+  `conda run -n mira ...`. Only an ACP stdio host that launches MIRA through
+  Conda needs
+  `conda run -n mira --no-capture-output mira --acp`, because stdout carries the
+  live JSON-RPC protocol stream.
 
 ## Environment
 

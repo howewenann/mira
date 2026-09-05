@@ -7,6 +7,7 @@ import socket
 import tempfile
 import unittest
 import warnings
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,7 @@ from acp import (
 )
 from acp.exceptions import RequestError
 from acp.http import create_http_stream
+from rich.console import Console
 
 from config.branding import VERSION, blocky_wordmark
 from mira.api import (
@@ -29,8 +31,8 @@ from mira.api import (
     MessageEvent,
     ToolEvent,
 )
-from protocols.acp.http.server import MiraAgentFactory, serve_http
-from protocols.acp.http.splash import http_splash_text
+from protocols.acp.http.server import MiraAgentFactory, _server_config, serve_http
+from protocols.acp.http.splash import http_splash
 
 
 class RecordingClient:
@@ -225,21 +227,49 @@ async def connect(url: str, client: RecordingClient) -> tuple[object, object]:
 
 
 class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
-    def test_http_splash_reuses_branding_and_server_only_fields(self) -> None:
-        plain = http_splash_text("127.0.0.1:9000").plain
+    def test_http_splash_is_centered_bounded_and_server_only(self) -> None:
+        output = StringIO()
+        console = Console(file=output, width=120, force_terminal=False)
+        console.print(http_splash("127.0.0.1:9000", terminal_width=console.width))
+        rendered = output.getvalue()
 
-        self.assertIn(blocky_wordmark(), plain)
-        self.assertIn(VERSION, plain)
-        self.assertIn("ACP Streamable HTTP", plain)
-        self.assertIn("http://127.0.0.1:9000/acp", plain)
-        self.assertIn("loopback only", plain)
-        self.assertIn("status    ready", plain)
-        self.assertIn("Ctrl+C to stop", plain)
-        self.assertNotIn("session", plain.lower())
-        self.assertNotIn("model", plain.lower())
-        self.assertNotIn("workspace", plain.lower())
-        self.assertNotIn("/help", plain)
-        self.assertNotIn("Alt+Q", plain)
+        for logo_line in blocky_wordmark().splitlines():
+            self.assertIn(logo_line.strip(), rendered)
+        self.assertIn(VERSION, rendered)
+        self.assertIn("ACP Streamable HTTP", rendered)
+        self.assertIn("http://127.0.0.1:9000/acp", rendered)
+        self.assertIn("loopback only", rendered)
+        self.assertIn("ready", rendered)
+        self.assertIn("Ctrl+C to stop", rendered)
+        self.assertNotIn("session", rendered.lower())
+        self.assertNotIn("model", rendered.lower())
+        self.assertNotIn("workspace", rendered.lower())
+        self.assertNotIn("/help", rendered)
+        self.assertNotIn("Alt+Q", rendered)
+
+        border = next(
+            line for line in rendered.splitlines() if "┌" in line or "╭" in line
+        )
+        self.assertTrue(border.startswith(" " * 20))
+        self.assertLessEqual(len(border), 120)
+
+    def test_http_splash_handles_a_narrow_terminal(self) -> None:
+        output = StringIO()
+        console = Console(file=output, width=32, force_terminal=False)
+
+        console.print(http_splash("127.0.0.1:9000", terminal_width=console.width))
+
+        rendered = output.getvalue()
+        self.assertIn("transport", rendered)
+        self.assertIn("Streamable", rendered)
+        self.assertIn("ready", rendered)
+        self.assertTrue(all(len(line) <= 32 for line in rendered.splitlines()))
+
+    def test_http_config_suppresses_startup_info_but_keeps_errors(self) -> None:
+        config = _server_config("127.0.0.1:9000")
+
+        self.assertEqual(config.loglevel, "WARNING")
+        self.assertEqual(config.errorlog, "-")
 
     async def test_occupied_port_does_not_print_a_false_ready_splash(self) -> None:
         with socket.socket() as listener:

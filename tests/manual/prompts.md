@@ -4,11 +4,12 @@ Use these prompts for manual smoke testing while developing MIRA.
 
 ## Stock ACP stdio integration
 
-Install `mira[acp]` and configure an ACP client to launch `mira --acp` with a
-disposable workspace. Initialize the connection, create a session, send a text
-prompt, switch between ACT and PLAN, reload the returned MIRA session ID, and
-cancel an active turn. Expected: the same workspace reuses MIRA resources,
-reloading replays MIRA's transcript, and cancellation affects only its session.
+Install `mira[acp]` and run
+`python examples/acp/stdio/full_client.py --workspace <workspace>`. Send a text
+prompt, use `/mode plan` and `/mode act`, note the ID from `/session`, restart,
+and use `/load <session-id>`. Try `/cancel-after 2 <prompt>` on a long turn.
+Expected: loading replays MIRA's transcript and continues the same durable
+session; cancellation affects only that session.
 
 Trigger `ask_user` with two concrete suggestions. Expected: the question is
 visible before buttons for both suggestions and `Reply in chat`. A suggestion
@@ -32,7 +33,8 @@ Expected: the streamed reply is `PONG`, the server accepts only loopback binds,
 and stopping the server cleans all connection-owned MIRA resources. A repeated
 prompt supplied with `--follow-up` stays in the same live conversation. In ACP
 0.12.1, HTTP `session/load` can replay a saved transcript but cannot continue it;
-the example rejects `--http` with `--session` instead of using private SDK hooks.
+the full HTTP example therefore explains that `/load` is disabled instead of
+using private SDK hooks.
 
 ## TUI Autocomplete And File References
 
@@ -330,7 +332,7 @@ Initialize the workspace and launch the current checkout:
 
 ```powershell
 git init .tmp_tool_results_manual
-conda run --no-capture-output -n mira python -m cli.main --workspace .tmp_tool_results_manual
+conda run -n mira python -m cli.main --workspace .tmp_tool_results_manual
 ```
 
 ### Parallel completion and original-block updates
@@ -366,7 +368,7 @@ blocking discovery of later calls.
 Run the same two-call prompt in one-shot mode:
 
 ```powershell
-conda run --no-capture-output -n mira python -m cli.main --workspace .tmp_tool_results_manual -p "Call timing_result twice in parallel. Start slow with delay_seconds 4, then fast with delay_seconds 0.2. Wait for both and report their completion order."
+conda run -n mira python -m cli.main --workspace .tmp_tool_results_manual -p "Call timing_result twice in parallel. Start slow with delay_seconds 4, then fast with delay_seconds 0.2. Wait for both and report their completion order."
 ```
 
 Expected:
@@ -889,7 +891,7 @@ Use a disposable workspace and retain its session file for replay checks.
 Run the current checkout from a disposable Git workspace with:
 
 ```powershell
-conda run --no-capture-output -n mira python -m cli.main --workspace <workspace>
+conda run -n mira python -m cli.main --workspace <workspace>
 ```
 
 Repeat the checks in each terminal host with both `cmd.exe` and Windows
@@ -952,7 +954,7 @@ and Ctrl+C with no selection does not change the prompt, cancel work, or quit.
 Run every scenario from a disposable Git workspace with the current checkout:
 
 ```powershell
-conda run --no-capture-output -n mira python -m cli.main --workspace <workspace>
+conda run -n mira python -m cli.main --workspace <workspace>
 ```
 
 ### Toast behavior

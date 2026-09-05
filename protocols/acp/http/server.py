@@ -47,13 +47,10 @@ async def serve_http(
     listen = validate_listen(listen)
     from acp.http.asgi import create_asgi_app
     from hypercorn.asyncio import serve
-    from hypercorn.config import Config
 
     factory = agent_factory or MiraAgentFactory()
     app = create_asgi_app(factory)
-    config = Config()
-    config.bind = [listen]
-    config.alpn_protocols = ["h2", "http/1.1"]
+    config = _server_config(listen)
     server_task = asyncio.create_task(
         serve(app, config, shutdown_trigger=shutdown_trigger)
     )
@@ -93,6 +90,19 @@ async def _wait_for_listener(listen: str, server_task: asyncio.Task[None]) -> No
 
     await server_task
     raise RuntimeError("ACP HTTP server stopped before its listener became ready")
+
+
+def _server_config(listen: str) -> Any:
+    """Build Hypercorn configuration through its public configuration API."""
+    from hypercorn.config import Config
+
+    config = Config()
+    config.bind = [listen]
+    config.alpn_protocols = ["h2", "http/1.1"]
+    # The MIRA ready panel reports the endpoint. Keep Hypercorn warnings and
+    # errors while suppressing only its redundant normal startup INFO line.
+    config.loglevel = "WARNING"
+    return config
 
 
 def run_http_server(listen: str) -> None:

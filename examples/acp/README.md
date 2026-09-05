@@ -1,45 +1,32 @@
 # ACP client examples
 
-ACP clients are the frontend side of an ACP connection. The stdio and HTTP
-examples use only public APIs from the stock `agent-client-protocol` SDK.
+These clients use only the public `agent-client-protocol` SDK. Install
+`mira[acp]` for stdio or `mira[acp-http]` for Streamable HTTP.
 
-## Stdio
-
-Install `mira[acp]`. The client launches `python -m cli.main --acp` as its child
-process, so no MIRA server is started separately.
+## Stdio: the client starts MIRA
 
 ```text
-conda run -n mira --no-capture-output python examples/acp/stdio/minimal_client.py
-conda run -n mira --no-capture-output python examples/acp/stdio/full_client.py
-conda run -n mira --no-capture-output python examples/acp/stdio/full_client.py "Summarize this project"
+python examples/acp/stdio/minimal_client.py
+python examples/acp/stdio/full_client.py
 ```
 
-The minimal client sends one fixed prompt and denies permission requests. The
-full client is MIRA's canonical ACP stdio reference console. Without a prompt it
-starts an interactive REPL; with a prompt it remains useful for scripted tests.
-It accepts `--follow-up`, `--workspace`, and `--session`, shows generic ACP
-permission choices, and denies them when no valid choice is made.
+The minimal example sends one prompt and denies permissions. The full example
+adds multiple prompts, permission choices, ACT/PLAN modes, cancellation, raw
+updates, and durable `/load <session-id>` continuation.
 
-## Experimental Streamable HTTP
+## HTTP: the client connects to MIRA
 
-Install `mira[acp-http]` and start the loopback-only MIRA server first:
+Start the loopback-only server, then run a client in another terminal:
 
 ```text
-conda run -n mira --no-capture-output mira --acp --listen 127.0.0.1:8765
-conda run -n mira --no-capture-output python examples/acp/http/minimal_client.py
-conda run -n mira --no-capture-output python examples/acp/http/full_client.py
-conda run -n mira --no-capture-output python examples/acp/http/full_client.py "Summarize this project"
+mira --acp --listen 127.0.0.1:8765
+python examples/acp/http/minimal_client.py
+python examples/acp/http/full_client.py
 ```
 
-The full HTTP client provides the same reference-console presentation and
-commands where the protocol permits them. It accepts `--url`, `--workspace`,
-and `--follow-up`. ACP 0.12.1 cannot continue a loaded session on a new HTTP
-connection, so `/load` is deliberately disabled and explains the replay-only
-limitation.
+The HTTP full client resembles the stdio version, but it does not own the MIRA
+process. ACP 0.12.1 HTTP session loading is replay-only and cannot continue on
+the new connection, so this example deliberately disables `/load`. Live
+multi-turn prompts on one HTTP connection are supported.
 
-Both full clients support `/help`, `/new`, `/session`, `/mode act`, `/mode plan`,
-`/raw on`, `/raw off`, `/cancel-after`, and `/quit`. The stdio client also
-supports `/load <session-id>` for durable replay and continuation.
-
-Use [`TESTING.md`](TESTING.md) for practical prompts, expected ACP-visible
-updates, and the exact MIRA-to-ACP coverage boundary.
+In either full client, use `/help` to see its small set of local commands.

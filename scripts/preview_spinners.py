@@ -47,9 +47,8 @@ def main() -> int:
     if not sys.stdout.isatty():
         print(
             "This preview needs direct terminal output.\n"
-            "Run `python scripts\\preview_spinners.py` from the activated environment,\n"
-            "or use `conda run --no-capture-output -n mira python "
-            "scripts\\preview_spinners.py`."
+            "Run `python scripts\\preview_spinners.py` directly from the activated "
+            "environment."
         )
         return 2
 

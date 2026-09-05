@@ -1,24 +1,15 @@
-# MIRA Python API frontend examples
+# MIRA Python API examples
 
-These examples embed MIRA directly through the supported `mira` and `mira.api`
-packages. They do not use ACP.
-
-## Minimal frontend
-
-[`minimal_frontend.py`](minimal_frontend.py) implements the two-method frontend
-contract, prints assistant text, rejects unsupported blocking interactions, and
-sends one fixed prompt:
+Use these examples when MIRA should run inside your Python process. Install
+MIRA, then start with the minimal lifecycle:
 
 ```text
-conda run -n mira --no-capture-output python examples/mira_api/minimal_frontend.py
+python examples/mira_api/minimal_frontend.py
+python examples/mira_api/full_frontend.py
 ```
 
-## Full frontend
+`minimal_frontend.py` shows the frontend callbacks, application ownership,
+session creation, one prompt, and cleanup. `full_frontend.py` adds streamed
+events, approvals, AskUser, Goal/Plan review, MCP approval, and a prompt loop.
 
-[`full_frontend.py`](full_frontend.py) is a conservative interactive terminal
-frontend. It renders streamed events and handles approvals, AskUser prompts,
-Goal/Plan reviews and display, MCP approval, and application confirmations:
-
-```text
-conda run -n mira --no-capture-output python examples/mira_api/full_frontend.py "Summarize this project"
-```
+For an external protocol client instead, use the ACP examples.
