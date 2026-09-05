@@ -1,15 +1,14 @@
-"""Stock agent-client-protocol adapter for MIRA's public application API."""
+"""Shared ACP agent behavior over MIRA's public application API."""
 
 from __future__ import annotations
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from acp import PROTOCOL_VERSION, run_agent
+from acp import PROTOCOL_VERSION
 from acp.exceptions import RequestError
 from acp.schema import (
     AgentCapabilities,
@@ -31,7 +30,7 @@ from acp.schema import (
 
 from config.version import __version__
 from mira import MiraApplication, MiraSession
-from protocols.acp.frontend import ACPFrontend, InteractionCancelled, ReplyInChat
+from protocols.acp.shared.frontend import ACPFrontend, InteractionCancelled, ReplyInChat
 
 
 MIRA_MODE_OPTIONS = [
@@ -273,23 +272,4 @@ class MiraAgent:
         if unsupported:
             raise RequestError.invalid_params(unsupported)
 
-
-async def serve() -> None:
-    server = MiraAgent()
-    if sys.platform == "win32":
-        # Finish optional native initialization before ACP starts its stdin reader.
-        try:
-            import numpy  # noqa: F401
-        except ImportError:
-            pass
-    try:
-        await run_agent(server)
-    finally:
-        await server.shutdown()
-
-
-def run_server() -> None:
-    asyncio.run(serve())
-
-
-__all__ = ["MiraAgent", "run_server", "serve"]
+__all__ = ["MiraAgent"]

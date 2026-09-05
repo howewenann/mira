@@ -145,7 +145,7 @@ class PublicAPITests(unittest.TestCase):
         acp_root = ROOT / "protocols" / "acp"
         self.assertTrue(acp_root.is_dir())
         prohibited: list[str] = []
-        for path in acp_root.glob("*.py"):
+        for path in acp_root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else ""
@@ -160,9 +160,25 @@ class PublicAPITests(unittest.TestCase):
         self.assertFalse((ROOT / "ui" / "qt").exists())
 
     def test_example_imports_without_starting_a_live_application(self) -> None:
-        namespace = runpy.run_path(str(ROOT / "examples" / "frontend.py"), run_name="frontend_example")
-        self.assertIn("ExampleFrontend", namespace)
-        self.assertTrue(callable(namespace["main"]))
+        examples = {
+            "minimal": ROOT / "examples" / "mira_api" / "minimal_frontend.py",
+            "full": ROOT / "examples" / "mira_api" / "full_frontend.py",
+        }
+        for name, path in examples.items():
+            namespace = runpy.run_path(
+                str(path),
+                run_name=f"{name}_frontend_example",
+            )
+            self.assertTrue(callable(namespace["main"]))
+            expected_frontend = (
+                "MinimalFrontend" if name == "minimal" else "FullFrontend"
+            )
+            self.assertIn(expected_frontend, namespace)
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn("from acp", source)
+            self.assertNotIn("import acp", source)
+
+        self.assertFalse((ROOT / "examples" / "frontend.py").exists())
 
     def test_wheel_configuration_includes_public_package(self) -> None:
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

@@ -67,7 +67,7 @@ def main(
             if any((prompt, prompt_file, rubric, rubric_file, resume, session, direct, trace)):
                 raise typer.BadParameter("--acp cannot be combined with interactive or one-shot options")
             if listen is not None:
-                from protocols.acp.listen import validate_listen
+                from protocols.acp.http.listen import validate_listen
 
                 try:
                     listen = validate_listen(listen)

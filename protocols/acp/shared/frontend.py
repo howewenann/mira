@@ -1,4 +1,4 @@
-"""ACP frontend consuming MIRA's supported public application contract."""
+"""Shared ACP frontend consuming MIRA's public application contract."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from mira.api import (
     MessageEvent,
     ToolEvent,
 )
-from protocols.acp.mapping import (
+from protocols.acp.shared.mapping import (
     artifact_ready,
     artifact_text,
     conversational_message_updates,

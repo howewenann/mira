@@ -1,4 +1,4 @@
-"""Small presentation translations from MIRA events to stock ACP updates."""
+"""Shared presentation translations from MIRA events to stock ACP updates."""
 
 from __future__ import annotations
 

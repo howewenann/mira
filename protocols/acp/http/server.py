@@ -6,8 +6,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from protocols.acp.listen import validate_listen
-from protocols.acp.server import MiraAgent
+from protocols.acp.http.listen import validate_listen
+from protocols.acp.shared.agent import MiraAgent
 
 
 class MiraAgentFactory:

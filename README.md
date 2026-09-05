@@ -84,7 +84,7 @@ from mira.api import Frontend, MessageEvent
 ```
 
 See the [MIRA Python API guide](docs/frontend-api.md) for lifecycle, events,
-blocking requests, snapshots, and a complete runnable frontend.
+blocking requests, snapshots, and minimal and full runnable frontends.
 
 ## TUI basics
 

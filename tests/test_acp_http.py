@@ -27,7 +27,7 @@ from mira.api import (
     MessageEvent,
     ToolEvent,
 )
-from protocols.acp.http import MiraAgentFactory, serve_http
+from protocols.acp.http.server import MiraAgentFactory, serve_http
 
 
 class RecordingClient:
@@ -245,7 +245,7 @@ class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
                 port = listener.getsockname()[1]
             url = f"http://127.0.0.1:{port}/acp"
             with patch(
-                "protocols.acp.server.MiraApplication.start",
+                "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(side_effect=start),
             ):
                 server_task = asyncio.create_task(

@@ -9,7 +9,7 @@ from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.interfaces import Client
 
 
-class ExampleClient(Client):
+class MinimalClient(Client):
     async def session_update(
         self, session_id: str, update: Any, **kwargs: Any
     ) -> None:
@@ -25,7 +25,7 @@ class ExampleClient(Client):
 
 async def main() -> None:
     async with spawn_agent_process(
-        ExampleClient(), sys.executable, "-m", "cli.main", "--acp"
+        MinimalClient(), sys.executable, "-m", "cli.main", "--acp"
     ) as (connection, _process):
         await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(Path.cwd()))

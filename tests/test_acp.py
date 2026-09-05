@@ -33,10 +33,10 @@ from mira.api import (
     MessageEvent,
     ToolEvent,
 )
-from protocols.acp import server as acp_server
-from protocols.acp.frontend import InteractionCancelled, ReplyInChat
-from protocols.acp.mapping import artifact_text
-from protocols.acp.server import MiraAgent
+from protocols.acp.shared.agent import MiraAgent
+from protocols.acp.shared.frontend import InteractionCancelled, ReplyInChat
+from protocols.acp.shared.mapping import artifact_text
+from protocols.acp.stdio import server as acp_stdio_server
 
 
 class FakeConnection:
@@ -197,7 +197,7 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
             return application
 
         with tempfile.TemporaryDirectory() as directory, patch(
-            "protocols.acp.server.MiraApplication.start",
+            "protocols.acp.shared.agent.MiraApplication.start",
             new=AsyncMock(side_effect=start),
         ):
             first = await self.server.new_session(directory)
@@ -223,7 +223,7 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory() as first_dir,
             tempfile.TemporaryDirectory() as second_dir,
             patch(
-                "protocols.acp.server.MiraApplication.start",
+                "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(side_effect=start),
             ),
         ):
@@ -237,7 +237,7 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             application = FakeApplication(Path(directory).resolve(), self.server.frontend)
             with patch(
-                "protocols.acp.server.MiraApplication.start",
+                "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(return_value=application),
             ):
                 response = await self.server.new_session(directory)
@@ -277,7 +277,7 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
                 transcripts={"saved": transcript},
             )
             with patch(
-                "protocols.acp.server.MiraApplication.start",
+                "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(return_value=application),
             ):
                 await self.server.load_session(directory, "saved")
@@ -292,7 +292,7 @@ class ACPServerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             application = FakeApplication(Path(directory).resolve(), self.server.frontend)
             with patch(
-                "protocols.acp.server.MiraApplication.start",
+                "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(return_value=application),
             ):
                 with self.assertRaises(RequestError):
@@ -680,7 +680,7 @@ class ACPWiringTests(unittest.TestCase):
         project = (root / "pyproject.toml").read_text(encoding="utf-8")
         sources = "\n".join(
             path.read_text(encoding="utf-8")
-            for path in (root / "protocols" / "acp").glob("*.py")
+            for path in (root / "protocols" / "acp").rglob("*.py")
         )
         self.assertIn('"agent-client-protocol==0.12.1"', project)
         self.assertIn('"agent-client-protocol[http]==0.12.1"', project)
@@ -691,37 +691,50 @@ class ACPWiringTests(unittest.TestCase):
         self.assertNotIn("create_elicitation", sources)
         self.assertNotIn("use_unstable_protocol", sources)
         self.assertIn("await run_agent(server)", sources)
-        stdio_source = (root / "protocols" / "acp" / "server.py").read_text(
-            encoding="utf-8"
-        )
+        stdio_source = (
+            root / "protocols" / "acp" / "stdio" / "server.py"
+        ).read_text(encoding="utf-8")
         self.assertNotIn("acp.http", stdio_source)
         self.assertNotIn("hypercorn", stdio_source)
-        http_source = (root / "protocols" / "acp" / "http.py").read_text(
-            encoding="utf-8"
-        )
+        http_source = (
+            root / "protocols" / "acp" / "http" / "server.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("create_asgi_app", http_source)
         self.assertNotIn("numpy", http_source)
+        shared_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (root / "protocols" / "acp" / "shared").glob("*.py")
+        )
+        self.assertNotIn("create_asgi_app", shared_source)
+        self.assertNotIn("run_agent", shared_source)
+        old_names = ("server.py", "http.py", "listen.py", "frontend.py", "mapping.py")
+        for old_name in old_names:
+            self.assertFalse((root / "protocols" / "acp" / old_name).exists())
 
     def test_examples_import_without_starting_mira(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        combined = runpy.run_path(
-            str(root / "examples" / "acp_client.py"),
-            run_name="acp_client_example",
-        )
-        stdio = runpy.run_path(
-            str(root / "examples" / "acp_stdio_client.py"),
-            run_name="acp_stdio_client_example",
-        )
-        http = runpy.run_path(
-            str(root / "examples" / "acp_http_client.py"),
-            run_name="acp_http_client_example",
-        )
+        paths = {
+            "stdio_minimal": (
+                root / "examples" / "acp" / "stdio" / "minimal_client.py"
+            ),
+            "stdio_full": root / "examples" / "acp" / "stdio" / "full_client.py",
+            "http_minimal": (
+                root / "examples" / "acp" / "http" / "minimal_client.py"
+            ),
+            "http_full": root / "examples" / "acp" / "http" / "full_client.py",
+        }
 
-        self.assertTrue(callable(combined["main"]))
-        self.assertTrue(callable(combined["run_stdio"]))
-        self.assertTrue(callable(combined["run_http"]))
-        self.assertTrue(callable(stdio["main"]))
-        self.assertTrue(callable(http["main"]))
+        for name, path in paths.items():
+            namespace = runpy.run_path(str(path), run_name=f"{name}_example")
+            self.assertTrue(callable(namespace["main"]))
+            expected_client = "MinimalClient" if "minimal" in name else "FullClient"
+            self.assertIn(expected_client, namespace)
+            if name.startswith("stdio"):
+                self.assertNotIn("acp.http", path.read_text(encoding="utf-8"))
+
+        self.assertFalse((root / "examples" / "acp_client.py").exists())
+        self.assertFalse((root / "examples" / "acp_stdio_client.py").exists())
+        self.assertFalse((root / "examples" / "acp_http_client.py").exists())
 
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
@@ -743,12 +756,12 @@ class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
 
         server = SimpleNamespace(shutdown=shutdown)
         with (
-            patch.object(acp_server.sys, "platform", "win32"),
+            patch.object(acp_stdio_server.sys, "platform", "win32"),
             patch("builtins.__import__", new=tracked_import),
-            patch.object(acp_server, "MiraAgent", return_value=server),
-            patch.object(acp_server, "run_agent", new=run_agent),
+            patch.object(acp_stdio_server, "MiraAgent", return_value=server),
+            patch.object(acp_stdio_server, "run_agent", new=run_agent),
         ):
-            await acp_server.serve()
+            await acp_stdio_server.serve()
         self.assertEqual(events, ["numpy", "run_agent", "shutdown"])
 
     async def test_non_windows_does_not_preload_numpy(self) -> None:
@@ -769,12 +782,12 @@ class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
 
         server = SimpleNamespace(shutdown=shutdown)
         with (
-            patch.object(acp_server.sys, "platform", "linux"),
+            patch.object(acp_stdio_server.sys, "platform", "linux"),
             patch("builtins.__import__", new=tracked_import),
-            patch.object(acp_server, "MiraAgent", return_value=server),
-            patch.object(acp_server, "run_agent", new=run_agent),
+            patch.object(acp_stdio_server, "MiraAgent", return_value=server),
+            patch.object(acp_stdio_server, "run_agent", new=run_agent),
         ):
-            await acp_server.serve()
+            await acp_stdio_server.serve()
         self.assertEqual(events, ["run_agent", "shutdown"])
 
 

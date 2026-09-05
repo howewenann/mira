@@ -27,7 +27,7 @@ HITL tool IDs, MCP approval, and Git confirmation buttons.
 
 Install `mira[acp-http]`, run
 `mira --acp --listen 127.0.0.1:8765`, and use
-`python examples/acp_client.py --http http://127.0.0.1:8765/acp "Reply only with PONG"`.
+`python examples/acp/http/full_client.py --follow-up "Reply only with PONG again" "Reply only with PONG"`.
 Expected: the streamed reply is `PONG`, the server accepts only loopback binds,
 and stopping the server cleans all connection-owned MIRA resources. A repeated
 prompt supplied with `--follow-up` stays in the same live conversation. In ACP

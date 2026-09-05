@@ -23,7 +23,10 @@ from mira import MiraApplication, MiraSession
 from mira.api import Frontend, FrontendEvent, FrontendRequest, MessageEvent
 ```
 
-The complete copyable example is [`examples/frontend.py`](../examples/frontend.py).
+Start with the copyable
+[`minimal_frontend.py`](../examples/mira_api/minimal_frontend.py), then see
+[`full_frontend.py`](../examples/mira_api/full_frontend.py) for complete
+interactive request handling.
 
 ## Lifecycle
 

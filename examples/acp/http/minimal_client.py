@@ -9,7 +9,7 @@ from acp.http import create_http_stream
 from acp.interfaces import Client
 
 
-class ExampleClient(Client):
+class MinimalClient(Client):
     async def session_update(
         self, session_id: str, update: Any, **kwargs: Any
     ) -> None:
@@ -25,7 +25,7 @@ class ExampleClient(Client):
 
 async def main() -> None:
     transport = create_http_stream("http://127.0.0.1:8765/acp")
-    connection = connect_to_agent(ExampleClient(), transport)
+    connection = connect_to_agent(MinimalClient(), transport)
     try:
         await connection.initialize(PROTOCOL_VERSION)
         session = await connection.new_session(str(Path.cwd()))

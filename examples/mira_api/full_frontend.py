@@ -1,4 +1,4 @@
-"""Minimal interactive stdout frontend for the supported MIRA Python API."""
+"""Full interactive terminal frontend for MIRA's direct Python API."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def interrupt_value(interrupt: Any) -> Any:
     return getattr(interrupt, "value", interrupt)
 
 
-class ExampleFrontend:
+class FullFrontend:
     """Human-in-the-loop terminal frontend with conservative defaults."""
 
     def __init__(self) -> None:
@@ -53,6 +53,8 @@ class ExampleFrontend:
             print(f"\n[tool] {event.name}: {event.arguments!r}", flush=True)
         elif isinstance(event, InformationEvent):
             print(f"\n[{event.kind}] {event.text}", flush=True)
+        else:
+            print(f"\n[{type(event).__name__}] {event!r}", flush=True)
 
     async def request(self, request: FrontendRequest) -> Any:
         if isinstance(request, ApprovalRequest):
@@ -80,7 +82,10 @@ class ExampleFrontend:
             for action in actions:
                 print("\nMIRA requests permission for:")
                 print(json.dumps(action, indent=2, default=str))
-                answer = await asyncio.to_thread(input, "Approve? Type 'approve' to allow [reject]: ")
+                answer = await asyncio.to_thread(
+                    input,
+                    "Approve? Type 'approve' to allow [reject]: ",
+                )
                 # Never silently auto-approve. A real application should show
                 # the allowed native approve/edit/reject choices in trusted UX.
                 decisions.append(
@@ -92,7 +97,11 @@ class ExampleFrontend:
 
     async def _answer_question(self, request: AskUserRequest) -> str:
         value = interrupt_value(request.interrupt)
-        question = str(value.get("question") or "MIRA needs input.") if isinstance(value, dict) else str(value)
+        question = (
+            str(value.get("question") or "MIRA needs input.")
+            if isinstance(value, dict)
+            else str(value)
+        )
         options = value.get("options", []) if isinstance(value, dict) else []
         print(f"\n{question}")
         for index, option in enumerate(options, start=1):
@@ -118,7 +127,11 @@ class ExampleFrontend:
         if self.session is None:
             return f"Current {request.artifact_type} is unavailable."
         snapshot = self.session.snapshot()
-        artifact = snapshot.current_goal if request.artifact_type == "goal" else snapshot.current_plan
+        artifact = (
+            snapshot.current_goal
+            if request.artifact_type == "goal"
+            else snapshot.current_plan
+        )
         print(json.dumps(dict(artifact or {}), indent=2, default=str))
         return f"Current {request.artifact_type} displayed."
 
@@ -129,7 +142,7 @@ class ExampleFrontend:
 
 
 async def main() -> None:
-    frontend = ExampleFrontend()
+    frontend = FullFrontend()
     app = await MiraApplication.start(workspace=".", frontend=frontend)
     try:
         session = await app.open_session()

@@ -47,18 +47,29 @@ MIRA does not use private transport hooks to bypass this limitation. New HTTP
 sessions and repeated prompts on the same live connection are supported; stdio
 continues to support full durable load-and-continue behavior.
 
-The bare-minimum stock-SDK examples send one prompt and deny permission requests
+The minimal stock-SDK examples send one prompt and deny permission requests
 instead of auto-approving tool use:
 
 ```text
-python examples/acp_stdio_client.py
-python examples/acp_http_client.py
+python examples/acp/stdio/minimal_client.py
+python examples/acp/http/minimal_client.py
 ```
 
-Start `mira --acp --listen 127.0.0.1:8765` before running the HTTP example. For
-custom prompts, follow-up turns, and durable stdio session loading, use
-`examples/acp_client.py`. Its `--session` option is deliberately rejected with
-HTTP while the ACP 0.12.1 limitation above remains.
+Start `mira --acp --listen 127.0.0.1:8765` before running an HTTP example. Full
+stdio and HTTP clients live beside the minimal clients and add custom prompts,
+follow-up turns, interactive permission choices, and the session behavior each
+transport supports. See [`examples/acp/README.md`](../../examples/acp/README.md).
+
+## Module layout
+
+Transport-independent behavior is separate from both server bootstraps:
+
+```text
+protocols/acp/
+  shared/   MiraAgent, ACPFrontend, and event mapping
+  stdio/    stock SDK stdio startup and Windows preload
+  http/     Streamable HTTP startup and loopback bind validation
+```
 
 ## Shared behavior
 
@@ -90,7 +101,7 @@ buttons. These remain MIRA-owned artifacts, not ACP todo plans. Only state
 emitted by the actual MIRA `write_todos` tool is projected as an ACP
 `AgentPlanUpdate`.
 
-Both transports reuse the same `MiraAgent`, `ACPFrontend`, mapper, and public
+Both transports reuse the same `MiraAgent`, `ACPFrontend`, mapping, and public
 `mira`/`mira.api` boundary. Neither invokes MIRA internals or the LangGraph graph
 directly. The stdio runner uses only the stable ACP protocol path and reports
 the pinned SDK's supported protocol version. On Windows it completes optional
