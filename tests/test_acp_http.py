@@ -6,6 +6,7 @@ import asyncio
 import socket
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -20,6 +21,7 @@ from acp import (
 from acp.exceptions import RequestError
 from acp.http import create_http_stream
 
+from config.branding import VERSION, blocky_wordmark
 from mira.api import (
     ApprovalRequest,
     ArtifactReviewRequest,
@@ -28,6 +30,7 @@ from mira.api import (
     ToolEvent,
 )
 from protocols.acp.http.server import MiraAgentFactory, serve_http
+from protocols.acp.http.splash import http_splash_text
 
 
 class RecordingClient:
@@ -222,6 +225,38 @@ async def connect(url: str, client: RecordingClient) -> tuple[object, object]:
 
 
 class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
+    def test_http_splash_reuses_branding_and_server_only_fields(self) -> None:
+        plain = http_splash_text("127.0.0.1:9000").plain
+
+        self.assertIn(blocky_wordmark(), plain)
+        self.assertIn(VERSION, plain)
+        self.assertIn("ACP Streamable HTTP", plain)
+        self.assertIn("http://127.0.0.1:9000/acp", plain)
+        self.assertIn("loopback only", plain)
+        self.assertIn("status    ready", plain)
+        self.assertIn("Ctrl+C to stop", plain)
+        self.assertNotIn("session", plain.lower())
+        self.assertNotIn("model", plain.lower())
+        self.assertNotIn("workspace", plain.lower())
+        self.assertNotIn("/help", plain)
+        self.assertNotIn("Alt+Q", plain)
+
+    async def test_occupied_port_does_not_print_a_false_ready_splash(self) -> None:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            with patch("protocols.acp.http.server.print_http_splash") as splash:
+                # Hypercorn 0.17 can leave its failed-bind probe socket for
+                # garbage collection. Keep that dependency warning out of this
+                # MIRA behavior test while still exercising the real bind path.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", ResourceWarning)
+                    with self.assertRaises(OSError):
+                        await serve_http(f"127.0.0.1:{port}")
+
+        splash.assert_not_called()
+
     async def test_http_bootstrap_rejects_non_loopback_bind(self) -> None:
         with self.assertRaisesRegex(ValueError, "loopback"):
             await serve_http("0.0.0.0:8765")
@@ -247,7 +282,7 @@ class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
             with patch(
                 "protocols.acp.shared.agent.MiraApplication.start",
                 new=AsyncMock(side_effect=start),
-            ):
+            ), patch("protocols.acp.http.server.print_http_splash") as splash:
                 server_task = asyncio.create_task(
                     serve_http(
                         f"127.0.0.1:{port}",
@@ -338,6 +373,8 @@ class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
 
                 shutdown.set()
                 await asyncio.wait_for(server_task, timeout=10)
+
+            splash.assert_called_once_with(f"127.0.0.1:{port}")
 
         self.assertEqual(factory.agent_count, 0)
         self.assertEqual(sum(app.shutdowns for app in applications), len(applications))

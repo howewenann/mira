@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from protocols.acp.http.listen import validate_listen
+from protocols.acp.http.splash import print_http_splash
 from protocols.acp.shared.agent import MiraAgent
 
 
@@ -52,10 +54,45 @@ async def serve_http(
     config = Config()
     config.bind = [listen]
     config.alpn_protocols = ["h2", "http/1.1"]
+    server_task = asyncio.create_task(
+        serve(app, config, shutdown_trigger=shutdown_trigger)
+    )
     try:
-        await serve(app, config, shutdown_trigger=shutdown_trigger)
+        await _wait_for_listener(listen, server_task)
+        print_http_splash(listen)
+        await server_task
     finally:
+        if not server_task.done():
+            server_task.cancel()
+            await asyncio.gather(server_task, return_exceptions=True)
         await factory.shutdown()
+
+
+async def _wait_for_listener(listen: str, server_task: asyncio.Task[None]) -> None:
+    """Wait for the public TCP listener without relying on Hypercorn internals."""
+    parsed = urlsplit(f"//{listen}")
+    host = parsed.hostname
+    port = parsed.port
+    assert host is not None and port is not None
+
+    while not server_task.done():
+        try:
+            _reader, writer = await asyncio.open_connection(host, port)
+        except OSError:
+            await asyncio.sleep(0.02)
+            continue
+
+        writer.close()
+        await writer.wait_closed()
+
+        # Give an immediate bind failure (for example, an occupied port) time
+        # to win before reporting that this specific Hypercorn task is ready.
+        await asyncio.sleep(0.05)
+        if not server_task.done():
+            return
+
+    await server_task
+    raise RuntimeError("ACP HTTP server stopped before its listener became ready")
 
 
 def run_http_server(listen: str) -> None:

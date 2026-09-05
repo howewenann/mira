@@ -16,14 +16,22 @@
 - Avoid MIRA-managed workarounds unless a real library/runtime edge case is
   confirmed. Keep any fallback narrow, documented by tests, and out of the
   normal path.
+- Treat code under `examples/` as developer-facing teaching documentation, not
+  code golf. Prefer readable names, explicit public lifecycle steps, obvious
+  control flow, and comments that explain ownership, callbacks, and non-obvious
+  behavior without narrating Python syntax. Keep important public API calls
+  visible instead of hiding the lifecycle behind convenience wrappers. Minimal
+  examples should teach the smallest understandable lifecycle; full and related
+  examples should remain easy to follow and structurally parallel where
+  practical.
 
 ## Environment
 
 - Use the shared Conda environment for Python checks:
-  `conda run -n ai_agents python ...`
+  `conda run -n mira python ...`
 - Do not edit `.env` unless explicitly asked.
 - Do not rely on installed entrypoints being fresh when testing code changes;
-  prefer `conda run -n ai_agents python -m cli.main ...` for current checkout
+  prefer `conda run -n mira python -m cli.main ...` for current checkout
   behavior.
 
 ## Testing
@@ -32,7 +40,7 @@
 - Use `git diff --check` before finishing.
 - For user-visible agent/runtime behavior, smoke test with real MIRA, for
   example:
-  `conda run -n ai_agents python -m cli.main -p "..."`
+  `conda run -n mira python -m cli.main -p "..."`
 - Use a disposable `--workspace` for smoke tests that may write `.mira/`,
   session files, or project artifacts.
 - For TUI changes, add or update `tests.test_textual_app`.

@@ -1,4 +1,4 @@
-"""Full safe client for MIRA's ACP stdio transport."""
+"""Interactive reference client for MIRA's ACP stdio transport."""
 
 from __future__ import annotations
 
@@ -8,63 +8,52 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
-from acp.interfaces import Client
+from acp import PROTOCOL_VERSION, spawn_agent_process
 from acp.schema import ClientCapabilities
 
+# These transport entrypoints are intentionally runnable as ordinary files.
+# Add their shared examples directory so both can reuse one small console layer.
+ACP_EXAMPLES_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ACP_EXAMPLES_DIR))
 
-class FullClient(Client):
-    """Print updates and ask before selecting a permission option."""
-
-    async def session_update(
-        self,
-        session_id: str,
-        update: Any,
-        **kwargs: Any,
-    ) -> None:
-        del session_id, kwargs
-        content = getattr(update, "content", None)
-        text = getattr(content, "text", None)
-        if text:
-            print(text, end="", flush=True)
-        else:
-            print(f"\n[{type(update).__name__}] {update}", file=sys.stderr)
-
-    async def request_permission(self, **kwargs: Any) -> Any:
-        tool_call = kwargs.get("tool_call")
-        options = kwargs.get("options") or []
-        title = getattr(tool_call, "title", "Permission required")
-        print(f"\n{title}", file=sys.stderr)
-        for index, option in enumerate(options, start=1):
-            print(f"  {index}. {option.name} ({option.kind})", file=sys.stderr)
-        answer = (await asyncio.to_thread(input, "Select an option [deny]: ")).strip()
-        if answer.isdigit() and 1 <= int(answer) <= len(options):
-            option = options[int(answer) - 1]
-            return {
-                "outcome": {
-                    "outcome": "selected",
-                    "optionId": option.option_id,
-                }
-            }
-        return {"outcome": {"outcome": "cancelled"}}
+from client_common import (  # noqa: E402
+    ReferenceClient as FullClient,
+    ReferenceConsole,
+    UpdateRenderer,
+)
 
 
-async def run_prompts(connection: Any, args: argparse.Namespace) -> None:
-    await connection.initialize(PROTOCOL_VERSION, ClientCapabilities())
-    if args.session:
-        await connection.load_session(str(args.workspace), args.session)
-        session_id = args.session
-    else:
-        created = await connection.new_session(str(args.workspace))
-        session_id = created.session_id
-    print(f"Session: {session_id}", file=sys.stderr)
-    await connection.prompt(session_id, [text_block(args.prompt)])
-    if args.follow_up:
-        await connection.prompt(session_id, [text_block(args.follow_up)])
+def parse_args() -> argparse.Namespace:
+    """Accept either a scripted prompt or no prompt for interactive mode."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("prompt", nargs="?", help="Send one prompt and exit.")
+    parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument("--session", help="Load and continue a saved MIRA session.")
+    parser.add_argument("--follow-up", help="Send a second scripted prompt.")
+    arguments = parser.parse_args()
+    if arguments.follow_up and arguments.prompt is None:
+        parser.error("--follow-up requires a prompt")
+    return arguments
 
 
-async def run(args: argparse.Namespace) -> None:
-    client = FullClient()
+def response_mode(response: Any) -> str:
+    """Read the current mode advertised by a stock ACP session response."""
+    modes = getattr(response, "modes", None)
+    return str(getattr(modes, "current_mode_id", "act") or "act")
+
+
+async def main() -> None:
+    arguments = parse_args()
+    workspace = arguments.workspace.expanduser().resolve()
+
+    # The client receives all ACP updates and permission requests. Rendering and
+    # the local REPL are shared with the HTTP example so transport comparisons
+    # use the same presentation behavior.
+    renderer = UpdateRenderer(output=sys.stdout)
+    client = FullClient(renderer)
+
+    # stdio clients own the MIRA child process. The context manager starts
+    # `python -m cli.main --acp` and closes its protocol streams on exit.
     async with spawn_agent_process(
         client,
         sys.executable,
@@ -72,22 +61,38 @@ async def run(args: argparse.Namespace) -> None:
         "cli.main",
         "--acp",
     ) as (connection, _process):
-        await run_prompts(connection, args)
+        # Every ACP connection must negotiate the protocol before session calls.
+        await connection.initialize(PROTOCOL_VERSION, ClientCapabilities())
 
+        if arguments.session:
+            # stdio supports true durable load-and-continue through session/load.
+            session_response = await connection.load_session(
+                str(workspace),
+                arguments.session,
+            )
+            session_id = arguments.session
+        else:
+            # session/new creates a durable MIRA conversation in this workspace.
+            session_response = await connection.new_session(str(workspace))
+            session_id = session_response.session_id
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workspace", type=Path, default=Path.cwd())
-    parser.add_argument("--session", help="Load a saved MIRA session.")
-    parser.add_argument("--follow-up", help="Send a second prompt on the live connection.")
-    parser.add_argument("prompt")
-    return parser.parse_args()
+        console = ReferenceConsole(
+            connection=connection,
+            client=client,
+            workspace=workspace,
+            session_id=session_id,
+            mode=response_mode(session_response),
+            transport_name="stdio",
+            allow_load=True,
+            output=sys.stdout,
+        )
 
-
-async def main() -> None:
-    args = parse_args()
-    args.workspace = args.workspace.expanduser().resolve()
-    await run(args)
+        # With a prompt this is a one-shot client. Without one it enters the
+        # reference REPL and reuses the same ACP session for every normal prompt.
+        await console.run(
+            initial_prompt=arguments.prompt,
+            follow_up=arguments.follow_up,
+        )
 
 
 if __name__ == "__main__":

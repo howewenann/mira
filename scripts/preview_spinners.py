@@ -48,7 +48,7 @@ def main() -> int:
         print(
             "This preview needs direct terminal output.\n"
             "Run `python scripts\\preview_spinners.py` from the activated environment,\n"
-            "or use `conda run --no-capture-output -n ai_agents python "
+            "or use `conda run --no-capture-output -n mira python "
             "scripts\\preview_spinners.py`."
         )
         return 2

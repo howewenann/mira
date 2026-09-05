@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import runpy
@@ -696,6 +697,7 @@ class ACPWiringTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("acp.http", stdio_source)
         self.assertNotIn("hypercorn", stdio_source)
+        self.assertNotIn("splash", stdio_source.lower())
         http_source = (
             root / "protocols" / "acp" / "http" / "server.py"
         ).read_text(encoding="utf-8")
@@ -731,6 +733,26 @@ class ACPWiringTests(unittest.TestCase):
             self.assertIn(expected_client, namespace)
             if name.startswith("stdio"):
                 self.assertNotIn("acp.http", path.read_text(encoding="utf-8"))
+
+        # ACP clients are external consumers. Keep their entire shared layer on
+        # the stock public ACP SDK rather than MIRA modules or implementation
+        # packages that another ACP agent would not provide.
+        client_paths = [
+            *paths.values(),
+            root / "examples" / "acp" / "client_common.py",
+        ]
+        prohibited_roots = {"mira", "core", "agent", "session", "protocols"}
+        for path in client_paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported_roots: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    imported_roots.add((node.module or "").split(".", 1)[0])
+                elif isinstance(node, ast.Import):
+                    imported_roots.update(
+                        alias.name.split(".", 1)[0] for alias in node.names
+                    )
+            self.assertEqual(imported_roots & prohibited_roots, set(), path.name)
 
         self.assertFalse((root / "examples" / "acp_client.py").exists())
         self.assertFalse((root / "examples" / "acp_stdio_client.py").exists())

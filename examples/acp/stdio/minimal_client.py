@@ -1,4 +1,4 @@
-"""Spawn MIRA over ACP stdio and send one prompt."""
+"""Minimal external ACP client that spawns MIRA over stdio."""
 
 import asyncio
 import sys
@@ -7,32 +7,57 @@ from typing import Any
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.interfaces import Client
+from acp.schema import PermissionOption, ToolCallUpdate
 
 
 class MinimalClient(Client):
+    """The two callbacks an ACP agent uses to communicate with its client."""
+
     async def session_update(
         self, session_id: str, update: Any, **kwargs: Any
     ) -> None:
+        # MIRA streams assistant text, thoughts, and tool updates through this
+        # callback. The minimal client displays text content only.
         del session_id, kwargs
-        text = getattr(getattr(update, "content", None), "text", None)
+        content = getattr(update, "content", None)
+        text = getattr(content, "text", None)
         if text:
             print(text, end="", flush=True)
 
-    async def request_permission(self, **kwargs: Any) -> Any:
-        del kwargs
+    async def request_permission(
+        self,
+        session_id: str,
+        tool_call: ToolCallUpdate,
+        options: list[PermissionOption],
+        **kwargs: Any,
+    ) -> Any:
+        # MIRA may pause for human approval. This minimal example has no
+        # interaction UI, so it always cancels. See full_client.py for choices.
+        del session_id, tool_call, options, kwargs
         return {"outcome": {"outcome": "cancelled"}}
 
 
 async def main() -> None:
+    client = MinimalClient()
+
+    # The client owns the child process and ACP stdio streams for this context.
+    # stdout belongs to ACP; MIRA keeps protocol-unrelated output off that stream.
     async with spawn_agent_process(
-        MinimalClient(), sys.executable, "-m", "cli.main", "--acp"
+        client, sys.executable, "-m", "cli.main", "--acp"
     ) as (connection, _process):
+        # ACP connections must be initialized before session methods are used.
         await connection.initialize(PROTOCOL_VERSION)
-        session = await connection.new_session(str(Path.cwd()))
+
+        # session/new creates one MIRA conversation rooted in this workspace.
+        created_session = await connection.new_session(str(Path.cwd()))
+
+        # Responses arrive asynchronously through client.session_update().
         await connection.prompt(
-            session.session_id,
+            created_session.session_id,
             [text_block("Reply only with PONG")],
         )
+
+    # Leaving the context closes the ACP streams and the MIRA child process.
 
 
 if __name__ == "__main__":

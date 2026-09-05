@@ -10,7 +10,7 @@ contract, prints assistant text, rejects unsupported blocking interactions, and
 sends one fixed prompt:
 
 ```text
-python examples/mira_api/minimal_frontend.py
+conda run -n mira --no-capture-output python examples/mira_api/minimal_frontend.py
 ```
 
 ## Full frontend
@@ -20,5 +20,5 @@ frontend. It renders streamed events and handles approvals, AskUser prompts,
 Goal/Plan reviews and display, MCP approval, and application confirmations:
 
 ```text
-python examples/mira_api/full_frontend.py "Summarize this project"
+conda run -n mira --no-capture-output python examples/mira_api/full_frontend.py "Summarize this project"
 ```

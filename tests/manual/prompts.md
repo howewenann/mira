@@ -287,7 +287,7 @@ profile whose `api_base` is usually `http://localhost:1234/v1`. Select it as
 Main through `/models`.
 
 ```powershell
-conda run -n ai_agents python -m cli.main -p "Use a tool to inspect README.md, then answer briefly with the project name."
+conda run -n mira python -m cli.main -p "Use a tool to inspect README.md, then answer briefly with the project name."
 ```
 
 Expected:
@@ -330,7 +330,7 @@ Initialize the workspace and launch the current checkout:
 
 ```powershell
 git init .tmp_tool_results_manual
-conda run --no-capture-output -n ai_agents python -m cli.main --workspace .tmp_tool_results_manual
+conda run --no-capture-output -n mira python -m cli.main --workspace .tmp_tool_results_manual
 ```
 
 ### Parallel completion and original-block updates
@@ -366,7 +366,7 @@ blocking discovery of later calls.
 Run the same two-call prompt in one-shot mode:
 
 ```powershell
-conda run --no-capture-output -n ai_agents python -m cli.main --workspace .tmp_tool_results_manual -p "Call timing_result twice in parallel. Start slow with delay_seconds 4, then fast with delay_seconds 0.2. Wait for both and report their completion order."
+conda run --no-capture-output -n mira python -m cli.main --workspace .tmp_tool_results_manual -p "Call timing_result twice in parallel. Start slow with delay_seconds 4, then fast with delay_seconds 0.2. Wait for both and report their completion order."
 ```
 
 Expected:
@@ -473,7 +473,7 @@ Delete `.tmp_tool_results_manual` after completing the checks. Do not copy its
 ## One-Shot Markdown File Prompt
 
 ```powershell
-conda run -n ai_agents python -m cli.main -f tests/manual/file_prompt.md
+conda run -n mira python -m cli.main -f tests/manual/file_prompt.md
 ```
 
 Expected:
@@ -481,7 +481,7 @@ Expected:
 - MIRA reads the Markdown file as the one-shot prompt.
 - MIRA inspects `README.md`.
 - MIRA answers with exactly two bullet points.
-- Running `conda run -n ai_agents python -m cli.main -p tests/manual/file_prompt.md`
+- Running `conda run -n mira python -m cli.main -p tests/manual/file_prompt.md`
   treats the path as literal prompt text, not as a file to read.
 
 ## Neat And Tidy Architecture Audit
@@ -490,7 +490,7 @@ Run this periodically when the repo starts feeling messy or before starting a
 cleanup pass:
 
 ```powershell
-conda run -n ai_agents python -m cli.main -f tests/manual/neat_tidy_audit_prompt.md
+conda run -n mira python -m cli.main -f tests/manual/neat_tidy_audit_prompt.md
 ```
 
 Expected:
@@ -730,7 +730,7 @@ Use a disposable workspace with `execute` enabled and always-allowed in that
 workspace's `.mira/settings.yml`.
 
 ```powershell
-conda run -n ai_agents python -m cli.main --workspace .tmp_plan_followthrough_manual -p "Create hello_check.py that defines greet(name) returning 'hello, ' plus the name. After creating it, run python -m py_compile hello_check.py. In your final answer, report whether the check ran."
+conda run -n mira python -m cli.main --workspace .tmp_plan_followthrough_manual -p "Create hello_check.py that defines greet(name) returning 'hello, ' plus the name. After creating it, run python -m py_compile hello_check.py. In your final answer, report whether the check ran."
 ```
 
 Expected:
@@ -771,7 +771,7 @@ Then try the one-shot surface in a disposable Git-initialized workspace with
 `execute` already enabled in that workspace's `.mira/settings.yml`:
 
 ```powershell
-conda run -n ai_agents python -m cli.main --workspace .tmp_execute_manual -p "Create a Python file at /tmp.py that prints exactly EXECUTE_PATH_OK, then run it with execute and report the output."
+conda run -n mira python -m cli.main --workspace .tmp_execute_manual -p "Create a Python file at /tmp.py that prints exactly EXECUTE_PATH_OK, then run it with execute and report the output."
 ```
 
 Expected:
@@ -809,7 +809,7 @@ Expected:
 Use a disposable workspace and start the TUI:
 
 ```powershell
-conda run -n ai_agents python -m cli.main --workspace .tmp_compact_manual
+conda run -n mira python -m cli.main --workspace .tmp_compact_manual
 ```
 
 Build a conversation with several substantial prompts and replies, then enter:
@@ -889,7 +889,7 @@ Use a disposable workspace and retain its session file for replay checks.
 Run the current checkout from a disposable Git workspace with:
 
 ```powershell
-conda run --no-capture-output -n ai_agents python -m cli.main --workspace <workspace>
+conda run --no-capture-output -n mira python -m cli.main --workspace <workspace>
 ```
 
 Repeat the checks in each terminal host with both `cmd.exe` and Windows
@@ -952,7 +952,7 @@ and Ctrl+C with no selection does not change the prompt, cancel work, or quit.
 Run every scenario from a disposable Git workspace with the current checkout:
 
 ```powershell
-conda run --no-capture-output -n ai_agents python -m cli.main --workspace <workspace>
+conda run --no-capture-output -n mira python -m cli.main --workspace <workspace>
 ```
 
 ### Toast behavior
@@ -994,7 +994,7 @@ does not expose the tool. Open Issues, confirm the source/import and project-too
 guidance, replace the package input with `./local_packages/mira_manual_dep`, and
 choose Install All and Reload. The UI remains responsive, the issue disappears,
 `/tools` exposes the tool, and invocation returns `manual:<text>`. Uninstall
-`mira-manual-dep` from `ai_agents` afterward.
+`mira-manual-dep` from `mira` afterward.
 
 ### 2. Multiple packages plus a syntax error
 
@@ -1115,7 +1115,7 @@ Add one successful tool file, one missing-dependency file, and one syntax-error
 file, then run:
 
 ```powershell
-conda run -n ai_agents python -m cli.main --workspace <workspace> -p "use the available custom tool"
+conda run -n mira python -m cli.main --workspace <workspace> -p "use the available custom tool"
 ```
 
 Expected: one grouped warning names both failed files and deduplicated missing
@@ -1334,7 +1334,7 @@ harnesses after completing the unified lifecycle:
 Use a disposable Git-protected workspace and current-checkout invocation:
 
 ```powershell
-conda run -n ai_agents python -m cli.main --workspace <workspace>
+conda run -n mira python -m cli.main --workspace <workspace>
 ```
 
 1. Ask a normal non-coding question in action mode. Expected: a concise,

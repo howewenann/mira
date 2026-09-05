@@ -24,18 +24,27 @@ from mira.api import (
 
 
 def interrupt_value(interrupt: Any) -> Any:
-    """Return the native value carried by a LangGraph interrupt."""
+    """Return the decision payload carried by a native LangGraph interrupt.
+
+    Depending on where a request originated, MIRA may provide either the
+    interrupt object or its already-unwrapped value. A frontend can handle both
+    without importing LangGraph itself.
+    """
     return getattr(interrupt, "value", interrupt)
 
 
 class FullFrontend:
-    """Human-in-the-loop terminal frontend with conservative defaults."""
+    """Example implementation of MIRA's complete blocking-request contract."""
 
     def __init__(self) -> None:
         self.session: MiraSession | None = None
         self._assistant_open = False
 
     def emit(self, event: FrontendEvent) -> None:
+        # Event handling -----------------------------------------------------
+        # MIRA calls emit() synchronously with ordered streaming observations.
+        # A real GUI would update owned widgets here; this example writes a
+        # readable terminal transcript instead.
         if isinstance(event, MessageEvent):
             if event.phase == "content":
                 print(event.text, end="", flush=True)
@@ -54,9 +63,14 @@ class FullFrontend:
         elif isinstance(event, InformationEvent):
             print(f"\n[{event.kind}] {event.text}", flush=True)
         else:
+            # The public event vocabulary can grow. Showing an unfamiliar event
+            # is safer for a reference frontend than crashing or hiding it.
             print(f"\n[{type(event).__name__}] {event!r}", flush=True)
 
     async def request(self, request: FrontendRequest) -> Any:
+        # Interactive requests ---------------------------------------------
+        # MIRA pauses the active turn until this async callback returns the
+        # response shape documented for that request type.
         if isinstance(request, ApprovalRequest):
             return await self._approve_actions(request)
         if isinstance(request, AskUserRequest):
@@ -73,6 +87,7 @@ class FullFrontend:
         raise RuntimeError(f"Unsupported request: {type(request).__name__}")
 
     async def _approve_actions(self, request: ApprovalRequest) -> list[dict[str, Any]]:
+        """Return the native approve/reject decisions expected by LangGraph."""
         decisions: list[dict[str, Any]] = []
         for interrupt in request.interrupts:
             value = interrupt_value(interrupt)
@@ -96,6 +111,7 @@ class FullFrontend:
         return decisions
 
     async def _answer_question(self, request: AskUserRequest) -> str:
+        """Return a selected or free-form answer to MIRA's AskUser request."""
         value = interrupt_value(request.interrupt)
         question = (
             str(value.get("question") or "MIRA needs input.")
@@ -109,6 +125,7 @@ class FullFrontend:
         return await asyncio.to_thread(input, "Answer: ")
 
     async def _review_artifact(self, request: ArtifactReviewRequest) -> dict[str, Any]:
+        """Review a proposed formal Goal or Plan using MIRA's public actions."""
         print(f"\nProposed {request.artifact_type}:")
         print(json.dumps(dict(request.artifact or {}), indent=2, default=str))
         answer = await asyncio.to_thread(
@@ -124,8 +141,10 @@ class FullFrontend:
         return decision
 
     def _display_artifact(self, request: ArtifactDisplayRequest) -> str:
+        """Read the current durable artifact projection from the session."""
         if self.session is None:
             return f"Current {request.artifact_type} is unavailable."
+        # snapshot() is the authoritative, read-only projection of session state.
         snapshot = self.session.snapshot()
         artifact = (
             snapshot.current_goal
@@ -136,21 +155,31 @@ class FullFrontend:
         return f"Current {request.artifact_type} displayed."
 
     async def _approve_mcp(self, request: MCPApprovalRequest) -> str:
+        """Ask before connecting a configured MCP server; denial is the default."""
         print(f"\nMCP connection request:\n{request.preview}")
         answer = await asyncio.to_thread(input, "Type allow or always_allow [deny]: ")
         return answer.strip() if answer.strip() in {"allow", "always_allow"} else "deny"
 
 
 async def main() -> None:
+    # Application lifecycle -------------------------------------------------
     frontend = FullFrontend()
-    app = await MiraApplication.start(workspace=".", frontend=frontend)
+
+    # The application owns resources shared by every session in this workspace.
+    application = await MiraApplication.start(workspace=".", frontend=frontend)
     try:
-        session = await app.open_session()
+        # Open one durable MIRA conversation and give the frontend access to its
+        # public snapshot for ArtifactDisplayRequest handling.
+        session = await application.open_session()
         frontend.session = session
+
+        # A command-line argument makes the example convenient to adapt while
+        # keeping the public prompt lifecycle visible here.
         prompt = " ".join(sys.argv[1:]).strip() or "Summarize this project."
         await session.prompt(prompt)
     finally:
-        await app.shutdown()
+        # Application shutdown closes sessions and releases MCP/runtime resources.
+        await application.shutdown()
 
 
 if __name__ == "__main__":
