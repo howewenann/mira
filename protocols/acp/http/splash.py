@@ -17,6 +17,7 @@ from config.branding import (
 )
 
 MAX_PANEL_WIDTH = 78
+PANEL_SPACING_ROWS = 3
 
 
 def http_splash(listen: str, *, terminal_width: int) -> Align:
@@ -27,8 +28,9 @@ def http_splash(listen: str, *, terminal_width: int) -> Align:
 
     # The blocky logo needs room to remain legible. Narrow terminals still get
     # the same MIRA identity without wrapping the ASCII art into fragments.
-    logo_text = wordmark if panel_width >= wordmark_width + 8 else "MIRA"
-    logo = Text(logo_text, style=MIRA_CYAN, justify="center")
+    use_wordmark = panel_width >= wordmark_width + 8
+    logo_text = wordmark if use_wordmark else "MIRA"
+    logo = Text(logo_text, style=MIRA_CYAN, no_wrap=True)
     title = Text(VERSION, style=MIRA_TITLE, justify="center")
 
     metadata = Table.grid(padding=(0, 2))
@@ -40,27 +42,37 @@ def http_splash(listen: str, *, terminal_width: int) -> Align:
     metadata.add_row("status", "ready")
 
     contents = Group(
-        Align.center(logo),
+        Align.center(logo, pad=False),
         Text(),
-        Align.center(title),
+        Align.center(title, pad=False),
         Text(),
-        Align.center(metadata),
+        Align.center(metadata, pad=False),
         Text(),
         Text("Ctrl+C to stop", style=MIRA_HINT, justify="center"),
     )
     panel = Panel(
         contents,
+        height=20 if use_wordmark else 17,
         width=panel_width,
         padding=(1, 2),
         border_style=MIRA_CYAN,
     )
-    return Align.center(panel)
+    # Padding an Align to the terminal width leaves trailing spaces on every
+    # rendered row. Windows terminals can reflow those rows after a focus or
+    # font-metric change, making an already-printed panel appear to grow.
+    return Align.center(panel, pad=False)
 
 
 def print_http_splash(listen: str) -> None:
     """Print the centered ready panel after the listener has been observed."""
-    console = Console()
+    # Hypercorn's startup logger also writes to stderr. Sharing the stream keeps
+    # the panel and its following native INFO line in deterministic order.
+    console = Console(stderr=True)
+    for _ in range(PANEL_SPACING_ROWS):
+        console.print()
     console.print(http_splash(listen, terminal_width=console.width))
+    for _ in range(PANEL_SPACING_ROWS):
+        console.print()
 
 
 __all__ = ["http_splash", "print_http_splash"]

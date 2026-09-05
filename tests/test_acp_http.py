@@ -32,7 +32,7 @@ from mira.api import (
     ToolEvent,
 )
 from protocols.acp.http.server import MiraAgentFactory, _server_config, serve_http
-from protocols.acp.http.splash import http_splash
+from protocols.acp.http.splash import http_splash, print_http_splash
 
 
 class RecordingClient:
@@ -252,6 +252,10 @@ class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(border.startswith(" " * 20))
         self.assertLessEqual(len(border), 120)
+        self.assertEqual(len(rendered.splitlines()), 20)
+        self.assertTrue(
+            all(line == line.rstrip() for line in rendered.splitlines())
+        )
 
     def test_http_splash_handles_a_narrow_terminal(self) -> None:
         output = StringIO()
@@ -264,11 +268,62 @@ class ACPHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Streamable", rendered)
         self.assertIn("ready", rendered)
         self.assertTrue(all(len(line) <= 32 for line in rendered.splitlines()))
+        self.assertEqual(len(rendered.splitlines()), 17)
 
-    def test_http_config_suppresses_startup_info_but_keeps_errors(self) -> None:
+    def test_http_splash_has_three_rows_of_spacing_above_and_below(self) -> None:
+        output = StringIO()
+        console = Console(file=output, width=100, force_terminal=False)
+
+        with patch("protocols.acp.http.splash.Console", return_value=console):
+            print_http_splash("127.0.0.1:9000")
+
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[:3], ["", "", ""])
+        self.assertEqual(lines[-3:], ["", "", ""])
+
+    async def test_native_hypercorn_info_is_emitted_below_the_panel(self) -> None:
+        config = _server_config("127.0.0.1:9000")
+        logger = config.log
+        events: list[str] = []
+
+        with (
+            patch(
+                "protocols.acp.http.server.print_http_splash",
+                side_effect=lambda _listen: events.append("splash"),
+            ),
+            patch.object(
+                logger.error_logger,
+                "info",
+                side_effect=lambda _message: events.append("hypercorn-info"),
+            ),
+        ):
+            await logger.info(
+                "Running on http://127.0.0.1:9000 (CTRL + C to quit)"
+            )
+
+        self.assertEqual(events, ["splash", "hypercorn-info"])
+
+    async def test_splash_failure_does_not_interfere_with_hypercorn(self) -> None:
+        config = _server_config("127.0.0.1:9000")
+        logger = config.log
+
+        with (
+            patch(
+                "protocols.acp.http.server.print_http_splash",
+                side_effect=UnicodeError,
+            ),
+            patch.object(logger.error_logger, "info") as hypercorn_info,
+        ):
+            await logger.info(
+                "Running on http://127.0.0.1:9000 (CTRL + C to quit)"
+            )
+
+        hypercorn_info.assert_called_once()
+
+    def test_http_config_keeps_hypercorn_info_and_errors(self) -> None:
         config = _server_config("127.0.0.1:9000")
 
-        self.assertEqual(config.loglevel, "WARNING")
+        self.assertEqual(config.loglevel, "INFO")
         self.assertEqual(config.errorlog, "-")
 
     async def test_occupied_port_does_not_print_a_false_ready_splash(self) -> None:

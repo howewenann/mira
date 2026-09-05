@@ -56,7 +56,6 @@ async def serve_http(
     )
     try:
         await _wait_for_listener(listen, server_task)
-        print_http_splash(listen)
         await server_task
     finally:
         if not server_task.done():
@@ -96,12 +95,27 @@ def _server_config(listen: str) -> Any:
     """Build Hypercorn configuration through its public configuration API."""
     from hypercorn.config import Config
 
+    class SplashLogger(Config.logger_class):
+        """Place MIRA's panel directly before Hypercorn's bound-server log."""
+
+        _splash_printed = False
+
+        async def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+            if not self._splash_printed and message.startswith("Running on "):
+                self._splash_printed = True
+                try:
+                    print_http_splash(listen)
+                except Exception:
+                    # Presentation must never prevent Hypercorn from logging
+                    # or serving after it has successfully bound the socket.
+                    pass
+            await super().info(message, *args, **kwargs)
+
     config = Config()
     config.bind = [listen]
     config.alpn_protocols = ["h2", "http/1.1"]
-    # The MIRA ready panel reports the endpoint. Keep Hypercorn warnings and
-    # errors while suppressing only its redundant normal startup INFO line.
-    config.loglevel = "WARNING"
+    config.logger_class = SplashLogger
+    config.loglevel = "INFO"
     return config
 
 
