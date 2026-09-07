@@ -35,6 +35,7 @@ from core.interface.requests import (
     ConfirmationRequest as CoreConfirmationRequest,
     FrontendRequest as CoreFrontendRequest,
     MCPApprovalRequest as CoreMCPApprovalRequest,
+    MCPElicitationRequest as CoreMCPElicitationRequest,
 )
 from core.interface.snapshot import SessionSnapshot as CoreSessionSnapshot
 
@@ -55,6 +56,7 @@ API_EXPORTS = {
     "FrontendRequest",
     "InformationEvent",
     "MCPApprovalRequest",
+    "MCPElicitationRequest",
     "MCPEvent",
     "MessageEvent",
     "RubricEvent",
@@ -108,6 +110,7 @@ class PublicAPITests(unittest.TestCase):
             "ArtifactReviewRequest": CoreArtifactReviewRequest,
             "ArtifactDisplayRequest": CoreArtifactDisplayRequest,
             "MCPApprovalRequest": CoreMCPApprovalRequest,
+            "MCPElicitationRequest": CoreMCPElicitationRequest,
             "ConfirmationRequest": CoreConfirmationRequest,
             "SessionSnapshot": CoreSessionSnapshot,
         }

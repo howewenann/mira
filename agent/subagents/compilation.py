@@ -30,8 +30,10 @@ def compile_dynamic_subagents(
     """Return synchronous subagents as compiled runnables.
 
     DeepAgents rejects per-call response schemas for compiled subagents. Raw
-    specs are materialized here with the same inherited capabilities that
-    ``create_deep_agent`` normally supplies before compiling them.
+    isolated specs are materialized here with the same inherited capabilities
+    that ``create_deep_agent`` normally supplies before compiling them. Native
+    ``mode="fork"`` specs remain declarative so DeepAgents can construct their
+    inherited prompt, middleware, state, and conversation itself.
     """
     specs = list(subagents)
     if not any(_is_synchronous(spec) and spec.get("name") == "general-purpose" for spec in specs):
@@ -50,7 +52,7 @@ def compile_dynamic_subagents(
             interrupt_on=interrupt_on,
             enable_todos=enable_todos,
         )
-        if _is_raw_synchronous(spec)
+        if _is_raw_synchronous(spec) and spec.get("mode") != "fork"
         else spec
         for spec in specs
     ]

@@ -10,7 +10,7 @@ from deepagents.backends import StateBackend
 from deepagents.middleware.filesystem import FilesystemPermission
 from deepagents.middleware.subagents import SUBAGENT_RESPONSE_FORMAT_CONFIG_KEY, SubAgentMiddleware
 from langchain.agents.middleware import TodoListMiddleware
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableLambda
 
 from agent.subagents.compilation import compile_dynamic_subagents
@@ -100,6 +100,137 @@ class SubagentCompilationTests(unittest.TestCase):
         self.assertEqual(researcher["response_format"], static_schema)
         self.assertEqual(researcher["interrupt_on"], {})
         self.assertFalse(any(isinstance(item, TodoListMiddleware) for item in researcher["middleware"]))
+
+    def test_fork_specs_remain_declarative_for_native_deepagents_construction(self) -> None:
+        fork = {
+            "name": "reviewer",
+            "description": "Reviews with parent context",
+            "system_prompt": "Review carefully.",
+            "mode": "fork",
+            "model": "child-model",
+            "tools": ["child-tool"],
+        }
+        isolated = {
+            "name": "researcher",
+            "description": "Researches in isolation",
+            "system_prompt": "Research carefully.",
+        }
+
+        with (
+            patch("agent.subagents.compilation.resolve_subagent_model", side_effect=lambda value: value),
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
+        ):
+            compiled = compile_dynamic_subagents(
+                [fork, isolated],
+                model="parent-model",
+                tools=["parent-tool"],
+                backend=StateBackend(),
+                skills=None,
+                permissions=None,
+                interrupt_on=None,
+            )
+
+        reviewer = next(item for item in compiled if item["name"] == "reviewer")
+        researcher = next(item for item in compiled if item["name"] == "researcher")
+        self.assertIs(reviewer, fork)
+        self.assertEqual(reviewer["mode"], "fork")
+        self.assertEqual(reviewer["model"], "child-model")
+        self.assertEqual(reviewer["tools"], ["child-tool"])
+        self.assertIn("runnable", researcher)
+        self.assertNotIn("reviewer", [call.args[0]["name"] for call in create.call_args_list])
+
+    def test_deepagents_native_fork_inherits_messages_while_default_isolated_does_not(self) -> None:
+        invocations: list[list[object]] = []
+
+        def compiled_subagent(_spec: dict[str, object], **_kwargs: object) -> RunnableLambda:
+            return RunnableLambda(
+                lambda state: invocations.append(list(state["messages"]))
+                or {"messages": [AIMessage("done")]}
+            )
+
+        parent_messages = [HumanMessage("original request"), AIMessage("parent context")]
+        runtime = SimpleNamespace(
+            config={},
+            state={"messages": parent_messages},
+            tool_call_id="task-call",
+        )
+
+        with patch("deepagents.middleware.subagents.create_sub_agent", side_effect=compiled_subagent):
+            forked = SubAgentMiddleware(
+                backend=StateBackend(),
+                subagents=[
+                    {
+                        "name": "reviewer",
+                        "description": "Reviews",
+                        "system_prompt": "Review carefully.",
+                        "mode": "fork",
+                    }
+                ],
+            )
+            forked.tools[0].func(
+                description="Check the answer",
+                subagent_type="reviewer",
+                runtime=runtime,
+            )
+            isolated = SubAgentMiddleware(
+                backend=StateBackend(),
+                subagents=[
+                    {
+                        "name": "reviewer",
+                        "description": "Reviews",
+                        "system_prompt": "Review carefully.",
+                    }
+                ],
+            )
+            isolated.tools[0].func(
+                description="Check the answer",
+                subagent_type="reviewer",
+                runtime=runtime,
+            )
+
+        fork_contents = [message.content for message in invocations[0]]
+        self.assertEqual(fork_contents[:2], ["original request", "parent context"])
+        self.assertIn("Check the answer", fork_contents[-1])
+        self.assertEqual([message.content for message in invocations[1]], ["Check the answer"])
+
+    def test_native_raw_fork_accepts_a_dynamic_response_schema(self) -> None:
+        response_schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        response_formats: list[object] = []
+
+        def compiled_subagent(
+            _spec: dict[str, object],
+            *,
+            response_format: object = None,
+            **_kwargs: object,
+        ) -> RunnableLambda:
+            response_formats.append(response_format)
+            return RunnableLambda(lambda _state: {"messages": [AIMessage("done")]})
+
+        runtime = SimpleNamespace(
+            config={"configurable": {SUBAGENT_RESPONSE_FORMAT_CONFIG_KEY: response_schema}},
+            state={"messages": [HumanMessage("parent context")]},
+            tool_call_id="task-call",
+        )
+        with patch("deepagents.middleware.subagents.create_sub_agent", side_effect=compiled_subagent):
+            middleware = SubAgentMiddleware(
+                backend=StateBackend(),
+                subagents=[
+                    {
+                        "name": "reviewer",
+                        "description": "Reviews",
+                        "system_prompt": "Review carefully.",
+                        "mode": "fork",
+                    }
+                ],
+            )
+            middleware.tools[0].func(
+                description="Return structured feedback",
+                subagent_type="reviewer",
+                runtime=runtime,
+            )
+
+        self.assertEqual(response_formats, [None, response_schema])
 
     def test_existing_general_purpose_is_not_duplicated(self) -> None:
         existing = {"name": "general-purpose", "description": "Custom", "runnable": object()}

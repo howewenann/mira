@@ -460,9 +460,9 @@ async def run_turn(
     DeepAgents exposes separate async event streams for messages, tool calls,
     subagents, and final output. MIRA consumes them concurrently so the terminal
     can update as soon as each event arrives. If LangGraph interrupts for a
-    write approval, ask_user prompt, or structured planning prompt, this
-    function asks the renderer for the needed input and resumes the same thread
-    with a ``Command`` payload.
+    write approval, MCP elicitation, ask_user prompt, or structured planning
+    prompt, this function asks the renderer for the needed input and resumes
+    the same thread with a ``Command`` payload.
     """
     payload: dict[str, Any] | Command = {
         "messages": list(messages) if messages is not None else [{"role": "user", "content": text}]
@@ -588,6 +588,7 @@ async def run_turn(
         show_goal_interrupt = first_typed_interrupt(interrupts, "show_goal")
         show_plan_interrupt = first_typed_interrupt(interrupts, "show_plan")
         ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
+        mcp_elicitation_interrupt = first_typed_interrupt(interrupts, "mcp_elicitation")
         if finalize_goal_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "finalize_goal",
@@ -664,6 +665,9 @@ async def run_turn(
             )
             result.final_text = ""
             return result
+        elif mcp_elicitation_interrupt is not None:
+            answer = await renderer.answer_mcp_elicitation(mcp_elicitation_interrupt)
+            payload = Command(resume=answer)
         elif ask_user_interrupt is not None:
             call_id = ensure_control_tool_call(
                 "ask_user",

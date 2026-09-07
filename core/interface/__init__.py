@@ -24,6 +24,7 @@ from core.interface.requests import (
     ConfirmationRequest,
     FrontendRequest,
     MCPApprovalRequest,
+    MCPElicitationRequest,
 )
 from core.interface.snapshot import SessionSnapshot
 
@@ -42,6 +43,7 @@ __all__ = [
     "FrontendRequest",
     "InformationEvent",
     "MCPApprovalRequest",
+    "MCPElicitationRequest",
     "MCPEvent",
     "MessageEvent",
     "NullFrontend",

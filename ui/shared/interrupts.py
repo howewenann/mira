@@ -25,6 +25,20 @@ def ask_user_request(interrupt: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def mcp_elicitation_request(interrupt: Any) -> dict[str, Any]:
+    """Extract a native LangChain MCP elicitation payload."""
+    value = getattr(interrupt, "value", interrupt)
+    return value if isinstance(value, dict) and value.get("type") == "mcp_elicitation" else {}
+
+
+def mcp_elicitation_preview(request: dict[str, Any]) -> str:
+    """Return concise supporting detail for one MCP elicitation question."""
+    if request.get("mode") == "url":
+        return str(request.get("url") or "")
+    schema = request.get("requested_schema")
+    return json.dumps(schema, indent=2, ensure_ascii=False) if isinstance(schema, dict) else "{}"
+
+
 def ask_user_question(request: dict[str, Any]) -> str:
     """Return the ask_user question text with a compact fallback."""
     question = compact_multiline_text(request.get("question"))

@@ -26,6 +26,7 @@ from core.interface.requests import (
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
     AskUserRequest,
+    MCPElicitationRequest,
 )
 
 
@@ -419,6 +420,9 @@ class FrontendEmitter:
 
     async def ask_user(self, interrupt: Any) -> Any:
         return await self.frontend.request(AskUserRequest(interrupt))
+
+    async def answer_mcp_elicitation(self, interrupt: Any) -> Any:
+        return await self.frontend.request(MCPElicitationRequest(interrupt))
 
     async def finalize_goal(
         self,

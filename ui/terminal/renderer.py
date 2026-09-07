@@ -20,6 +20,8 @@ from ui.shared.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    mcp_elicitation_preview,
+    mcp_elicitation_request,
     plan_request,
 )
 from session.goals import goal_artifact_text
@@ -252,6 +254,39 @@ class Renderer:
 
         response = (await self._input(f"{ASK_USER_OPEN_OPTION}: ")).strip()
         return response or ASK_USER_OPEN_OPTION
+
+    async def answer_mcp_elicitation(self, interrupt: Any) -> dict[str, Any]:
+        """Collect native MCP form or URL answers through terminal interaction."""
+        payload = mcp_elicitation_request(interrupt)
+        responses: dict[str, dict[str, Any]] = {}
+        for request in payload.get("requests", []):
+            if not isinstance(request, dict):
+                continue
+            message = str(request.get("message") or "MCP input required")
+            preview = mcp_elicitation_preview(request)
+            self.transcript.block("question", f"{message}\n{preview}".rstrip())
+            action = await self._choice(
+                "Answer this MCP request?",
+                [("a", "Accept"), ("d", "Decline"), ("c", "Cancel tool")],
+            )
+            response: dict[str, Any] = {
+                "action": {"a": "accept", "d": "decline"}.get(action, "cancel")
+            }
+            if response["action"] == "accept" and request.get("mode") == "form":
+                while True:
+                    raw = await self._input("JSON response: ")
+                    try:
+                        content = json.loads(raw)
+                    except json.JSONDecodeError:
+                        self.transcript.line("Response must be valid JSON.")
+                        continue
+                    if not isinstance(content, dict):
+                        self.transcript.line("Response must be a JSON object.")
+                        continue
+                    response["content"] = content
+                    break
+            responses[str(request.get("key") or "")] = response
+        return {"responses": responses}
 
     async def finalize_plan(self, interrupt: Any) -> str:
         """Print a structured plan in one-shot terminal mode."""

@@ -151,13 +151,6 @@ def approval_preview(state: MCPServerState) -> str:
     )
 
 
-def adapter_connection(state: MCPServerState) -> dict[str, Any]:
-    config = dict(state.connection_config)
-    if config.get("transport") == "http":
-        config["transport"] = "streamable_http"
-    return config
-
-
 def _error_text(error: BaseException) -> str:
     message = str(error).strip()
     return f"{type(error).__name__}: {message}" if message else type(error).__name__

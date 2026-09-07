@@ -13,6 +13,7 @@ from deepagents.backends import CompositeBackend, FilesystemBackend
 from langchain_quickjs import CodeInterpreterMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
 
 from agent.factory import _action_permissions, _write_interrupts
 from agent.resources import build_resources
@@ -264,7 +265,7 @@ class DeepAgentsPermissionCompatibilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
-    """Exercise the exact QuickJS 0.3.5 behavior MIRA relies on."""
+    """Exercise the QuickJS 0.3.7 execution and native PTC streaming MIRA relies on."""
 
     def runtime(self, call_id: str = "eval-call") -> SimpleNamespace:
         return SimpleNamespace(
@@ -281,6 +282,7 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(middleware._registry.close)
         tool = middleware.tools[0]
         runtime = self.runtime()
+        runtime.state.update(middleware.before_agent(runtime.state, runtime) or {})
 
         first = await tool.coroutine(runtime=runtime, code="globalThis.saved = 41; saved")
         second = await tool.coroutine(runtime=runtime, code="saved + 1")
@@ -298,6 +300,7 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(middleware._registry.close)
         tool = middleware.tools[0]
         runtime = self.runtime()
+        runtime.state.update(middleware.before_agent(runtime.state, runtime) or {})
 
         syntax = await tool.coroutine(runtime=runtime, code="const =")
         runtime_error = await tool.coroutine(runtime=runtime, code='throw new Error("boom")')
@@ -310,6 +313,42 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_inner_ptc_calls_surface_on_miras_existing_v3_tool_stream(self) -> None:
+        @tool
+        async def double(value: int) -> int:
+            """Double one integer."""
+            return value * 2
+
+        model = BindableFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "eval",
+                            "args": {"code": "await tools.double({value: 21})"},
+                            "id": "eval-call",
+                        }
+                    ],
+                ),
+                AIMessage(content="The answer is 42."),
+            ]
+        )
+        middleware = CodeInterpreterMiddleware(mode="call", ptc=["double"])
+        agent = create_deep_agent(
+            model=model,
+            tools=[double],
+            middleware=[middleware],
+        )
+        renderer = ApprovalRenderer({"type": "approve"})
+
+        result = await run_turn(agent, "Double 21", renderer, "quickjs-native-stream")
+
+        self.assertEqual(result.final_text, "The answer is 42.")
+        self.assertIn("eval", result.tool_calls)
+        self.assertIn("double", result.tool_calls)
+        self.assertLess(result.tool_calls.index("eval"), result.tool_calls.index("double"))
 
 
 if __name__ == "__main__":

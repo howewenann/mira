@@ -10,15 +10,10 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import StructuredTool, ToolException, tool
-from langchain_mcp_adapters.callbacks import Callbacks
-from langchain_mcp_adapters.prompts import load_mcp_prompt
-from langchain_mcp_adapters.resources import get_mcp_resource
-from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
 from agent.mcp.configuration import (
     MCPConfiguration,
-    adapter_connection,
     approval_preview,
     load_mcp_configuration,
 )
@@ -33,7 +28,7 @@ from agent.mcp.auth import (
     is_oauth_login_required,
     sanitized_error,
 )
-from agent.mcp.client import MiraMCPClient
+from agent.mcp.integration import MiraMCPIntegration
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry
 from agent.mcp.runtime import MCPServerRuntime
@@ -53,7 +48,6 @@ from core.diagnostics.logging import get_diagnostics_logger
 ApprovalHandler = Callable[[MCPServerState, str], Awaitable[str]]
 ChangeHandler = Callable[[], Awaitable[None]]
 _ATTACHMENT_PATTERN = re.compile(r'(?<![\w@])@(?:"([^"\r\n]+)"|([^\s@]+))')
-_MAX_PAGES = 1000
 
 
 class MCPManager:
@@ -76,7 +70,6 @@ class MCPManager:
         self._operation_lock = asyncio.Lock()
         self._oauth_providers: dict[str, MiraOAuthProvider] = {}
         self._runtimes: dict[str, MCPServerRuntime] = {}
-        self.client = self._new_client()
         self.read_tool = self._build_read_tool()
 
     @property
@@ -130,7 +123,6 @@ class MCPManager:
             self._resource_locks = {}
             self._oauth_providers = {}
             self._runtimes = {}
-            self.client = self._new_client()
             await self.initialize(self._approval_handler)
 
     async def shutdown(self) -> None:
@@ -348,7 +340,7 @@ class MCPManager:
         if not _advertises_capability(state.session, "tools"):
             return
         try:
-            descriptors = await _list_all(state.session, "list_tools", "tools")
+            descriptors = await state.session.list_tool_descriptors()
         except BaseException as error:
             state.error = f"tools: {_concise_error(error)}"
             return
@@ -371,12 +363,7 @@ class MCPManager:
                 self._ambiguous_tools.add(generated)
                 continue
             try:
-                converted = convert_mcp_tool_to_langchain_tool(
-                    state.session,
-                    descriptor,
-                    server_name=state.name,
-                    callbacks=self.client.callbacks,
-                )
+                converted = await state.session.as_tool(descriptor)
                 converted.name = generated
                 metadata = dict(getattr(converted, "metadata", None) or {})
                 metadata["mira_mcp"] = {"server": state.name, "tool": original}
@@ -417,7 +404,7 @@ class MCPManager:
                 return
             try:
                 session = state.session
-                descriptors = await _list_all(session, "list_prompts", "prompts")
+                descriptors = await session.list_prompts()
                 if state.session is not session:
                     return
                 specs: list[PromptSpec] = []
@@ -435,7 +422,12 @@ class MCPManager:
                         _name: str = original,
                     ) -> list[BaseMessage]:
                         try:
-                            return list(await load_mcp_prompt(_state.session, _name, arguments=values or None))
+                            return list(
+                                await _state.session.get_prompt_messages(
+                                    _name,
+                                    values or None,
+                                )
+                            )
                         except BaseException as error:
                             if await self._handle_later_auth_failure(_state, error):
                                 raise RuntimeError("MCP login required.") from error
@@ -478,7 +470,7 @@ class MCPManager:
                 return
             try:
                 session = state.session
-                descriptors = await _list_all(session, "list_resources", "resources")
+                descriptors = await session.list_resources()
                 if state.session is not session:
                     return
                 resources = []
@@ -491,7 +483,11 @@ class MCPManager:
                         uri=uri,
                         name=str(getattr(descriptor, "title", None) or getattr(descriptor, "name", "") or ""),
                         description=str(getattr(descriptor, "description", "") or ""),
-                        mime_type=str(getattr(descriptor, "mimeType", "") or ""),
+                        mime_type=str(
+                            getattr(descriptor, "mime_type", None)
+                            or getattr(descriptor, "mimeType", "")
+                            or ""
+                        ),
                     )
                     resources.append(resource)
                     self.resource_registry[token] = resource
@@ -547,14 +543,14 @@ class MCPManager:
             if state is None or state.session is None or not state.usable:
                 raise ToolException("MCP server is not available.")
             try:
-                blobs = await get_mcp_resource(state.session, uri)
+                contents = await state.session.read_resource(uri)
             except BaseException as error:
                 if await manager._handle_later_auth_failure(state, error):
                     raise ToolException("MCP login required.") from error
                 raise ToolException(f"MCP resource read failed: {_concise_error(error)}") from error
             parts: list[str] = []
-            for blob in blobs:
-                data = getattr(blob, "data", None)
+            for content in contents:
+                data = getattr(content, "text", None)
                 if not isinstance(data, str):
                     raise ToolException("MCP resource content is binary or unsupported.")
                 parts.append(data)
@@ -623,18 +619,11 @@ class MCPManager:
             self._oauth_providers.pop(state.name, None)
         else:
             self._oauth_providers[state.name] = provider
-        connections = getattr(self.client, "connections", None)
-        if not isinstance(connections, dict) or state.name not in connections:
-            return
-        connection = adapter_connection(state)
-        if provider is not None:
-            connection["auth"] = provider
-        connections[state.name] = connection
 
     def _runtime_for(self, state: MCPServerState) -> MCPServerRuntime:
         runtime = self._runtimes.get(state.name)
         if runtime is None:
-            runtime = MCPServerRuntime(state.name, lambda: self.client.session(state.name))
+            runtime = MCPServerRuntime(state.name, lambda: self._new_integration(state))
             self._runtimes[state.name] = runtime
         return runtime
 
@@ -644,30 +633,17 @@ class MCPManager:
         except BaseException:
             get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
 
-    def _new_client(self) -> MiraMCPClient:
-        connections: dict[str, dict[str, Any]] = {}
-        for name, state in self.servers.items():
-            if state.config.get("transport") not in {"stdio", "http"}:
-                continue
-            connection = adapter_connection(state)
-            if (
-                state.transport == "http"
-                and not has_authorization_header(state)
-                and has_persisted_login(state, token_root=self.token_root)
-            ):
-                provider = MiraOAuthProvider(state, interactive=False, token_root=self.token_root)
-                self._oauth_providers[name] = provider
-                connection["auth"] = provider
-            connections[name] = connection
-
-        async def log_message(params: Any, context: Any) -> None:
-            data = getattr(params, "data", "")
-            level = str(getattr(params, "level", "info") or "info").lower()
-            logger = get_diagnostics_logger()
-            method = getattr(logger, level, logger.info)
-            method("MCP %s: %s", context.server_name, data)
-
-        return MiraMCPClient(connections, callbacks=Callbacks(on_logging_message=log_message))
+    def _new_integration(self, state: MCPServerState) -> MiraMCPIntegration:
+        provider = self._oauth_providers.get(state.name)
+        if (
+            provider is None
+            and state.transport == "http"
+            and not has_authorization_header(state)
+            and has_persisted_login(state, token_root=self.token_root)
+        ):
+            provider = MiraOAuthProvider(state, interactive=False, token_root=self.token_root)
+            self._oauth_providers[state.name] = provider
+        return MiraMCPIntegration(state, auth=provider)
 
     def _server(self, name: str) -> MCPServerState:
         if name not in self.servers:
@@ -677,18 +653,6 @@ class MCPManager:
     async def _notify_changed(self) -> None:
         if self._change_handler is not None:
             await self._change_handler()
-
-
-async def _list_all(session: Any, method_name: str, field: str) -> list[Any]:
-    items: list[Any] = []
-    cursor: str | None = None
-    for _ in range(_MAX_PAGES):
-        result = await getattr(session, method_name)(cursor=cursor)
-        items.extend(getattr(result, field, None) or [])
-        cursor = getattr(result, "nextCursor", None)
-        if not cursor:
-            return items
-    raise RuntimeError(f"{method_name} exceeded {_MAX_PAGES} pages")
 
 
 def _attached_pairs(messages: list[Any]) -> set[tuple[str, str]]:

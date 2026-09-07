@@ -43,6 +43,18 @@ class AskUserRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class MCPElicitationRequest:
+    """Request answers for one native LangChain MCP elicitation interrupt.
+
+    The frontend returns the upstream resume shape unchanged:
+    ``{"responses": {key: {"action": "accept", "content": {...}}}}``.
+    Decline and cancel responses omit ``content``.
+    """
+
+    interrupt: Any
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactReviewRequest:
     """Request review of a provisional MIRA Goal or Plan.
 
@@ -106,6 +118,7 @@ class ConfirmationRequest:
 FrontendRequest = (
     ApprovalRequest
     | AskUserRequest
+    | MCPElicitationRequest
     | ArtifactReviewRequest
     | ArtifactDisplayRequest
     | MCPApprovalRequest
@@ -125,4 +138,5 @@ __all__ = [
     "FrontendRequest",
     "MCPApprovalDecision",
     "MCPApprovalRequest",
+    "MCPElicitationRequest",
 ]

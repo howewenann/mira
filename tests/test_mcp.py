@@ -4,21 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import tempfile
 import unittest
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import anyio
-import httpx
+import httpx2 as httpx
+from fastmcp import Context, FastMCP
+from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.tools import ToolException
-from langchain_mcp_adapters.callbacks import Callbacks
+from langchain_core.tools import StructuredTool, ToolException
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mcp.types import (
     PromptsCapability,
+    ElicitRequest,
+    ElicitRequestFormParams,
+    InputRequiredResult,
     ReadResourceResult,
     ResourcesCapability,
     ServerCapabilities,
@@ -29,7 +37,6 @@ from textual.app import App, ComposeResult
 from textual.widgets import Button, Collapsible, Static
 
 from agent.mcp.configuration import (
-    adapter_connection,
     approval_preview,
     configuration_fingerprint,
     load_mcp_configuration,
@@ -45,7 +52,8 @@ from agent.mcp.auth import (
     server_token_directory,
 )
 from agent.mcp.manager import MCPManager
-from agent.mcp.models import MCPResource, PromptArgument, PromptSpec
+from agent.mcp.integration import MCPAdapter, MiraMCPIntegration
+from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry, mustache_variables
 from agent.resources.project_setup import ensure_project_examples
 from config.settings import (
@@ -156,7 +164,7 @@ class MCPConfigurationTests(unittest.TestCase):
             "Bearer first-secret",
         )
         self.assertEqual(
-            adapter_connection(remote)["headers"]["Authorization"],
+            remote.connection_config["headers"]["Authorization"],
             "Bearer first-secret",
         )
         self.assertNotIn("first-secret", approval_preview(remote))
@@ -558,9 +566,10 @@ class MCPOAuthStorageTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             manager = MCPManager(root, token_root=token_root)
-            connection = manager.client.connections["server"]
-            self.assertNotIn("auth", connection)
-            self.assertEqual(connection["headers"]["Authorization"], "Bearer configured")
+            integration = manager._new_integration(manager.servers["server"])
+            self.assertIsInstance(integration.client.transport, StreamableHttpTransport)
+            self.assertIsNone(integration.client.transport.auth)
+            self.assertEqual(integration.client.transport.headers["Authorization"], "Bearer configured")
 
 
 class MCPSettingsTests(unittest.TestCase):
@@ -708,6 +717,150 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
                 await registry.resolve("/mcp__github__review_pr repo=one repo=two")
 
 
+class MCPNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manager_starts_executes_and_stops_a_real_stdio_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server_path = root / "stdio_server.py"
+            server_path.write_text(
+                """from fastmcp import FastMCP
+
+server = FastMCP(\"stdio test\")
+
+@server.tool
+def ping(value: str) -> str:
+    return f\"pong: {value}\"
+
+if __name__ == \"__main__\":
+    server.run(show_banner=False)
+""",
+                encoding="utf-8",
+            )
+            write_config(
+                root,
+                {"local": {"command": sys.executable, "args": [str(server_path)]}},
+            )
+            manager = MCPManager(root)
+
+            async def approve(_state: object, _preview: str) -> str:
+                return "allow"
+
+            await manager.initialize(approve)
+            try:
+                state = manager.servers["local"]
+                self.assertEqual(state.status, "Available")
+                self.assertEqual([tool.name for tool in state.tools], ["mcp__local__ping"])
+                result = await state.tools[0].ainvoke({"value": "ready"})
+                self.assertEqual(
+                    "".join(
+                        block.get("text", "")
+                        for block in result
+                        if block.get("type") == "text"
+                    ),
+                    "pong: ready",
+                )
+            finally:
+                await manager.shutdown()
+            self.assertEqual(state.status, "Disabled")
+
+    async def test_tools_execute_and_elicitation_interrupts_resume_or_decline(self) -> None:
+        server = FastMCP("MIRA native MCP test")
+
+        @server.tool
+        async def greet(name: str) -> str:
+            return f"Hello, {name}."
+
+        @server.tool
+        async def guarded_greet(ctx: Context) -> str | InputRequiredResult:
+            responses = ctx.input_responses
+            if responses is None:
+                return InputRequiredResult(
+                    inputRequests={
+                        "identity": ElicitRequest(
+                            params=ElicitRequestFormParams(
+                                message="Who should be greeted?",
+                                requestedSchema={
+                                    "type": "object",
+                                    "properties": {"name": {"type": "string"}},
+                                    "required": ["name"],
+                                },
+                            )
+                        )
+                    },
+                    requestState="greeting-round",
+                )
+            answer = responses["identity"]
+            if answer.action == "accept":
+                return f"Hello, {answer.content['name']}."
+            return f"Greeting {answer.action}d."
+
+        state = MCPServerState(
+            name="native",
+            transport="stdio",
+            config={"command": "unused", "args": []},
+            fingerprint="test",
+        )
+        integration = MiraMCPIntegration(state)
+        integration.adapter = MCPAdapter(server)
+
+        async with integration:
+            descriptors = await integration.list_tool_descriptors()
+            tools = {
+                descriptor.name: await integration.as_tool(descriptor)
+                for descriptor in descriptors
+            }
+
+            def tool_text(value) -> str:
+                return "".join(
+                    str(block.get("text") or "")
+                    for block in value
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+
+            self.assertEqual(
+                tool_text(await tools["greet"].ainvoke({"name": "MIRA"})),
+                "Hello, MIRA.",
+            )
+
+            async def call_guarded(_state: dict[str, object]) -> dict[str, object]:
+                return {"result": await tools["guarded_greet"].ainvoke({})}
+
+            builder = StateGraph(dict)
+            builder.add_node("call", call_guarded)
+            builder.add_edge(START, "call")
+            builder.add_edge("call", END)
+            graph = builder.compile(checkpointer=InMemorySaver())
+
+            accepted_config = {"configurable": {"thread_id": "mcp-accept"}}
+            interrupted = await graph.ainvoke({}, accepted_config)
+            payload = interrupted["__interrupt__"][0].value
+            self.assertEqual(payload["type"], "mcp_elicitation")
+            self.assertEqual(payload["tool_name"], "guarded_greet")
+            self.assertEqual(payload["requests"][0]["key"], "identity")
+            accepted = await graph.ainvoke(
+                Command(
+                    resume={
+                        "responses": {
+                            "identity": {
+                                "action": "accept",
+                                "content": {"name": "Ada"},
+                            }
+                        }
+                    }
+                ),
+                accepted_config,
+            )
+            self.assertEqual(tool_text(accepted["result"]), "Hello, Ada.")
+
+            declined_config = {"configurable": {"thread_id": "mcp-decline"}}
+            await graph.ainvoke({}, declined_config)
+            declined = await graph.ainvoke(
+                Command(resume={"responses": {"identity": {"action": "decline"}}}),
+                declined_config,
+            )
+            self.assertEqual(tool_text(declined["result"]), "Greeting declined.")
+
+
 class Page:
     def __init__(self, field: str, values: list, cursor: str | None = None) -> None:
         setattr(self, field, values)
@@ -770,28 +923,79 @@ class FakeSession:
 class FakeClient:
     def __init__(self, sessions: dict[str, FakeSession]) -> None:
         self.sessions = sessions
-        self.callbacks = Callbacks()
         self.opened: list[str] = []
         self.closed: list[str] = []
         self.entered_tasks: list[tuple[str, asyncio.Task | None]] = []
         self.exited_tasks: list[tuple[str, asyncio.Task | None]] = []
 
-    @asynccontextmanager
-    async def session(self, name: str):
-        self.opened.append(name)
-        self.entered_tasks.append((name, asyncio.current_task()))
-        try:
-            yield self.sessions[name]
-        finally:
-            self.closed.append(name)
-            self.exited_tasks.append((name, asyncio.current_task()))
+    def integration(self, name: str) -> FakeIntegration:
+        return FakeIntegration(self, name)
 
+
+class FakeIntegration:
+    def __init__(self, owner: FakeClient, name: str) -> None:
+        self.owner = owner
+        self.name = name
+        self.session = owner.sessions[name]
+
+    async def __aenter__(self):
+        name = self.name
+        self.owner.opened.append(name)
+        self.owner.entered_tasks.append((name, asyncio.current_task()))
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        name = self.name
+        self.owner.closed.append(name)
+        self.owner.exited_tasks.append((name, asyncio.current_task()))
+
+    def get_server_capabilities(self) -> ServerCapabilities:
+        return self.session.get_server_capabilities()
+
+    async def list_tool_descriptors(self) -> list:
+        return list((await self.session.list_tools()).tools)
+
+    async def as_tool(self, descriptor) -> StructuredTool:
+        async def call(**arguments):
+            return await self.session.call_tool(descriptor.name, arguments)
+
+        return StructuredTool(
+            name=descriptor.name,
+            description=descriptor.description,
+            args_schema=descriptor.inputSchema,
+            coroutine=call,
+        )
+
+    async def list_prompts(self) -> list:
+        return list((await self.session.list_prompts()).prompts)
+
+    async def get_prompt_messages(self, name: str, arguments: dict | None = None) -> list:
+        response = await self.session.get_prompt(name, arguments)
+        messages = []
+        for message in response.messages:
+            cls = HumanMessage if message.role == "user" else AIMessage
+            messages.append(cls(message.content.text))
+        return messages
+
+    async def list_resources(self) -> list:
+        resources = []
+        cursor = None
+        while True:
+            page = await self.session.list_resources(cursor)
+            resources.extend(page.resources)
+            cursor = page.nextCursor
+            if not cursor:
+                return resources
+
+    async def read_resource(self, uri: str) -> list:
+        return list((await self.session.read_resource(uri)).contents)
 
 class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
     async def make_manager(self, root: Path, servers: dict[str, dict], sessions: dict[str, FakeSession]) -> MCPManager:
         write_config(root, servers)
         manager = MCPManager(root, token_root=root / "profile-tokens")
         manager.client = FakeClient(sessions)
+        manager._new_integration = lambda state: manager.client.integration(state.name)
 
         async def allow(_state, _preview):
             return "allow"
@@ -800,27 +1004,6 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
         return manager
 
     async def test_all_stdio_connections_disable_sdk_stderr_logging(self) -> None:
-        calls: list[tuple[str, object]] = []
-        omitted = object()
-
-        @asynccontextmanager
-        async def fake_stdio_client(server, *, errlog=omitted):
-            calls.append((server.command, errlog))
-            yield object(), object()
-
-        class FakeClientSession:
-            def __init__(self, _read, _write, **_kwargs) -> None:
-                pass
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args) -> None:
-                pass
-
-            async def initialize(self) -> None:
-                pass
-
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_config(
@@ -832,16 +1015,15 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             manager = MCPManager(root, token_root=root / "profile-tokens")
-            with (
-                patch("agent.mcp.client.stdio_client", fake_stdio_client),
-                patch("agent.mcp.client.ClientSession", FakeClientSession),
-            ):
-                for name, connection in manager.client.connections.items():
-                    if connection["transport"] == "stdio":
-                        async with manager.client.session(name):
-                            pass
+            transports = [
+                manager._new_integration(state).client.transport
+                for state in manager.servers.values()
+                if state.transport == "stdio"
+            ]
 
-        self.assertEqual(calls, [("first", None), ("second", None)])
+        self.assertEqual([item.command for item in transports], ["first", "second"])
+        self.assertTrue(all(isinstance(item, StdioTransport) for item in transports))
+        self.assertTrue(all(item.log_file == Path(os.devnull) for item in transports))
 
     async def test_persistent_runtime_eager_caches_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -886,6 +1068,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             session = GatedPrompts()
             manager = MCPManager(root, token_root=root / "profile-tokens")
             manager.client = FakeClient({"gated": session})
+            manager._new_integration = lambda state: manager.client.integration(state.name)
 
             async def allow(_state, _preview):
                 return "allow"
@@ -976,6 +1159,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             manager = MCPManager(root)
             client = FakeClient({"a": FakeSession(), "b": FakeSession()})
             manager.client = client
+            manager._new_integration = lambda state: client.integration(state.name)
 
             async def approve(state, _preview):
                 return "deny" if state.name == "a" else "allow"
@@ -1051,27 +1235,19 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             await manager.shutdown()
 
     async def test_approval_precedes_oauth_classification(self) -> None:
-        class ChallengedClient:
-            callbacks = Callbacks()
-            connections = {
-                "linear": {
-                    "transport": "streamable_http",
-                    "url": "https://example.test/mcp",
-                    "headers": {},
-                }
-            }
-
-            @asynccontextmanager
-            async def session(self, _name: str):
+        class ChallengedIntegration:
+            async def __aenter__(self):
                 challenge = 'Bearer resource_metadata="https://example.test/.well-known/oauth-protected-resource"'
                 raise oauth_response_error(401, authenticate=challenge)
-                yield  # pragma: no cover
+
+            async def __aexit__(self, *_args):
+                pass
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_config(root, {"linear": {"type": "http", "url": "https://example.test/mcp"}})
             manager = MCPManager(root, token_root=root / "profile-tokens")
-            manager.client = ChallengedClient()
+            manager._new_integration = lambda _state: ChallengedIntegration()
             events: list[str] = []
 
             async def approve(_state, _preview):
@@ -1095,7 +1271,6 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             manager = MCPManager(root, token_root=root / "profile-tokens")
             state = manager.servers["linear"]
             state.status = "Login required"
-            other_mapping = manager.client.connections["other"]
             transitions: list[str] = []
             changes: list[str] = []
 
@@ -1113,8 +1288,8 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await manager.login_server("linear"))
             self.assertEqual(transitions, ["Authenticating", "Starting"])
             self.assertEqual(state.status, "Available")
-            self.assertIs(manager.client.connections["other"], other_mapping)
-            self.assertIn("auth", manager.client.connections["linear"])
+            self.assertIn("linear", manager._oauth_providers)
+            self.assertNotIn("other", manager._oauth_providers)
             self.assertEqual(changes, ["Available"])
 
     async def test_failed_explicit_login_returns_to_login_required(self) -> None:
@@ -1195,12 +1370,20 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def convert(_session, descriptor, **_kwargs):
+            async def convert(_integration, descriptor):
                 if descriptor.name == "bad":
                     raise ValueError("cannot convert")
-                return SimpleNamespace(name=descriptor.name, description="works", metadata={})
 
-            with patch("agent.mcp.manager.convert_mcp_tool_to_langchain_tool", side_effect=convert):
+                async def works():
+                    return "works"
+
+                return StructuredTool.from_function(
+                    coroutine=works,
+                    name=descriptor.name,
+                    description="works",
+                )
+
+            with patch.object(FakeIntegration, "as_tool", autospec=True, side_effect=convert):
                 manager = await self.make_manager(
                     root,
                     {"x": {"command": "x", "args": []}},

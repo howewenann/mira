@@ -7,7 +7,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator, Mapping
 
-from acp.schema import PermissionOption, ToolCallUpdate
+from acp.schema import (
+    ElicitationFormSessionMode,
+    ElicitationUrlSessionMode,
+    PermissionOption,
+    ToolCallUpdate,
+)
 
 from mira.api import (
     ApprovalRequest,
@@ -19,6 +24,7 @@ from mira.api import (
     FrontendRequest,
     InformationEvent,
     MCPApprovalRequest,
+    MCPElicitationRequest,
     MessageEvent,
     ToolEvent,
 )
@@ -98,6 +104,36 @@ class ACPFrontend:
                 [str(item) for item in value.get("options", ())],
                 str(value.get("open_option") or ""),
             )
+        if isinstance(request, MCPElicitationRequest):
+            value = getattr(request.interrupt, "value", request.interrupt)
+            value = value if isinstance(value, Mapping) else {}
+            responses: dict[str, dict[str, Any]] = {}
+            for item in value.get("requests", ()):
+                if not isinstance(item, Mapping):
+                    continue
+                key = str(item.get("key") or "")
+                elicitation_id = self._interaction_id("mira-mcp-elicit")
+                if item.get("mode") == "url":
+                    mode = ElicitationUrlSessionMode(
+                        session_id=session_id,
+                        elicitation_id=elicitation_id,
+                        url=str(item.get("url") or ""),
+                    )
+                else:
+                    mode = ElicitationFormSessionMode(
+                        session_id=session_id,
+                        elicitation_id=elicitation_id,
+                        requested_schema=dict(item.get("requested_schema") or {}),
+                    )
+                answer = await self.connection.create_elicitation(
+                    str(item.get("message") or "MCP input required"),
+                    mode,
+                )
+                response = {"action": answer.action}
+                if answer.action == "accept" and answer.content is not None:
+                    response["content"] = dict(answer.content)
+                responses[key] = response
+            return {"responses": responses}
         if isinstance(request, ArtifactReviewRequest):
             return await self._review_artifact(session_id, request)
         if isinstance(request, ArtifactDisplayRequest):

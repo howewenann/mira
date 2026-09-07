@@ -21,6 +21,7 @@ from core.interface import (
     FrontendEvent,
     FrontendRequest,
     MCPEvent,
+    MCPElicitationRequest,
     MessageEvent,
     RubricEvent,
     RuntimeEvent,
@@ -276,6 +277,41 @@ class FrontendContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(request.interrupts[0], interrupt)
                 self.assertEqual(agent.payloads[1].resume, {"decisions": [decision]})
                 await application.shutdown()
+
+    async def test_mcp_elicitation_uses_the_frontend_boundary_and_native_resume_shape(self) -> None:
+        interrupt = {
+            "type": "mcp_elicitation",
+            "tool_name": "lookup",
+            "requests": [
+                {
+                    "key": "identity",
+                    "mode": "form",
+                    "message": "Who should be looked up?",
+                    "requested_schema": {"type": "object"},
+                }
+            ],
+        }
+        answer = {
+            "responses": {
+                "identity": {"action": "accept", "content": {"name": "Ada"}}
+            }
+        }
+        frontend = RecordingFrontend([answer])
+        agent = FakeAgent(
+            [
+                FakeStream(interrupts=[interrupt]),
+                FakeStream(output={"messages": [AIMessage(content="found")]})
+            ]
+        )
+        application, session = application_for(frontend, agent)
+
+        result = await session.prompt("Look up a person")
+
+        self.assertEqual(result.final_text, "found")
+        self.assertIsInstance(frontend.requests[0], MCPElicitationRequest)
+        self.assertIs(frontend.requests[0].interrupt, interrupt)
+        self.assertEqual(agent.payloads[1].resume, answer)
+        await application.shutdown()
 
     async def test_ask_user_and_formal_plan_run_headlessly(self) -> None:
         ask_interrupt = {

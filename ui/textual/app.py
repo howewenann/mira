@@ -72,6 +72,8 @@ from ui.shared.interrupts import (
     ask_user_options,
     ask_user_question,
     ask_user_request,
+    mcp_elicitation_preview,
+    mcp_elicitation_request,
 )
 from ui.textual.artifact_review import PendingArtifactReview
 from ui.textual.adapter import TextualFrontend
@@ -2647,6 +2649,50 @@ class MiraApp(App[None]):
             result = response.strip()
             if result:
                 return result
+
+    async def answer_mcp_elicitation(self, interrupt: Any) -> dict[str, Any]:
+        """Collect native MCP form or URL answers through the shared prompt panel."""
+        self.waiting_finished()
+        payload = mcp_elicitation_request(interrupt)
+        responses: dict[str, dict[str, Any]] = {}
+        for request in payload.get("requests", []):
+            if not isinstance(request, dict):
+                continue
+            while True:
+                action = await self._prompt_choice(
+                    "MCP Input",
+                    "\n\n".join(
+                        part
+                        for part in (
+                            str(request.get("message") or "MCP input required"),
+                            mcp_elicitation_preview(request),
+                        )
+                        if part
+                    ),
+                    [("a", "Accept"), ("d", "Decline"), ("c", "Cancel tool")],
+                    vertical=True,
+                )
+                if action is None:
+                    continue
+                response: dict[str, Any] = {
+                    "action": {"a": "accept", "d": "decline"}.get(action, "cancel")
+                }
+                if response["action"] == "accept" and request.get("mode") == "form":
+                    content = await self._prompt_json("MCP Input", "{}")
+                    if content is None:
+                        continue
+                    try:
+                        parsed = json.loads(content)
+                    except json.JSONDecodeError:
+                        self.system_message("MCP response must be valid JSON.", kind="warning")
+                        continue
+                    if not isinstance(parsed, dict):
+                        self.system_message("MCP response must be a JSON object.", kind="warning")
+                        continue
+                    response["content"] = parsed
+                responses[str(request.get("key") or "")] = response
+                break
+        return {"responses": responses}
 
     async def ask_create_git_repo(self, message: str) -> bool:
         """Ask whether MIRA should initialize Git for the workspace."""

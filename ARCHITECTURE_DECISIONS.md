@@ -239,10 +239,13 @@ QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
 requires an explicit System Settings toggle. Dynamic response schemas default
 on for compatibility, but can be disabled independently for models that do not
 reliably complete the synthetic structured-output tool protocol. In that mode,
-MIRA materializes every raw synchronous subagent with its inherited model,
-tools, middleware, skills, permissions, and interrupts, then passes it to
-DeepAgents as a `CompiledSubAgent`. A compiled `general-purpose` replaces the
-auto-added raw one by name. DeepAgents therefore rejects a dynamic
+MIRA materializes every raw synchronous isolated subagent with its inherited
+model, tools, middleware, skills, permissions, and interrupts, then passes it
+to DeepAgents as a `CompiledSubAgent`. A raw subagent with `mode="fork"` stays
+declarative so DeepAgents can apply its native parent-message, prompt,
+middleware, and state inheritance; forking is opt-in and an omitted mode stays
+isolated. A compiled `general-purpose` replaces the auto-added raw one by name.
+DeepAgents therefore rejects a dynamic
 `responseSchema` before starting the child while ordinary text delegation and
 static response formats continue to work. Keeping these choices in workspace
 settings makes them inspectable without changing QuickJS or installed packages.
@@ -679,7 +682,7 @@ Success Criteria or introduce a second grading call. Rubric colors are
 centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
 isolated to Rubric UI.
 
-Each DeepAgents 0.7.11 per-grader call runs two separate static nested agents
+Each DeepAgents 0.7.13 per-grader call runs two separate static nested agents
 with the configured Rubric model. MIRA owns the verifier's effective Rubric
 tools and normal HITL middleware; the verifier has no response format and may
 naturally finish without calling a tool. DeepAgents' grader-owned tool and
@@ -693,7 +696,7 @@ and their real `ToolMessage` results are copied without truncation into a
 private evidence channel for that final grader call. Verifier prose and all
 verifier messages remain outside the main agent state and transcript.
 
-DeepAgents 0.7.11 continues to own grading iterations, frozen criteria,
+DeepAgents 0.7.13 continues to own grading iterations, frozen criteria,
 coverage retry, revision injection, caps, and terminal status. MIRA inserts its
 isolated verifier before each final grader call without replacing that stock
 lifecycle. Transcript and verifier evidence are independently valid; verifier
@@ -959,7 +962,7 @@ differently.
 
 ## DeepAgents Runtime Ownership
 
-**Decision:** MIRA pins DeepAgents 0.7.7 and `langchain-quickjs` 0.3.5. MIRA
+**Decision:** MIRA pins DeepAgents 0.7.13 and `langchain-quickjs` 0.3.7. MIRA
 owns a small general-purpose action prompt and its existing planning prompt;
 DeepAgents owns the filesystem, delegation, streaming, and middleware
 execution. Project and bundled memory files remain opaque Markdown resources,
@@ -987,7 +990,10 @@ Rubric terminal events are accepted directly from DeepAgents, including
 `max_iterations_reached`. MIRA preserves the explanation and available grader
 diagnostics instead of synthesizing another iteration. QuickJS runs with
 explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
-not receive ambient filesystem, network, process, or clock access.
+not receive ambient filesystem, network, process, or clock access. Inner PTC
+calls use QuickJS' native tool lifecycle callbacks and therefore appear on the
+same LangGraph v3 tool-call stream MIRA already consumes; MIRA does not maintain
+a parallel PTC event bridge.
 
 **Where to check:** `agent/factory.py`, `agent/middleware/`,
 `agent/subagents/compilation.py`, `agent/tools/specs.py`, `core/execution/runner.py`,
@@ -1139,6 +1145,12 @@ fallback rules change, or the dashboard changes how context is reported.
 It owns one runtime/session and one capability cache per configured server,
 plus the shared prompt and fixed-resource registries. Act and Plan receive
 policy-filtered tool views when the existing agent-pair pathway rebuilds.
+MIRA owns configuration, lifecycle and status, approvals and fingerprints,
+tool policy, UI state, prompts, and resources. A narrow per-server integration
+constructs LangChain's first-party `MCPAdapter`; LangChain and FastMCP own MCP
+transport, protocol negotiation, and low-level client behavior. Stdio uses
+FastMCP's public `StdioTransport.log_file` option pointed at the platform null
+device so server stderr cannot corrupt the TUI.
 Each server runtime has one long-lived owner task and command queue. That task
 both enters and exits the adapter session context; UI workers request lifecycle
 transitions but never directly close SDK task groups or cancellation scopes.
@@ -1167,6 +1179,10 @@ The interactive MCP panel is the only path that may open a browser; startup,
 reload, retry, and one-shot runs may silently use or refresh stored credentials
 but otherwise leave the server at `Login required`. Authentication state stays
 in the MCP panel and never becomes an Issues entry.
+MCP tool elicitation uses the adapter's native LangGraph interrupt payload.
+Core sends that payload through the existing frontend request boundary and
+resumes the same graph thread with the upstream `responses` mapping; terminal,
+Textual, and ACP consumers only collect the requested form or URL decision.
 
 **Why:** The shared agent factory builds project resources twice, once per
 mode. Starting MCP there would duplicate child processes, discovery, and
@@ -1189,7 +1205,8 @@ sessions. They also keep restart, disable, authentication cleanup, reload, and
 shutdown deterministic if the requesting panel recomposes or closes.
 
 **Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`,
-`agent/mcp/manager.py`, `agent/mcp/runtime.py`, `agent/factory.py`,
+`agent/mcp/integration.py`, `agent/mcp/manager.py`, `agent/mcp/runtime.py`,
+`agent/factory.py`,
 `ui/textual/app.py`, `ui/textual/widgets/mcp_panel.py`, `ui/textual/widgets/autocomplete_input.py`.
 
 **Update this when:** MCP transport ownership, capability caching, attachment

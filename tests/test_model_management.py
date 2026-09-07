@@ -139,7 +139,8 @@ class ModelManagementTests(unittest.TestCase):
             root.mkdir(parents=True)
             source = root / "helpers.py"
             source.write_text(
-                'SUBAGENTS = [{"name": "helper", "description": "Does focused work", "system_prompt": "Help"}]\n',
+                'SUBAGENTS = [{"name": "helper", "description": "Does focused work", '
+                '"system_prompt": "Help", "mode": "fork"}]\n',
                 encoding="utf-8",
             )
             discovery = discover_subagents(workspace)
@@ -156,6 +157,8 @@ class ModelManagementTests(unittest.TestCase):
             helper = next(item for item in effective if item["name"] == "helper")
             original = next(item.spec for item in discovery.items if item.name == "helper")
             self.assertIs(helper["model"], replacement)
+            self.assertEqual(helper["mode"], "fork")
+            self.assertEqual(original["mode"], "fork")
             self.assertNotIn("model", original)
             self.assertNotIn("model", source.read_text(encoding="utf-8"))
 

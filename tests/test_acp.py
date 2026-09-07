@@ -32,6 +32,7 @@ from mira.api import (
     AskUserRequest,
     ConfirmationRequest,
     MCPApprovalRequest,
+    MCPElicitationRequest,
     MessageEvent,
     ToolEvent,
 )
@@ -46,6 +47,8 @@ class FakeConnection:
         self.updates: list[tuple[str, object]] = []
         self.permissions: list[dict[str, object]] = []
         self.permission_choices: list[str | None] = []
+        self.elicitations: list[tuple[str, object]] = []
+        self.elicitation_answers: list[object] = []
         self.activity: list[tuple[str, object]] = []
 
     async def session_update(self, session_id: str, update: object, **kwargs: object) -> None:
@@ -63,6 +66,10 @@ class FakeConnection:
         return SimpleNamespace(
             outcome=SimpleNamespace(outcome="selected", option_id=choice)
         )
+
+    async def create_elicitation(self, message: str, mode: object) -> object:
+        self.elicitations.append((message, mode))
+        return self.elicitation_answers.pop(0)
 
 
 class FakeSession:
@@ -529,6 +536,57 @@ class ACPFrontendTests(unittest.IsolatedAsyncioTestCase):
             ["A", "B", "Reply in chat"],
         )
 
+    async def test_mcp_elicitation_uses_stock_acp_form_and_url_sessions(self) -> None:
+        self.connection.elicitation_answers = [
+            SimpleNamespace(action="accept", content={"name": "Ada"}),
+            SimpleNamespace(action="decline", content=None),
+        ]
+        request = MCPElicitationRequest(
+            {
+                "type": "mcp_elicitation",
+                "tool_name": "lookup",
+                "requests": [
+                    {
+                        "key": "identity",
+                        "mode": "form",
+                        "message": "Who?",
+                        "requested_schema": {"type": "object"},
+                    },
+                    {
+                        "key": "authorization",
+                        "mode": "url",
+                        "message": "Authorize access",
+                        "url": "https://example.test/authorize",
+                    },
+                ],
+            }
+        )
+
+        with self.frontend.bind("elicitation"):
+            answer = await self.frontend.request(request)
+
+        self.assertEqual(
+            answer,
+            {
+                "responses": {
+                    "identity": {"action": "accept", "content": {"name": "Ada"}},
+                    "authorization": {"action": "decline"},
+                }
+            },
+        )
+        self.assertEqual(
+            [message for message, _ in self.connection.elicitations],
+            ["Who?", "Authorize access"],
+        )
+        self.assertEqual(
+            type(self.connection.elicitations[0][1]).__name__,
+            "ElicitationFormSessionMode",
+        )
+        self.assertEqual(
+            type(self.connection.elicitations[1][1]).__name__,
+            "ElicitationUrlSessionMode",
+        )
+
     async def test_open_reply_and_cancel_never_return_fabricated_user_text(self) -> None:
         request = AskUserRequest(
             {
@@ -709,7 +767,7 @@ class ACPWiringTests(unittest.TestCase):
         self.assertNotIn("deepagents-acp", project.lower())
         self.assertNotIn("deepagents_acp", sources)
         self.assertNotIn("AgentServerACP", sources)
-        self.assertNotIn("create_elicitation", sources)
+        self.assertIn("create_elicitation", sources)
         self.assertNotIn("use_unstable_protocol", sources)
         self.assertIn("await run_agent(server)", sources)
         stdio_source = (

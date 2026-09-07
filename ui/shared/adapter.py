@@ -17,6 +17,7 @@ from mira.api import (
     FrontendRequest,
     InformationEvent,
     MCPApprovalRequest,
+    MCPElicitationRequest,
     MessageEvent,
     RubricEvent,
     RuntimeEvent,
@@ -76,6 +77,8 @@ class RendererAdapter:
             return await self._await_call("ask_approvals", list(request.interrupts))
         if isinstance(request, AskUserRequest):
             return await self._await_call("ask_user", request.interrupt)
+        if isinstance(request, MCPElicitationRequest):
+            return await self._await_call("answer_mcp_elicitation", request.interrupt)
         if isinstance(request, ArtifactReviewRequest):
             if callable(getattr(self.renderer, "review_artifact", None)):
                 return await self._await_call(

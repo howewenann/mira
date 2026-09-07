@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-import httpx
+import httpx2 as httpx
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.auth.oauth2 import (
     build_oauth_authorization_server_metadata_discovery_urls,
@@ -175,7 +175,6 @@ class MiraOAuthProvider(OAuthClientProvider):
             storage=self.storage,
             redirect_handler=self._redirect,
             callback_handler=self._callback,
-            timeout=callback_timeout,
         )
 
     async def _initialize(self) -> None:
