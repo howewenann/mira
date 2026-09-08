@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import BaseMessage
-from langchain_core.tools import StructuredTool, ToolException, tool
+from langchain_core.tools import ToolException, tool
 from langgraph.prebuilt.tool_node import ToolRuntime
 
 from agent.mcp.configuration import (
@@ -17,17 +17,7 @@ from agent.mcp.configuration import (
     approval_preview,
     load_mcp_configuration,
 )
-from agent.mcp.auth import (
-    TOKEN_ROOT,
-    MiraOAuthProvider,
-    OAuthLoginRequired,
-    forget_persisted_login,
-    has_authorization_header,
-    has_persisted_login,
-    is_known_oauth_failure,
-    is_oauth_login_required,
-    sanitized_error,
-)
+from agent.mcp.errors import sanitized_error
 from agent.mcp.integration import MiraMCPIntegration
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry
@@ -53,9 +43,8 @@ _ATTACHMENT_PATTERN = re.compile(r'(?<![\w@])@(?:"([^"\r\n]+)"|([^\s@]+))')
 class MCPManager:
     """Own every configured server runtime and all MCP-facing registries."""
 
-    def __init__(self, workspace: Path, *, token_root: Path | None = None) -> None:
+    def __init__(self, workspace: Path) -> None:
         self.workspace = workspace.expanduser().resolve()
-        self.token_root = (token_root or TOKEN_ROOT).expanduser()
         self.configuration: MCPConfiguration = load_mcp_configuration(self.workspace)
         self.servers: dict[str, MCPServerState] = self.configuration.servers
         self.prompt_registry = PromptRegistry(self.workspace)
@@ -68,7 +57,6 @@ class MCPManager:
         self._approval_handler: ApprovalHandler | None = None
         self._change_handler: ChangeHandler | None = None
         self._operation_lock = asyncio.Lock()
-        self._oauth_providers: dict[str, MiraOAuthProvider] = {}
         self._runtimes: dict[str, MCPServerRuntime] = {}
         self.read_tool = self._build_read_tool()
 
@@ -121,7 +109,6 @@ class MCPManager:
             self._ambiguous_tools = set()
             self._prompt_locks = {}
             self._resource_locks = {}
-            self._oauth_providers = {}
             self._runtimes = {}
             await self.initialize(self._approval_handler)
 
@@ -186,62 +173,6 @@ class MCPManager:
         await self._notify_changed()
         return state.usable
 
-    def has_persisted_login(self, server_name: str) -> bool:
-        state = self._server(server_name)
-        return state.transport == "http" and has_persisted_login(state, token_root=self.token_root)
-
-    async def login_server(self, server_name: str) -> bool:
-        """Run browser OAuth only for this explicit interactive panel action."""
-        return await _complete_lifecycle(
-            self._login_server(server_name),
-            name=f"mcp-login-{server_name}",
-        )
-
-    async def _login_server(self, server_name: str) -> bool:
-        state = self._server(server_name)
-        if state.transport != "http" or state.status != "Login required":
-            return False
-        async with self._operation_lock:
-            state.status = "Authenticating"
-            state.error = ""
-            provider = MiraOAuthProvider(state, interactive=True, token_root=self.token_root)
-            self._set_server_auth(state, provider)
-            try:
-                await self._start_server(state, restarting=False)
-            except asyncio.CancelledError:
-                state.status = "Login required"
-                state.error = "Browser authorization was cancelled."
-                raise
-            if not state.usable:
-                state.status = "Login required"
-                if not state.error:
-                    state.error = "Browser authorization did not complete."
-        await self._notify_changed()
-        return state.usable
-
-    async def forget_server_login(self, server_name: str) -> bool:
-        """Stop one server and delete only its user-level OAuth state."""
-        return await _complete_lifecycle(
-            self._forget_server_login(server_name),
-            name=f"mcp-forget-login-{server_name}",
-        )
-
-    async def _forget_server_login(self, server_name: str) -> bool:
-        state = self._server(server_name)
-        if state.transport != "http":
-            return False
-        async with self._operation_lock:
-            enabled = mcp_server_enabled(load_settings(self.workspace), server_name)
-            await self._stop_server(state, final_status="Disabled")
-            await forget_persisted_login(state, token_root=self.token_root)
-            self._oauth_providers.pop(state.name, None)
-            self._set_server_auth(state, None)
-            if enabled:
-                state.status = "Login required"
-                state.error = "Login required."
-        await self._notify_changed()
-        return True
-
     async def set_server_always_allow(self, server_name: str, value: bool) -> bool:
         """Persist launch/use approval for the server's current fingerprint."""
         state = self._server(server_name)
@@ -272,35 +203,22 @@ class MCPManager:
         if not await self._approved(state, settings, force=force_approval):
             state.status = "Approval required"
             return
-        if (
-            not has_authorization_header(state)
-            and self.has_persisted_login(state.name)
-            and state.name not in self._oauth_providers
-        ):
-            self._set_server_auth(
-                state,
-                MiraOAuthProvider(state, interactive=False, token_root=self.token_root),
-            )
         try:
             state.session = await runtime.start()
             await self._discover_tools(state)
-            await self._discover_server_prompts(state, during_start=True)
-            await self._discover_server_resources(state, during_start=True)
+            await self._discover_server_prompts(state)
+            await self._discover_server_resources(state)
             state.status = "Partially available" if state.error else "Available"
         except BaseException as error:
             await self._stop_runtime(runtime, state.name)
             state.session = None
-            known_oauth = state.name in self._oauth_providers and is_known_oauth_failure(error, state)
-            login_required = isinstance(error, OAuthLoginRequired) or known_oauth
-            if not login_required:
-                login_required = await is_oauth_login_required(error, state)
-            state.status = "Login required" if login_required else "Failed"
-            state.error = "Login required." if login_required else _concise_error(error)
-            logger = get_diagnostics_logger()
-            if login_required:
-                logger.warning("MCP server %s requires login", state.name)
-            else:
-                logger.error("MCP server %s failed to start: %s", state.name, state.error)
+            state.status = "Failed"
+            state.error = _concise_error(error)
+            get_diagnostics_logger().error(
+                "MCP server %s failed to start: %s",
+                state.name,
+                state.error,
+            )
 
     async def _approved(self, state: MCPServerState, settings: dict[str, Any], *, force: bool) -> bool:
         key = (state.name, state.fingerprint)
@@ -368,7 +286,6 @@ class MCPManager:
                 metadata = dict(getattr(converted, "metadata", None) or {})
                 metadata["mira_mcp"] = {"server": state.name, "tool": original}
                 converted.metadata = metadata
-                converted = self._observe_tool_auth(state, converted)
             except BaseException as error:
                 state.error = _join_error(state.error, f"tool {original}: {_concise_error(error)}")
                 continue
@@ -392,7 +309,7 @@ class MCPManager:
         states = self._discovery_states(server_name)
         await asyncio.gather(*(self._discover_server_prompts(state) for state in states))
 
-    async def _discover_server_prompts(self, state: MCPServerState, *, during_start: bool = False) -> None:
+    async def _discover_server_prompts(self, state: MCPServerState) -> None:
         lock = self._prompt_locks.setdefault(state.name, asyncio.Lock())
         async with lock:
             if state.prompts is not None or state.session is None:
@@ -421,17 +338,12 @@ class MCPManager:
                         _state: MCPServerState = state,
                         _name: str = original,
                     ) -> list[BaseMessage]:
-                        try:
-                            return list(
-                                await _state.session.get_prompt_messages(
-                                    _name,
-                                    values or None,
-                                )
+                        return list(
+                            await _state.session.get_prompt_messages(
+                                _name,
+                                values or None,
                             )
-                        except BaseException as error:
-                            if await self._handle_later_auth_failure(_state, error):
-                                raise RuntimeError("MCP login required.") from error
-                            raise
+                        )
 
                     specs.append(
                         PromptSpec(
@@ -447,10 +359,6 @@ class MCPManager:
                 state.prompt_error = ""
                 self.prompt_registry.replace_server(state.name, specs)
             except BaseException as error:
-                if during_start and state.name in self._oauth_providers and is_known_oauth_failure(error, state):
-                    raise
-                if await self._handle_later_auth_failure(state, error):
-                    return
                 state.prompts = []
                 state.prompt_error = _concise_error(error)
                 self._mark_partial(state, f"prompts: {state.prompt_error}")
@@ -459,7 +367,7 @@ class MCPManager:
         states = self._discovery_states(server_name)
         await asyncio.gather(*(self._discover_server_resources(state) for state in states))
 
-    async def _discover_server_resources(self, state: MCPServerState, *, during_start: bool = False) -> None:
+    async def _discover_server_resources(self, state: MCPServerState) -> None:
         lock = self._resource_locks.setdefault(state.name, asyncio.Lock())
         async with lock:
             if state.resources is not None or state.session is None:
@@ -494,10 +402,6 @@ class MCPManager:
                 state.resources = resources
                 state.resource_error = ""
             except BaseException as error:
-                if during_start and state.name in self._oauth_providers and is_known_oauth_failure(error, state):
-                    raise
-                if await self._handle_later_auth_failure(state, error):
-                    return
                 state.resources = []
                 state.resource_error = _concise_error(error)
                 self._mark_partial(state, f"resources: {state.resource_error}")
@@ -545,8 +449,6 @@ class MCPManager:
             try:
                 contents = await state.session.read_resource(uri)
             except BaseException as error:
-                if await manager._handle_later_auth_failure(state, error):
-                    raise ToolException("MCP login required.") from error
                 raise ToolException(f"MCP resource read failed: {_concise_error(error)}") from error
             parts: list[str] = []
             for content in contents:
@@ -582,44 +484,6 @@ class MCPManager:
         if state.usable:
             state.status = "Partially available"
 
-    def _observe_tool_auth(self, state: MCPServerState, converted: Any) -> Any:
-        if not isinstance(converted, StructuredTool) or converted.coroutine is None:
-            return converted
-        original = converted.coroutine
-        manager = self
-
-        async def observed(**arguments: Any) -> Any:
-            try:
-                return await original(**arguments)
-            except BaseException as error:
-                if await manager._handle_later_auth_failure(state, error):
-                    raise ToolException("MCP login required.") from error
-                raise
-
-        return converted.model_copy(update={"coroutine": observed})
-
-    async def _handle_later_auth_failure(self, state: MCPServerState, error: BaseException) -> bool:
-        if state.name not in self._oauth_providers or not is_known_oauth_failure(error, state):
-            return False
-        async with self._operation_lock:
-            if state.status == "Login required":
-                return True
-            self._remove_server_capabilities(state)
-            state.session = None
-            state.status = "Login required"
-            state.error = "Login required. Stored credentials could not be refreshed."
-            runtime = self._runtimes.get(state.name)
-            if runtime is not None and runtime.open:
-                await self._stop_runtime(runtime, state.name)
-        await self._notify_changed()
-        return True
-
-    def _set_server_auth(self, state: MCPServerState, provider: MiraOAuthProvider | None) -> None:
-        if provider is None:
-            self._oauth_providers.pop(state.name, None)
-        else:
-            self._oauth_providers[state.name] = provider
-
     def _runtime_for(self, state: MCPServerState) -> MCPServerRuntime:
         runtime = self._runtimes.get(state.name)
         if runtime is None:
@@ -634,16 +498,7 @@ class MCPManager:
             get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
 
     def _new_integration(self, state: MCPServerState) -> MiraMCPIntegration:
-        provider = self._oauth_providers.get(state.name)
-        if (
-            provider is None
-            and state.transport == "http"
-            and not has_authorization_header(state)
-            and has_persisted_login(state, token_root=self.token_root)
-        ):
-            provider = MiraOAuthProvider(state, interactive=False, token_root=self.token_root)
-            self._oauth_providers[state.name] = provider
-        return MiraMCPIntegration(state, auth=provider)
+        return MiraMCPIntegration(state)
 
     def _server(self, name: str) -> MCPServerState:
         if name not in self.servers:

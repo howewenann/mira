@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 with suppress_langchain_beta_warning():
     from langchain.mcp import MCPAdapter, as_langchain_tool
 
+from agent.mcp.auth import create_http_oauth
 from agent.mcp.models import MCPServerState
 from core.diagnostics.logging import get_diagnostics_logger
 
@@ -23,8 +24,9 @@ _MAX_PAGES = 1000
 class MiraMCPIntegration:
     """Connect one configured server through ``MCPAdapter`` and FastMCP."""
 
-    def __init__(self, state: MCPServerState, *, auth: Any = None) -> None:
+    def __init__(self, state: MCPServerState) -> None:
         config = state.connection_config
+        self._state = state
         if state.transport == "stdio":
             transport = StdioTransport(
                 command=str(config["command"]),
@@ -39,7 +41,6 @@ class MiraMCPIntegration:
             transport = StreamableHttpTransport(
                 url=str(config["url"]),
                 headers=dict(config.get("headers") or {}),
-                auth=auth,
             )
 
         async def log_message(message: Any) -> None:
@@ -50,21 +51,38 @@ class MiraMCPIntegration:
             method("MCP %s: %s", state.name, data)
 
         # Constructing MCPAdapter around this client arms native LangGraph
-        # interrupt elicitation while retaining MIRA's transport and auth UX.
-        self.adapter = MCPAdapter(Client(transport, name=state.name, log_handler=log_message))
+        # interrupt elicitation while retaining MIRA's transport lifecycle.
+        self._transport = transport
+        self._client_options: dict[str, Any] = {
+            "name": state.name,
+            "log_handler": log_message,
+        }
+        self.adapter: MCPAdapter | None = None
+        if state.transport == "stdio":
+            self.adapter = MCPAdapter(Client(transport, **self._client_options))
 
     @property
     def client(self) -> Client[Any]:
+        if self.adapter is None:
+            raise RuntimeError("HTTP MCP integration has not started")
         client = self.adapter.client
         if not isinstance(client, Client):  # pragma: no cover - one-server invariant
             raise TypeError("MIRA MCP integration requires one FastMCP client")
         return client
 
     async def __aenter__(self) -> MiraMCPIntegration:
+        if self.adapter is None:
+            url = str(self._state.connection_config["url"])
+            oauth = await create_http_oauth(url)
+            self.adapter = MCPAdapter(
+                Client(self._transport, auth=oauth, **self._client_options)
+            )
         await self.adapter.__aenter__()
         return self
 
     async def __aexit__(self, *args: Any) -> None:
+        if self.adapter is None:  # pragma: no cover - enter constructs HTTP adapter
+            return
         await self.adapter.__aexit__(*args)
 
     def get_server_capabilities(self) -> Any:

@@ -26,12 +26,14 @@ from textual.events import MouseMove
 from textual.selection import SELECT_ALL
 from textual.widgets import (
     Button,
+    Checkbox,
     Collapsible,
     ContentSwitcher,
     DataTable,
     Input,
     OptionList,
     Select,
+    SelectionList,
     Static,
     TextArea,
 )
@@ -103,7 +105,19 @@ from ui.shared.terminal.colors import (
     TOOL_RUNNING_COLOR,
     strip_ansi,
 )
-from ui.textual.widgets import AutocompleteInput, ChatLog, ContextReportScreen, ContextStatus, PromptBox, PromptPanel, SessionHistory, SettingsPanel, StatusBar, SubagentsPanel
+from ui.textual.widgets import (
+    AutocompleteInput,
+    ChatLog,
+    ContextReportScreen,
+    ContextStatus,
+    MCPElicitationForm,
+    PromptBox,
+    PromptPanel,
+    SessionHistory,
+    SettingsPanel,
+    StatusBar,
+    SubagentsPanel,
+)
 from ui.textual.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
 from ui.textual.widgets.settings_panel import SettingsHeaderRow
 from ui.textual.widgets.status_bar import STATUS_STARTING_COLOR
@@ -9949,6 +9963,175 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(task.done())
             await pilot.press("1")
             self.assertEqual(await asyncio.wait_for(task, timeout=2), "Use A")
+
+    async def test_mcp_form_renders_supported_fields_and_returns_typed_values(self) -> None:
+        app = make_app()
+        interrupt = {
+            "type": "mcp_elicitation",
+            "tool_name": "dynamic_tool",
+            "requests": [
+                {
+                    "key": "request-1",
+                    "message": "Complete the requested fields.",
+                    "mode": "form",
+                    "requested_schema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "title": "Display name",
+                                "description": "The name shown to other users.",
+                            },
+                            "count": {"type": "integer", "title": "Count"},
+                            "ratio": {"type": "number", "title": "Ratio"},
+                            "enabled": {"type": "boolean", "title": "Enabled"},
+                            "color": {
+                                "type": "string",
+                                "title": "Color",
+                                "enum": ["red", "green"],
+                            },
+                            "scopes": {
+                                "type": "array",
+                                "title": "Scopes",
+                                "items": {"type": "string", "enum": ["read", "write"]},
+                            },
+                        },
+                        "required": ["name", "count", "ratio", "enabled", "color", "scopes"],
+                    },
+                }
+            ],
+        }
+
+        async with app.run_test(size=(100, 40)):
+            task = asyncio.create_task(app.answer_mcp_elicitation(interrupt))
+            panel = app.query_one(PromptPanel)
+            await wait_until(
+                lambda: panel.active
+                and len(panel.query(MCPElicitationForm)) == 1
+                and len(panel.query(Button)) == 3
+            )
+            form = panel.query_one(MCPElicitationForm)
+            await wait_until(lambda: getattr(app.focused, "id", None) == "mcp-form-field-0")
+
+            labels = [renderable_plain(label) for label in form.query(".mcp-form-label")]
+            self.assertEqual(labels[0], "Display name *")
+            self.assertIn(
+                "The name shown to other users.",
+                renderable_plain(form.query_one(".mcp-form-description", Static)),
+            )
+            message = renderable_plain(panel.query_one("#prompt-panel-message", Static))
+            self.assertEqual(message, "Complete the requested fields.")
+            self.assertNotIn("properties", message)
+
+            form.query_one("#mcp-form-field-0", Input).value = "Ada"
+            form.query_one("#mcp-form-field-1", Input).value = "7"
+            form.query_one("#mcp-form-field-2", Input).value = "2.5"
+            form.query_one("#mcp-form-field-3", Checkbox).value = True
+            form.query_one("#mcp-form-field-4", Select).value = "green"
+            scopes = form.query_one("#mcp-form-field-5", SelectionList)
+            scopes.select("read")
+            scopes.select("write")
+            panel.query_one("#prompt-mcp-accept", Button).press()
+
+            self.assertEqual(
+                await asyncio.wait_for(task, timeout=2),
+                {
+                    "responses": {
+                        "request-1": {
+                            "action": "accept",
+                            "content": {
+                                "name": "Ada",
+                                "count": 7,
+                                "ratio": 2.5,
+                                "enabled": True,
+                                "color": "green",
+                                "scopes": ["read", "write"],
+                            },
+                        }
+                    }
+                },
+            )
+
+    async def test_mcp_form_validates_required_fields_before_accepting(self) -> None:
+        app = make_app()
+        interrupt = {
+            "type": "mcp_elicitation",
+            "requests": [
+                {
+                    "key": "required-input",
+                    "message": "Enter a display name.",
+                    "mode": "form",
+                    "requested_schema": {
+                        "type": "object",
+                        "properties": {
+                            "display_name": {
+                                "type": "string",
+                                "title": "Display name",
+                            }
+                        },
+                        "required": ["display_name"],
+                    },
+                }
+            ],
+        }
+
+        async with app.run_test(size=(100, 30)):
+            task = asyncio.create_task(app.answer_mcp_elicitation(interrupt))
+            panel = app.query_one(PromptPanel)
+            await wait_until(lambda: panel.active and len(panel.query(Button)) == 3)
+            panel.query_one("#prompt-mcp-accept", Button).press()
+            await wait_until(
+                lambda: "Display name is required."
+                in renderable_plain(panel.query_one("#mcp-form-error", Static))
+            )
+            self.assertFalse(task.done())
+            self.assertEqual(getattr(app.focused, "id", None), "mcp-form-field-0")
+
+            panel.query_one("#mcp-form-field-0", Input).value = "mira"
+            panel.query_one("#prompt-mcp-accept", Button).press()
+            self.assertEqual(
+                await asyncio.wait_for(task, timeout=2),
+                {
+                    "responses": {
+                        "required-input": {
+                            "action": "accept",
+                            "content": {"display_name": "mira"},
+                        }
+                    }
+                },
+            )
+
+    async def test_mcp_form_decline_and_cancel_preserve_native_actions(self) -> None:
+        app = make_app()
+        interrupt = {
+            "type": "mcp_elicitation",
+            "requests": [
+                {
+                    "key": "decision",
+                    "message": "Choose an action.",
+                    "mode": "form",
+                    "requested_schema": {"type": "object", "properties": {}},
+                }
+            ],
+        }
+
+        async with app.run_test(size=(100, 30)):
+            panel = app.query_one(PromptPanel)
+            decline = asyncio.create_task(app.answer_mcp_elicitation(interrupt))
+            await wait_until(lambda: panel.active and len(panel.query(Button)) == 3)
+            panel.query_one("#prompt-mcp-decline", Button).press()
+            self.assertEqual(
+                await asyncio.wait_for(decline, timeout=2),
+                {"responses": {"decision": {"action": "decline"}}},
+            )
+
+            cancel = asyncio.create_task(app.answer_mcp_elicitation(interrupt))
+            await wait_until(lambda: panel.active and len(panel.query(Button)) == 3)
+            panel.query_one("#prompt-mcp-cancel", Button).press()
+            self.assertEqual(
+                await asyncio.wait_for(cancel, timeout=2),
+                {"responses": {"decision": {"action": "cancel"}}},
+            )
 
     async def test_whole_turn_cancellation_discards_pending_review(self) -> None:
         app = make_app()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -30,7 +31,22 @@ PREPARE_TOOL_COMPLETIONS = {
 }
 
 
-async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None = None) -> None:
+@dataclass(frozen=True, slots=True)
+class ProjectedToolError:
+    """Ambiguous string error emitted by LangGraph's tool-call projection."""
+
+    name: str
+    text: str
+    call_id: str
+    identity: dict[str, Any]
+
+
+async def consume_tool_calls(
+    tool_calls: Any,
+    renderer: Any,
+    result: Any | None = None,
+    projected_errors: list[ProjectedToolError] | None = None,
+) -> None:
     """Consume DeepAgents tool-call projections and render starts promptly."""
     watchers: set[asyncio.Task[None]] = set()
     try:
@@ -69,6 +85,7 @@ async def consume_tool_calls(tool_calls: Any, renderer: Any, result: Any | None 
                         renderer,
                         result,
                         identity=identity,
+                        projected_errors=projected_errors,
                     ),
                     name=f"mira-tool-result-{call_id or name}",
                 )
@@ -98,6 +115,7 @@ async def watch_tool_result(
     result: Any | None,
     *,
     identity: dict[str, Any] | None = None,
+    projected_errors: list[ProjectedToolError] | None = None,
 ) -> None:
     """Follow one call to completion and deliver a visible non-control result."""
     output, is_error, native_error = await tool_call_completion(call)
@@ -120,6 +138,17 @@ async def watch_tool_result(
         # completion a control tool renders through this path.
         return
 
+    if is_error and not native_error and projected_errors is not None:
+        projected_errors.append(
+            ProjectedToolError(
+                name=name,
+                text=tool_output_text(output) or "tool failed",
+                call_id=call_id,
+                identity=identity or {},
+            )
+        )
+        return
+
     text = tool_output_text(output) or ("tool failed" if is_error else "")
     render_tool_completion(
         renderer,
@@ -130,6 +159,24 @@ async def watch_tool_result(
         is_error=is_error,
         identity=identity,
     )
+
+
+def render_projected_tool_errors(
+    errors: list[ProjectedToolError],
+    renderer: Any,
+    result: Any | None,
+) -> None:
+    """Render deferred projection errors after native interrupt detection."""
+    for error in errors:
+        render_tool_completion(
+            renderer,
+            result,
+            name=error.name,
+            text=error.text,
+            call_id=error.call_id,
+            is_error=True,
+            identity=error.identity,
+        )
 
 
 async def consume_live_tool_errors(events: Any, renderer: Any, result: Any | None = None) -> None:

@@ -1494,24 +1494,39 @@ Observed 2026-08-04 against LM Studio in a disposable workspace:
 
 ## Standards-Compliant MCP OAuth
 
-Use a disposable workspace and manually add Linear's remote endpoint to
-`.mira/mcp/mcp.json` as an ordinary HTTP server with no `auth` field. Keep a normal
-unauthenticated HTTP MCP and a static-header HTTP MCP available for comparison.
+Use a disposable workspace and configure the official example without an
+authentication field:
 
-1. Launch the TUI and approve the configured OAuth server. Expected: it becomes
-   `Login required`, the filled teal indicator reads `! MCP 0/1`, no browser
-   opens, the state does not appear under Issues, and comparison servers behave
-   as before.
-2. Expand the server and select `Login`. Expected: only its row shows the
-   authenticating spinner, the TUI stays responsive, and the browser opens for
-   consent. Successful consent changes its labelled badge to Available and the
-   top indicator to `✓ MCP 1/1`.
-3. Restart MIRA and run `/reload-runtime`. Expected: the stored credential under
-   `~/.mira/_state/mcp-tokens/` is reused or refreshed without opening a browser.
-   A one-shot invocation also never opens a browser or waits for a callback.
-4. Select `Forget login`. Expected: only this server stops, only its token
-   directory is removed, `.mira/mcp/mcp.json` is unchanged, and the enabled server
-   returns to `Login required`; a disabled server remains disabled.
+```json
+{
+  "mcpServers": {
+    "official-mcp-example": {
+      "type": "http",
+      "url": "https://example-server.modelcontextprotocol.io/mcp"
+    }
+  }
+}
+```
+
+1. Launch the TUI and approve the server. Expected: MIRA discovers the
+   authorization-server metadata, selects `client_secret_post` when advertised,
+   and FastMCP opens browser authorization when challenged. After the callback,
+   MIRA reports the server Available with its advertised tools, prompts, and
+   resources, including `elicitInputs`. Invoke a tool that requests elicitation.
+   Expected: its bubble remains pending while the input surface is open. The
+   requested schema appears as labeled string/number/boolean/enum/multi-select
+   controls with descriptions and required markers, the first field has focus,
+   and accepting is blocked until required values are present. The raw schema,
+   `Interrupt(...)`, and `Failed after` do not appear. Accept resumes the same
+   bubble with typed form content; decline and cancel remain user decisions
+   rather than tool failures.
+2. Configure an unauthenticated HTTP fixture. Expected: it becomes Available
+   without opening a browser even though the client remains OAuth-capable.
+3. Configure a stdio fixture. Expected: startup and discovery are unchanged and
+   no HTTP OAuth behavior is attached to its FastMCP client.
+4. Restart the OAuth server within the same process. Expected: FastMCP owns
+   token reuse and refresh. A full MIRA restart may require authorization again
+   because FastMCP's default storage is in memory.
 5. Configure at least two available remote servers, open MCP, and restart one.
    Expected: each server card has a name/transport/status header, three separate
    count cells, and a right-aligned action row. Only the selected card

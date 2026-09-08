@@ -12,6 +12,8 @@ from textual.css.query import NoMatches
 from textual.events import Key
 from textual.widgets import Button, Input, Static, TextArea
 
+from ui.textual.widgets.mcp_form import MCPElicitationForm, MCPFormValidationError
+
 
 class PromptButton(Button):
     """Button that lets PromptPanel own choice navigation keys."""
@@ -39,7 +41,7 @@ class PromptPanel(Vertical):
         super().__init__(id="prompt-panel", **kwargs)
         self.can_focus = True
         self.display = False
-        self._future: asyncio.Future[str | None] | None = None
+        self._future: asyncio.Future[Any] | None = None
         self._mode = ""
         self._shortcuts: dict[str, str] = {}
         self._button_values: dict[str, str] = {}
@@ -61,6 +63,7 @@ class PromptPanel(Vertical):
         yield Static("", id="prompt-panel-title")
         with VerticalScroll(id="prompt-panel-body"):
             yield Static("", id="prompt-panel-message")
+            yield Vertical(id="prompt-panel-form-host")
         yield Input(id="prompt-panel-input")
         yield TextArea("", show_line_numbers=False, id="prompt-panel-editor")
         yield Vertical(id="prompt-panel-buttons")
@@ -69,6 +72,7 @@ class PromptPanel(Vertical):
         """Hide controls that only appear for some prompt modes."""
         self.query_one("#prompt-panel-input", Input).display = False
         self.query_one("#prompt-panel-editor", TextArea).display = False
+        self.query_one("#prompt-panel-form-host", Vertical).display = False
 
     async def choose(
         self,
@@ -115,6 +119,27 @@ class PromptPanel(Vertical):
         self.call_after_refresh(editor.focus)
         return await self._wait()
 
+    async def ask_mcp_form(
+        self,
+        title: str,
+        message: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Show one schema-driven MCP elicitation form."""
+        await self._open("mcp_form", title, message)
+        self.set_class(True, "mcp-form-active")
+        host = self.query_one("#prompt-panel-form-host", Vertical)
+        host.display = True
+        form = MCPElicitationForm(schema, id="mcp-elicitation-form")
+        await host.mount(form)
+        self._mount_action_buttons(
+            ("prompt-mcp-accept", "Accept"),
+            ("prompt-mcp-decline", "Decline"),
+            ("prompt-mcp-cancel", "Cancel tool"),
+        )
+        self.call_after_refresh(form.focus_first_field)
+        return await self._wait()
+
     async def _open(self, mode: str, title: str, message: str) -> None:
         """Prepare the prompt shell for one active prompt."""
         if self._future is not None and not self._future.done():
@@ -132,16 +157,18 @@ class PromptPanel(Vertical):
         self._reflow_generation += 1
         self._vertical_choices = False
         self.set_class(False, "vertical-choices")
+        self.set_class(False, "mcp-form-active")
 
         self.query_one("#prompt-panel-title", Static).update(title)
         self.query_one("#prompt-panel-message", Static).update(message)
         self.query_one("#prompt-panel-body", VerticalScroll).display = True
         self.query_one("#prompt-panel-input", Input).display = False
         self.query_one("#prompt-panel-editor", TextArea).display = False
+        await self._clear_form()
         await self._clear_buttons()
         self.display = True
 
-    async def _wait(self) -> str | None:
+    async def _wait(self) -> Any:
         """Wait for a prompt result and clean up the panel."""
         try:
             if self._future is None:
@@ -162,6 +189,7 @@ class PromptPanel(Vertical):
         self._reflow_generation += 1
         self._vertical_choices = False
         self.set_class(False, "vertical-choices")
+        self.set_class(False, "mcp-form-active")
         if not self.is_mounted:
             self._future = None
             return
@@ -173,6 +201,7 @@ class PromptPanel(Vertical):
             self.query_one("#prompt-panel-body", VerticalScroll).display = True
             self.query_one("#prompt-panel-input", Input).display = False
             self.query_one("#prompt-panel-editor", TextArea).display = False
+            await self._clear_form()
         except NoMatches:
             self._future = None
             return
@@ -292,6 +321,12 @@ class PromptPanel(Vertical):
         buttons = self.query_one("#prompt-panel-buttons", Vertical)
         await buttons.remove_children()
 
+    async def _clear_form(self) -> None:
+        """Remove the schema form from the reusable prompt shell."""
+        host = self.query_one("#prompt-panel-form-host", Vertical)
+        host.display = False
+        await host.remove_children()
+
     def _focus_first_button(self) -> None:
         """Focus the first footer button if one exists."""
         buttons = self.query(Button)
@@ -341,7 +376,7 @@ class PromptPanel(Vertical):
                 return self._button_values.get(button.id or "")
         return None
 
-    def _resolve(self, value: str | None) -> None:
+    def _resolve(self, value: Any) -> None:
         """Resolve the active prompt once."""
         if self._future is not None and not self._future.done():
             self._future.set_result(value)
@@ -354,6 +389,21 @@ class PromptPanel(Vertical):
 
         if self._mode == "choice":
             self._resolve(self._button_values.get(button_id))
+            return
+
+        if self._mode == "mcp_form":
+            if button_id == "prompt-mcp-decline":
+                self._resolve({"action": "decline"})
+            elif button_id == "prompt-mcp-cancel":
+                self._resolve({"action": "cancel"})
+            elif button_id == "prompt-mcp-accept":
+                form = self.query_one("#mcp-elicitation-form", MCPElicitationForm)
+                try:
+                    content = form.collect_values()
+                except MCPFormValidationError as error:
+                    form.show_validation_error(error)
+                    return
+                self._resolve({"action": "accept", "content": content})
             return
 
         if button_id == "prompt-cancel":
@@ -379,7 +429,7 @@ class PromptPanel(Vertical):
         if self.handle_choice_key(event):
             return
 
-        if self._mode in {"text", "json"} and event.key == "escape":
+        if self._mode in {"text", "json", "mcp_form"} and event.key == "escape":
             event.stop()
             self._resolve(None)
 

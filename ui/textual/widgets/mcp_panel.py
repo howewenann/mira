@@ -83,11 +83,7 @@ class MCPPanelScreen(ModalScreen[None]):
                 for title, content in server_detail_sections(state):
                     yield Static(f"{title}\n{content}", classes="mcp-detail-section", markup=False)
             with Horizontal(classes="mcp-controls"):
-                persisted_login = bool(
-                    state.transport == "http"
-                    and getattr(self.manager, "has_persisted_login", lambda _name: False)(state.name)
-                )
-                for action in controls_for(state.status, persisted_login=persisted_login):
+                for action in controls_for(state.status):
                     button = Button(
                         action,
                         id=f"mcp-{safe_id(action.lower())}-{safe_id(state.name)}",
@@ -145,10 +141,6 @@ class MCPPanelScreen(ModalScreen[None]):
             await self.manager.set_server_enabled(name, False)
         elif action == "restart":
             await self.manager.restart_server(name)
-        elif action == "login":
-            await self.manager.login_server(name)
-        elif action == "forget login":
-            await self.manager.forget_server_login(name)
         await self.refresh_from_manager()
 
     async def refresh_from_manager(self, preferred_focus_id: str | None = None) -> None:
@@ -248,14 +240,10 @@ def capability_summary(state: Any) -> Text:
     return summary
 
 
-def controls_for(status: str, *, persisted_login: bool = False) -> tuple[str, ...]:
+def controls_for(status: str) -> tuple[str, ...]:
     if status == "Disabled":
-        return ("Enable", "Forget login") if persisted_login else ("Enable",)
-    if status in {"Login required", "Authenticating"}:
-        controls = ("Login", "Disable")
-    else:
-        controls = ("Restart", "Disable")
-    return (*controls, "Forget login") if persisted_login else controls
+        return ("Enable",)
+    return ("Restart", "Disable")
 
 
 def status_class(status: str) -> str:
@@ -263,14 +251,13 @@ def status_class(status: str) -> str:
         "Available": "available",
         "Partially available": "warning",
         "Approval required": "warning",
-        "Login required": "warning",
         "Failed": "failed",
         "Disabled": "disabled",
     }.get(status, "transient")
 
 
 def status_badge(status: str, *, spinner: int = 0) -> str:
-    if status in {"Authenticating", "Starting", "Restarting", "Stopping"}:
+    if status in {"Starting", "Restarting", "Stopping"}:
         return f"{SPINNER_FRAMES[spinner % len(SPINNER_FRAMES)]} {status}"
     return "Partial" if status == "Partially available" else status
 
@@ -279,9 +266,9 @@ def mcp_summary_symbol(states: Iterable[Any], *, spinner: int = 0) -> str:
     statuses = [state.status for state in states]
     if any(status == "Failed" for status in statuses):
         return "x"
-    if any(status in {"Partially available", "Approval required", "Login required"} for status in statuses):
+    if any(status in {"Partially available", "Approval required"} for status in statuses):
         return "!"
-    if any(status in {"Authenticating", "Starting", "Restarting", "Stopping"} for status in statuses):
+    if any(status in {"Starting", "Restarting", "Stopping"} for status in statuses):
         return SPINNER_FRAMES[spinner % len(SPINNER_FRAMES)]
     if statuses and all(status == "Disabled" for status in statuses):
         return "–"

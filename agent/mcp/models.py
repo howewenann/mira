@@ -14,8 +14,6 @@ MCPStatus = Literal[
     "Approval required",
     "Failed",
     "Disabled",
-    "Login required",
-    "Authenticating",
     "Starting",
     "Restarting",
     "Stopping",
@@ -99,7 +97,7 @@ class MCPServerState:
 
     @property
     def transient(self) -> bool:
-        return self.status in {"Authenticating", "Starting", "Restarting", "Stopping"}
+        return self.status in {"Starting", "Restarting", "Stopping"}
 
     @property
     def connection_config(self) -> dict[str, Any]:

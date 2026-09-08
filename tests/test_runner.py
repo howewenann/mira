@@ -10,7 +10,7 @@ from typing import Any
 
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.types import Command
+from langgraph.types import Command, Interrupt
 
 from agent.middleware.compaction import (
     MiraSummarizationMiddleware,
@@ -26,7 +26,12 @@ from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from core.execution.streams.output import final_text
 from core.execution.streams.subagents import consume_subagent, consume_subagents
-from core.execution.streams.tools import CONTROL_TOOLS, consume_live_tool_errors, consume_tool_calls
+from core.execution.streams.tools import (
+    CONTROL_TOOLS,
+    consume_live_tool_errors,
+    consume_tool_calls,
+    render_projected_tool_errors,
+)
 from core.context.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
 from agent.resources.defaults.tools.ask_user import normalize_options
@@ -689,6 +694,116 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
+
+    async def test_run_turn_resumes_tool_projected_mcp_elicitation_without_failure(self) -> None:
+        class MCPRenderer(RunTurnRenderer):
+            async def answer_mcp_elicitation(self, interrupt: Any) -> dict[str, Any]:
+                self.events.append(("mcp_elicitation", interrupt))
+                return {
+                    "responses": {
+                        "confirmation": {"action": "accept", "content": {"ok": True}}
+                    }
+                }
+
+        interrupt = Interrupt(
+            value={
+                "type": "mcp_elicitation",
+                "tool_name": "dynamic_tool",
+                "requests": [{"key": "confirmation", "mode": "form"}],
+            }
+        )
+        interrupted_call = DocumentedToolCall(
+            "dynamic_tool",
+            {"target": "example"},
+            error=str((interrupt,)),
+            call_id="call-mcp",
+        )
+        completed_call = DocumentedToolCall(
+            "dynamic_tool",
+            {"target": "example"},
+            output="confirmed",
+            call_id="call-mcp",
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[interrupted_call],
+                    interrupts=[interrupt],
+                ),
+                FakeStream(output={"messages": []}, tool_calls=[completed_call]),
+            ]
+        )
+        renderer = MCPRenderer()
+
+        result = await runner.run_turn(
+            agent,
+            "confirm MCP action",
+            renderer,
+            "thread-1",
+        )
+
+        self.assertEqual(
+            agent.payloads[1].resume,
+            {
+                "responses": {
+                    "confirmation": {"action": "accept", "content": {"ok": True}}
+                }
+            },
+        )
+        self.assertFalse(any(event[0] == "tool_error" for event in renderer.events))
+        self.assertIn(
+            ("tool_result", "dynamic_tool", "confirmed", "call-mcp"),
+            renderer.events,
+        )
+        self.assertEqual(result.tool_results, ["confirmed"])
+
+    async def test_run_turn_treats_any_native_projected_interrupt_as_paused(self) -> None:
+        interrupt = Interrupt(
+            value={
+                "action_requests": [{"name": "custom_tool", "args": {"value": "x"}}],
+                "review_configs": [
+                    {
+                        "action_name": "custom_tool",
+                        "allowed_decisions": ["approve", "reject"],
+                    }
+                ],
+            }
+        )
+        agent = FakeAgent(
+            [
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[
+                        DocumentedToolCall(
+                            "custom_tool",
+                            {"value": "x"},
+                            error=str((interrupt,)),
+                            call_id="call-custom",
+                        )
+                    ],
+                    interrupts=[interrupt],
+                ),
+                FakeStream(
+                    output={"messages": []},
+                    tool_calls=[
+                        DocumentedToolCall(
+                            "custom_tool",
+                            {"value": "x"},
+                            output="approved",
+                            call_id="call-custom",
+                        )
+                    ],
+                ),
+            ]
+        )
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        result = await runner.run_turn(agent, "run custom tool", renderer, "thread-1")
+
+        self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertFalse(any(event[0] == "tool_error" for event in renderer.events))
+        self.assertEqual(result.tool_results, ["approved"])
 
     async def test_run_turn_updates_displayed_call_after_approval_edit(self) -> None:
         original = {"file_path": "/test.txt", "content": "hello"}
@@ -2552,6 +2667,69 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-single"),
             ],
         )
+
+    async def test_tool_call_stream_defers_ambiguous_projection_errors(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        projected_errors = []
+
+        await consume_tool_calls(
+            AsyncItems(
+                [
+                    DocumentedToolCall(
+                        "dynamic_tool",
+                        {},
+                        error="projected failure",
+                        call_id="call-projected",
+                    )
+                ]
+            ),
+            renderer,
+            result,
+            projected_errors,
+        )
+
+        self.assertEqual(
+            renderer.events,
+            [("tool_call", "dynamic_tool", {}, "call-projected")],
+        )
+        self.assertEqual(result.tool_results, [])
+
+        render_projected_tool_errors(projected_errors, renderer, result)
+
+        self.assertEqual(
+            renderer.events[-1],
+            ("tool_error", "dynamic_tool", "projected failure", "call-projected"),
+        )
+        self.assertEqual(result.tool_results, ["projected failure"])
+
+    async def test_tool_call_stream_still_renders_real_projection_errors(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+
+        await consume_tool_calls(
+            AsyncItems(
+                [
+                    DocumentedToolCall(
+                        "dynamic_tool",
+                        {},
+                        error=RuntimeError("tool crashed"),
+                        call_id="call-error",
+                    )
+                ]
+            ),
+            renderer,
+            result,
+        )
+
+        self.assertEqual(
+            renderer.events,
+            [
+                ("tool_call", "dynamic_tool", {}, "call-error"),
+                ("tool_error", "dynamic_tool", "tool crashed", "call-error"),
+            ],
+        )
+        self.assertEqual(result.tool_results, ["tool crashed"])
 
     async def test_prepare_commands_complete_with_sanitized_results(self) -> None:
         renderer = RecordingRenderer()

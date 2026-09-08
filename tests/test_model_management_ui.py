@@ -198,7 +198,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 ),
                 encoding="utf-8",
             )
-            manager = MCPManager(workspace, token_root=workspace / "tokens")
+            manager = MCPManager(workspace)
             config = {
                 "settings": load_settings(workspace),
                 "settings_valid": True,

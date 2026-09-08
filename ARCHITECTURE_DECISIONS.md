@@ -841,14 +841,16 @@ live recording and rendering path. This covers middleware-short-circuited and
 unregistered calls that never create a tool-call completion handle. Repeated
 full-state snapshots do not duplicate either event.
 
-Successful Plan/Goal and `ask_user` controls retain dedicated interrupt-driven
-surfaces. Pinned LangGraph exposes successful `interrupt()` control flow through
-the raw `ToolCallStream.error` field as an `Interrupt(...)`, which cannot be
-distinguished there from failure. MIRA therefore suppresses raw control-stream
-errors, `Command` values, interrupt payloads, and empty interrupted completions;
-only the native error `ToolMessage` drives an ordinary visible error. Argument
-validation and middleware rejection produce that native message. Unexpected
-service, persistence, and UI failures remain fatal.
+Successful Plan/Goal, `ask_user`, and MCP elicitation controls retain dedicated
+interrupt-driven surfaces. Pinned LangGraph stringifies both successful
+`interrupt()` control flow and ordinary failures into `ToolCallStream.error`, so
+that projection cannot classify the value by native Python type. MIRA defers
+those ambiguous projected errors until the runner reads the authoritative
+native interrupt state: a native interrupt keeps the tool pending while its UI
+collects a decision, and the absence of an interrupt flushes the projected value
+as a visible failure. Native error `ToolMessage` values remain authoritative and
+render immediately. Unexpected service, persistence, and UI failures remain
+fatal.
 
 Final graph-state recovery remains the fallback for providers that omit a live
 terminal projection. Before each top-level turn MIRA
@@ -1161,9 +1163,16 @@ result without an invalid RPC or degraded server health. A failed advertised
 capability makes the overall projection partially available with its concrete
 error.
 Panel expansion reads those completed caches and only changes presentation.
-Remote HTTP OAuth is inferred only after an approved server's ordinary
-connection returns a valid MCP OAuth challenge or its protected-resource and
-authorization-server metadata can be discovered. User JSON has no OAuth field.
+Every remote HTTP integration enables FastMCP's native OAuth capability. Before
+constructing that provider, MIRA uses the MCP SDK's public authorization-server
+metadata helpers to select the strongest advertised DCR token authentication
+method in this order: `client_secret_basic`, `client_secret_post`, then `none`.
+If metadata is unavailable, MIRA leaves the client metadata unset so FastMCP's
+SDK default remains authoritative. Unauthenticated servers connect without
+user interaction, while protected servers delegate discovery, browser consent,
+PKCE, callback handling, token exchange, and refresh entirely to FastMCP. User
+JSON has no OAuth field, and stdio integrations receive no HTTP
+authentication.
 MCP string values may contain explicit `${NAME}` references. Loading keeps
 the normalized template for approval previews and fingerprints while building
 a separate resolved configuration in memory for the connection. Resolution is
@@ -1175,14 +1184,14 @@ Reusable prompt signatures stay compact as `<required> [optional]`. Prompts
 with only required arguments use positional values; the presence of any
 optional argument switches the whole invocation to `name=value` so omissions
 cannot shift later values onto the wrong MCP argument.
-The interactive MCP panel is the only path that may open a browser; startup,
-reload, retry, and one-shot runs may silently use or refresh stored credentials
-but otherwise leave the server at `Login required`. Authentication state stays
-in the MCP panel and never becomes an Issues entry.
 MCP tool elicitation uses the adapter's native LangGraph interrupt payload.
 Core sends that payload through the existing frontend request boundary and
 resumes the same graph thread with the upstream `responses` mapping; terminal,
 Textual, and ACP consumers only collect the requested form or URL decision.
+Textual form mode projects the request's top-level JSON Schema properties into
+native input, checkbox, select, and multi-select controls, validates required
+and numeric values locally, then returns typed content without displaying the
+raw schema in the ordinary prompt surface.
 
 **Why:** The shared agent factory builds project resources twice, once per
 mode. Starting MCP there would duplicate child processes, discovery, and
@@ -1193,18 +1202,14 @@ from changing server health and gives autocomplete, prompts, and attachments
 the same settled startup view. Persisted user-event attachment metadata is
 projected into LangGraph message metadata, which lets the implicit resource
 reader enforce the attachment boundary without a second session allowlist.
-OAuth tokens and dynamically registered client information are user-level
-state under `~/.mira/_state/mcp-tokens/`, separate from project configuration,
-settings, sessions, and diagnostics. V1 stores that state locally in plaintext.
-Provider-specific flows, device codes, configured client secrets, encryption,
-and keyring integration are deferred. A refresh failure removes only the
-affected server's projected capabilities and uses the existing registry-change
-pathway so the remaining MCP sessions and agents continue running.
+FastMCP owns OAuth credentials and dynamically registered client information;
+MIRA does not add its own token store or authentication state machine. With
+FastMCP's default in-memory storage, credentials do not survive a MIRA restart.
 Task-owned entry and exit are required by the AnyIO scopes used by remote HTTP
-sessions. They also keep restart, disable, authentication cleanup, reload, and
+sessions. They also keep restart, disable, reload, and
 shutdown deterministic if the requesting panel recomposes or closes.
 
-**Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`,
+**Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`, `agent/mcp/errors.py`,
 `agent/mcp/integration.py`, `agent/mcp/manager.py`, `agent/mcp/runtime.py`,
 `agent/factory.py`,
 `ui/textual/app.py`, `ui/textual/widgets/mcp_panel.py`, `ui/textual/widgets/autocomplete_input.py`.

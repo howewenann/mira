@@ -2659,6 +2659,16 @@ class MiraApp(App[None]):
             if not isinstance(request, dict):
                 continue
             while True:
+                if request.get("mode") == "form":
+                    schema = request.get("requested_schema")
+                    response = await self._prompt_mcp_form(
+                        str(request.get("message") or "MCP input required"),
+                        schema if isinstance(schema, dict) else {},
+                    )
+                    if response is None:
+                        continue
+                    responses[str(request.get("key") or "")] = response
+                    break
                 action = await self._prompt_choice(
                     "MCP Input",
                     "\n\n".join(
@@ -2677,19 +2687,6 @@ class MiraApp(App[None]):
                 response: dict[str, Any] = {
                     "action": {"a": "accept", "d": "decline"}.get(action, "cancel")
                 }
-                if response["action"] == "accept" and request.get("mode") == "form":
-                    content = await self._prompt_json("MCP Input", "{}")
-                    if content is None:
-                        continue
-                    try:
-                        parsed = json.loads(content)
-                    except json.JSONDecodeError:
-                        self.system_message("MCP response must be valid JSON.", kind="warning")
-                        continue
-                    if not isinstance(parsed, dict):
-                        self.system_message("MCP response must be a JSON object.", kind="warning")
-                        continue
-                    response["content"] = parsed
                 responses[str(request.get("key") or "")] = response
                 break
         return {"responses": responses}
@@ -2750,7 +2747,17 @@ class MiraApp(App[None]):
         """Show a JSON editor prompt in the main window."""
         return await self._with_prompt_lock(self.query_one(PromptPanel).edit_json(title, text))
 
-    async def _with_prompt_lock(self, prompt_waiter: Any) -> str | None:
+    async def _prompt_mcp_form(
+        self,
+        message: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Show a schema-driven MCP form in the shared prompt area."""
+        return await self._with_prompt_lock(
+            self.query_one(PromptPanel).ask_mcp_form("MCP Input", message, schema)
+        )
+
+    async def _with_prompt_lock(self, prompt_waiter: Any) -> Any:
         """Disable the prompt box while an in-window prompt is active."""
         prompt = self.query_one(PromptBox)
         was_disabled = prompt.disabled

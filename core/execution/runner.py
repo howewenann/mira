@@ -33,6 +33,7 @@ from core.execution.streams.tools import (
     CONTROL_TOOLS,
     consume_live_tool_errors,
     consume_tool_calls,
+    render_projected_tool_errors,
     render_tool_completion,
 )
 
@@ -497,6 +498,7 @@ async def run_turn(
             grader_model=rubric_model_name,
         )
         output: dict[str, Any] = {}
+        projected_tool_errors = []
         tool_call_start = len(result.tool_calls)
         tool_draft_start = len(result._tool_call_drafts)
         waiting_started = getattr(renderer, "waiting_started", None)
@@ -514,11 +516,21 @@ async def run_turn(
                     render_normal_tools=False,
                     invocation_metadata=message_metadata,
                 ),
-                consume_tool_calls(stream.tool_calls, event_renderer, result),
+                consume_tool_calls(
+                    stream.tool_calls,
+                    event_renderer,
+                    result,
+                    projected_tool_errors,
+                ),
                 consume_subagents(stream.subagents, event_renderer, rubric_renderer),
                 capture_output(stream.output(), output),
             )
         except BaseException:
+            render_projected_tool_errors(
+                projected_tool_errors,
+                event_renderer,
+                result,
+            )
             rubric_renderer.cancel()
             raise
 
@@ -542,6 +554,11 @@ async def run_turn(
         interrupts = await collect_interrupts(stream, output.get("value"))
 
         if not interrupts:
+            render_projected_tool_errors(
+                projected_tool_errors,
+                event_renderer,
+                result,
+            )
             pending_calls = output_tool_calls(output.get("value"))
             leaked_tool_repr = output_has_tool_call_repr(output.get("value"))
             stream_tool_calls_observed = len(result.tool_calls) > tool_call_start

@@ -21,7 +21,6 @@ from langchain_core.tools import StructuredTool, ToolException
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mcp.types import (
     PromptsCapability,
     ElicitRequest,
@@ -36,21 +35,18 @@ from mcp.types import (
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Collapsible, Static
 
+from agent.mcp.auth import (
+    create_http_oauth,
+    discover_token_endpoint_auth_method,
+    select_token_endpoint_auth_method,
+)
 from agent.mcp.configuration import (
     approval_preview,
     configuration_fingerprint,
     load_mcp_configuration,
     mcp_path,
 )
-from agent.mcp.auth import (
-    FileTokenStorage,
-    MiraOAuthProvider,
-    OAuthLoginRequired,
-    has_persisted_login,
-    is_oauth_login_required,
-    sanitized_error,
-    server_token_directory,
-)
+from agent.mcp.errors import sanitized_error
 from agent.mcp.manager import MCPManager
 from agent.mcp.integration import MCPAdapter, MiraMCPIntegration
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
@@ -119,6 +115,7 @@ class MCPConfigurationTests(unittest.TestCase):
         self.assertTrue(loaded.valid)
         self.assertEqual(loaded.servers["local"].transport, "stdio")
         self.assertEqual(loaded.servers["docs"].transport, "http")
+        self.assertNotIn("auth", loaded.servers["docs"].connection_config)
 
     def test_environment_references_resolve_only_in_runtime_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -350,45 +347,7 @@ class MCPConfigurationTests(unittest.TestCase):
         self.assertNotIn("top-secret", fingerprint)
 
 
-def oauth_response_error(status: int, *, authenticate: str = "") -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://example.test/mcp")
-    headers = {"WWW-Authenticate": authenticate} if authenticate else {}
-    response = httpx.Response(status, request=request, headers=headers)
-    return httpx.HTTPStatusError("request failed", request=request, response=response)
-
-
-class MCPOAuthClassificationTests(unittest.IsolatedAsyncioTestCase):
-    def state(self, *, transport: str = "http", headers: dict[str, str] | None = None):
-        definition = (
-            {"type": "http", "url": "https://example.test/mcp", "headers": headers or {}}
-            if transport == "http"
-            else {"command": "fake", "args": []}
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_config(root, {"linear": definition})
-            return load_mcp_configuration(root).servers["linear"]
-
-    async def test_valid_nested_mcp_oauth_challenge_requires_login(self) -> None:
-        challenge = 'Bearer realm="mcp", resource_metadata="https://example.test/.well-known/oauth-protected-resource"'
-        nested = ExceptionGroup("connection", [RuntimeError("wrapper", oauth_response_error(401, authenticate=challenge))])
-        self.assertTrue(await is_oauth_login_required(nested, self.state()))
-
-    async def test_plain_401_static_authorization_and_stdio_remain_failures(self) -> None:
-        plain = oauth_response_error(401)
-        with patch("agent.mcp.auth._discover_oauth_metadata", return_value=False):
-            self.assertFalse(await is_oauth_login_required(plain, self.state()))
-        self.assertFalse(
-            await is_oauth_login_required(
-                oauth_response_error(
-                    401,
-                    authenticate='Bearer resource_metadata="https://example.test/metadata"',
-                ),
-                self.state(headers={"Authorization": "Bearer configured"}),
-            )
-        )
-        self.assertFalse(await is_oauth_login_required(plain, self.state(transport="stdio")))
-
+class MCPErrorRenderingTests(unittest.TestCase):
     def test_nested_secret_text_is_redacted(self) -> None:
         error = ExceptionGroup(
             "outer",
@@ -445,131 +404,16 @@ class MCPOAuthClassificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(rendered, "RuntimeError: first failure; ValueError: Bearer [redacted]")
 
+    def test_actionable_failure_is_not_hidden_by_async_context(self) -> None:
+        try:
+            raise anyio.WouldBlock
+        except anyio.WouldBlock:
+            error = RuntimeError("Token exchange failed: invalid client")
 
-class MCPOAuthStorageTests(unittest.IsolatedAsyncioTestCase):
-    def state(self, name: str = "linear", url: str = "https://example.test/mcp"):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_config(root, {name: {"type": "http", "url": url}})
-            return load_mcp_configuration(root).servers[name]
-
-    async def test_user_level_identity_storage_is_atomic_distinct_and_forgettable(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            token_root = Path(directory) / "profile" / ".mira" / "_state" / "mcp-tokens"
-            first = self.state("linear", "https://example.test/mcp/")
-            equivalent = self.state("linear", "https://EXAMPLE.test:443/mcp")
-            other = self.state("linear", "https://example.test/other")
-            colliding_name = self.state("linear/a", "https://example.test/mcp")
-            same_component = self.state("linear-a", "https://example.test/mcp")
-            self.assertEqual(
-                server_token_directory(first, token_root=token_root),
-                server_token_directory(equivalent, token_root=token_root),
-            )
-            self.assertNotEqual(
-                server_token_directory(first, token_root=token_root),
-                server_token_directory(other, token_root=token_root),
-            )
-            self.assertNotEqual(
-                server_token_directory(same_component, token_root=token_root),
-                server_token_directory(colliding_name, token_root=token_root),
-            )
-            storage = FileTokenStorage(server_token_directory(first, token_root=token_root))
-            await storage.set_tokens(OAuthToken(access_token="stored-access", refresh_token="stored-refresh", expires_in=3600))
-            loaded = await FileTokenStorage(storage.directory).get_tokens()
-            self.assertEqual(loaded.access_token, "stored-access")
-            self.assertTrue(has_persisted_login(first, token_root=token_root))
-            self.assertFalse((Path(directory) / ".mira" / "mcp" / "mcp.json").exists())
-            await storage.clear()
-            self.assertFalse(storage.directory.exists())
-
-    async def test_stored_token_is_used_silently_and_missing_token_cannot_open_browser(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            token_root = Path(directory)
-            state = self.state()
-            opened: list[str] = []
-            provider = MiraOAuthProvider(
-                state,
-                interactive=False,
-                token_root=token_root,
-                browser_opener=lambda url: opened.append(url) or True,
-            )
-            await provider.storage.set_tokens(OAuthToken(access_token="stored", expires_in=3600))
-
-            async def respond(request: httpx.Request) -> httpx.Response:
-                self.assertEqual(request.headers.get("Authorization"), "Bearer stored")
-                return httpx.Response(200, request=request)
-
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond), auth=provider) as client:
-                response = await client.get("https://example.test/mcp")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(opened, [])
-            with self.assertRaises(OAuthLoginRequired):
-                await provider._redirect("https://auth.example/authorize?code=secret")
-            self.assertEqual(opened, [])
-
-    async def test_expired_stored_token_refreshes_without_browser(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            state = self.state()
-            opened: list[str] = []
-            provider = MiraOAuthProvider(
-                state,
-                interactive=False,
-                token_root=Path(directory),
-                browser_opener=lambda url: opened.append(url) or True,
-            )
-            await provider.storage.set_tokens(
-                OAuthToken(access_token="expired", refresh_token="refresh", expires_in=-60)
-            )
-            await provider.storage.set_client_info(
-                OAuthClientInformationFull(
-                    client_id="dynamic-client",
-                    redirect_uris=["http://127.0.0.1/callback"],
-                    token_endpoint_auth_method="none",
-                )
-            )
-            requests: list[str] = []
-
-            async def respond(request: httpx.Request) -> httpx.Response:
-                requests.append(str(request.url))
-                if request.url.path == "/token":
-                    return httpx.Response(
-                        200,
-                        request=request,
-                        headers={"Content-Type": "application/json"},
-                        json={"access_token": "fresh", "token_type": "Bearer", "expires_in": 3600},
-                    )
-                self.assertEqual(request.headers.get("Authorization"), "Bearer fresh")
-                return httpx.Response(200, request=request)
-
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond), auth=provider) as client:
-                response = await client.get("https://example.test/mcp")
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(requests, ["https://example.test/token", "https://example.test/mcp"])
-            self.assertEqual(opened, [])
-
-    async def test_static_authorization_header_ignores_stale_oauth_state(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            token_root = root / "profile-tokens"
-            write_config(root, {"server": {"type": "http", "url": "https://example.test/mcp"}})
-            state = load_mcp_configuration(root).servers["server"]
-            storage = FileTokenStorage(server_token_directory(state, token_root=token_root))
-            await storage.set_tokens(OAuthToken(access_token="stale", expires_in=3600))
-            write_config(
-                root,
-                {
-                    "server": {
-                        "type": "http",
-                        "url": "https://example.test/mcp",
-                        "headers": {"Authorization": "Bearer configured"},
-                    }
-                },
-            )
-            manager = MCPManager(root, token_root=token_root)
-            integration = manager._new_integration(manager.servers["server"])
-            self.assertIsInstance(integration.client.transport, StreamableHttpTransport)
-            self.assertIsNone(integration.client.transport.auth)
-            self.assertEqual(integration.client.transport.headers["Authorization"], "Bearer configured")
+        self.assertEqual(
+            sanitized_error(error),
+            "RuntimeError: Token exchange failed: invalid client",
+        )
 
 
 class MCPSettingsTests(unittest.TestCase):
@@ -718,6 +562,128 @@ class LocalPromptTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MCPNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_token_endpoint_auth_method_selection(self) -> None:
+        cases = (
+            (["client_secret_basic", "client_secret_post"], "client_secret_basic"),
+            (["client_secret_post"], "client_secret_post"),
+            (["none"], "none"),
+            ([], "none"),
+            (None, None),
+        )
+        for supported, expected in cases:
+            with self.subTest(supported=supported):
+                self.assertEqual(
+                    select_token_endpoint_auth_method(supported),
+                    expected,
+                )
+
+    async def test_http_oauth_receives_selected_token_endpoint_auth_method(self) -> None:
+        with (
+            patch(
+                "agent.mcp.auth.discover_token_endpoint_auth_method",
+                new=AsyncMock(return_value="client_secret_post"),
+            ),
+            patch("agent.mcp.auth.OAuth") as oauth_type,
+        ):
+            oauth = await create_http_oauth("https://example.test/mcp")
+
+        self.assertIs(oauth, oauth_type.return_value)
+        oauth_type.assert_called_once_with(
+            "https://example.test/mcp",
+            additional_client_metadata={
+                "token_endpoint_auth_method": "client_secret_post"
+            },
+        )
+
+    async def test_http_oauth_discovers_metadata_with_public_sdk_request(self) -> None:
+        response = httpx.Response(
+            200,
+            json={
+                "issuer": "https://example.test",
+                "authorization_endpoint": "https://example.test/authorize",
+                "token_endpoint": "https://example.test/token",
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            },
+        )
+        with patch("agent.mcp.auth.httpx.AsyncClient") as client_type:
+            client = client_type.return_value.__aenter__.return_value
+            client.send = AsyncMock(return_value=response)
+            method = await discover_token_endpoint_auth_method(
+                "https://example.test/mcp"
+            )
+
+        self.assertEqual(method, "client_secret_post")
+        request = client.send.await_args.args[0]
+        self.assertEqual(
+            str(request.url),
+            "https://example.test/.well-known/oauth-authorization-server",
+        )
+        self.assertIn("mcp-protocol-version", request.headers)
+
+    async def test_http_oauth_uses_sdk_default_when_metadata_is_unavailable(self) -> None:
+        with (
+            patch(
+                "agent.mcp.auth.discover_token_endpoint_auth_method",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("agent.mcp.auth.OAuth") as oauth_type,
+        ):
+            await create_http_oauth("https://example.test/mcp")
+
+        oauth_type.assert_called_once_with(
+            "https://example.test/mcp",
+            additional_client_metadata=None,
+        )
+
+    async def test_ordinary_http_clients_enable_native_oauth_and_preserve_headers(self) -> None:
+        state = MCPServerState(
+            name="remote",
+            transport="http",
+            config={
+                "transport": "http",
+                "url": "https://example.test/mcp",
+                "headers": {"X-Project": "mira"},
+            },
+            fingerprint="test",
+        )
+        oauth = object()
+
+        with (
+            patch(
+                "agent.mcp.integration.create_http_oauth",
+                new=AsyncMock(return_value=oauth),
+            ) as create_oauth,
+            patch("agent.mcp.integration.Client") as client_type,
+            patch("agent.mcp.integration.MCPAdapter") as adapter_type,
+        ):
+            integration = MiraMCPIntegration(state)
+            await integration.__aenter__()
+
+        create_oauth.assert_awaited_once_with("https://example.test/mcp")
+        transport = client_type.call_args.args[0]
+        self.assertIsInstance(transport, StreamableHttpTransport)
+        self.assertEqual(transport.url, "https://example.test/mcp")
+        self.assertEqual(transport.headers, {"X-Project": "mira"})
+        self.assertIs(client_type.call_args.kwargs["auth"], oauth)
+        adapter_type.return_value.__aenter__.assert_awaited_once_with()
+
+    def test_stdio_clients_do_not_receive_http_oauth(self) -> None:
+        state = MCPServerState(
+            name="local",
+            transport="stdio",
+            config={"transport": "stdio", "command": "python", "args": [], "env": {}},
+            fingerprint="test",
+        )
+
+        with (
+            patch("agent.mcp.integration.Client") as client_type,
+            patch("agent.mcp.integration.MCPAdapter"),
+        ):
+            MiraMCPIntegration(state)
+
+        self.assertIsInstance(client_type.call_args.args[0], StdioTransport)
+        self.assertNotIn("auth", client_type.call_args.kwargs)
+
     async def test_manager_starts_executes_and_stops_a_real_stdio_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -993,7 +959,7 @@ class FakeIntegration:
 class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
     async def make_manager(self, root: Path, servers: dict[str, dict], sessions: dict[str, FakeSession]) -> MCPManager:
         write_config(root, servers)
-        manager = MCPManager(root, token_root=root / "profile-tokens")
+        manager = MCPManager(root)
         manager.client = FakeClient(sessions)
         manager._new_integration = lambda state: manager.client.integration(state.name)
 
@@ -1014,7 +980,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
                     "remote": {"type": "http", "url": "https://example.test/mcp"},
                 },
             )
-            manager = MCPManager(root, token_root=root / "profile-tokens")
+            manager = MCPManager(root)
             transports = [
                 manager._new_integration(state).client.transport
                 for state in manager.servers.values()
@@ -1066,7 +1032,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             write_config(root, {"gated": {"command": "fake", "args": []}})
             session = GatedPrompts()
-            manager = MCPManager(root, token_root=root / "profile-tokens")
+            manager = MCPManager(root)
             manager.client = FakeClient({"gated": session})
             manager._new_integration = lambda state: manager.client.integration(state.name)
 
@@ -1234,125 +1200,33 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.client.closed.count("a"), 1)
             await manager.shutdown()
 
-    async def test_approval_precedes_oauth_classification(self) -> None:
-        class ChallengedIntegration:
+    async def test_startup_preserves_actionable_native_oauth_errors(self) -> None:
+        class FailedIntegration:
             async def __aenter__(self):
-                challenge = 'Bearer resource_metadata="https://example.test/.well-known/oauth-protected-resource"'
-                raise oauth_response_error(401, authenticate=challenge)
+                try:
+                    raise anyio.WouldBlock
+                except anyio.WouldBlock:
+                    raise RuntimeError("Token exchange failed: invalid client")
 
             async def __aexit__(self, *_args):
                 pass
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_config(root, {"linear": {"type": "http", "url": "https://example.test/mcp"}})
-            manager = MCPManager(root, token_root=root / "profile-tokens")
-            manager._new_integration = lambda _state: ChallengedIntegration()
-            events: list[str] = []
+            write_config(root, {"remote": {"type": "http", "url": "https://example.test/mcp"}})
+            manager = MCPManager(root)
+            manager._new_integration = lambda _state: FailedIntegration()
 
             async def approve(_state, _preview):
-                events.append("approved")
                 return "allow"
 
             await manager.initialize(approve)
-            self.assertEqual(events, ["approved"])
-            self.assertEqual(manager.servers["linear"].status, "Login required")
 
-    async def test_explicit_login_targets_one_mapping_and_notifies_registry(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_config(
-                root,
-                {
-                    "linear": {"type": "http", "url": "https://example.test/mcp"},
-                    "other": {"type": "http", "url": "https://other.test/mcp"},
-                },
+            self.assertEqual(manager.servers["remote"].status, "Failed")
+            self.assertEqual(
+                manager.servers["remote"].error,
+                "RuntimeError: Token exchange failed: invalid client",
             )
-            manager = MCPManager(root, token_root=root / "profile-tokens")
-            state = manager.servers["linear"]
-            state.status = "Login required"
-            transitions: list[str] = []
-            changes: list[str] = []
-
-            async def start(target, *, restarting, force_approval=False):
-                transitions.append(target.status)
-                target.status = "Starting"
-                transitions.append(target.status)
-                target.status = "Available"
-
-            async def changed():
-                changes.append(state.status)
-
-            manager._start_server = start
-            manager.set_change_handler(changed)
-            self.assertTrue(await manager.login_server("linear"))
-            self.assertEqual(transitions, ["Authenticating", "Starting"])
-            self.assertEqual(state.status, "Available")
-            self.assertIn("linear", manager._oauth_providers)
-            self.assertNotIn("other", manager._oauth_providers)
-            self.assertEqual(changes, ["Available"])
-
-    async def test_failed_explicit_login_returns_to_login_required(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_config(root, {"linear": {"type": "http", "url": "https://example.test/mcp"}})
-            manager = MCPManager(root, token_root=root / "profile-tokens")
-            state = manager.servers["linear"]
-            state.status = "Login required"
-
-            async def fail(target, *, restarting, force_approval=False):
-                target.status = "Failed"
-                target.error = "Browser authorization was cancelled or denied."
-
-            manager._start_server = fail
-            self.assertFalse(await manager.login_server("linear"))
-            self.assertEqual(state.status, "Login required")
-            self.assertNotIn("token", state.error.casefold())
-
-    async def test_later_oauth_failure_removes_only_target_capabilities(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            manager = await self.make_manager(
-                root,
-                {
-                    "linear": {"type": "http", "url": "https://example.test/mcp"},
-                    "other": {"command": "other", "args": []},
-                },
-                {"linear": FakeSession(["search"]), "other": FakeSession(["keep"])},
-            )
-            target = manager.servers["linear"]
-            manager._oauth_providers["linear"] = SimpleNamespace()
-            changes: list[bool] = []
-
-            async def changed():
-                changes.append(True)
-
-            manager.set_change_handler(changed)
-            self.assertTrue(await manager._handle_later_auth_failure(target, oauth_response_error(401)))
-            self.assertEqual(target.status, "Login required")
-            self.assertEqual(target.tools, [])
-            self.assertEqual(manager.client.closed, ["linear"])
-            self.assertEqual(manager.servers["other"].status, "Available")
-            self.assertEqual(len(manager.servers["other"].tools), 1)
-            self.assertEqual(changes, [True])
-            await manager.shutdown()
-
-    async def test_forget_login_preserves_config_and_disabled_state(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            token_root = root / "profile-tokens"
-            write_config(root, {"linear": {"type": "http", "url": "https://example.test/mcp"}})
-            settings = set_mcp_server_enabled(load_settings(root), "linear", False)
-            self.assertTrue(save_settings(root, settings))
-            state = load_mcp_configuration(root).servers["linear"]
-            storage = FileTokenStorage(server_token_directory(state, token_root=token_root))
-            await storage.set_tokens(OAuthToken(access_token="stored", expires_in=3600))
-            original = mcp_path(root).read_text(encoding="utf-8")
-            manager = MCPManager(root, token_root=token_root)
-            self.assertTrue(await manager.forget_server_login("linear"))
-            self.assertEqual(manager.servers["linear"].status, "Disabled")
-            self.assertFalse(storage.directory.exists())
-            self.assertEqual(mcp_path(root).read_text(encoding="utf-8"), original)
 
     async def test_tool_collisions_and_conversion_failures_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1507,8 +1381,6 @@ class PanelManager:
         self.config_issue = None
         self.change_handler = None
         self.shutdown_calls = 0
-        self.login_calls: list[str] = []
-        self.forgotten: set[str] = set()
 
     @property
     def show_status(self) -> bool:
@@ -1544,20 +1416,6 @@ class PanelManager:
         self.servers[name].status = "Available"
         return True
 
-    def has_persisted_login(self, name: str) -> bool:
-        return name in self.forgotten
-
-    async def login_server(self, name: str) -> bool:
-        self.login_calls.append(name)
-        self.servers[name].status = "Available"
-        return True
-
-    async def forget_server_login(self, name: str) -> bool:
-        self.forgotten.discard(name)
-        self.servers[name].status = "Login required"
-        return True
-
-
 class PanelApp(App[None]):
     CSS_PATH = "../ui/textual/styles/mira.tcss"
 
@@ -1582,7 +1440,7 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             ensure_project_examples(root)
-            manager = MCPManager(root, token_root=root / "profile-tokens")
+            manager = MCPManager(root)
             self.assertFalse(manager.show_status)
             self.assertEqual(manager.issues, [])
 
@@ -1796,18 +1654,9 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
 
     def test_controls_status_colours_and_spinner_are_consistent(self) -> None:
         self.assertEqual(controls_for("Disabled"), ("Enable",))
-        self.assertEqual(controls_for("Disabled", persisted_login=True), ("Enable", "Forget login"))
         for status in ("Available", "Partially available", "Approval required", "Failed"):
             self.assertEqual(controls_for(status), ("Restart", "Disable"))
-        self.assertEqual(controls_for("Login required"), ("Login", "Disable"))
-        self.assertEqual(controls_for("Authenticating"), ("Login", "Disable"))
-        self.assertEqual(
-            controls_for("Login required", persisted_login=True),
-            ("Login", "Disable", "Forget login"),
-        )
         self.assertEqual(status_class("Available"), "available")
-        self.assertEqual(status_class("Login required"), "warning")
-        self.assertEqual(status_class("Authenticating"), "transient")
         self.assertEqual(status_class("Failed"), "failed")
         self.assertEqual(status_badge("Available"), "Available")
         self.assertEqual(status_badge("Partially available"), "Partial")
@@ -1821,28 +1670,6 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mcp_summary_symbol(states("Disabled", "Disabled")), "–")
         self.assertEqual(mcp_summary_symbol(states("Starting"), spinner=1), "/")
         self.assertEqual(mcp_summary_symbol(states("Starting", "Failed")), "x")
-
-    async def test_login_control_runs_in_worker_and_authenticating_row_spins(self) -> None:
-        manager = PanelManager()
-        manager.servers["two"].status = "Login required"
-        app = PanelApp(manager)
-        async with app.run_test(size=(100, 35)) as pilot:
-            await pilot.pause()
-            await pilot.click("#mcp-login-two")
-            await pilot.pause()
-            self.assertEqual(manager.login_calls, ["two"])
-            self.assertEqual(manager.servers["two"].status, "Available")
-
-            manager.servers["two"].status = "Authenticating"
-            manager.servers["two"].transient = True
-            await app.screen.refresh_from_manager()
-            login = app.screen.query_one("#mcp-login-two", Button)
-            disable = app.screen.query_one("#mcp-disable-two", Button)
-            self.assertTrue(login.disabled)
-            self.assertTrue(disable.disabled)
-            self.assertIn("transient", app.screen.query_one("#mcp-card-two").classes)
-            badge = app.screen.query_one("#mcp-card-two .mcp-status-badge", Static)
-            self.assertIn("Authenticating", str(badge.render()))
 
     async def test_app_button_and_slash_open_the_same_panel_pathway(self) -> None:
         from tests.test_textual_app import make_app
