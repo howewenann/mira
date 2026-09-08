@@ -30,7 +30,6 @@ from mira.api import (
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
     AskUserRequest,
-    ConfirmationRequest,
     MCPApprovalRequest,
     MCPElicitationRequest,
     MessageEvent,
@@ -678,21 +677,17 @@ class ACPFrontendTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-    async def test_mcp_confirmation_and_retained_artifact_display(self) -> None:
+    async def test_mcp_approval_and_retained_artifact_display(self) -> None:
         artifact = {"title": "Retained", "objective": "Keep it"}
         self.server._mira_sessions["buttons"] = SimpleNamespace(
             snapshot=lambda: SimpleNamespace(current_goal=artifact, current_plan=None)
         )
-        self.connection.permission_choices = ["always_allow", "confirm"]
+        self.connection.permission_choices = ["always_allow"]
         with self.frontend.bind("buttons"):
             mcp = await self.frontend.request(MCPApprovalRequest(object(), "Connect docs"))
-            confirmed = await self.frontend.request(
-                ConfirmationRequest("create_git_repo", "Create a repository?")
-            )
             displayed = await self.frontend.request(ArtifactDisplayRequest("goal"))
 
         self.assertEqual(mcp, "always_allow")
-        self.assertTrue(confirmed)
         self.assertEqual(displayed, "Displayed retained goal.")
         self.assertIn("MIRA Goal", self.connection.updates[-1][1].content.text)
 

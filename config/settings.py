@@ -92,7 +92,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
     },
     "hitl": {
-        "git_protection": {"enabled": True},
+        "git_protection": {"enabled": None},
         "execute_env": {
             "mode": "system",
             "name": "",
@@ -235,8 +235,10 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
         return settings
 
     git_protection = hitl.get("git_protection")
-    if isinstance(git_protection, dict) and isinstance(git_protection.get("enabled"), bool):
-        settings["hitl"]["git_protection"]["enabled"] = git_protection["enabled"]
+    if isinstance(git_protection, dict):
+        enabled = git_protection.get("enabled")
+        if enabled is None or isinstance(enabled, bool):
+            settings["hitl"]["git_protection"]["enabled"] = enabled
 
     execute_env = hitl.get("execute_env")
     if isinstance(execute_env, dict):
@@ -423,8 +425,8 @@ def settings_issues(raw: Any) -> list[Issue]:
                     issues.append(_invalid_setting("hitl.git_protection", "must be a mapping"))
                 else:
                     _unknown_settings(git, {"enabled"}, "hitl.git_protection", issues)
-                    if "enabled" in git and not isinstance(git["enabled"], bool):
-                        issues.append(_invalid_setting("hitl.git_protection.enabled", "must be true or false"))
+                    if "enabled" in git and git["enabled"] is not None and not isinstance(git["enabled"], bool):
+                        issues.append(_invalid_setting("hitl.git_protection.enabled", "must be true, false, or null"))
             execute_env = hitl.get("execute_env")
             if execute_env is not None:
                 if not isinstance(execute_env, dict):
@@ -716,10 +718,11 @@ def execute_env_settings(config_or_settings: dict[str, Any] | None) -> dict[str,
     return normalize_execute_env(hitl.get("execute_env"))
 
 
-def git_protection_enabled(config_or_settings: dict[str, Any] | None) -> bool:
-    """Return whether startup Git protection is enabled."""
+def git_protection_preference(config_or_settings: dict[str, Any] | None) -> bool | None:
+    """Return the explicit Git preference, or None while undecided."""
     hitl = hitl_settings(config_or_settings)
-    return bool(hitl.get("git_protection", {}).get("enabled", True))
+    value = hitl.get("git_protection", {}).get("enabled")
+    return value if isinstance(value, bool) else None
 
 
 def dynamic_subagents_enabled(config_or_settings: dict[str, Any] | None) -> bool:
@@ -929,10 +932,12 @@ def tool_enabled(config_or_settings: dict[str, Any] | None, tool_name: str) -> b
     return True
 
 
-def set_git_protection(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
-    """Return settings with the Git protection toggle updated."""
+def set_git_protection(settings: dict[str, Any], enabled: bool | None) -> dict[str, Any]:
+    """Return settings with the tri-state Git preference updated."""
+    if enabled is not None and not isinstance(enabled, bool):
+        raise ValueError("Git protection preference must be true, false, or None")
     updated = normalize_settings(settings)
-    updated["hitl"]["git_protection"]["enabled"] = bool(enabled)
+    updated["hitl"]["git_protection"]["enabled"] = enabled
     return updated
 
 

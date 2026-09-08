@@ -76,7 +76,6 @@ async def _run(
     """Create the app objects, then run either one-shot or TUI mode."""
     import typer
 
-    from cli.git_guard import ensure_git_repository
     from agent.resources.project_setup import ensure_project_examples
     from config.runtime import LaunchOptions, load_effective_config
 
@@ -113,7 +112,6 @@ async def _run(
             config=config,
             launch_options=launch_options,
             bootstrap=_bootstrap,
-            ensure_git_repository=ensure_git_repository,
             tool_output_chars=config["tool_output_chars"],
         )
         if trace:
@@ -126,9 +124,6 @@ async def _run(
     from ui.terminal.renderer import Renderer
 
     renderer = Renderer(tool_output_chars=config["tool_output_chars"])
-    if not await ensure_git_repository(workspace, renderer):
-        raise typer.Exit(code=1)
-
     app = await _bootstrap(workspace=workspace, session=session, resume=resume, config=config, renderer=renderer)
     try:
         from agent.tools.failures import one_shot_warning

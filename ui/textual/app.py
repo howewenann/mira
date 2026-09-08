@@ -18,6 +18,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.reactive import reactive
 from textual.widgets import Button, ListView, Static
 
 from agent.middleware.compaction import compact_after_turn
@@ -31,12 +32,13 @@ from agent.planning.policy import (
 from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
 from config.settings import (
     EXECUTE_TOOL,
-    git_protection_enabled,
+    git_protection_preference,
     load_settings,
     middleware_span_mode,
     rubric_enabled,
     rubric_max_iterations,
     save_settings,
+    set_git_protection,
     tool_enabled,
 )
 from core.diagnostics.logging import get_diagnostics_logger
@@ -47,6 +49,7 @@ from core.context.report import (
     mcp_tool_metadata,
 )
 from core.diagnostics.error_report import clear_error_reports, write_error_report
+from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
 from core.application import available_tools, initial_mode, refresh_agent_specs
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from mira import MiraApplication, MiraSession
@@ -96,14 +99,35 @@ from ui.textual.widgets import (
 )
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
-from ui.textual.widgets.session_history import SessionItem
+from ui.textual.widgets.session_history import (
+    HistoryToggleButton,
+    SessionActionMenuScreen,
+    SessionItem,
+    session_display_title,
+)
 from ui.textual.platform.windows.clipboard import set_windows_clipboard
 from ui.textual.platform.windows.input import driver_class_for_platform
 from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_platform
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
-GitGuard = Callable[[Path, Any], Any]
 DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
+BUSY_MUTATING_COMMANDS = {
+    "/act",
+    "/clear",
+    "/compact",
+    "/goal-clear",
+    "/goal-resume",
+    "/models",
+    "/new-chat",
+    "/plan",
+    "/plan-clear",
+    "/plan-resume",
+    "/reload",
+    "/reload-runtime",
+    "/settings",
+    *DESTRUCTIVE_HISTORY_COMMANDS,
+}
+HISTORY_RAIL_WIDTH = 4
 STARTUP_RECOVERY_COMMANDS = {
     "/settings",
     "/models",
@@ -130,6 +154,7 @@ class MiraApp(App[None]):
 
     CSS_PATH = "styles/mira.tcss"
     manages_subagent_animation = True
+    busy = reactive(False)
     BINDINGS = [
         Binding("ctrl+c", "copy", "Copy", priority=True),
         Binding("alt+q", "interrupt_or_quit", "Cancel/Quit", priority=True),
@@ -146,7 +171,6 @@ class MiraApp(App[None]):
         config: dict[str, Any] | None = None,
         launch_options: LaunchOptions | None = None,
         bootstrap: Bootstrap | None = None,
-        ensure_git_repository: GitGuard | None = None,
         prebuilt: dict[str, Any] | None = None,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
     ) -> None:
@@ -158,7 +182,6 @@ class MiraApp(App[None]):
         self.config = config
         self.launch_options = launch_options or LaunchOptions()
         self.bootstrap = bootstrap
-        self.ensure_git_repository = ensure_git_repository
         self.prebuilt = prebuilt
         self.tool_output_chars = int(tool_output_chars)
         self.history_path = self.workspace / ".mira" / "history.txt"
@@ -187,6 +210,10 @@ class MiraApp(App[None]):
         self._waiting_label = "working..."
         self._main_stream_active = False
         self._settings_panel: SettingsPanel | None = None
+        self._foreground_interrupt_lock = asyncio.Lock()
+        self._foreground_interrupt_owner: asyncio.Task[Any] | None = None
+        self._artifact_action_disabled: dict[Button, bool] = {}
+        self.history_collapsed = False
         self.mcp_manager: Any | None = None
         self._mcp_spinner = 0
         self._reload_in_progress = False
@@ -204,7 +231,10 @@ class MiraApp(App[None]):
                 with Horizontal(id="session-sidebar-header"):
                     yield Static("Chat History", id="session-sidebar-title")
                     yield Button("+ New", id="new-chat")
+                    yield HistoryToggleButton("<|", id="history-collapse")
                 yield SessionHistory(id="sessions")
+            with Vertical(id="history-rail"):
+                yield HistoryToggleButton("|>", id="history-expand")
             with Vertical(id="main-panel"):
                 with Horizontal(id="status-row"):
                     yield StatusBar(id="status")
@@ -239,14 +269,8 @@ class MiraApp(App[None]):
         self.run_worker(self._startup(), name="startup", exclusive=True)
 
     async def _startup(self) -> None:
-        """Run Git safety checks and build agents inside the TUI."""
+        """Build agents inside the TUI without blocking on workspace Git state."""
         try:
-            if self.ensure_git_repository is not None:
-                self.startup_progress("checking workspace...")
-                if not await self.ensure_git_repository(self.workspace, self):
-                    self.exit()
-                    return
-
             if self.bootstrap is None:
                 raise RuntimeError("MIRA bootstrap function was not provided")
 
@@ -395,9 +419,13 @@ class MiraApp(App[None]):
         text = event.value.strip()
         prompt = self.query_one(PromptBox)
         prompt.value = ""
-        if not text or self.busy:
-            if text in DESTRUCTIVE_HISTORY_COMMANDS and self.busy:
-                self.system_message("finish the current turn before clearing history", kind="warning")
+        if not text:
+            self.action_focus_prompt()
+            return
+        if self.busy:
+            command = text.partition(" ")[0]
+            if command in BUSY_MUTATING_COMMANDS or command == "/goal":
+                self._notify_busy_action("using that command")
             self.action_focus_prompt()
             return
         if not self.ready and not (
@@ -734,6 +762,177 @@ class MiraApp(App[None]):
         event.stop()
         self.run_worker(self._run_new_chat(), name="new-chat", exclusive=True)
 
+    @on(Button.Pressed, "#history-collapse")
+    def press_history_collapse(self, event: Button.Pressed) -> None:
+        """Replace the expanded History sidebar with the minimal rail."""
+        event.stop()
+        previous_focus = self.screen.focused
+        self.history_collapsed = True
+        self._sync_sidebar_visibility()
+        self.call_after_refresh(self._restore_focus_after_history_toggle, previous_focus)
+
+    @on(Button.Pressed, "#history-expand")
+    def press_history_expand(self, event: Button.Pressed) -> None:
+        """Restore the original expanded History sidebar."""
+        event.stop()
+        previous_focus = self.screen.focused
+        self.history_collapsed = False
+        self._sync_sidebar_visibility()
+        self.call_after_refresh(self._restore_focus_after_history_toggle, previous_focus)
+
+    def _restore_focus_after_history_toggle(self, previous_focus: Any) -> None:
+        """Return idle mouse toggles to input without taking interrupt focus."""
+        if not self.is_mounted:
+            return
+        settings = self._settings_panel
+        interrupt_owns_focus = bool(
+            len(self.screen_stack) > 1
+            or self._foreground_interrupt_owner is not None
+            or self._pending_artifact_review is not None
+            or (settings is not None and settings.display)
+            or self.query_one(PromptPanel).active
+        )
+        if interrupt_owns_focus:
+            focus_id = getattr(previous_focus, "id", None)
+            focus_target = previous_focus
+            if focus_target is not None and not focus_target.is_mounted and focus_id:
+                try:
+                    focus_target = self.query_one(f"#{focus_id}")
+                except NoMatches:
+                    focus_target = None
+            if (
+                focus_target is not None
+                and focus_target.is_mounted
+                and not focus_target.disabled
+            ):
+                focus_target.focus()
+            if focus_id:
+                self.set_timer(0.05, lambda: self._restore_interaction_focus(focus_id))
+            return
+        prompt = self.query_one(PromptBox)
+        if not prompt.is_mounted or prompt.disabled:
+            return
+        prompt.focus()
+
+    def _restore_interaction_focus(self, focus_id: str) -> None:
+        """Reacquire an interaction control if layout refresh recomposed it."""
+        if not self.is_mounted:
+            return
+        settings = self._settings_panel
+        if not (
+            len(self.screen_stack) > 1
+            or self._foreground_interrupt_owner is not None
+            or self._pending_artifact_review is not None
+            or (settings is not None and settings.display)
+            or self.query_one(PromptPanel).active
+        ):
+            return
+        try:
+            focus_target = self.query_one(f"#{focus_id}")
+        except NoMatches:
+            return
+        if focus_target.is_mounted and not focus_target.disabled:
+            focus_target.focus()
+
+    @on(SessionItem.PinRequested)
+    def pin_history_session(self, event: SessionItem.PinRequested) -> None:
+        """Toggle pin metadata without treating the row as a session selection."""
+        event.stop()
+        if self.busy:
+            self._notify_busy_action("pinning a chat")
+            return
+        self._set_history_pin(event.item, not event.item.pinned)
+        self.call_after_refresh(self.action_focus_prompt)
+
+    @on(SessionItem.MenuRequested)
+    def open_history_session_menu(self, event: SessionItem.MenuRequested) -> None:
+        """Open the compact native action menu for one history row."""
+        event.stop()
+        if self.busy:
+            self._notify_busy_action("changing a saved chat")
+            return
+        self.run_worker(
+            self._run_history_session_menu(event.item),
+            name="history-session-menu",
+            exclusive=False,
+        )
+
+    @on(SessionItem.RenameSubmitted)
+    def rename_history_session(self, event: SessionItem.RenameSubmitted) -> None:
+        """Persist an inline custom title without changing conversation recency."""
+        event.stop()
+        if self.busy:
+            self._notify_busy_action("renaming a chat")
+            return
+        record = self._history_session_record(event.item)
+        record["custom_title"] = " ".join(event.value.split())
+        self._save_history_metadata(record)
+        self._refresh_sessions()
+
+    async def _run_history_session_menu(self, item: SessionItem) -> None:
+        """Apply the selected action to the exact originating session."""
+        row_region = item.region
+        action = await self.push_screen_wait(
+            SessionActionMenuScreen(
+                pinned=item.pinned,
+                anchor_x=row_region.right,
+                anchor_y=row_region.y,
+            )
+        )
+        if action == "rename" and item.is_mounted:
+            item.begin_rename()
+            return
+        if action == "pin":
+            self._set_history_pin(item, not item.pinned)
+        elif action == "delete":
+            await self._delete_history_session(item)
+        self.call_after_refresh(self.action_focus_prompt)
+
+    def _set_history_pin(self, item: SessionItem, pinned: bool) -> None:
+        """Persist pin state and refresh grouped chronological ordering."""
+        record = self._history_session_record(item)
+        record["pinned"] = bool(pinned)
+        self._save_history_metadata(record)
+        self._refresh_sessions()
+
+    def _history_session_record(self, item: SessionItem) -> dict[str, Any]:
+        """Return the live record when an action targets the open session."""
+        if item.session_id == str(self.session.get("id") or ""):
+            return self.session
+        return item.record
+
+    def _save_history_metadata(self, record: dict[str, Any]) -> None:
+        """Use metadata-only persistence so pin and rename preserve updated_at."""
+        if self.store is None:
+            return
+        save_metadata = getattr(self.store, "save_metadata", None)
+        if callable(save_metadata):
+            save_metadata(record)
+            return
+        updated_at = record.get("updated_at")
+        self.store.save(record)
+        record["updated_at"] = updated_at
+
+    async def _delete_history_session(self, item: SessionItem) -> None:
+        """Confirm and delete only the selected session."""
+        title = session_display_title(item.record)
+        answer = await self._prompt_choice(
+            "Delete Chat?",
+            f'Delete saved chat "{title}"?\n\n{DESTRUCTIVE_CONFIRM_HINT}',
+            DESTRUCTIVE_CONFIRM_CHOICES,
+        )
+        if answer != "o" or self.store is None:
+            return
+        delete = getattr(self.store, "delete", None)
+        if not callable(delete) or not delete(item.session_id):
+            self.notify("The saved chat no longer exists.", title="History")
+            self._refresh_sessions()
+            return
+        if item.session_id == str(self.session.get("id") or ""):
+            self._handle_new_chat()
+        else:
+            self._refresh_sessions()
+
     async def _run_new_chat(self) -> None:
         """Create and switch to a fresh session outside event handlers."""
         try:
@@ -749,7 +948,7 @@ class MiraApp(App[None]):
     def _handle_new_chat(self) -> bool:
         """Create a fresh saved session while preserving the current one."""
         if self.busy:
-            self.system_message("finish the current turn before starting a new chat", kind="warning")
+            self._notify_busy_action("starting a new chat")
             return True
         if self.store is None:
             self.system_message("new chat needs the normal session store", kind="warning")
@@ -815,7 +1014,7 @@ class MiraApp(App[None]):
             self.system_message("that plan is no longer active", kind="warning")
             return
         if self.busy:
-            self.system_message("finish the current turn before resolving the plan", kind="warning")
+            self._notify_busy_action("resolving the plan")
             return
 
         if action == "close":
@@ -919,7 +1118,7 @@ class MiraApp(App[None]):
             self.system_message("that Goal is no longer current", kind="warning")
             return
         if self.busy:
-            self.system_message("finish the current turn before resolving the Goal", kind="warning")
+            self._notify_busy_action("resolving the Goal")
             return
 
         if action == "close":
@@ -995,6 +1194,7 @@ class MiraApp(App[None]):
             feedback = await self._prompt_text(
                 f"Revise {label}",
                 f"What should MIRA change about this {label}?",
+                foreground_owned=True,
             )
             feedback = (feedback or "").strip()
             if not feedback:
@@ -1016,6 +1216,17 @@ class MiraApp(App[None]):
         artifact: dict[str, Any],
     ) -> dict[str, Any]:
         """Present a Core-owned provisional artifact and await its UI decision."""
+        return await self.foreground_interrupt(
+            lambda: self._review_artifact(kind, interrupt, artifact)
+        )
+
+    async def _review_artifact(
+        self,
+        kind: str,
+        interrupt: Any,
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Present one serialized artifact review in the foreground."""
         del interrupt
         self.waiting_finished()
         self.mode["planning_stage"] = (
@@ -1052,12 +1263,14 @@ class MiraApp(App[None]):
                 status="proposed",
                 created_at=created_at,
             )
+        self.call_after_refresh(self._sync_artifact_actions)
         try:
             return await review.wait()
         finally:
             if self._pending_artifact_review is review:
                 self._pending_artifact_review = None
                 self.call_after_refresh(self._sync_header_control_visibility)
+                self.call_after_refresh(self._sync_artifact_actions)
 
     def artifact_state_changed(self, event: Any) -> None:
         """Project one authoritative Core artifact transition into chat widgets."""
@@ -1591,7 +1804,7 @@ class MiraApp(App[None]):
         if text not in DESTRUCTIVE_HISTORY_COMMANDS:
             return False
         if self.busy:
-            self.system_message("finish the current turn before clearing history", kind="warning")
+            self._notify_busy_action("clearing history")
             return True
 
         if text == "/clear-chat":
@@ -1688,7 +1901,7 @@ class MiraApp(App[None]):
             return False
 
         if self._reload_in_progress:
-            self.system_message("reload already in progress", kind="warning")
+            self.notify("Reload already in progress.", title="MIRA is busy", severity="warning")
             return False
 
         if self.busy:
@@ -1698,6 +1911,7 @@ class MiraApp(App[None]):
         prompt = self.query_one(PromptBox)
         prompt_was_disabled = prompt.disabled
         self._reload_in_progress = True
+        self._sync_interactivity()
         prompt.disabled = True
         self._set_status(state="running")
         try:
@@ -1717,6 +1931,7 @@ class MiraApp(App[None]):
             return False
         finally:
             self._reload_in_progress = False
+            self._sync_interactivity()
             if self.is_mounted:
                 prompt.disabled = prompt_was_disabled
                 if not prompt.disabled:
@@ -1725,7 +1940,7 @@ class MiraApp(App[None]):
     async def _handle_reload_command(self, *, full_runtime: bool = False) -> bool:
         """Reload config, resources, and agents, optionally restarting MCP."""
         if self.busy:
-            self.system_message("finish the current turn before reloading agents", kind="warning")
+            self._notify_busy_action("reloading agents")
             return True
 
         if full_runtime:
@@ -1944,7 +2159,7 @@ class MiraApp(App[None]):
         from config.tracing import TracingRegistry, load_tracing_registry
 
         if self.busy:
-            self.system_message("finish the current turn before changing settings", kind="warning")
+            self._notify_busy_action("changing settings")
             return True
 
         settings = load_settings(self.workspace)
@@ -1957,6 +2172,7 @@ class MiraApp(App[None]):
             settings,
             tool_metadata=self._settings_tool_metadata(),
             apply_change=self._apply_settings,
+            configure_git=self._configure_git,
             reload_runtime=self._run_reload_runtime_command,
             close_panel=self._close_settings_panel,
             mcp_manager=self.mcp_manager,
@@ -1975,8 +2191,6 @@ class MiraApp(App[None]):
             return True, "settings unchanged"
         if await self._execute_enable_cancelled(old_settings, settings):
             return False, "execute remains disabled"
-        old_git_enabled = git_protection_enabled(old_settings)
-        new_git_enabled = git_protection_enabled(settings)
         if not save_settings(self.workspace, settings):
             return False, "could not save .mira/settings.yml"
 
@@ -1985,10 +2199,6 @@ class MiraApp(App[None]):
         self.config["settings"] = settings
         if not self.ready:
             return True, "settings saved; MIRA is not ready; Reload Runtime required"
-        if new_git_enabled != old_git_enabled:
-            if new_git_enabled:
-                return await self._ensure_git_after_enabling()
-            return True, "git protection disabled; no reload required"
         old_tracing = old_settings.get("tracing") or {}
         new_tracing = settings.get("tracing") or {}
         if (
@@ -2045,15 +2255,62 @@ class MiraApp(App[None]):
                 panel.focus()
         return answer != "y"
 
-    async def _ensure_git_after_enabling(self) -> tuple[bool, str]:
-        """Initialize Git if protection was enabled for an unprotected workspace."""
-        from cli.git_guard import init_git_repository, is_git_worktree
+    async def _configure_git(
+        self,
+        preference: bool | None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        """Resolve and persist Git protection without blocking MIRA."""
+        settings = (self.config or {}).get("settings") or load_settings(self.workspace)
+        current = git_protection_preference(settings)
+        if preference is None:
+            answer = await self.foreground_interrupt(
+                lambda: self._prompt_choice(
+                    "Configure Git Protection?",
+                    "Initialize a Git repository for this workspace?",
+                    [("y", "Yes (y)"), ("n", "No (n)")],
+                )
+            )
+            if answer is None:
+                return False, "Git configuration cancelled", settings
+            preference = answer == "y"
 
-        if is_git_worktree(self.workspace):
-            return True, "git protection enabled; no reload required"
-        if init_git_repository(self.workspace):
-            return True, "git protection enabled; repository initialized; no reload required"
-        return True, "git protection enabled; Git was not initialized; no reload required"
+        if preference and not is_git_worktree(self.workspace):
+            if not init_git_repository(self.workspace):
+                self._refresh_git_issue(None)
+                return False, "Git could not initialize; protection remains unconfigured", settings
+
+        updated = set_git_protection(settings, preference)
+        if not save_settings(self.workspace, updated):
+            return False, "could not save .mira/settings.yml", settings
+        if self.config is not None:
+            self.config["settings"] = updated
+        self._refresh_git_issue(preference)
+        if preference:
+            message = "Git protection enabled; repository ready"
+        else:
+            message = "Git protection declined; no reload required"
+        return True, message, updated
+
+    def _refresh_git_issue(self, preference: bool | None) -> None:
+        """Replace only the workspace Git diagnostic in current runtime state."""
+        issue = git_protection_issue(self.workspace, preference)
+        self.issues = [
+            item
+            for item in self.issues
+            if getattr(item, "summary", "") != GIT_NOT_CONFIGURED_SUMMARY
+        ]
+        if issue is not None:
+            self.issues.append(issue)
+        if self.config is not None:
+            config_issues = [
+                item
+                for item in self.config.get("issues", [])
+                if getattr(item, "summary", "") != GIT_NOT_CONFIGURED_SUMMARY
+            ]
+            if issue is not None:
+                config_issues.append(issue)
+            self.config["issues"] = config_issues
+        self._sync_issues()
 
     def _settings_tool_metadata(self) -> list[dict[str, str]]:
         """Return loaded tool metadata for the settings panel."""
@@ -2599,6 +2856,10 @@ class MiraApp(App[None]):
 
     async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
         """Ask the user to approve, edit, or reject interrupted actions."""
+        return await self.foreground_interrupt(lambda: self._ask_approvals(interrupts))
+
+    async def _ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
+        """Resolve one serialized group of tool approvals."""
         self.waiting_finished()
         decisions: list[dict[str, Any]] = []
         for interrupt in interrupts:
@@ -2625,6 +2886,10 @@ class MiraApp(App[None]):
 
     async def ask_user(self, interrupt: Any) -> str:
         """Ask the user for a concrete next-step choice from an ask_user interrupt."""
+        return await self.foreground_interrupt(lambda: self._ask_user(interrupt))
+
+    async def _ask_user(self, interrupt: Any) -> str:
+        """Resolve one serialized ask_user interaction."""
         self.waiting_finished()
         request = ask_user_request(interrupt)
         question = ask_user_question(request)
@@ -2652,6 +2917,12 @@ class MiraApp(App[None]):
 
     async def answer_mcp_elicitation(self, interrupt: Any) -> dict[str, Any]:
         """Collect native MCP form or URL answers through the shared prompt panel."""
+        return await self.foreground_interrupt(
+            lambda: self._answer_mcp_elicitation(interrupt)
+        )
+
+    async def _answer_mcp_elicitation(self, interrupt: Any) -> dict[str, Any]:
+        """Resolve one serialized MCP elicitation interaction."""
         self.waiting_finished()
         payload = mcp_elicitation_request(interrupt)
         responses: dict[str, dict[str, Any]] = {}
@@ -2691,16 +2962,6 @@ class MiraApp(App[None]):
                 break
         return {"responses": responses}
 
-    async def ask_create_git_repo(self, message: str) -> bool:
-        """Ask whether MIRA should initialize Git for the workspace."""
-        answer = await self._prompt_choice("Git", message, [("y", "Yes (y)"), ("n", "No (n)")])
-        return answer == "y"
-
-    async def ask_continue_without_git(self, message: str) -> bool:
-        """Ask whether startup should continue without Git protection."""
-        answer = await self._prompt_choice("Git", message, [("c", "Continue (c)"), ("e", "Exit (e)")])
-        return answer == "c"
-
     async def edit_decision(self, action: Any) -> dict[str, Any] | None:
         """Prompt for edited JSON args and return a LangGraph decision."""
         if not isinstance(action, dict):
@@ -2737,15 +2998,36 @@ class MiraApp(App[None]):
         vertical: bool = False,
     ) -> str | None:
         """Show a choice prompt in the main window."""
-        return await self._with_prompt_lock(self.query_one(PromptPanel).choose(title, message, choices, vertical=vertical))
+        return await self._with_prompt_lock(
+            lambda: self.query_one(PromptPanel).choose(
+                title,
+                message,
+                choices,
+                vertical=vertical,
+            )
+        )
 
-    async def _prompt_text(self, title: str, message: str) -> str | None:
+    async def _prompt_text(
+        self,
+        title: str,
+        message: str,
+        *,
+        foreground_owned: bool = False,
+    ) -> str | None:
         """Show a text prompt in the main window."""
-        return await self._with_prompt_lock(self.query_one(PromptPanel).ask_text(title, message))
+        if foreground_owned:
+            return await self._wait_with_prompt_disabled(
+                lambda: self.query_one(PromptPanel).ask_text(title, message)
+            )
+        return await self._with_prompt_lock(
+            lambda: self.query_one(PromptPanel).ask_text(title, message)
+        )
 
     async def _prompt_json(self, title: str, text: str) -> str | None:
         """Show a JSON editor prompt in the main window."""
-        return await self._with_prompt_lock(self.query_one(PromptPanel).edit_json(title, text))
+        return await self._with_prompt_lock(
+            lambda: self.query_one(PromptPanel).edit_json(title, text)
+        )
 
     async def _prompt_mcp_form(
         self,
@@ -2754,20 +3036,64 @@ class MiraApp(App[None]):
     ) -> dict[str, Any] | None:
         """Show a schema-driven MCP form in the shared prompt area."""
         return await self._with_prompt_lock(
-            self.query_one(PromptPanel).ask_mcp_form("MCP Input", message, schema)
+            lambda: self.query_one(PromptPanel).ask_mcp_form(
+                "MCP Input",
+                message,
+                schema,
+            )
         )
 
-    async def _with_prompt_lock(self, prompt_waiter: Any) -> Any:
+    async def _with_prompt_lock(self, prompt_waiter: Callable[[], Awaitable[Any]]) -> Any:
         """Disable the prompt box while an in-window prompt is active."""
+        return await self.foreground_interrupt(
+            lambda: self._wait_with_prompt_disabled(prompt_waiter)
+        )
+
+    async def _wait_with_prompt_disabled(
+        self,
+        prompt_waiter: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Wait for one prompt while preserving its prior input availability."""
         prompt = self.query_one(PromptBox)
         was_disabled = prompt.disabled
         prompt.disabled = True
         try:
-            return await prompt_waiter
+            return await prompt_waiter()
         finally:
             prompt.disabled = was_disabled
             if self.is_mounted and self.ready and not self.busy and not prompt.disabled:
                 self.action_focus_prompt()
+
+    async def foreground_interrupt(self, waiter: Callable[[], Awaitable[Any]]) -> Any:
+        """Serialize user-action requests and temporarily suspend foreground UI."""
+        task = asyncio.current_task()
+        if task is not None and task is self._foreground_interrupt_owner:
+            return await waiter()
+
+        async with self._foreground_interrupt_lock:
+            self._foreground_interrupt_owner = task
+            focused = self.screen.focused if self.is_mounted else None
+            settings = self._settings_panel
+            settings_visible = bool(
+                settings is not None and settings.display
+            )
+            modal = self.screen if self.is_mounted and len(self.screen_stack) > 1 else None
+            if settings_visible:
+                settings.display = False
+            if modal is not None:
+                await self.pop_screen()
+            try:
+                return await waiter()
+            finally:
+                try:
+                    if modal is not None and self.is_mounted:
+                        await self.push_screen(modal)
+                    if settings_visible and settings is not None and settings.parent is not None:
+                        settings.display = True
+                    if focused is not None and focused.is_mounted and not focused.disabled:
+                        focused.focus()
+                finally:
+                    self._foreground_interrupt_owner = None
 
     def waiting_started(
         self,
@@ -2885,6 +3211,73 @@ class MiraApp(App[None]):
         self._sync_artifact_button()
         self._sync_mcp_button()
         self._sync_issues_button()
+        self._sync_interactivity()
+
+    def watch_busy(self) -> None:
+        """Keep every state-mutating control aligned with runtime activity."""
+        self._sync_interactivity()
+
+    def _sync_interactivity(self) -> None:
+        """Central projection of whether runtime/session mutation is available."""
+        if not self.is_mounted or not self._screen_stack:
+            return
+        locked = bool(self.busy or getattr(self, "_reload_in_progress", False))
+        for selector in ("#model-settings-button", "#new-chat"):
+            try:
+                self.query_one(selector, Button).disabled = locked
+            except NoMatches:
+                pass
+        try:
+            self.query_one(SessionHistory).disabled = locked
+        except NoMatches:
+            pass
+        try:
+            self.query_one(ContextStatus).disabled = locked
+        except NoMatches:
+            pass
+        settings_panel = getattr(self, "_settings_panel", None)
+        if settings_panel is not None:
+            settings_panel.set_runtime_busy(locked)
+            if settings_panel.is_mounted:
+                self.call_after_refresh(settings_panel.set_runtime_busy, locked)
+        self._sync_artifact_button()
+        self._sync_artifact_actions()
+
+    def _sync_artifact_actions(self) -> None:
+        """Disable retained artifact mutations while keeping active reviews usable."""
+        pending = self._pending_artifact_review
+        buttons = [*self.query(".plan-action"), *self.query(".goal-action")]
+        if not self.busy:
+            for button in buttons:
+                previous = self._artifact_action_disabled.pop(button, None)
+                if previous is not None:
+                    button.disabled = previous
+            self._artifact_action_disabled = {
+                button: disabled
+                for button, disabled in self._artifact_action_disabled.items()
+                if button.is_mounted
+            }
+            return
+        for button in buttons:
+            pending_action = bool(
+                pending is not None
+                and (button.id or "").endswith(f"-{pending.artifact.get('id', '')}")
+            )
+            if pending_action:
+                previous = self._artifact_action_disabled.pop(button, None)
+                if previous is not None:
+                    button.disabled = previous
+                continue
+            self._artifact_action_disabled.setdefault(button, button.disabled)
+            button.disabled = True
+
+    def _notify_busy_action(self, action: str) -> None:
+        """Report an unavailable mutation without changing the transcript."""
+        self.notify(
+            f"Finish the current turn before {action}.",
+            title="MIRA is busy",
+            severity="warning",
+        )
 
     def _set_ready_unless_error(self) -> None:
         """Return passive work to Ready without clearing a sticky Error."""
@@ -3026,6 +3419,7 @@ class MiraApp(App[None]):
             return
         try:
             sidebar = self.query_one("#session-sidebar")
+            rail = self.query_one("#history-rail")
             controls = (
                 (
                     self.query_one("#artifact-status-button", Button),
@@ -3043,8 +3437,14 @@ class MiraApp(App[None]):
             any(wanted for _button, wanted in controls)
             or self._pending_artifact_review is not None
         )
-        sidebar.display = self.size.width >= (90 if has_controls else 72)
-        main_width = self.size.width - 42 if sidebar.display else self.size.width
+        sidebar.display = bool(
+            not self.history_collapsed
+            and self.size.width >= (90 if has_controls else 72)
+        )
+        rail.display = self.history_collapsed
+        main_width = self.size.width - (
+            HISTORY_RAIL_WIDTH if self.history_collapsed else 42 if sidebar.display else 0
+        )
         slots = max(0, (main_width - 40) // 13)
         for button, wanted in controls:
             button.display = bool(wanted and slots > 0)
@@ -3060,7 +3460,7 @@ class MiraApp(App[None]):
         if item.session_id == str(self.session.get("id") or ""):
             return
         if self.busy:
-            self.system_message("finish the current turn before switching sessions", kind="warning")
+            self._notify_busy_action("switching sessions")
             return
         self.run_worker(self._load_session(item.session_id), name="load-session", exclusive=True)
 
@@ -3296,6 +3696,12 @@ class MiraApp(App[None]):
 
     async def approve_mcp_server(self, state: Any, preview: str) -> str:
         """Use MIRA's existing modal choice interaction for server trust."""
+        return await self.foreground_interrupt(
+            lambda: self._approve_mcp_server(state, preview)
+        )
+
+    async def _approve_mcp_server(self, state: Any, preview: str) -> str:
+        """Resolve one serialized MCP server trust choice."""
         answer = await self._prompt_choice(
             f"Allow MCP Server: {state.name}",
             preview,
@@ -3392,12 +3798,12 @@ class MiraApp(App[None]):
         except NoMatches:
             return
 
-    def on_resize(self) -> None:
+    def on_resize(self, _event: Any = None) -> None:
         """Keep the main panel usable in very narrow terminals."""
         self._sync_sidebar_visibility()
 
     def _sync_sidebar_visibility(self) -> None:
-        """Hide history before the fixed sidebar can squeeze chat to zero width."""
+        """Hide expanded history before it can squeeze chat to zero width."""
         if not self.is_mounted:
             return
         self._sync_header_control_visibility()

@@ -18,7 +18,7 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             loaded = settings.load_settings(Path(directory))
 
-        self.assertTrue(settings.git_protection_enabled(loaded))
+        self.assertIsNone(settings.git_protection_preference(loaded))
         self.assertFalse(settings.tool_always_allow(loaded, "write_file"))
         self.assertFalse(settings.tool_always_allow(loaded, "edit_file"))
         self.assertFalse(settings.tool_always_allow(loaded, "eval"))
@@ -458,7 +458,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("enabled: false", text)
         self.assertNotIn("llm_direct", text)
         self.assertNotIn("llm_direct", loaded)
-        self.assertFalse(settings.git_protection_enabled(loaded))
+        self.assertFalse(settings.git_protection_preference(loaded))
         self.assertTrue(settings.planning_todos_enabled(loaded))
         self.assertEqual(settings.planning_response_status_max_retries(loaded), 4)
         self.assertTrue(settings.tool_always_allow(loaded, "delete"))

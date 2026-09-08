@@ -13,7 +13,6 @@ from mira.api import (
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
     AskUserRequest,
-    ConfirmationRequest,
     FrontendEvent,
     FrontendRequest,
     InformationEvent,
@@ -81,9 +80,6 @@ class FullFrontend:
             return self._display_artifact(request)
         if isinstance(request, MCPApprovalRequest):
             return await self._approve_mcp(request)
-        if isinstance(request, ConfirmationRequest):
-            answer = await asyncio.to_thread(input, f"{request.message} [y/N] ")
-            return answer.strip().lower() == "y"
         raise RuntimeError(f"Unsupported request: {type(request).__name__}")
 
     async def _approve_actions(self, request: ApprovalRequest) -> list[dict[str, Any]]:

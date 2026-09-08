@@ -21,7 +21,7 @@ from ui.textual.commands.help import command_help_entries, command_insertion
 from ui.textual.widgets.prompt_box import PromptBox
 
 
-MAX_COMPLETIONS = 5
+MAX_VISIBLE_COMPLETIONS = 5
 MIN_PROMPT_HEIGHT = 5
 FILE_DISCOVERY_CONCURRENCY = 32
 POPUP_BORDER_HEIGHT = 2
@@ -414,19 +414,14 @@ class AutocompleteInput(Vertical):
         return self.subagent_provider() if self.subagent_provider is not None else []
 
     def _show_items(self, items: list[CompletionItem]) -> None:
-        statuses = [item for item in items if not item.selectable]
-        selectable = [item for item in items if item.selectable]
-        if statuses:
-            self._items = [*selectable[: MAX_COMPLETIONS - 1], statuses[0]]
-        else:
-            self._items = selectable[:MAX_COMPLETIONS]
+        self._items = list(items)
         options = self.query_one(OptionList)
         options.set_options([Option(_completion_row(item), disabled=not item.selectable) for item in self._items])
         options.display = bool(self._items)
         options_height = 0
         if self._items:
             options.highlighted = 0
-            options_height = min(len(self._items), MAX_COMPLETIONS) + POPUP_BORDER_HEIGHT
+            options_height = min(len(self._items), MAX_VISIBLE_COMPLETIONS) + POPUP_BORDER_HEIGHT
             options.styles.height = options_height
         self.query_one(PromptResizeHandle).styles.offset = (1, options_height)
 
@@ -506,7 +501,7 @@ def file_items(paths: list[str], query: str) -> list[CompletionItem]:
     matches = sorted(
         (path for path in paths if folded in path.casefold()),
         key=lambda path: (path.casefold(), path),
-    )[:MAX_COMPLETIONS]
+    )
     return [
         CompletionItem(
             kind="file",
@@ -675,6 +670,7 @@ def _location_from_offset(text: str, offset: int) -> tuple[int, int]:
 __all__ = [
     "AutocompleteInput",
     "CompletionItem",
+    "MAX_VISIBLE_COMPLETIONS",
     "attachment_items",
     "command_items",
     "completion_fragment",

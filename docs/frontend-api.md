@@ -309,12 +309,6 @@ summary. Return exactly:
 
 Any other value is interpreted as denial.
 
-### `ConfirmationRequest`
-
-Known `kind` values are `create_git_repo` and `continue_without_git`. Return
-`True` to proceed or `False` to decline. These application confirmations are
-not LangGraph HITL decisions.
-
 ## Session snapshots
 
 ```python

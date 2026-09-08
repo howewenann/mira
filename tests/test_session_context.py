@@ -229,6 +229,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             [
                 "id",
                 "title",
+                "custom_title",
+                "pinned",
                 "workspace",
                 "created_at",
                 "updated_at",
@@ -240,11 +242,35 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
+        self.assertEqual(record["custom_title"], "")
+        self.assertFalse(record["pinned"])
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
         self.assertIsNone(record["current_plan"])
         self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)
+
+    def test_session_metadata_save_preserves_updated_at_and_resume_recency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            older = store.new(session_id="older", workspace=Path("workspace"))
+            older["updated_at"] = "2026-09-08T01:00:00+00:00"
+            store.save_metadata(older)
+            newer = store.new(session_id="newer", workspace=Path("workspace"))
+            newer["updated_at"] = "2026-09-08T02:00:00+00:00"
+            store.save_metadata(newer)
+
+            older["custom_title"] = "Pinned reference"
+            older["pinned"] = True
+            store.save_metadata(older)
+            restored = store.read(store.path("older"))
+            latest = store.latest()
+
+        self.assertEqual(restored["custom_title"], "Pinned reference")
+        self.assertTrue(restored["pinned"])
+        self.assertEqual(restored["updated_at"], "2026-09-08T01:00:00+00:00")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.stem, "newer")
 
     def test_transient_resume_flag_survives_save_without_being_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

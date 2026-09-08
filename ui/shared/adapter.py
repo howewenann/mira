@@ -12,7 +12,6 @@ from mira.api import (
     ArtifactReviewRequest,
     AskUserRequest,
     CompactionEvent,
-    ConfirmationRequest,
     FrontendEvent,
     FrontendRequest,
     InformationEvent,
@@ -99,13 +98,6 @@ class RendererAdapter:
                 raise RuntimeError("this frontend cannot approve MCP servers")
             server = request.server
             return await self._await(callback, server, request.preview)
-        if isinstance(request, ConfirmationRequest):
-            method = {
-                "create_git_repo": "ask_create_git_repo",
-                "continue_without_git": "ask_continue_without_git",
-            }.get(request.kind)
-            if method is not None:
-                return await self._await_call(method, request.message)
         raise RuntimeError(f"unsupported frontend request: {type(request).__name__}")
 
     def _message(self, event: MessageEvent) -> None:

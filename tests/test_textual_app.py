@@ -54,6 +54,7 @@ from config.settings import (
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
+    git_protection_preference,
     load_settings,
     planning_response_status_max_retries,
     planning_todos_enabled,
@@ -61,6 +62,7 @@ from config.settings import (
     rubric_max_iterations,
     save_settings,
     set_model_assignment,
+    set_git_protection,
     set_dynamic_subagents,
     set_mcp_server_always_allow,
     set_mcp_server_enabled,
@@ -88,6 +90,7 @@ from session.goals import current_goal, goal_artifact
 from session.plans import current_plan, plan_artifact
 from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
+from session.store import SessionStore
 from ui.textual.commands import dispatcher as repl
 from ui.textual.commands.help import command_help_entries
 from ui.shared.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
@@ -118,7 +121,12 @@ from ui.textual.widgets import (
     StatusBar,
     SubagentsPanel,
 )
-from ui.textual.widgets.autocomplete_input import MIN_PROMPT_HEIGHT
+from ui.textual.widgets.autocomplete_input import (
+    CompletionItem,
+    MAX_VISIBLE_COMPLETIONS,
+    MIN_PROMPT_HEIGHT,
+    file_items,
+)
 from ui.textual.widgets.settings_panel import SettingsHeaderRow
 from ui.textual.widgets.status_bar import STATUS_STARTING_COLOR
 from ui.textual.widgets.subagent_panel import (
@@ -130,7 +138,14 @@ from ui.textual.widgets.subagent_panel import (
     group_status_icon,
     truncate_cells,
 )
-from ui.textual.widgets.session_history import session_label
+from ui.textual.widgets.session_history import (
+    SESSION_ROW_PREVIEW_WIDTH,
+    SessionActionMenuScreen,
+    SessionItem,
+    session_display_title,
+    session_label,
+    session_records,
+)
 from ui.textual.widgets.rubric_bubble import RubricBubble, RubricToolRow
 from ui.textual.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
@@ -982,7 +997,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(options.region.height, 3)
             self.assertEqual(options.content_region.height, 1)
 
-    async def test_autocomplete_displays_at_most_five_options(self) -> None:
+    async def test_autocomplete_retains_all_matches_with_five_visible(self) -> None:
         app = AutocompleteTestApp()
 
         async with app.run_test() as pilot:
@@ -992,9 +1007,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "/"
             await pilot.pause()
 
-            self.assertEqual(len(completion.items), 5)
+            self.assertGreater(len(completion.items), MAX_VISIBLE_COMPLETIONS)
+            self.assertEqual(len(options.options), len(completion.items))
             self.assertEqual(options.region.height, 7)
             self.assertEqual(options.content_region.height, 5)
+            for _ in range(5):
+                await pilot.press("down")
+            self.assertEqual(options.highlighted, 5)
+
+    async def test_autocomplete_height_tracks_one_through_five_matches(self) -> None:
+        app = AutocompleteTestApp()
+
+        async with app.run_test() as pilot:
+            completion = app.query_one(AutocompleteInput)
+            options = app.query_one(OptionList)
+            for count in range(1, MAX_VISIBLE_COMPLETIONS + 1):
+                completion._show_items(
+                    [CompletionItem("file", f"file-{index}", f"@file-{index}") for index in range(count)]
+                )
+                await pilot.pause()
+                self.assertEqual(options.content_region.height, count)
+                self.assertEqual(len(options.options), count)
+
+    def test_file_item_producer_does_not_truncate_matches(self) -> None:
+        items = file_items([f"src/file-{index}.py" for index in range(20)], "file")
+        self.assertEqual(len(items), 20)
 
     async def test_long_completion_rows_stay_single_line_across_narrow_resize(self) -> None:
         tools = [
@@ -1493,6 +1530,79 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("turn", label.lower())
         self.assertLessEqual(max(len(line) for line in label.splitlines()[:-1]), 34)
 
+    def test_history_styles_keep_original_sidebar_and_add_only_compact_controls(self) -> None:
+        styles = Path("ui/textual/styles/mira.tcss").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "#session-sidebar {\n"
+            "    width: 42;\n"
+            "    min-width: 30;\n"
+            "    height: 100%;\n"
+            "    padding: 0 1;\n"
+            "    border: solid #2d5661;\n"
+            "    border-right: heavy #5bb8b1;\n"
+            "    background: #101516;\n"
+            "}",
+            styles,
+        )
+        self.assertIn(
+            "#sessions > .session-row {\n"
+            "    height: 4;\n"
+            "    padding: 0 1;\n"
+            "    margin: 0 0 1 0;\n"
+            "    color: #b8c1c7;\n"
+            "}",
+            styles,
+        )
+        self.assertIn(
+            "#sessions > .session-row.--highlight,\n"
+            "#sessions > .session-row.active {\n"
+            "    background: #1b3036;\n"
+            "    color: #eef7f8;\n"
+            "}",
+            styles,
+        )
+        self.assertIn(
+            "#sessions > .session-row.active {\n"
+            "    border-left: solid #d2a957;\n"
+            "}",
+            styles,
+        )
+        self.assertIn("scrollbar-color: #5bb8b1;", styles)
+        self.assertNotIn("#history-drawer", styles)
+        self.assertNotIn("#main-status-brand", styles)
+
+    def test_history_titles_and_pinned_groups_use_session_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            records = []
+            for session_id, updated_at, pinned in (
+                ("normal-new", "2026-09-08T03:00:00+00:00", False),
+                ("pinned-old", "2026-09-08T01:00:00+00:00", True),
+                ("normal-old", "2026-09-08T00:00:00+00:00", False),
+                ("pinned-new", "2026-09-08T02:00:00+00:00", True),
+            ):
+                record = store.new(session_id=session_id, workspace=Path("workspace"))
+                record["updated_at"] = updated_at
+                record["pinned"] = pinned
+                record["events"] = [{"type": "user", "text": f"fallback {session_id}"}]
+                store.save_metadata(record)
+                records.append(record)
+
+            records[1]["custom_title"] = "Pinned custom title"
+            store.save_metadata(records[1])
+            ordered = session_records(store)
+
+        self.assertEqual(
+            [record["id"] for record in ordered],
+            ["pinned-new", "pinned-old", "normal-new", "normal-old"],
+        )
+        self.assertEqual(session_display_title(records[1]), "Pinned custom title")
+        records[1]["custom_title"] = ""
+        self.assertEqual(session_display_title(records[1]), "fallback pinned-old")
+        records[1]["events"] = []
+        self.assertEqual(session_display_title(records[1]), "Untitled session")
+
     async def test_bootstrapped_app_renders_stream_and_tool_events_in_chat(self) -> None:
         """Stream events and tool calls should stay in the central transcript."""
         app = make_app()
@@ -1508,8 +1618,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app.query_one(PromptBox).disabled)
             self.assertGreaterEqual(len(app.query_one(ChatLog).children), 3)
             self.assertIsNotNone(app.query_one(SessionHistory))
-            self.assertEqual(renderable_plain(app.query_one("#session-sidebar-title", Static)), "Chat History")
+            self.assertEqual(
+                renderable_plain(app.query_one("#session-sidebar-title", Static)),
+                "Chat History",
+            )
             self.assertEqual(app.query_one("#new-chat", Button).label.plain, "+ New")
+            self.assertEqual(renderable_plain(app.query_one(StatusBar)).count("MIRA"), 1)
+            self.assertEqual(len(app.query("#history-drawer-brand")), 0)
+            self.assertEqual(len(app.query("#main-status-brand")), 0)
             startup = app.query_one(ChatLog).children[0]
             startup_text = renderable_plain(startup)
             self.assertIn(VERSION, startup_text)
@@ -1575,16 +1691,90 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            app.notify = Mock()  # type: ignore[method-assign]
+            before = len(app.query_one(ChatLog).children)
             app.busy = True
+            await pilot.pause()
 
             handled = app._handle_new_chat()
             await pilot.pause()
 
-            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertTrue(handled)
             self.assertEqual(app.session["id"], "thread-1")
             self.assertEqual(store.new_sessions, 0)
-            self.assertIn("finish the current turn before starting a new chat", rendered)
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+            self.assertTrue(app.query_one("#new-chat", Button).disabled)
+            self.assertTrue(app.query_one("#model-settings-button", Button).disabled)
+            self.assertTrue(app.query_one(SessionHistory).disabled)
+            app.notify.assert_called_once()
+
+    async def test_busy_new_chat_slash_uses_toast_without_transcript_output(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.notify = Mock()  # type: ignore[method-assign]
+            prompt = app.query_one(PromptBox)
+            before = len(app.query_one(ChatLog).children)
+            app.busy = True
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/new-chat"))
+            await pilot.pause()
+
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+            self.assertEqual(app.notify.call_args.kwargs["title"], "MIRA is busy")
+
+    async def test_disabled_model_button_does_not_dispatch_or_pollute_stream(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._run_settings_command = AsyncMock()  # type: ignore[method-assign]
+            before = len(app.query_one(ChatLog).children)
+            app.busy = True
+            await pilot.pause()
+
+            await pilot.click("#model-settings-button")
+            await pilot.pause()
+
+            app._run_settings_command.assert_not_awaited()
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+
+    async def test_open_settings_mutations_disable_while_busy(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._handle_settings_command()
+            await wait_until(
+                lambda: len(app.query("#settings-toggle-system-dynamic_subagents")) == 1
+            )
+            panel = app.query_one(SettingsPanel)
+            toggle = panel.query_one("#settings-toggle-system-dynamic_subagents", Button)
+            reload_button = panel.query_one("#settings-reload-runtime", Button)
+
+            app.busy = True
+            await pilot.pause()
+            self.assertTrue(toggle.disabled)
+            self.assertTrue(reload_button.disabled)
+
+            app.busy = False
+            await pilot.pause()
+            self.assertFalse(toggle.disabled)
+            self.assertFalse(reload_button.disabled)
+
+    async def test_settings_policy_scrollers_use_mcp_scrollbar_palette(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 35)):
+            app._handle_settings_command("access")
+            await wait_until(lambda: len(app.query("#settings-access-detail")) == 1)
+            for selector in ("#settings-access-landing", "#settings-access-detail"):
+                scroller = app.query_one(selector, VerticalScroll)
+                self.assertEqual(scroller.styles.scrollbar_color, Color.parse("#5bb8b1"))
+                self.assertEqual(
+                    scroller.styles.scrollbar_background,
+                    Color.parse("#122023"),
+                )
+                self.assertEqual(scroller.styles.scrollbar_gutter, "stable")
 
     async def test_session_switch_reuses_effective_config_and_launch_options(self) -> None:
         """Loading another conversation should retain process-local direct mode."""
@@ -1609,14 +1799,300 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.runtime_snapshot.direct_effective)
         self.assertTrue(app.runtime_snapshot.direct_requested)
 
-    async def test_narrow_window_hides_sidebar_and_keeps_prompt_width(self) -> None:
-        """Very narrow terminals should not squeeze the prompt to zero width."""
+    async def test_history_sidebar_collapses_to_minimal_rail_and_restores(self) -> None:
+        """The original sidebar and minimal rail are the two explicit states."""
+        app = make_app()
+
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            sidebar = app.query_one("#session-sidebar")
+            rail = app.query_one("#history-rail")
+            collapse = app.query_one("#history-collapse", Button)
+            expand = app.query_one("#history-expand", Button)
+            prompt = app.query_one(PromptBox)
+
+            self.assertFalse(app.history_collapsed)
+            self.assertTrue(sidebar.display)
+            self.assertEqual(sidebar.region.width, 42)
+            self.assertFalse(rail.display)
+            self.assertEqual(collapse.label.plain, "<|")
+            self.assertEqual(
+                [child.id for child in app.query_one("#session-sidebar-header").children],
+                ["session-sidebar-title", "new-chat", "history-collapse"],
+            )
+            self.assertEqual(
+                collapse.region.right,
+                app.query_one("#session-sidebar-header").content_region.right,
+            )
+
+            collapse.press()
+            await pilot.pause()
+            self.assertTrue(app.history_collapsed)
+            self.assertFalse(sidebar.display)
+            self.assertTrue(rail.display)
+            self.assertEqual(rail.region.width, 4)
+            self.assertEqual(list(rail.children), [expand])
+            self.assertEqual(expand.label.plain, "|>")
+            self.assertTrue(prompt.has_focus)
+            self.assertFalse(collapse.has_focus)
+
+            expand.press()
+            await pilot.pause()
+            self.assertFalse(app.history_collapsed)
+            self.assertTrue(sidebar.display)
+            self.assertFalse(rail.display)
+            self.assertTrue(prompt.has_focus)
+            self.assertFalse(expand.has_focus)
+
+    async def test_session_row_actions_keep_three_line_geometry_and_do_not_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root / "sessions")
+            current = store.new(session_id="current", workspace=root)
+            current["updated_at"] = "2026-09-08T01:00:00+00:00"
+            current["events"] = [
+                {
+                    "type": "user",
+                    "text": "sorry i mean use mcp__github __delete_repository",
+                }
+            ]
+            store.save_metadata(current)
+            other = store.new(session_id="other", workspace=root)
+            other["updated_at"] = "2026-09-08T02:00:00+00:00"
+            other["events"] = [
+                {
+                    "type": "user",
+                    "text": "a deliberately long preview title for the action row",
+                }
+            ]
+            store.save_metadata(other)
+            original_updated_at = other["updated_at"]
+            app = make_app(workspace=root, session=current, store=store)
+
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                app._load_session = AsyncMock()  # type: ignore[method-assign]
+                item = next(
+                    row for row in app.query(SessionItem) if row.session_id == "other"
+                )
+                label = item.query_one(".session-label", Static)
+                actions = item.query_one(".session-actions")
+                pin = item.query_one(".session-pin-action", Button)
+                menu = item.query_one(".session-menu-action", Button)
+
+                self.assertEqual(item.region.height, 4)
+                self.assertEqual(label.region.width, SESSION_ROW_PREVIEW_WIDTH)
+                self.assertEqual(actions.region.width, 3)
+                self.assertEqual(actions.region.x - label.region.right, 4)
+                self.assertEqual(pin.region.width, 3)
+                self.assertEqual(menu.region.width, 3)
+                self.assertEqual(pin.region.right, menu.region.right)
+                self.assertEqual(menu.region.y, pin.region.y + 1)
+                self.assertEqual(pin.styles.line_pad, 0)
+                self.assertEqual(menu.styles.line_pad, 0)
+                self.assertFalse(pin.can_focus)
+                self.assertFalse(menu.can_focus)
+                self.assertEqual(pin.render_line(0).text, "[!]")
+                self.assertEqual(menu.render_line(0).text, "...")
+                active_item = next(
+                    row for row in app.query(SessionItem) if row.session_id == "current"
+                )
+                active_label = active_item.query_one(".session-label", Static)
+                active_actions = active_item.query_one(".session-actions")
+                active_pin = active_item.query_one(".session-pin-action", Button)
+                active_menu = active_item.query_one(".session-menu-action", Button)
+                self.assertEqual(active_label.region.width, SESSION_ROW_PREVIEW_WIDTH)
+                self.assertEqual(active_actions.region.x - active_label.region.right, 3)
+                self.assertEqual(active_pin.region.right, pin.region.right)
+                self.assertEqual(active_menu.region.right, menu.region.right)
+                self.assertEqual(active_pin.render_line(0).text, "[!]")
+                self.assertEqual(active_menu.render_line(0).text, "...")
+                active_lines = [
+                    active_label.render_line(row).text.rstrip() for row in range(3)
+                ]
+                self.assertEqual(
+                    active_lines[:2],
+                    ["sorry i mean use", "mcp__github..."],
+                )
+                self.assertTrue(active_lines[2].startswith("Sep 08"))
+                lines = renderable_plain(label).splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertTrue(lines[2].startswith("Sep 08"))
+                self.assertTrue(all(len(line) <= SESSION_ROW_PREVIEW_WIDTH for line in lines[:2]))
+                self.assertEqual(pin.label.plain, "[!]")
+                self.assertEqual(menu.label.plain, "...")
+                self.assertEqual(pin.styles.color, Color.parse("#b8c1c7"))
+
+                await pilot.click(".session-pin-action")
+                await pilot.pause()
+                app._load_session.assert_not_awaited()
+                pinned = next(
+                    row for row in app.query(SessionItem) if row.session_id == "other"
+                )
+                pinned_button = pinned.query_one(".session-pin-action", Button)
+                self.assertEqual(pinned_button.label.plain, "[!]")
+                self.assertTrue(pinned_button.has_class("pinned"))
+                self.assertEqual(pinned_button.styles.color, Color.parse("#d2a957"))
+                self.assertEqual(store.read(store.path("other"))["updated_at"], original_updated_at)
+                await wait_until(lambda: app.query_one(PromptBox).has_focus)
+
+                menu_anchor_x = pinned.region.right
+                menu_anchor_y = pinned.region.y
+                pinned.query_one(".session-menu-action", Button).press()
+                await wait_until(
+                    lambda: isinstance(app.screen, SessionActionMenuScreen)
+                    and len(app.screen.query(OptionList)) == 1
+                )
+                popup = app.screen.query_one("#session-action-popup")
+                await wait_until(lambda: popup.region.x == menu_anchor_x)
+                self.assertEqual(popup.region.y, menu_anchor_y)
+                self.assertEqual(
+                    option_list_plain(app.screen.query_one(OptionList)).splitlines(),
+                    ["Rename", "Unpin", "Delete", "Cancel"],
+                )
+                await pilot.press("escape")
+                await wait_until(lambda: not isinstance(app.screen, SessionActionMenuScreen))
+                await wait_until(lambda: app.query_one(PromptBox).has_focus)
+
+                pinned.query_one(".session-menu-action", Button).press()
+                await wait_until(lambda: isinstance(app.screen, SessionActionMenuScreen))
+                await pilot.press("end", "enter")
+                await wait_until(lambda: not isinstance(app.screen, SessionActionMenuScreen))
+                await wait_until(lambda: app.query_one(PromptBox).has_focus)
+                self.assertTrue(store.read(store.path("other"))["pinned"])
+
+                pinned_button.press()
+                await pilot.pause()
+                restored = session_records(store)
+                self.assertFalse(store.read(store.path("other"))["pinned"])
+                self.assertEqual(store.read(store.path("other"))["updated_at"], original_updated_at)
+                self.assertEqual([record["id"] for record in restored], ["other", "current"])
+
+    async def test_session_menu_renames_inline_and_blank_restores_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root / "sessions")
+            current = store.new(session_id="current", workspace=root)
+            current["updated_at"] = "2026-09-08T01:00:00+00:00"
+            store.save_metadata(current)
+            other = store.new(session_id="other", workspace=root)
+            other["updated_at"] = "2026-09-08T02:00:00+00:00"
+            other["events"] = [{"type": "user", "text": "automatic fallback title"}]
+            store.save_metadata(other)
+            original_updated_at = other["updated_at"]
+            app = make_app(workspace=root, session=current, store=store)
+
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                app._load_session = AsyncMock()  # type: ignore[method-assign]
+                await pilot.click(".session-menu-action")
+                await wait_until(lambda: isinstance(app.screen, SessionActionMenuScreen))
+                self.assertEqual(
+                    option_list_plain(app.screen.query_one(OptionList)).splitlines(),
+                    ["Rename", "Pin", "Delete", "Cancel"],
+                )
+                await pilot.press("enter")
+                await wait_until(
+                    lambda: len(app.query(".session-rename-input")) > 0
+                    and app.query(".session-rename-input").first(Input).has_focus
+                )
+                editor = app.query(".session-rename-input").first(Input)
+                self.assertEqual(editor.value, "automatic fallback title")
+                editor.value = "  My custom chat  "
+                await pilot.press("enter")
+                await pilot.pause()
+
+                saved = store.read(store.path("other"))
+                self.assertEqual(saved["custom_title"], "My custom chat")
+                self.assertEqual(saved["updated_at"], original_updated_at)
+                item = next(row for row in app.query(SessionItem) if row.session_id == "other")
+                self.assertIn("My custom chat", renderable_plain(item.query_one(".session-label")))
+                app._load_session.assert_not_awaited()
+
+                item.query_one(".session-menu-action", Button).press()
+                await wait_until(lambda: isinstance(app.screen, SessionActionMenuScreen))
+                await pilot.press("enter")
+                await wait_until(lambda: app.query(".session-rename-input").first(Input).has_focus)
+                editor = app.query(".session-rename-input").first(Input)
+                editor.value = "   "
+                await pilot.press("enter")
+                await pilot.pause()
+
+                saved = store.read(store.path("other"))
+                self.assertEqual(saved["custom_title"], "")
+                item = next(row for row in app.query(SessionItem) if row.session_id == "other")
+                self.assertIn(
+                    "automatic fallback title",
+                    renderable_plain(item.query_one(".session-label")),
+                )
+
+    async def test_inline_rename_escape_cancels_without_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root / "sessions")
+            current = store.new(session_id="current", workspace=root)
+            current["custom_title"] = "Keep this title"
+            store.save_metadata(current)
+            app = make_app(workspace=root, session=current, store=store)
+
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                item = app.query_one(SessionItem)
+                item.begin_rename()
+                await wait_until(lambda: item.query_one(Input).has_focus)
+                item.query_one(Input).value = "Discard this title"
+                await pilot.press("escape")
+                await pilot.pause()
+
+                self.assertFalse(item.query_one(".session-rename-editor").display)
+                self.assertTrue(item.query_one(".session-label").display)
+                self.assertEqual(
+                    store.read(store.path("current"))["custom_title"],
+                    "Keep this title",
+                )
+
+    async def test_delete_history_session_handles_other_and_current_chat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = SessionStore(root / "sessions")
+            current = store.new(session_id="current", workspace=root)
+            current["updated_at"] = "2026-09-08T02:00:00+00:00"
+            store.save_metadata(current)
+            other = store.new(session_id="other", workspace=root)
+            other["updated_at"] = "2026-09-08T01:00:00+00:00"
+            store.save_metadata(other)
+            app = make_app(workspace=root, session=current, store=store)
+
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = AsyncMock(return_value="o")  # type: ignore[method-assign]
+                other_item = next(
+                    row for row in app.query(SessionItem) if row.session_id == "other"
+                )
+                await app._delete_history_session(other_item)
+                await pilot.pause()
+                self.assertFalse(store.path("other").exists())
+                self.assertEqual(app.session["id"], "current")
+
+                current_item = next(
+                    row for row in app.query(SessionItem) if row.session_id == "current"
+                )
+                await app._delete_history_session(current_item)
+                await pilot.pause()
+                self.assertFalse(store.path("current").exists())
+                self.assertNotEqual(app.session["id"], "current")
+                self.assertTrue(store.path(str(app.session["id"])).exists())
+                self.assertEqual(app._prompt_choice.await_count, 2)
+
+    async def test_narrow_window_uses_original_responsive_sidebar_behavior(self) -> None:
+        """An uncollapsed sidebar still auto-hides at the original narrow threshold."""
         app = make_app()
 
         async with app.run_test(size=(50, 20)) as pilot:
             await pilot.pause()
 
             self.assertFalse(app.query_one("#session-sidebar").display)
+            self.assertFalse(app.query_one("#history-rail").display)
             self.assertGreater(app.query_one(PromptBox).region.width, 0)
             goal = goal_artifact(
                 goal_id="goal-narrow",
@@ -1679,6 +2155,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.text_delta("\nupdated line")
             await wait_until(lambda: chat.is_vertical_scroll_end)
             self.assertTrue(chat.is_vertical_scroll_end)
+
+    async def test_history_toggle_does_not_steal_interrupt_focus(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 24)) as pilot:
+            await pilot.pause()
+            task = asyncio.create_task(
+                app.ask_user(
+                    {"type": "ask_user", "question": "Choose", "options": ["One"]}
+                )
+            )
+            await wait_until(lambda: app.query_one(PromptPanel).active)
+            await wait_until(lambda: getattr(app.focused, "id", None) == "prompt-choice-0")
+            interrupt_focus = app.focused
+
+            app.query_one("#history-collapse", Button).press()
+            await pilot.pause()
+            await wait_until(
+                lambda: getattr(app.focused, "id", None) == interrupt_focus.id
+            )
+            self.assertEqual(getattr(app.focused, "id", None), interrupt_focus.id)
+            self.assertTrue(app.focused.has_focus)
+
+            await pilot.press("1")
+            self.assertEqual(await task, "One")
 
     async def test_fixed_subagent_panel_preserves_chat_tail_scroll(self) -> None:
         """Showing and updating the fixed panel should preserve the transcript tail."""
@@ -1922,14 +2423,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
             raise RuntimeError("startup boom")
 
-        async def ensure_git_repository(*args: Any, **kwargs: Any) -> bool:
-            return True
-
         app = MiraApp(
             workspace=Path("."),
             config={},
             bootstrap=bootstrap,
-            ensure_git_repository=ensure_git_repository,
         )
 
         with patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")) as report:
@@ -3795,14 +4292,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 "checkpointer": "checkpointer",
             }
 
-        async def ensure_git_repository(*args: Any, **kwargs: Any) -> bool:
-            return True
-
         app = MiraApp(
             workspace=Path("."),
             config={},
             bootstrap=bootstrap,
-            ensure_git_repository=ensure_git_repository,
         )
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -5168,6 +5661,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await release_reload.wait()
 
         app._reload_runtime = AsyncMock(side_effect=reload_runtime)  # type: ignore[method-assign]
+        app.notify = Mock()  # type: ignore[method-assign]
 
         async with app.run_test(size=(100, 30)):
             first_reload = asyncio.create_task(app._run_reload_runtime_command())
@@ -5187,7 +5681,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 renderable_plain(block) for block in app.query_one(ChatLog).children
             )
 
-        self.assertIn("reload already in progress", rendered)
+        self.assertNotIn("reload already in progress", rendered)
+        self.assertTrue(
+            any("Reload already in progress" in call.args[0] for call in app.notify.call_args_list)
+        )
 
     async def test_reload_command_tokens_route_to_distinct_workers(self) -> None:
         """Each independent slash token should invoke only its matching worker."""
@@ -5304,6 +5801,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            app.notify = Mock()  # type: ignore[method-assign]
             app._reload_agents = AsyncMock()  # type: ignore[method-assign]
             app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
             app.busy = True
@@ -5312,14 +5810,151 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             handled_agent = await app._handle_reload_command()
             handled_runtime = await app._handle_reload_command(full_runtime=True)
             await app._run_reload_command()
-            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
         self.assertTrue(handled_agent)
         self.assertTrue(handled_runtime)
         app._reload_agents.assert_not_awaited()
         app._reload_runtime.assert_not_awaited()
         self.assertEqual(app.status_state, "running")
-        self.assertIn("finish the current turn before reloading agents", rendered)
+        self.assertGreaterEqual(app.notify.call_count, 3)
+
+    async def test_settings_is_suspended_for_every_interactive_interrupt(self) -> None:
+        """Core questions, approvals, MCP interactions, and reviews share ownership."""
+        app = make_app()
+        approval = {
+            "action_requests": [
+                {"name": "write_file", "args": {"file_path": "x", "content": "y"}}
+            ]
+        }
+        elicitation = {
+            "type": "mcp_elicitation",
+            "requests": [
+                {"key": "decision", "mode": "url", "message": "Open sign-in", "url": "https://example.test"}
+            ],
+        }
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app._handle_settings_command()
+            await wait_until(
+                lambda: len(app.query("#settings-toggle-system-dynamic_subagents")) == 1
+            )
+            settings = app.query_one(SettingsPanel)
+            focused = settings.query_one("#settings-toggle-system-dynamic_subagents", Button)
+
+            async def resolve(task: asyncio.Task[Any], key: str) -> Any:
+                await wait_until(lambda: app.query_one(PromptPanel).active)
+                self.assertFalse(settings.display)
+                await pilot.press(key)
+                result = await asyncio.wait_for(task, timeout=2)
+                await wait_until(lambda: settings.display)
+                self.assertTrue(focused.has_focus)
+                return result
+
+            focused.focus()
+            answer = await resolve(
+                asyncio.create_task(
+                    app.ask_user({"type": "ask_user", "question": "Choose", "options": ["One"]})
+                ),
+                "1",
+            )
+            self.assertEqual(answer, "One")
+
+            focused.focus()
+            decisions = await resolve(asyncio.create_task(app.ask_approvals([approval])), "a")
+            self.assertEqual(decisions, [{"type": "approve"}])
+
+            focused.focus()
+            mcp = await resolve(
+                asyncio.create_task(app.approve_mcp_server(SimpleNamespace(name="docs"), "Connect docs")),
+                "a",
+            )
+            self.assertEqual(mcp, "allow")
+
+            focused.focus()
+            response = await resolve(
+                asyncio.create_task(app.answer_mcp_elicitation(elicitation)),
+                "d",
+            )
+            self.assertEqual(response, {"responses": {"decision": {"action": "decline"}}})
+
+            artifact = plan_artifact(
+                plan_id="foreground-plan",
+                title="Foreground Plan",
+                objective="Keep review visible.",
+                context_and_constraints="None.",
+                key_changes=["Review."],
+                test_plan=["Verify."],
+                assumptions=["None."],
+                success_criteria="- Reviewed.",
+                rubric_enabled=False,
+                rubric_iterations=3,
+            )
+            focused.focus()
+            review = asyncio.create_task(app.review_artifact("plan", {}, artifact))
+            await wait_until(lambda: app._pending_artifact_review is not None)
+            self.assertFalse(settings.display)
+            app.query_one("#plan-close-foreground-plan", Button).press()
+            self.assertEqual((await review)["action"], "close")
+            await wait_until(lambda: settings.display)
+            self.assertTrue(focused.has_focus)
+
+    async def test_foreground_interrupt_restores_settings_after_cancel_and_error(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            app._handle_settings_command()
+            await wait_until(
+                lambda: len(app.query("#settings-toggle-system-dynamic_subagents")) == 1
+            )
+            settings = app.query_one(SettingsPanel)
+            focused = settings.query_one("#settings-toggle-system-dynamic_subagents", Button)
+            focused.focus()
+            release = asyncio.Event()
+
+            task = asyncio.create_task(app.foreground_interrupt(release.wait))
+            await wait_until(lambda: not settings.display)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(settings.display)
+            self.assertTrue(focused.has_focus)
+
+            async def fail() -> None:
+                self.assertFalse(settings.display)
+                raise RuntimeError("foreground failed")
+
+            with self.assertRaisesRegex(RuntimeError, "foreground failed"):
+                await app.foreground_interrupt(fail)
+            self.assertTrue(settings.display)
+            self.assertTrue(focused.has_focus)
+
+    async def test_foreground_interrupts_serialize_without_nesting(self) -> None:
+        app = make_app()
+        entered: list[str] = []
+        first_release = asyncio.Event()
+        second_release = asyncio.Event()
+
+        async def wait_as(label: str, release: asyncio.Event) -> str:
+            entered.append(label)
+            await release.wait()
+            return label
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            first = asyncio.create_task(
+                app.foreground_interrupt(lambda: wait_as("first", first_release))
+            )
+            await wait_until(lambda: entered == ["first"])
+            second = asyncio.create_task(
+                app.foreground_interrupt(lambda: wait_as("second", second_release))
+            )
+            await pilot.pause()
+            self.assertEqual(entered, ["first"])
+            first_release.set()
+            self.assertEqual(await first, "first")
+            await wait_until(lambda: entered == ["first", "second"])
+            second_release.set()
+            self.assertEqual(await second, "second")
 
     async def test_approval_prompt_uses_in_window_panel_with_arrow_keys(self) -> None:
         """Approval prompts should stay in the app layout and accept arrow keys."""
@@ -5774,13 +6409,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            app.notify = Mock()  # type: ignore[method-assign]
             app.busy = True
             prompt = app.query_one(PromptBox)
+            before = len(app.query_one(ChatLog).children)
             await app.submit_prompt(PromptBox.Submitted(prompt, "/clear-chat"))
             await pilot.pause()
 
-            rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
-            self.assertIn("finish the current turn before clearing history", rendered)
+            self.assertEqual(len(app.query_one(ChatLog).children), before)
+            app.notify.assert_called_once()
             self.assertEqual(store.saves, [])
 
     async def test_settings_command_toggles_tool_and_rebuilds_agents(self) -> None:
@@ -5999,6 +6636,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             workspace = Path(directory)
             git_dir = workspace / ".git"
             git_dir.mkdir()
+            save_settings(workspace, set_git_protection(load_settings(workspace), True))
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
 
             async with app.run_test(size=(100, 30)) as pilot:
@@ -6014,7 +6652,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("n")
                 await wait_until(
                     lambda: renderable_plain(panel.query_one("#settings-status", Static))
-                    == "git protection disabled; no reload required"
+                    == "Git protection declined; no reload required"
                 )
 
             self.assertTrue(git_dir.exists())
@@ -6152,7 +6790,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "<CUDA_HOME, HF_HOME, REQUESTS_CA_BUNDLE>",
                 )
                 self.assertTrue(execute_env_allow.display)
-                self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "yes")
+                self.assertEqual(str(buttons["settings-toggle-git-git_protection"].label), "Configure")
                 self.assertEqual(str(buttons["settings-toggle-system-dynamic_subagents"].label), "no")
                 self.assertEqual(str(buttons["settings-toggle-response_schema-response_schema"].label), "yes")
                 self.assertTrue(buttons["settings-toggle-response_schema-response_schema"].disabled)
@@ -10159,37 +10797,77 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["key_changes"], ["List the key implementation changes."])
         self.assertEqual(plan["test_plan"], ["Describe the tests or checks to create."])
         self.assertEqual(plan["assumptions"], ["No additional assumptions."])
-    async def test_git_prompt_booleans_use_in_window_choices(self) -> None:
-        """Startup Git prompts should keep returning the expected booleans."""
-        app = make_app()
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await pilot.pause()
-
-            create_task = asyncio.create_task(app.ask_create_git_repo("Initialize Git?"))
-            panel = app.query_one(PromptPanel)
-            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 2)
-            buttons = list(panel.query(Button))
-            self.assertEqual(
-                [button.label.plain for button in buttons],
-                ["Yes (y)", "No (n)"],
+    async def test_git_configure_yes_initializes_persists_and_clears_issue(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            issue = Issue("STARTUP", "Git protection is not configured")
+            app = make_app(
+                workspace=workspace,
+                config={"settings": load_settings(workspace), "issues": [issue]},
+                issues=[issue],
             )
-            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
-            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
-            await pilot.press("y")
-            self.assertTrue(await asyncio.wait_for(create_task, timeout=2))
 
-            continue_task = asyncio.create_task(app.ask_continue_without_git("Continue without Git?"))
-            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 2)
-            buttons = list(panel.query(Button))
-            self.assertEqual(
-                [button.label.plain for button in buttons],
-                ["Continue (c)", "Exit (e)"],
-            )
-            self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
-            self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
-            await pilot.press("e")
-            self.assertFalse(await asyncio.wait_for(continue_task, timeout=2))
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app._handle_settings_command()
+                await wait_until(
+                    lambda: len(app.query("#settings-toggle-git-git_protection")) == 1
+                )
+                settings_panel = app.query_one(SettingsPanel)
+                git_button = settings_panel.query_one("#settings-toggle-git-git_protection", Button)
+                focused = settings_panel.query_one("#settings-toggle-system-dynamic_subagents", Button)
+                focused.focus()
+                with (
+                    patch("ui.textual.app.is_git_worktree", return_value=False),
+                    patch("ui.textual.app.init_git_repository", return_value=True) as init_git,
+                ):
+                    git_button.press()
+                    await wait_until(lambda: app.query_one(PromptPanel).active)
+                    self.assertFalse(settings_panel.display)
+                    await pilot.press("y")
+                    await wait_until(lambda: settings_panel.display)
+
+                self.assertTrue(focused.has_focus)
+                self.assertTrue(git_protection_preference(load_settings(workspace)))
+                self.assertFalse(app.issues)
+                init_git.assert_called_once_with(workspace.resolve())
+
+    async def test_git_configure_failure_stays_undecided_and_keeps_issue(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            issue = Issue("STARTUP", "Git protection is not configured")
+            app = make_app(workspace=workspace, issues=[issue])
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                with (
+                    patch("ui.textual.app.is_git_worktree", return_value=False),
+                    patch("ui.textual.app.init_git_repository", return_value=False),
+                    patch("core.workspace.is_git_worktree", return_value=False),
+                ):
+                    task = asyncio.create_task(app._configure_git(None))
+                    await wait_until(lambda: app.query_one(PromptPanel).active)
+                    await pilot.press("y")
+                    ok, _message, _settings = await task
+
+            self.assertFalse(ok)
+            self.assertIsNone(git_protection_preference(load_settings(workspace)))
+            self.assertEqual([item.summary for item in app.issues], ["Git protection is not configured"])
+
+    async def test_git_configure_no_persists_false_and_clears_issue(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            issue = Issue("STARTUP", "Git protection is not configured")
+            app = make_app(workspace=workspace, issues=[issue])
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                task = asyncio.create_task(app._configure_git(None))
+                await wait_until(lambda: app.query_one(PromptPanel).active)
+                await pilot.press("n")
+                ok, _message, _settings = await task
+
+            self.assertTrue(ok)
+            self.assertFalse(git_protection_preference(load_settings(workspace)))
+            self.assertFalse(app.issues)
 
 
 if __name__ == "__main__":

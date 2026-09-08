@@ -31,7 +31,7 @@ from config.settings import (
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
-    git_protection_enabled,
+    git_protection_preference,
     planning_todos_enabled,
     planning_response_status_max_retries,
     rubric_enabled,
@@ -41,7 +41,6 @@ from config.settings import (
     set_execute_env_allow,
     set_execute_env_mode,
     set_execute_env_value,
-    set_git_protection,
     set_planning_todos,
     set_planning_response_status_max_retries,
     set_rubric_enabled,
@@ -98,6 +97,7 @@ EXECUTE_ENV_FIELDS = {
     "venv": ("path", "Venv location", r".venv or .venv\Scripts\python.exe"),
 }
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
+GitCallback = Callable[[bool | None], Awaitable[tuple[bool, str, dict[str, Any]]]]
 ReloadCallback = Callable[[], Awaitable[bool]]
 CloseCallback = Callable[[], None]
 INHERIT_VALUE = "__mira_default__"
@@ -139,6 +139,7 @@ class SettingsPanel(Vertical):
         *,
         tool_metadata: list[dict[str, str]] | None = None,
         apply_change: ToggleCallback,
+        configure_git: GitCallback | None = None,
         reload_runtime: ReloadCallback | None = None,
         close_panel: CloseCallback | None = None,
         mcp_manager: Any = None,
@@ -152,6 +153,7 @@ class SettingsPanel(Vertical):
         self.settings = settings
         self.tool_metadata = tool_metadata or []
         self.apply_change = apply_change
+        self.configure_git = configure_git
         self.reload_runtime = reload_runtime
         self.close_panel = close_panel
         self.mcp_manager = mcp_manager
@@ -161,6 +163,8 @@ class SettingsPanel(Vertical):
         self.initial_tab = initial_tab if initial_tab in SETTINGS_TAB_PAGES else "general"
         self._model_controls_ready = False
         self._button_cells: dict[str, ToggleCell] = {}
+        self._runtime_busy = False
+        self._busy_disabled: dict[Any, bool] = {}
 
     def compose(self) -> ComposeResult:
         """Compose a scrollable settings window."""
@@ -206,7 +210,10 @@ class SettingsPanel(Vertical):
                     yield SettingsHeaderRow("", show_always=False)
                     with Horizontal(classes="settings-row settings-policy-row"):
                         yield Static("Git Protection", classes="settings-label")
-                        yield self._toggle_button(ToggleCell("git", "git_protection"), git_protection_enabled(self.settings))
+                        yield self._toggle_button(
+                            ToggleCell("git", "git_protection"),
+                            git_protection_preference(self.settings),
+                        )
                     with Horizontal(classes="settings-row settings-policy-row settings-tracing-row"):
                         yield Static("Tracing", classes="settings-label")
                         yield self._toggle_button(
@@ -500,6 +507,9 @@ class SettingsPanel(Vertical):
 
     def on_mount(self) -> None:
         """Focus the first editable toggle when the panel appears."""
+        sync_interactivity = getattr(self.app, "_sync_interactivity", None)
+        if callable(sync_interactivity):
+            sync_interactivity()
         self.call_after_refresh(self._finish_mount)
 
     def _finish_mount(self) -> None:
@@ -629,7 +639,15 @@ class SettingsPanel(Vertical):
         cell = self._button_cells.get(button.id or "")
         if cell is None or self._cell_locked(cell):
             return
-        await self._set_cell(cell, not selected_value(self.settings, cell))
+        await self._activate_cell(cell)
+
+    async def _activate_cell(self, cell: ToggleCell, requested: bool | None = None) -> None:
+        """Activate one settings cell, including undecided Git configuration."""
+        current = selected_value(self.settings, cell)
+        if cell.kind == "git" and current is None:
+            await self._set_cell(cell, None)
+            return
+        await self._set_cell(cell, not bool(current) if requested is None else requested)
 
     @on(Select.Changed, "#settings-execute-env-mode")
     async def change_execute_env_mode(self, event: Select.Changed) -> None:
@@ -790,11 +808,19 @@ class SettingsPanel(Vertical):
             return
         await self._set_cell(cell, value)
 
-    async def _set_cell(self, cell: ToggleCell, value: bool) -> None:
+    async def _set_cell(self, cell: ToggleCell, value: bool | None) -> None:
         if cell.kind == "git":
-            updated = set_git_protection(self.settings, value)
+            if self.configure_git is None:
+                self._set_status("Git configuration unavailable")
+                return
+            ok, message, updated = await self.configure_git(value)
+            self._set_status(message)
+            if ok:
+                self.settings = updated
+                self._refresh_buttons()
+            return
         elif cell.kind == "system":
-            updated = set_dynamic_subagents(self.settings, value)
+            updated = set_dynamic_subagents(self.settings, bool(value))
         elif cell.kind == "response_schema":
             updated = set_dynamic_subagent_response_schema(self.settings, value)
         elif cell.kind == "todos":
@@ -900,7 +926,7 @@ class SettingsPanel(Vertical):
             self.settings = updated
         input_widget.value = str(planning_response_status_max_retries(self.settings))
 
-    def _toggle_button(self, cell: ToggleCell, value: bool) -> Button:
+    def _toggle_button(self, cell: ToggleCell, value: bool | None) -> Button:
         button_id = button_id_for(cell)
         self._button_cells[button_id] = cell
         locked = self._cell_locked(cell)
@@ -926,6 +952,30 @@ class SettingsPanel(Vertical):
             button.label = button_label(cell, value)
             button.disabled = locked
             button.set_classes(toggle_classes(value, locked=locked))
+
+    def set_runtime_busy(self, busy: bool) -> None:
+        """Disable only state-mutating Settings controls while runtime work runs."""
+        busy = bool(busy)
+        controls = [
+            *self.query(".settings-toggle"),
+            *self.query(".settings-input"),
+            *self.query(".settings-select"),
+            *self.query("#settings-reload-runtime"),
+        ]
+        if busy:
+            if not self._runtime_busy:
+                self._busy_disabled = {control: control.disabled for control in controls}
+            self._runtime_busy = True
+            for control in controls:
+                control.disabled = True
+            return
+        if not self._runtime_busy:
+            return
+        self._runtime_busy = False
+        for control, disabled in self._busy_disabled.items():
+            if control.is_mounted:
+                control.disabled = disabled
+        self._busy_disabled = {}
 
     def _cell_locked(self, cell: ToggleCell) -> bool:
         if cell.locked:
@@ -1330,10 +1380,10 @@ def custom_tool_names(metadata: list[dict[str, str]]) -> list[str]:
     return sorted({item["name"] for item in metadata if item.get("source") == "project" and item.get("name")})
 
 
-def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool:
+def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool | None:
     """Return the boolean value for a settings cell."""
     if cell.kind == "git":
-        return git_protection_enabled(settings)
+        return git_protection_preference(settings)
     if cell.kind == "system":
         return dynamic_subagents_enabled(settings)
     if cell.kind == "response_schema":
@@ -1392,18 +1442,20 @@ def fixed_builtin_access_value(policy: str, tool_name: str) -> str | None:
     return None
 
 
-def button_label(cell: ToggleCell, value: bool) -> str:
+def button_label(cell: ToggleCell, value: bool | None) -> str:
     """Return display text for a settings toggle."""
     if cell.kind == "always_allow" and cell.name in READ_ONLY_BUILTIN_TOOLS and not cell.server:
         return "-"
     if cell.kind == "ptc" and cell.name in PTC_INAPPLICABLE_TOOLS and not cell.server:
         return "-"
+    if cell.kind == "git" and value is None:
+        return "Configure"
     return "yes" if value else "no"
 
 
-def toggle_classes(value: bool, *, locked: bool = False) -> str:
+def toggle_classes(value: bool | None, *, locked: bool = False) -> str:
     """Return CSS classes for a toggle button."""
-    state = "on" if value else "off"
+    state = "configure" if value is None else "on" if value else "off"
     locked_class = " locked" if locked else ""
     return f"settings-mode settings-toggle {state}{locked_class}"
 
@@ -1430,7 +1482,7 @@ class SettingsToggleButton(Button):
             event.stop()
             cell = self.panel._button_cells.get(self.id or "")
             if cell is not None and not self.panel._cell_locked(cell):
-                await self.panel._set_cell(cell, key == "y")
+                await self.panel._activate_cell(cell, key == "y")
 
 
 class SettingsHeaderRow(Horizontal):

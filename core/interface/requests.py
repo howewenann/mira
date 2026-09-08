@@ -11,7 +11,6 @@ from typing import Any, Literal, Mapping
 APPROVAL_CONSEQUENCE = "_mira_consequence"
 ArtifactReviewAction = Literal["implement", "close", "revise", "clear"]
 MCPApprovalDecision = Literal["allow", "deny", "always_allow"]
-ConfirmationKind = Literal["create_git_repo", "continue_without_git"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,21 +99,6 @@ class MCPApprovalRequest:
     preview: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class ConfirmationRequest:
-    """Request a non-agent application confirmation.
-
-    Known ``kind`` values are ``create_git_repo`` and
-    ``continue_without_git``. ``message`` is the prompt and ``context`` may
-    provide supporting values. Return ``True`` to proceed or ``False`` to
-    decline. These confirmations are not LangGraph HITL decisions.
-    """
-
-    kind: ConfirmationKind
-    message: str
-    context: Mapping[str, Any] | None = None
-
-
 FrontendRequest = (
     ApprovalRequest
     | AskUserRequest
@@ -122,7 +106,6 @@ FrontendRequest = (
     | ArtifactReviewRequest
     | ArtifactDisplayRequest
     | MCPApprovalRequest
-    | ConfirmationRequest
 )
 
 
@@ -133,8 +116,6 @@ __all__ = [
     "ArtifactReviewAction",
     "ArtifactReviewRequest",
     "AskUserRequest",
-    "ConfirmationKind",
-    "ConfirmationRequest",
     "FrontendRequest",
     "MCPApprovalDecision",
     "MCPApprovalRequest",

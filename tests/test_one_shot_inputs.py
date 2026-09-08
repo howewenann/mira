@@ -162,10 +162,6 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
                     tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
                     patch("config.runtime.load_effective_config", return_value=config),
                     patch("ui.terminal.renderer.Renderer", return_value=object()),
-                    patch(
-                        "cli.git_guard.ensure_git_repository",
-                        new=AsyncMock(return_value=True),
-                    ),
                     patch("cli.commands._bootstrap", new=bootstrap),
                     patch("cli.commands._run_one_shot", new=one_shot),
                 ):
@@ -208,10 +204,6 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
             tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
             patch("config.runtime.load_effective_config", return_value=config),
             patch("ui.terminal.renderer.Renderer", return_value=object()),
-            patch(
-                "cli.git_guard.ensure_git_repository",
-                new=AsyncMock(return_value=True),
-            ),
             patch("cli.commands._bootstrap", new=bootstrap),
             patch("cli.commands._run_one_shot", new=one_shot),
         ):
@@ -308,10 +300,6 @@ class OneShotExecutionTests(unittest.IsolatedAsyncioTestCase):
                     tempfile.TemporaryDirectory(dir=Path.cwd()) as directory,
                     patch("config.runtime.load_effective_config", return_value=config),
                     patch("ui.terminal.renderer.Renderer", return_value=object()),
-                    patch(
-                        "cli.git_guard.ensure_git_repository",
-                        new=AsyncMock(return_value=True),
-                    ),
                     patch(
                         "cli.commands._bootstrap",
                         new=AsyncMock(

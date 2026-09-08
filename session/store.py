@@ -64,6 +64,8 @@ class SessionStore:
         return {
             "id": session_id or new_session_id(),
             "title": "Untitled session",
+            "custom_title": "",
+            "pinned": False,
             "workspace": str(workspace),
             "created_at": now,
             "updated_at": now,
@@ -76,8 +78,17 @@ class SessionStore:
 
     def save(self, record: dict[str, Any]) -> None:
         """Update the timestamp and write the session JSON file."""
+        self._write(record, update_timestamp=True)
+
+    def save_metadata(self, record: dict[str, Any]) -> None:
+        """Write pin/title metadata without changing conversation recency."""
+        self._write(record, update_timestamp=False)
+
+    def _write(self, record: dict[str, Any], *, update_timestamp: bool) -> None:
+        """Normalize and persist one record with explicit timestamp ownership."""
         resume_context_pending = record.get("resume_context_pending") is True
-        record["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if update_timestamp:
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
         normalized = normalize_session(record)
         self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         record.clear()
@@ -96,7 +107,18 @@ class SessionStore:
         if not paths:
             return None
 
-        return max(paths, key=lambda path: path.stat().st_mtime)
+        return max(paths, key=self._updated_at_timestamp)
+
+    def _updated_at_timestamp(self, path: Path) -> float:
+        """Read conversation recency without treating metadata writes as turns."""
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            text = str(record.get("updated_at") or record.get("created_at") or "")
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.fromisoformat(text).timestamp()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return path.stat().st_mtime
 
     def delete(self, session_id: str) -> bool:
         """Delete one saved session JSON file."""

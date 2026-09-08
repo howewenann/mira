@@ -350,14 +350,6 @@ class Renderer:
             details.append(f"Completion: {goal['completion_source']}")
         self.transcript.block("goal", f"{goal_artifact_text(goal)}\n\n{' · '.join(details)}")
 
-    async def ask_create_git_repo(self, message: str) -> bool:
-        """Ask whether MIRA should initialize Git for the workspace."""
-        return await self._choice(message, [("y", "yes"), ("n", "no")]) == "y"
-
-    async def ask_continue_without_git(self, message: str) -> bool:
-        """Ask whether startup should continue without Git protection."""
-        return await self._choice(message, [("c", "continue"), ("e", "exit")]) == "c"
-
     def truncate(self, value: Any) -> str:
         """Return a single-line string shortened to the configured display size."""
         return self.transcript.truncate(value)

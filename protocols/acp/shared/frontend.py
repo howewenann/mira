@@ -19,7 +19,6 @@ from mira.api import (
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
     AskUserRequest,
-    ConfirmationRequest,
     FrontendEvent,
     FrontendRequest,
     InformationEvent,
@@ -157,20 +156,6 @@ class ACPFrontend:
                 ],
             )
             return selected if selected in {"allow", "always_allow"} else "deny"
-        if isinstance(request, ConfirmationRequest):
-            selected = await self._permission_choice(
-                session_id,
-                tool_call=ToolCallUpdate(
-                    tool_call_id=self._interaction_id(f"mira-confirm-{request.kind}"),
-                    title=request.message,
-                    raw_input=dict(request.context or {}),
-                ),
-                options=[
-                    PermissionOption(option_id="confirm", name="Continue", kind="allow_once"),
-                    PermissionOption(option_id="cancel", name="Cancel", kind="reject_once"),
-                ],
-            )
-            return selected == "confirm"
         raise RuntimeError(f"unsupported frontend request: {type(request).__name__}")
 
     def enqueue(self, session_id: str, item: Any) -> None:

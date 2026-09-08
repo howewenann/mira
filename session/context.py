@@ -50,6 +50,8 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(record.get("id", "")),
         "title": safe_title(record.get("title")),
+        "custom_title": custom_session_title(record.get("custom_title")),
+        "pinned": record.get("pinned") is True,
         "workspace": str(record.get("workspace", "")),
         "created_at": str(record.get("created_at", now_iso())),
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
@@ -449,6 +451,12 @@ def safe_title(value: Any) -> str:
     if not title:
         return UNTITLED_SESSION
     return title[:TITLE_MAX_CHARS].rstrip() or UNTITLED_SESSION
+
+
+def custom_session_title(value: Any) -> str:
+    """Normalize an optional user-owned history title without inventing one."""
+    title = compact_line(value).strip("\"'` ")
+    return title[:TITLE_MAX_CHARS].rstrip()
 
 
 def compact_line(value: Any) -> str:

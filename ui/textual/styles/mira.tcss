@@ -54,6 +54,37 @@ Screen {
     color: #eef7f8;
 }
 
+#history-collapse,
+#history-expand {
+    width: 4;
+    min-width: 4;
+    max-width: 4;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #7ce3dc;
+    content-align: center middle;
+}
+
+#history-collapse:hover,
+#history-expand:hover {
+    background: #21424b;
+    color: #eef7f8;
+}
+
+#history-rail {
+    display: none;
+    width: 4;
+    min-width: 4;
+    max-width: 4;
+    height: 100%;
+    padding: 0;
+    border: none;
+    background: #101516;
+}
+
 #sessions {
     width: 1fr;
     height: 1fr;
@@ -81,10 +112,113 @@ Screen {
 
 .session-label {
     height: 3;
+    text-wrap: nowrap;
+}
+
+.session-row-layout {
+    width: 1fr;
+    height: 3;
+}
+
+.session-text-column,
+.session-label,
+.session-rename-editor {
+    width: 27;
+    min-width: 27;
+    max-width: 27;
+    height: 3;
+}
+
+.session-actions {
+    width: 3;
+    min-width: 3;
+    max-width: 3;
+    height: 3;
+    margin-left: 4;
+}
+
+#sessions > .session-row.active .session-actions {
+    margin-left: 3;
+}
+
+Button.session-pin-action,
+Button.session-menu-action {
+    width: 3;
+    min-width: 3;
+    max-width: 3;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #b8c1c7;
+    content-align: center middle;
+}
+
+Button.session-pin-action.pinned {
+    color: #d2a957;
+}
+
+Button.session-pin-action:hover,
+Button.session-pin-action:focus,
+Button.session-menu-action:hover,
+Button.session-menu-action:focus {
+    background: #21424b;
+    color: #eef7f8;
+}
+
+Button.session-pin-action.pinned:hover,
+Button.session-pin-action.pinned:focus {
+    color: #d2a957;
+}
+
+.session-rename-input {
+    width: 27;
+    min-width: 27;
+    max-width: 27;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: #17313a;
+    color: #eef7f8;
+}
+
+.session-rename-spacer,
+.session-rename-timestamp {
+    width: 27;
+    height: 1;
 }
 
 .session-empty {
     color: #7d8b95;
+}
+
+SessionActionMenuScreen {
+    align: left top;
+    background: transparent;
+}
+
+#session-action-popup {
+    width: 18;
+    height: 6;
+    padding: 0;
+    border: solid #5bb8b1;
+    background: #101516;
+}
+
+#session-action-options {
+    width: 1fr;
+    height: 4;
+    padding: 0;
+    border: none;
+    background: #101516;
+}
+
+#session-action-options > .option-list--option-highlighted,
+#session-action-options:focus > .option-list--option-highlighted {
+    background: #1b3036;
+    color: #eef7f8;
 }
 
 #status-row {
@@ -1337,6 +1471,12 @@ Button.goal-action:focus {
     border: none;
 }
 
+.settings-toggle.configure {
+    color: #0c0f10;
+    background: #d2a957;
+    border: none;
+}
+
 .settings-toggle.locked {
     color: #7a858c;
     background: #151a1d;
@@ -1356,6 +1496,11 @@ Button.goal-action:focus {
 .settings-toggle.off:focus {
     color: #d2d8dc;
     background: #20272b;
+}
+
+.settings-toggle.configure:focus {
+    color: #0c0f10;
+    background: #e4c574;
 }
 
 .settings-access-fixed-value {
@@ -1617,6 +1762,12 @@ Button.goal-action:focus {
 #settings-access-switcher,
 #settings-access-landing,
 #settings-access-detail { height: 1fr; }
+#settings-access-landing,
+#settings-access-detail {
+    scrollbar-gutter: stable;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
 .settings-access-heading {
     height: 1;
     color: #D8DEE9;

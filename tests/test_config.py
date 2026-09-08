@@ -127,7 +127,7 @@ class CLIConfigTests(unittest.TestCase):
 
 
 class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
-    """Tests for startup ordering around the Git safety guard."""
+    """Tests for non-blocking CLI startup ordering."""
 
     async def _captured_one_shot_text(
         self,
@@ -144,9 +144,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         }
         session_record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
         captured: list[str] = []
-
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            return True
 
         async def bootstrap(
             workspace: Path,
@@ -172,7 +169,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("config.loader.load_config", return_value=config),
             patch("ui.terminal.renderer.Renderer", return_value=object()),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("core.execution.turns.run_turn", run_turn),
         ):
@@ -186,8 +182,8 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
 
         return captured[0], session_record["events"][0]["text"]
 
-    async def test_run_checks_git_before_bootstrap(self) -> None:
-        """The Git guard should run before sessions, resources, or agents are created."""
+    async def test_run_bootstraps_without_git_gate(self) -> None:
+        """One-shot startup should proceed directly from config to bootstrap."""
         events: list[str] = []
         config = {
             "tool_output_chars": 123,
@@ -216,11 +212,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             events.append("renderer")
             self.assertEqual(tool_output_chars, 123)
             return renderer
-
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            events.append("guard")
-            self.assertIs(guard_renderer, renderer)
-            return True
 
         async def bootstrap(
             workspace: Path,
@@ -258,13 +249,12 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("config.loader.load_config", load_config),
             patch("ui.terminal.renderer.Renderer", make_renderer),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("core.execution.turns.run_turn", run_turn),
         ):
             await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
-        self.assertEqual(events[:4], ["config", "renderer", "guard", "bootstrap"])
+        self.assertEqual(events[:3], ["config", "renderer", "bootstrap"])
         self.assertIn("run_turn", events)
         self.assertLess(events.index("bootstrap"), events.index("run_turn"))
         self.assertGreater(events.count("save"), 0)
@@ -277,9 +267,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             "llm_provider": "lmstudio",
             "llm_model": "local-model",
         }
-
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            return True
 
         async def bootstrap(
             workspace: Path,
@@ -300,7 +287,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("config.loader.load_config", return_value=config),
             patch("ui.terminal.renderer.Renderer", return_value=object()),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("core.execution.turns.run_turn", run_turn),
         ):
@@ -321,9 +307,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
             "llm_model": "local-model",
         }
 
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            return True
-
         async def bootstrap(
             workspace: Path,
             session: str | None,
@@ -343,7 +326,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("config.loader.load_config", return_value=config),
             patch("ui.terminal.renderer.Renderer", return_value=object()),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("core.execution.turns.run_turn", run_turn),
         ):
@@ -365,9 +347,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         session_record = {"id": "thread-1", "events": [], "turns": 0, "dashboard": {}}
         saved: list[dict[str, object]] = []
 
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            return True
-
         async def bootstrap(
             workspace: Path,
             session: str | None,
@@ -384,7 +363,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("config.loader.load_config", return_value=config),
             patch("ui.terminal.renderer.Renderer", return_value=object()),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
             patch("cli.commands._bootstrap", bootstrap),
             patch("core.execution.turns.run_turn", run_turn),
             patch("core.diagnostics.error_report.write_error_report", return_value=Path("report.txt")) as report,
@@ -432,25 +410,6 @@ class CLIStartupTests(unittest.IsolatedAsyncioTestCase):
                 commands.run(prompt="hello", resume=False, workspace=Path("."), session=None)
 
         report.assert_not_called()
-
-    async def test_run_exits_when_git_guard_blocks_startup(self) -> None:
-        """Choosing exit after a Git failure should stop before bootstrap."""
-        renderer = object()
-
-        async def ensure_git_repository(workspace: Path, guard_renderer: object) -> bool:
-            return False
-
-        with (
-            patch("config.loader.load_config", return_value={"tool_output_chars": 123}),
-            patch("ui.terminal.renderer.Renderer", return_value=renderer),
-            patch("cli.git_guard.ensure_git_repository", ensure_git_repository),
-            patch("cli.commands._bootstrap") as bootstrap,
-        ):
-            with self.assertRaises(typer.Exit) as raised:
-                await commands._run(prompt="hello", resume=False, workspace=Path("."), session=None)
-
-        self.assertEqual(raised.exception.exit_code, 1)
-        bootstrap.assert_not_called()
 
     async def test_short_file_flag_reads_markdown_prompt(self) -> None:
         """The file prompt path should be read and sent to one-shot mode."""

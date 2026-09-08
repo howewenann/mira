@@ -32,7 +32,6 @@ from core.interface.requests import (
     ArtifactDisplayRequest as CoreArtifactDisplayRequest,
     ArtifactReviewRequest as CoreArtifactReviewRequest,
     AskUserRequest as CoreAskUserRequest,
-    ConfirmationRequest as CoreConfirmationRequest,
     FrontendRequest as CoreFrontendRequest,
     MCPApprovalRequest as CoreMCPApprovalRequest,
     MCPElicitationRequest as CoreMCPElicitationRequest,
@@ -50,7 +49,6 @@ API_EXPORTS = {
     "ArtifactReviewRequest",
     "AskUserRequest",
     "CompactionEvent",
-    "ConfirmationRequest",
     "Frontend",
     "FrontendEvent",
     "FrontendRequest",
@@ -111,7 +109,6 @@ class PublicAPITests(unittest.TestCase):
             "ArtifactDisplayRequest": CoreArtifactDisplayRequest,
             "MCPApprovalRequest": CoreMCPApprovalRequest,
             "MCPElicitationRequest": CoreMCPElicitationRequest,
-            "ConfirmationRequest": CoreConfirmationRequest,
             "SessionSnapshot": CoreSessionSnapshot,
         }
         for name, core_type in expected.items():

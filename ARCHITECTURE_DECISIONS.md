@@ -133,28 +133,27 @@ LangGraph used to handle, or when a workaround becomes part of the normal path.
 
 ## Startup Flow
 
-**Decision:** Startup builds runtime state in one path: CLI command, Git guard,
-config, headless `MiraApplication`, and headless `MiraSession`, followed by a
-Textual or one-shot frontend adapter.
+**Decision:** Startup builds runtime state in one path: CLI command, config,
+headless `MiraApplication`, and headless `MiraSession`, followed by a Textual
+or one-shot frontend adapter.
 
-**Why:** A single startup shape keeps TUI and one-shot mode consistent. The Git
-guard runs before sessions and agents so MIRA does not begin work in an
-unprotected workspace by accident.
+**Why:** A single startup shape keeps TUI and one-shot mode consistent. Git is
+diagnostic rather than a startup gate, so a missing repository never prevents
+MIRA from starting or running a one-shot prompt.
 
-**Git guard behavior:** When Git protection is enabled, startup first checks
-the resolved workspace with `git -C <workspace> rev-parse
---is-inside-work-tree`, with a parent `.git` marker check as a fallback. If the
-workspace is not covered by Git and the user approves initialization, MIRA runs
-`git init <workspace>` directly through `subprocess.run(...)` in
-`cli/git_guard.py`. This happens before agent construction, so it is outside
-the normal agent tool/HITL approval path. The initializer only creates the
-repository; it does not stage files or create an initial commit.
+**Git protection behavior:** The setting is tri-state: enabled, declined, or
+undecided. An undecided workspace outside a Git worktree receives a startup
+Issue while startup continues. Settings offers Configure; accepting runs
+`git init <workspace>` and persists enabled only after success, while declining
+persists disabled. Worktree detection and initialization live in
+`core/workspace.py`; the initializer only creates the repository and does not
+stage files or create an initial commit.
 
-**Where to check:** `cli/main.py`, `cli/commands.py`, `cli/git_guard.py`,
+**Where to check:** `cli/main.py`, `cli/commands.py`, `core/workspace.py`,
 `core/application/app.py`, `core/application/session.py`, `config/loader.py`, `config/metadata.py`.
 
 **Update this when:** Startup order changes, a new runtime mode is added, or Git
-protection is moved later in the flow.
+protection again becomes more than a non-blocking diagnostic and Settings action.
 
 ## Error Reports And Trace Diagnostics
 
