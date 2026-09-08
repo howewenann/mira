@@ -183,9 +183,23 @@ class PublicAPITests(unittest.TestCase):
 
         self.assertFalse((ROOT / "examples" / "frontend.py").exists())
 
-    def test_wheel_configuration_includes_public_package(self) -> None:
+    def test_wheel_configuration_includes_public_package_and_project_kit(self) -> None:
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"mira"', pyproject)
+        self.assertIn(
+            '"examples" = "agent/resources/project_kit/examples"',
+            pyproject,
+        )
+        for path in (
+            ROOT / "agent" / "resources" / "project_kit" / "README.md",
+            ROOT / "agent" / "resources" / "project_kit" / "env.example",
+            ROOT / "examples" / "mira_api" / "full_frontend.py",
+            ROOT / "examples" / "acp" / "stdio" / "full_client.py",
+            ROOT / "examples" / "acp" / "http" / "full_client.py",
+            ROOT / "examples" / "mcp" / "README.md",
+            ROOT / "examples" / "tracing" / "README.md",
+        ):
+            self.assertTrue(path.is_file(), path)
 
     def test_application_can_distinguish_existing_explicit_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

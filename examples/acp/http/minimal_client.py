@@ -56,11 +56,21 @@ async def main() -> None:
         await connection.initialize(PROTOCOL_VERSION)
         created_session = await connection.new_session(str(Path.cwd()))
 
-        # Responses arrive asynchronously through client.session_update().
+        # Reuse this exact ID while this connection remains live. Responses
+        # arrive asynchronously through client.session_update().
+        session_id = created_session.session_id
         await connection.prompt(
-            created_session.session_id,
-            [text_block("Reply only with PONG")],
+            session_id, [text_block("My name is Nicholas.")]
         )
+        print()
+        await connection.prompt(
+            session_id, [text_block("What is my name?")]
+        )
+        print()
+        await connection.prompt(
+            session_id, [text_block("Summarize our conversation.")]
+        )
+        print()
     finally:
         # The connection and its underlying HTTP transport own separate resources.
         await connection.close()

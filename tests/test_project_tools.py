@@ -372,14 +372,14 @@ class ProjectToolProxyTests(unittest.TestCase):
 
 
 class ProjectExamplesTests(unittest.TestCase):
-    def test_examples_are_inert_and_never_overwritten(self) -> None:
+    def test_examples_are_inert_and_refreshed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             ensure_project_examples(workspace)
             project_example = workspace / ".mira" / "examples" / "tools" / "project_runtime_tool.py"
             project_example.write_text("custom", encoding="utf-8")
             ensure_project_examples(workspace)
-            self.assertEqual(project_example.read_text(encoding="utf-8"), "custom")
+            self.assertIn("project_tool", project_example.read_text(encoding="utf-8"))
             self.assertEqual(list((workspace / ".mira" / "tools").glob("*.py")), [])
             self.assertFalse(build_resources(workspace, create_examples=False).tool_failures)
 

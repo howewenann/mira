@@ -1,7 +1,9 @@
 # MIRA examples
 
-Start with the minimal example for your integration, then read its full version.
-Each executable example is self-contained teaching code.
+These files are the source for the inert recipes MIRA copies into each
+project's `.mira/examples/` directory. Start with the minimal example for your
+integration, then read its full version. Each executable example is
+self-contained teaching code.
 
 ```text
 Embed MIRA in this Python process
@@ -19,3 +21,6 @@ Connect to an already-running MIRA ACP HTTP server
 
 Minimal examples teach the complete basic lifecycle. Full examples add
 multi-turn interaction and the important capabilities of that public API.
+
+Focused copy-and-customize recipes for memories, skills, subagents, tools, MCP,
+and tracing live in their matching directories here.

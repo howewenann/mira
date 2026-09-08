@@ -58,11 +58,21 @@ async def main() -> None:
         # session/new creates one MIRA conversation rooted in this workspace.
         created_session = await connection.new_session(str(Path.cwd()))
 
-        # Responses arrive asynchronously through client.session_update().
+        # Reuse this exact ID for every turn. Responses arrive asynchronously
+        # through client.session_update().
+        session_id = created_session.session_id
         await connection.prompt(
-            created_session.session_id,
-            [text_block("Reply only with PONG")],
+            session_id, [text_block("My name is Nicholas.")]
         )
+        print()
+        await connection.prompt(
+            session_id, [text_block("What is my name?")]
+        )
+        print()
+        await connection.prompt(
+            session_id, [text_block("Summarize our conversation.")]
+        )
+        print()
 
     # Leaving the context closes the ACP streams and the MIRA child process.
 

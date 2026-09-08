@@ -32,7 +32,6 @@ from agent.resources import (
 )
 from agent.resources.project_setup import (
     EMPTY_MCP_CONFIGURATION,
-    EXAMPLE_MCP_CONFIGURATION,
     MCP_CONFIGURATION_SCHEMA,
     ensure_project_examples,
 )
@@ -43,21 +42,19 @@ from core.application import DEFAULT_TOOL_SPECS, resource_specs
 class ResourceDiscoveryTests(unittest.TestCase):
     """Tests for default and project resource layering."""
 
-    def test_launch_creates_project_examples_without_overwriting(self) -> None:
-        """Missing project resource examples should be created once."""
+    def test_launch_creates_inert_project_kit_and_keeps_active_directories_empty(self) -> None:
+        """A fresh launch should create complete guidance without activating it."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            memory = workspace / ".mira" / "memories" / "AGENTS.md"
-            memory.parent.mkdir(parents=True)
-            memory.write_text("custom memory", encoding="utf-8")
+            root_env_example = workspace / ".env.example"
+            root_env_example.write_text("owned by host project", encoding="utf-8")
 
-            build_resources(workspace)
+            resources = build_resources(workspace)
 
-            self.assertEqual(memory.read_text(encoding="utf-8"), "custom memory")
+            mira_dir = workspace / ".mira"
             mcp_dir = workspace / ".mira" / "mcp"
             expected_files = {
                 "mcp.json": EMPTY_MCP_CONFIGURATION,
-                "example.json": EXAMPLE_MCP_CONFIGURATION,
                 "schema.json": MCP_CONFIGURATION_SCHEMA,
             }
             for name, expected in expected_files.items():
@@ -67,57 +64,104 @@ class ResourceDiscoveryTests(unittest.TestCase):
                     self.assertTrue(generated.endswith("\n"))
                     self.assertIsInstance(json.loads(generated), dict)
             self.assertFalse((workspace / ".mira" / "mcp.json").exists())
-            project_readme = (workspace / ".mira" / "README.md").read_text(encoding="utf-8")
-            self.assertIn("`mcp/mcp.json`: active MCP configuration", project_readme)
-            self.assertIn("Run `/reload-runtime` after changes", project_readme)
-            self.assertTrue((workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").exists())
-            self.assertTrue((workspace / ".mira" / "subagents" / "example_subagent.py").exists())
-            self.assertEqual(list((workspace / ".mira" / "tools").glob("*.py")), [])
-            self.assertTrue((workspace / ".mira" / "examples" / "tools" / "mira_runtime_tool.py").exists())
-            self.assertTrue((workspace / ".mira" / "examples" / "tools" / "project_runtime_tool.py").exists())
-            self.assertIn(
-                "Example Skill",
-                (workspace / ".mira" / "skills" / "example-skill" / "SKILL.md").read_text(encoding="utf-8"),
+            self.assertTrue((mcp_dir / "servers").is_dir())
+            self.assertFalse((mcp_dir / "example.json").exists())
+            for active_dir in ("memories", "prompts", "skills", "subagents", "tools"):
+                self.assertEqual(list((mira_dir / active_dir).iterdir()), [])
+            project_readme = (mira_dir / "README.md").read_text(encoding="utf-8")
+            self.assertIn("MIRA is usable once a Main model is configured", project_readme)
+            self.assertIn("`/reload-runtime`", project_readme)
+            env_reference = (mira_dir / ".env.example").read_text(encoding="utf-8")
+            for name in (
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "GEMINI_API_KEY",
+                "GROQ_API_KEY",
+                "OPENROUTER_API_KEY",
+                "REMOTE_MCP_TOKEN",
+                "LANGSMITH_API_KEY",
+                "LANGSMITH_WORKSPACE_ID",
+                "PHOENIX_WORKING_DIR=.mira/_phoenix",
+                "MIRA_TOOL_OUTPUT_CHARS",
+                "MIRA_SESSION_DIR",
+                "MIRA_LMSTUDIO_METADATA_TIMEOUT",
+            ):
+                self.assertIn(name, env_reference)
+            self.assertEqual(root_env_example.read_text(encoding="utf-8"), "owned by host project")
+            expected_examples = {
+                "memories/AGENTS.md",
+                "skills/example-skill/SKILL.md",
+                "subagents/example_subagent.py",
+                "tools/mira_runtime_tool.py",
+                "tools/project_runtime_tool.py",
+                "mcp/README.md",
+                "mcp/example.json",
+                "tracing/README.md",
+                "api/README.md",
+                "api/minimal_frontend.py",
+                "api/full_frontend.py",
+                "acp/README.md",
+                "acp/zed.md",
+                "acp/stdio/minimal_client.py",
+                "acp/stdio/full_client.py",
+                "acp/http/minimal_client.py",
+                "acp/http/full_client.py",
+            }
+            actual_examples = {
+                path.relative_to(mira_dir / "examples").as_posix()
+                for path in (mira_dir / "examples").rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(actual_examples, expected_examples)
+            self.assertEqual(resources.skills, [])
+            self.assertEqual(
+                resources.memory[:2],
+                [
+                    "/mira-defaults/memories/AGENTS.md",
+                    "/mira-defaults/memories/software-development.md",
+                ],
             )
-            self.assertIn(
-                "example-project-guide",
-                (workspace / ".mira" / "subagents" / "example_subagent.py").read_text(encoding="utf-8"),
+            self.assertFalse(
+                any(item["source"] == "project" for item in resources.metadata["subagents"])
             )
-            self.assertIn(
-                "project_tool",
-                (workspace / ".mira" / "examples" / "tools" / "project_runtime_tool.py").read_text(
-                    encoding="utf-8"
-                ),
+            self.assertFalse(
+                any(item["source"] == "project" for item in resources.metadata["tools"])
             )
 
-    def test_mcp_bootstrap_preserves_each_existing_file_and_fills_missing_companions(self) -> None:
-        """Each MCP file should be preserved independently while missing files appear."""
-        filenames = ("mcp.json", "example.json", "schema.json")
-        for existing_name in filenames:
-            with self.subTest(existing_name=existing_name), tempfile.TemporaryDirectory() as directory:
-                workspace = Path(directory)
-                mcp_dir = workspace / ".mira" / "mcp"
-                mcp_dir.mkdir(parents=True)
-                existing_path = mcp_dir / existing_name
-                existing = f"custom {existing_name}\n"
-                existing_path.write_text(existing, encoding="utf-8")
-
-                ensure_project_examples(workspace)
-
-                self.assertEqual(existing_path.read_text(encoding="utf-8"), existing)
-                self.assertTrue(all((mcp_dir / name).exists() for name in filenames))
-
-    def test_repeated_bootstrap_does_not_modify_existing_mcp_files(self) -> None:
-        """Re-running bootstrap should leave all three MCP files byte-for-byte unchanged."""
+    def test_user_configuration_is_preserved_and_managed_resources_refresh(self) -> None:
+        """Later launches preserve configuration but restore shipped documentation."""
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             ensure_project_examples(workspace)
-            mcp_dir = workspace / ".mira" / "mcp"
-            before = {path.name: path.read_bytes() for path in mcp_dir.iterdir()}
+            mira_dir = workspace / ".mira"
+            user_files = [
+                mira_dir / "models.yml",
+                mira_dir / "tracing.yml",
+                mira_dir / "mcp" / "mcp.json",
+                mira_dir / "memories" / "project.md",
+                mira_dir / "skills" / "project-skill" / "SKILL.md",
+                mira_dir / "subagents" / "project.py",
+                mira_dir / "tools" / "project.py",
+                mira_dir / "prompts" / "project.md",
+            ]
+            for path in user_files:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"custom {path.name}", encoding="utf-8")
+            managed_files = [
+                mira_dir / "README.md",
+                mira_dir / ".env.example",
+                mira_dir / "mcp" / "schema.json",
+                mira_dir / "examples" / "tools" / "project_runtime_tool.py",
+            ]
+            for path in managed_files:
+                path.write_text("stale managed content", encoding="utf-8")
 
             ensure_project_examples(workspace)
 
-            self.assertEqual({path.name: path.read_bytes() for path in mcp_dir.iterdir()}, before)
+            for path in user_files:
+                self.assertEqual(path.read_text(encoding="utf-8"), f"custom {path.name}")
+            for path in managed_files:
+                self.assertNotEqual(path.read_text(encoding="utf-8"), "stale managed content")
 
     def test_default_memories_load_without_project_memory(self) -> None:
         """Both bundled memories should load when project examples are skipped."""
@@ -800,8 +844,8 @@ def get_tools(project_backend):
             )
         )
         self.assertTrue(any(isinstance(middleware, FileReferenceMiddleware) for middleware in kwargs["middleware"]))
-        self.assertIn("/.mira/skills", kwargs["skills"])
-        self.assertEqual(kwargs["memory"][0], "/.mira/memories/AGENTS.md")
+        self.assertEqual(kwargs["skills"], [])
+        self.assertEqual(kwargs["memory"][0], "/mira-defaults/memories/AGENTS.md")
         self.assertEqual([subagent["name"] for subagent in kwargs["subagents"]], ["general-purpose"])
         self.assertTrue(any(tool.name == "grep" for tool in kwargs["tools"]))
         self.assertFalse(any(tool.name == "example_project_note" for tool in kwargs["tools"]))
@@ -883,7 +927,7 @@ def read_file_as_bytes(path: str) -> str:
         self.assertEqual(
             action_memory,
             [
-                "/.mira/memories/AGENTS.md",
+                "/mira-defaults/memories/AGENTS.md",
                 "/mira-defaults/memories/software-development.md",
                 "/.mira/memories/01-context.md",
                 "/.mira/memories/zebra-notes.md",

@@ -1,0 +1,22 @@
+{
+  "$schema": "../../mcp/schema.json",
+  "mcpServers": {
+    "fetch": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        ".mira/mcp/servers/fetch",
+        "mcp-server-fetch"
+      ]
+    },
+    "remote": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+      }
+    }
+  }
+}

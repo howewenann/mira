@@ -837,6 +837,21 @@ class ACPWiringTests(unittest.TestCase):
         for path in paths.values():
             self.assertNotIn("client_common", path.read_text(encoding="utf-8"))
 
+    def test_minimal_examples_send_three_prompts_through_one_session(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for transport in ("stdio", "http"):
+            with self.subTest(transport=transport):
+                source = (
+                    root / "examples" / "acp" / transport / "minimal_client.py"
+                ).read_text(encoding="utf-8")
+                self.assertEqual(source.count("await connection.prompt("), 3)
+                self.assertEqual(source.count("session_id, [text_block("), 3)
+                self.assertIn("session_id = created_session.session_id", source)
+                self.assertNotIn("while True", source)
+                self.assertIn('"My name is Nicholas."', source)
+                self.assertIn('"What is my name?"', source)
+                self.assertIn('"Summarize our conversation."', source)
+
 
 class ACPStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_windows_preloads_numpy_before_stdio_runner(self) -> None:

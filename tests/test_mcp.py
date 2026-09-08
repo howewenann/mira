@@ -279,23 +279,28 @@ class MCPConfigurationTests(unittest.TestCase):
             self.assertTrue(loaded.valid)
             self.assertEqual(loaded.servers, {})
 
-            example_path = active_path.parent / "example.json"
+            example_path = root / ".mira" / "examples" / "mcp" / "example.json"
             active_path.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
             example = load_mcp_configuration(root, environ={"REMOTE_MCP_TOKEN": "resolved-secret"})
-            self.assertEqual(set(example.servers), {"local-server", "remote-server"})
-            self.assertEqual(example.servers["local-server"].transport, "stdio")
+            self.assertEqual(set(example.servers), {"fetch", "remote"})
+            self.assertEqual(example.servers["fetch"].transport, "stdio")
             self.assertEqual(
-                example.servers["local-server"].config,
+                example.servers["fetch"].config,
                 {
                     "transport": "stdio",
-                    "command": "python",
-                    "args": ["/absolute/path/to/server.py"],
+                    "command": "uv",
+                    "args": [
+                        "run",
+                        "--project",
+                        ".mira/mcp/servers/fetch",
+                        "mcp-server-fetch",
+                    ],
                     "env": {},
                 },
             )
-            self.assertEqual(example.servers["remote-server"].transport, "http")
+            self.assertEqual(example.servers["remote"].transport, "http")
             self.assertEqual(
-                example.servers["remote-server"].config,
+                example.servers["remote"].config,
                 {
                     "transport": "http",
                     "url": "https://example.com/mcp",
@@ -303,7 +308,7 @@ class MCPConfigurationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                example.servers["remote-server"].connection_config["headers"],
+                example.servers["remote"].connection_config["headers"],
                 {"Authorization": "Bearer resolved-secret"},
             )
 

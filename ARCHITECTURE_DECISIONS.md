@@ -313,6 +313,10 @@ to inspect.
   there by default.
 - Project resources live under the workspace's `.mira/` folder and are mounted
   at `/.mira/...`.
+- A fresh project creates empty active `memories/`, `skills/`, `subagents/`,
+  `tools/`, and `prompts/` directories. Teaching material lives only under
+  `.mira/examples/`, which none of the project resource loaders scan. This
+  keeps an example `AGENTS.md` from replacing MIRA's bundled default.
 - `build_resources()` loads memories, skills, subagents, and tools, then passes
   the final lists to `create_deep_agent(...)`.
 - Metadata keeps `source` and `replaces` fields so `/tools`, `/memories`,
@@ -322,6 +326,12 @@ to inspect.
 
 **Overwrite rules:**
 
+- Bootstrap distinguishes project-owned configuration from MIRA-owned
+  guidance. `models.yml`, `tracing.yml`, `mcp/mcp.json`, and active resource
+  files are created only when missing. `.mira/README.md`, `.mira/.env.example`,
+  `mcp/schema.json`, and `.mira/examples/` are inert documentation for the
+  installed MIRA version and refresh when shipped content changes. Repository
+  examples are packaged into the wheel as the source for those local copies.
 - Memories load from `*.md` and replace by filename. For example, a project
   `.mira/memories/AGENTS.md` replaces the bundled `AGENTS.md`, and a project
   `.mira/memories/software-development.md` replaces the bundled software
@@ -388,6 +398,7 @@ to inspect.
 **Where to check:** `mira_tool_api.py`, `agent/tools/discovery.py`,
 `agent/tools/failures.py`, `agent/tools/project.py`,
 `agent/tools/project_runner.py`, `agent/resources/defaults/`,
+`agent/resources/project_setup.py`, `agent/resources/project_kit/`,
 `tests/test_resources.py`, `tests/test_project_tools.py`.
 
 **Update this when:** Resource locations, overwrite rules, display metadata, or

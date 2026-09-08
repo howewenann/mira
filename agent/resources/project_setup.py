@@ -1,7 +1,9 @@
-"""Creation of editable `.mira` project examples."""
+"""Bootstrap user-owned configuration and MIRA-managed project guidance."""
 
 from __future__ import annotations
 
+from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 
 from config.tracing import TRACING_REGISTRY_TEMPLATE
@@ -10,48 +12,102 @@ from agent.resources.paths import (
     MCP_DIR,
     MEMORIES_DIR,
     PROJECT_DIR,
+    PROMPTS_DIR,
     SKILLS_DIR,
     SUBAGENTS_DIR,
     TOOLS_DIR,
-    PROMPTS_DIR,
 )
 
 
+PROJECT_KIT_ROOT = resources.files(__package__) / "project_kit"
+_SOURCE_EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples"
+
+
+def _examples_root() -> Traversable | Path:
+    """Return packaged examples, falling back to their checkout source tree."""
+    packaged = PROJECT_KIT_ROOT / "examples"
+    return packaged if packaged.is_dir() else _SOURCE_EXAMPLES_ROOT
+
+
+def _resource_text(path: Traversable | Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _example_text(relative_path: str) -> str:
+    return _resource_text(_examples_root() / relative_path)
+
+
 def ensure_project_examples(workspace: Path) -> None:
-    mira_dir = workspace / PROJECT_DIR
-    mcp_dir = mira_dir / MCP_DIR
-    memories_dir = mira_dir / MEMORIES_DIR
-    prompts_dir = mira_dir / PROMPTS_DIR
-    skills_dir = mira_dir / SKILLS_DIR / "example-skill"
-    subagents_dir = mira_dir / SUBAGENTS_DIR
-    tools_dir = mira_dir / TOOLS_DIR
-    tool_examples_dir = mira_dir / "examples" / TOOLS_DIR
+    """Create the local project kit while preserving user-owned configuration."""
+    mira_dir = Path(workspace) / PROJECT_DIR
 
-    mcp_dir.mkdir(parents=True, exist_ok=True)
-    memories_dir.mkdir(parents=True, exist_ok=True)
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    subagents_dir.mkdir(parents=True, exist_ok=True)
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    tool_examples_dir.mkdir(parents=True, exist_ok=True)
+    for relative_dir in (
+        MCP_DIR,
+        f"{MCP_DIR}/servers",
+        MEMORIES_DIR,
+        PROMPTS_DIR,
+        SKILLS_DIR,
+        SUBAGENTS_DIR,
+        TOOLS_DIR,
+    ):
+        (mira_dir / relative_dir).mkdir(parents=True, exist_ok=True)
 
-    write_example(mcp_dir / "mcp.json", EMPTY_MCP_CONFIGURATION)
-    write_example(mira_dir / "models.yml", MODEL_REGISTRY_TEMPLATE)
-    write_example(mira_dir / "tracing.yml", TRACING_REGISTRY_TEMPLATE)
-    write_example(mcp_dir / "example.json", EXAMPLE_MCP_CONFIGURATION)
-    write_example(mcp_dir / "schema.json", MCP_CONFIGURATION_SCHEMA)
-    write_example(mira_dir / "README.md", PROJECT_README)
-    write_example(memories_dir / "AGENTS.md", EXAMPLE_MEMORY)
-    write_example(skills_dir / "SKILL.md", EXAMPLE_SKILL)
-    write_example(subagents_dir / "example_subagent.py", EXAMPLE_SUBAGENT)
-    write_example(tool_examples_dir / "mira_runtime_tool.py", MIRA_RUNTIME_TOOL_EXAMPLE)
-    write_example(tool_examples_dir / "project_runtime_tool.py", PROJECT_RUNTIME_TOOL_EXAMPLE)
+    # These become project configuration as soon as they are created.
+    write_user_template(mira_dir / MCP_DIR / "mcp.json", EMPTY_MCP_CONFIGURATION)
+    write_user_template(mira_dir / "models.yml", MODEL_REGISTRY_TEMPLATE)
+    write_user_template(mira_dir / "tracing.yml", TRACING_REGISTRY_TEMPLATE)
+
+    # These document the installed MIRA version. Active resources never live
+    # here, so upgrading them cannot replace project behavior or configuration.
+    write_managed_resource(
+        mira_dir / "README.md",
+        _resource_text(PROJECT_KIT_ROOT / "README.md"),
+    )
+    write_managed_resource(
+        mira_dir / ".env.example",
+        _resource_text(PROJECT_KIT_ROOT / "env.example"),
+    )
+    write_managed_resource(mira_dir / MCP_DIR / "schema.json", MCP_CONFIGURATION_SCHEMA)
+
+    for target, source in MANAGED_EXAMPLES.items():
+        write_managed_resource(mira_dir / "examples" / target, _example_text(source))
 
 
-def write_example(path: Path, content: str) -> None:
+def write_user_template(path: Path, content: str) -> None:
+    """Create a user-owned template once and never overwrite it."""
     if path.exists():
         return
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def write_managed_resource(path: Path, content: str) -> None:
+    """Refresh documentation owned by the installed MIRA version."""
+    if path.exists() and path.read_text(encoding="utf-8") == content:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+MANAGED_EXAMPLES = {
+    "memories/AGENTS.md": "memories/AGENTS.md",
+    "skills/example-skill/SKILL.md": "skills/example-skill/SKILL.md",
+    "subagents/example_subagent.py": "subagents/example_subagent.py",
+    "tools/mira_runtime_tool.py": "tools/mira_runtime_tool.py",
+    "tools/project_runtime_tool.py": "tools/project_runtime_tool.py",
+    "mcp/README.md": "mcp/README.md",
+    "mcp/example.json": "mcp/example.json",
+    "tracing/README.md": "tracing/README.md",
+    "api/README.md": "mira_api/README.md",
+    "api/minimal_frontend.py": "mira_api/minimal_frontend.py",
+    "api/full_frontend.py": "mira_api/full_frontend.py",
+    "acp/README.md": "acp/README.md",
+    "acp/zed.md": "acp/zed.md",
+    "acp/stdio/minimal_client.py": "acp/stdio/minimal_client.py",
+    "acp/stdio/full_client.py": "acp/stdio/full_client.py",
+    "acp/http/minimal_client.py": "acp/http/minimal_client.py",
+    "acp/http/full_client.py": "acp/http/full_client.py",
+}
 
 
 EMPTY_MCP_CONFIGURATION = '''{
@@ -59,28 +115,6 @@ EMPTY_MCP_CONFIGURATION = '''{
   "mcpServers": {}
 }
 '''
-
-
-EXAMPLE_MCP_CONFIGURATION = '''{
-  "$schema": "./schema.json",
-  "mcpServers": {
-    "local-server": {
-      "type": "stdio",
-      "command": "python",
-      "args": ["/absolute/path/to/server.py"],
-      "env": {}
-    },
-    "remote-server": {
-      "type": "http",
-      "url": "https://example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
-      }
-    }
-  }
-}
-'''
-
 
 MCP_CONFIGURATION_SCHEMA = '''{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -165,134 +199,6 @@ MCP_CONFIGURATION_SCHEMA = '''{
   "required": ["mcpServers"],
   "additionalProperties": false
 }
-'''
-
-
-PROJECT_README = """# MIRA Project Resources
-
-MIRA loads project resources from this folder on top of its defaults.
-
-- `memories/*.md`: always-on project context. A file with the same name as a
-  default memory replaces the default.
-- `skills/<skill>/SKILL.md`: DeepAgents skills. Project skills are loaded from
-  these folders and may override bundled skills if MIRA adds any later.
-- `subagents/*.py`: Python files that export `SUBAGENTS = [...]`. Project
-  subagents are loaded from these files and may override bundled subagents if
-  MIRA adds any later. Enable and optionally assign them under `/models`.
-- `tools/*.py`: active Python tool files. Standard LangChain `@tool` runs in
-  MIRA, while `mira_tool_api.project_tool` runs its function body in the
-  configured project Execute Environment.
-- `mcp/mcp.json`: active MCP configuration. `mcp/example.json` is inert, and
-  `mcp/schema.json` documents the supported keys. MCP string values can use
-  `${NAME}` to read explicit process or workspace `.env` values without
-  storing the resolved value. Run `/reload-runtime` after changes.
-- `models.yml`: ordered AnyLLM profiles. Put secrets in `.env`, reference them
-  with `${NAME}`, then select Main and other assignments through `/models`.
-- `tracing.yml`: generic OTLP tracing profiles selected through Settings.
-  Environment references remain unresolved on disk and in the Settings preview.
-- `prompts/**/*`: recursive Mustache prompt files flattened to `/prompt__...`
-  commands with `__` between suffix-free path components.
-- `examples/tools/*.py`: inert examples to copy into `tools/`; this folder is
-  never scanned as active resources.
-  Files can also define `get_tools(project_backend)` for tools that need
-  workspace access. Project tools override defaults when the tool `name` is
-  the same.
-
-Use `/models` to configure models and `/runtime` to inspect the active model. Use
-`/tools`, `/memories`, `/skills`, and `/subagents` for their focused sections.
-"""
-
-EXAMPLE_MEMORY = """# Example Project Memory
-
-This is example memory. Replace it with this project's commands, style,
-architecture, and preferences.
-MIRA loads this file instead of its default `AGENTS.md`.
-"""
-
-EXAMPLE_SKILL = """---
-name: example-skill
-description: Example skill placeholder. Rename this before using it for a real project workflow.
----
-
-# Example Skill
-
-This is an example skill. Rename the folder and frontmatter `name`, then
-replace this text with a real project-specific workflow.
-"""
-
-EXAMPLE_SUBAGENT = '''"""Example project subagent placeholder.
-
-Edit or delete this file when you know which project helpers you want. Rename
-the subagent before using it for real work.
-"""
-
-SUBAGENTS = [
-    {
-        "name": "example-project-guide",
-        "description": "Example subagent placeholder. Rename before using for real project guidance.",
-        "system_prompt": (
-            "You are an example project guide placeholder. Replace this prompt "
-            "with concrete project guidance before relying on this subagent."
-        ),
-    }
-]
-'''
-
-MIRA_RUNTIME_TOOL_EXAMPLE = '''# Standard MIRA-runtime tool.
-#
-# This file is imported and executed inside MIRA's Python environment.
-# Packages imported here must be installed in MIRA's environment.
-#
-# To use:
-#   1. Copy this file into .mira/tools/
-#   2. Rename and edit the function.
-#   3. Run /reload.
-#
-# If an imported package is missing, Issues shows the exact command needed to
-# install it into MIRA's environment.
-
-from langchain_core.tools import tool
-
-
-@tool
-def count_words(text: str) -> int:
-    """Count the number of words in text."""
-    return len(text.split())
-'''
-
-PROJECT_RUNTIME_TOOL_EXAMPLE = '''# Project-runtime tool.
-#
-# The tool is exposed to the agent normally, but its function body runs
-# in the configured project Execute Environment.
-#
-# Use this for:
-#   - Packages installed only in the project's Conda env or venv
-#   - Imports from the current project package
-#
-# Important:
-#   Project-only imports must remain inside the function because MIRA
-#   imports this file first to discover the tool.
-#
-# To use:
-#   1. Copy this file into .mira/tools/
-#   2. Rename and edit the function.
-#   3. Configure the Execute Environment in /settings.
-#   4. Run /reload.
-#
-# Arguments should be JSON-compatible. Return JSON-compatible data or text.
-# Other return values are converted to a readable representation.
-
-from mira_tool_api import project_tool
-
-
-@project_tool
-def inspect_csv(path: str) -> str:
-    """Summarize a CSV using the project environment."""
-
-    import pandas as pd
-
-    dataframe = pd.read_csv(path)
-    return dataframe.describe(include="all").to_string()
 '''
 
 
