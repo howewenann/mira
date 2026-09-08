@@ -925,6 +925,131 @@ class SemanticProcessorTests(unittest.TestCase):
         provider.shutdown()
         return list(exporter.get_finished_spans())
 
+    def _finished_langsmith_error_span(
+        self,
+        error: BaseException,
+        *,
+        events_before: list[tuple[str, dict[str, object]]] | None = None,
+        events_after: list[tuple[str, dict[str, object]]] | None = None,
+        additional_errors: list[BaseException] | None = None,
+    ):
+        from langchain_core.tracers.base import BaseTracer
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+        from opentelemetry.trace import StatusCode
+        from tracing.semantic_processor import LangSmithOpenInferenceProcessor
+
+        def run_error(exc: BaseException) -> str:
+            try:
+                raise exc
+            except BaseException as raised:
+                return BaseTracer._get_stacktrace(raised)
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(LangSmithOpenInferenceProcessor())
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        tracer = provider.get_tracer("mira.semantic-error-tests")
+        with tracer.start_as_current_span(
+            "interrupted-node",
+            attributes={"langsmith.span.kind": "chain"},
+        ) as span:
+            span.set_status(StatusCode.ERROR)
+            for name, attributes in events_before or []:
+                span.add_event(name, attributes)
+            # LangSmith 0.11's OTel exporter wraps run.error in Exception, so
+            # the original type is present only in the traceback message.
+            span.record_exception(Exception(run_error(error)))
+            for additional_error in additional_errors or []:
+                span.record_exception(Exception(run_error(additional_error)))
+            for name, attributes in events_after or []:
+                span.add_event(name, attributes)
+        provider.shutdown()
+        return exporter.get_finished_spans()[0]
+
+    def test_graph_interrupt_is_exported_as_paused(self) -> None:
+        from langgraph.errors import GraphInterrupt
+        from opentelemetry.trace import StatusCode
+
+        span = self._finished_langsmith_error_span(GraphInterrupt(()))
+
+        self.assertIs(span.status.status_code, StatusCode.UNSET)
+        self.assertEqual(span.events, ())
+        self.assertIs(span.attributes["langgraph.interrupted"], True)
+        self.assertEqual(span.attributes["openinference.span.kind"], "CHAIN")
+
+    def test_legacy_node_interrupt_is_exported_as_paused(self) -> None:
+        import warnings
+
+        from langgraph.errors import NodeInterrupt
+        from opentelemetry.trace import StatusCode
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            error = NodeInterrupt("approval required")
+        span = self._finished_langsmith_error_span(error)
+
+        self.assertIs(span.status.status_code, StatusCode.UNSET)
+        self.assertEqual(span.events, ())
+        self.assertIs(span.attributes["langgraph.interrupted"], True)
+
+    def test_real_exceptions_remain_errors(self) -> None:
+        from opentelemetry.trace import StatusCode
+
+        for error in (ValueError("invalid input"), RuntimeError("runtime failed")):
+            with self.subTest(error=type(error).__name__):
+                span = self._finished_langsmith_error_span(error)
+
+                self.assertIs(span.status.status_code, StatusCode.ERROR)
+                self.assertEqual([event.name for event in span.events], ["exception"])
+                self.assertNotIn("langgraph.interrupted", span.attributes)
+
+    def test_error_message_that_mentions_graph_interrupt_remains_an_error(self) -> None:
+        from opentelemetry.trace import StatusCode
+
+        span = self._finished_langsmith_error_span(
+            RuntimeError(
+                "GraphInterrupt was mentioned\nlanggraph.errors.GraphInterrupt: ()"
+            )
+        )
+
+        self.assertIs(span.status.status_code, StatusCode.ERROR)
+        self.assertEqual([event.name for event in span.events], ["exception"])
+        self.assertNotIn("langgraph.interrupted", span.attributes)
+
+    def test_interrupt_removes_only_its_exception_event(self) -> None:
+        from langgraph.errors import GraphInterrupt
+        from opentelemetry.trace import StatusCode
+
+        span = self._finished_langsmith_error_span(
+            GraphInterrupt(()),
+            events_before=[("checkpoint.saved", {"step": 1})],
+            events_after=[("resume.available", {"thread": "test"})],
+        )
+
+        self.assertIs(span.status.status_code, StatusCode.UNSET)
+        self.assertEqual(
+            [event.name for event in span.events],
+            ["checkpoint.saved", "resume.available"],
+        )
+        self.assertEqual(span.events[0].attributes["step"], 1)
+        self.assertEqual(span.events[1].attributes["thread"], "test")
+
+    def test_interrupt_does_not_suppress_an_additional_real_exception(self) -> None:
+        from langgraph.errors import GraphInterrupt
+        from opentelemetry.trace import StatusCode
+
+        span = self._finished_langsmith_error_span(
+            GraphInterrupt(()),
+            additional_errors=[ValueError("also failed")],
+        )
+
+        self.assertIs(span.status.status_code, StatusCode.ERROR)
+        self.assertEqual([event.name for event in span.events], ["exception"])
+        self.assertIn("ValueError", span.events[0].attributes["exception.message"])
+        self.assertIs(span.attributes["langgraph.interrupted"], True)
+
     def test_profile_attributes_reach_every_span_without_discarding_semantics(self) -> None:
         spans = self._finished_spans(
             [

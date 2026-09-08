@@ -28,6 +28,7 @@ from openinference.semconv.trace import (
     SpanAttributes,
 )
 from opentelemetry.sdk.trace import SpanProcessor
+from opentelemetry.trace import Status, StatusCode
 from opentelemetry.util.types import AttributeValue
 
 _ROLE_BY_MESSAGE_TYPE = {
@@ -42,6 +43,11 @@ _ROLE_BY_MESSAGE_TYPE = {
     "toolmessage": "tool",
 }
 
+_LANGGRAPH_INTERRUPT_TYPES = {
+    "GraphInterrupt": "langgraph.errors.GraphInterrupt",
+    "NodeInterrupt": "langgraph.errors.NodeInterrupt",
+}
+
 
 class LangSmithOpenInferenceProcessor(SpanProcessor):
     """Add OpenInference semantics and configured attributes before export."""
@@ -52,6 +58,7 @@ class LangSmithOpenInferenceProcessor(SpanProcessor):
     def on_end(self, span: Any) -> None:
         attributes = dict(span.attributes or {})
         if "langsmith.span.kind" in attributes:
+            _normalize_langgraph_interrupt(span, attributes)
             kind = _span_kind(attributes)
             enriched = _openinference_attributes(span.name, attributes, kind)
             _remove_misleading_genai_attributes(attributes, kind)
@@ -64,6 +71,44 @@ class LangSmithOpenInferenceProcessor(SpanProcessor):
         # processor callbacks. OpenInference's own conversion processors use
         # this replacement so later processors receive the enriched view.
         span._attributes = attributes
+
+
+def _normalize_langgraph_interrupt(span: Any, attributes: dict[str, Any]) -> None:
+    if span.status.status_code is not StatusCode.ERROR:
+        return
+
+    events = list(span.events or ())
+    remaining_events = [event for event in events if not _is_interrupt_event(event)]
+    if len(remaining_events) == len(events):
+        return
+
+    attributes["langgraph.interrupted"] = True
+
+    # ReadableSpan exposes status and events as read-only properties backed by
+    # private state. OTel has frozen the live span before on_end(), so replacing
+    # that state here is the only way for the next processor to see the fix.
+    span._events = remaining_events
+    if not any(event.name == "exception" for event in remaining_events):
+        span._status = Status(StatusCode.UNSET)
+
+
+def _is_interrupt_event(event: Any) -> bool:
+    if event.name != "exception":
+        return False
+    attributes = event.attributes or {}
+    if attributes.get("exception.type") != "Exception":
+        return False
+    message = attributes.get("exception.message")
+    if not isinstance(message, str) or "Traceback (most recent call last):" not in message:
+        return False
+
+    # LangSmith records Exception(run.error), which hides the original type in
+    # exception.type. Require both its repr prefix and exact traceback class;
+    # an ordinary error that merely mentions GraphInterrupt matches neither.
+    for class_name, qualified_name in _LANGGRAPH_INTERRUPT_TYPES.items():
+        if message.startswith(f"{class_name}(") and f"\n{qualified_name}:" in message:
+            return True
+    return False
 
 
 def _openinference_attributes(
