@@ -23,6 +23,7 @@ from textual.widgets import Button, ListView, Static
 
 from agent.middleware.compaction import compact_after_turn
 from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
+from agent.skills import SkillRegistry, prepare_skill
 from agent.planning.policy import (
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
@@ -50,7 +51,7 @@ from core.context.report import (
 )
 from core.diagnostics.error_report import clear_error_reports, write_error_report
 from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
-from core.application import available_tools, initial_mode, refresh_agent_specs
+from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
@@ -81,7 +82,7 @@ from ui.shared.interrupts import (
 from ui.textual.artifact_review import PendingArtifactReview
 from ui.textual.adapter import TextualFrontend
 from ui.textual.commands.dispatcher import handle_command
-from ui.textual.runtime_report import runtime_report
+from ui.textual.runtime_report import prompts_table, runtime_report
 from ui.textual.widgets import (
     AutocompleteInput,
     ChatLog,
@@ -247,6 +248,7 @@ class MiraApp(App[None]):
                 yield AutocompleteInput(
                     tool_provider=self._active_autocomplete_tools,
                     subagent_provider=self._active_autocomplete_subagents,
+                    skill_registry_provider=self._skill_registry,
                 )
                 yield TelemetryBar(id="telemetry-row")
 
@@ -497,11 +499,26 @@ class MiraApp(App[None]):
             return
 
         prepared = None
+        if text.startswith("/skill__"):
+            if not self._model_agents_available():
+                return
+            try:
+                prepared = await asyncio.to_thread(
+                    prepare_skill,
+                    text,
+                    self._skill_registry(),
+                    self.agent.mira_backend,
+                )
+            except (AttributeError, ValueError) as error:
+                self.system_message(str(error), kind="warning")
+                self.action_focus_prompt()
+                return
         if self.mcp_manager is not None:
             if text.startswith("/mcp__"):
                 await self.mcp_manager.discover_prompts()
             try:
-                prepared = await self.mcp_manager.prompt_registry.resolve(text)
+                prompt_prepared = await self.mcp_manager.prompt_registry.resolve(text)
+                prepared = prepared or prompt_prepared
             except ValueError as error:
                 self.system_message(str(error), kind="warning")
                 self.action_focus_prompt()
@@ -992,16 +1009,17 @@ class MiraApp(App[None]):
     async def _run_prompts_command(self) -> None:
         """List the exact shared prompt registry after lazy MCP discovery."""
         if self.mcp_manager is None:
-            self.system_message("No prompts loaded.", kind="muted")
+            self.command_output(prompts_table([]))
+            self.action_focus_prompt()
             return
         await self.mcp_manager.discover_prompts()
         specs = sorted(self.mcp_manager.prompt_registry.specs.values(), key=lambda item: item.command.casefold())
-        if not specs:
-            self.system_message("No local or MCP prompts loaded.", kind="muted")
-        else:
-            lines = ["Prompts", *(f"{spec.usage}    {spec.description}" for spec in specs)]
-            self.system_message("\n".join(lines), kind="info")
+        self.command_output(prompts_table(specs))
         self.action_focus_prompt()
+
+    def _skill_registry(self) -> SkillRegistry:
+        """Build exact commands from the active resource projection."""
+        return SkillRegistry(resources_for(self.mode, "skills"))
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from agent.mcp.models import MCPResource, PromptArgument, PromptSpec
+from agent.skills import SkillRegistry
 from ui.textual.commands.help import COMMAND_HELP_SECTIONS, command_help_entries
 from ui.textual.commands.dispatcher import COMMAND_HELP_SECTIONS as REPL_COMMAND_HELP_SECTIONS
 from ui.textual.widgets.autocomplete_input import (
@@ -79,6 +80,25 @@ class AutocompleteModelTests(unittest.TestCase):
         self.assertEqual(reusable.kind, "prompt_command")
         self.assertEqual(reusable.display, "/prompt__review <file> [focus]")
         self.assertEqual(reusable.insertion, "/prompt__review")
+
+    def test_skill_commands_use_dynamic_registry_and_custom_tool_green(self) -> None:
+        registry = SkillRegistry(
+            [
+                {"name": "review", "description": "Review code."},
+                {"name": "skill-creator", "description": "Create skills."},
+            ]
+        )
+        review = next(item for item in command_items("review", None, registry))
+        creator = next(item for item in command_items("creator", None, registry))
+
+        self.assertEqual(review.kind, "skill_command")
+        self.assertEqual(review.display, "/skill__review")
+        self.assertEqual(review.insertion, "/skill__review")
+        self.assertEqual(creator.display, "/skill__skill-creator")
+        rendered = _completion_row(review)
+        self.assertTrue(rendered.plain.startswith("SKIL  "))
+        self.assertIn("#78d5cf", str(rendered.spans[0].style))
+        self.assertTrue(any(item.kind == "native_command" for item in command_items("skill", None, registry)))
 
     def test_command_description_matches_do_not_displace_the_typed_command(self) -> None:
         self.assertEqual([item.display for item in command_items("too")], ["/tools"])

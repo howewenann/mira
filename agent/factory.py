@@ -37,6 +37,7 @@ from agent.resources import build_resources
 from agent.subagents.compilation import compile_dynamic_subagents
 from agent.subagents.discovery import resolve_subagent_tool_allowlists
 from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_name
+from agent.tools.skill_validation import VALIDATE_SKILL_TOOL
 from config.metadata import ModelMetadata
 from config.settings import (
     EXECUTE_TOOL,
@@ -579,7 +580,8 @@ def effective_rubric_tools(
     filesystem_names = [
         name
         for name in READ_ONLY_BUILTIN_TOOLS
-        if name not in excluded
+        if name != VALIDATE_SKILL_TOOL
+        and name not in excluded
         and tool_enabled(config, name)
         and tool_rubric_access(config, name)
     ]
@@ -606,6 +608,14 @@ def effective_rubric_tools(
         name = tool_name(tool)
         item = metadata_by_name.get(name, {})
         source = item.get("source")
+        if name == VALIDATE_SKILL_TOOL:
+            if (
+                name not in excluded
+                and tool_enabled(config, name)
+                and tool_rubric_access(config, name)
+            ):
+                resolved.append(tool)
+            continue
         if name in excluded or source not in {"project", "mcp"}:
             continue
         policy = tool_policy(config, name)

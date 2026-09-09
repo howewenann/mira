@@ -8,6 +8,7 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
+from agent.mcp.models import PromptSpec
 from config.runtime import RuntimeSnapshot
 
 
@@ -87,6 +88,27 @@ def resources_table(title: str, items: Sequence[Mapping[str, str]]) -> Table:
             str(item.get("replaces") or "-"),
             str(item.get("path") or "-"),
         )
+    return table
+
+
+def prompts_table(specs: Sequence[PromptSpec]) -> Table:
+    """Build the local and MCP prompt registry with independently wrapping fields."""
+    table = Table(title="Prompts", title_style="bold cyan")
+    table.add_column("Prompt", style="cyan", no_wrap=True)
+    table.add_column("Source", no_wrap=True)
+    table.add_column("Arguments")
+    table.add_column("Description")
+    if not specs:
+        table.add_row("none loaded", "-", "-", "-")
+        return table
+
+    for spec in specs:
+        arguments = " ".join(
+            f"<{argument.name}>" if argument.required else f"[{argument.name}]"
+            for argument in spec.arguments
+        )
+        source = f"mcp:{spec.server}" if spec.source == "mcp" else "local"
+        table.add_row(spec.command, source, arguments or "-", spec.description or "-")
     return table
 
 

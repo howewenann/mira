@@ -41,6 +41,7 @@ from textual.widgets import (
 from agent.middleware.compaction import PostTurnCompactionResult
 from agent.middleware.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent.mcp.prompts import PromptRegistry
+from agent.mcp.models import PromptArgument, PromptSpec
 from agent.planning.policy import PLANNING_STAGE_PLAN_FINALIZE, PLANNING_STAGE_PLAN_RESEARCH
 from agent.tools.specs import mira_environment_label
 from config.metadata import ModelMetadata
@@ -5367,6 +5368,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("plan_reader", output)
         self.assertNotIn("action_writer", output)
 
+    async def test_prompts_command_uses_rich_table_with_separate_arguments(self) -> None:
+        async def resolve(_values: dict[str, str]) -> list[Any]:
+            return []
+
+        spec = PromptSpec(
+            command="/mcp__github__issue_to_fix_workflow",
+            description="Draft an issue workflow.",
+            arguments=(PromptArgument("owner"), PromptArgument("repo")),
+            source="mcp",
+            resolver=resolve,
+            server="github",
+        )
+        manager = SimpleNamespace(
+            prompt_registry=SimpleNamespace(specs={spec.command: spec}),
+            discover_prompts=AsyncMock(),
+            shutdown=AsyncMock(),
+            set_change_handler=lambda _handler: None,
+            show_status=False,
+            servers={},
+            usable_count=0,
+            configured_count=0,
+        )
+        app = make_app(mcp_manager=manager)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one(PromptBox)
+            await app.submit_prompt(PromptBox.Submitted(prompt, "/prompts"))
+            await wait_until(lambda: manager.discover_prompts.await_count == 1)
+            await pilot.pause()
+            blocks = [child for child in app.query_one(ChatLog).children if "command" in child.classes]
+            output = renderable_plain(blocks[0])
+
+        self.assertIn("Prompt", output)
+        self.assertIn("Source", output)
+        self.assertIn("Arguments", output)
+        self.assertIn("Description", output)
+        self.assertIn("/mcp__github__issue_to_fix_workflow", output)
+        self.assertIn("mcp:github", output)
+        self.assertIn("<owner> <repo>", output)
+
     async def test_resource_commands_render_one_section_per_command(self) -> None:
         """Resource inspection should stay split across focused command blocks."""
         app = make_app()
@@ -6712,6 +6753,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
+                        "validate_skill",
                         "write_file",
                         "edit_file",
                         "delete",
@@ -6827,13 +6869,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
                 self.assertTrue(
-                    str(buttons["settings-access-policy-plan"].label).endswith("4 allowed      >")
+                    str(buttons["settings-access-policy-plan"].label).endswith("5 allowed      >")
                 )
                 self.assertTrue(
-                    str(buttons["settings-access-policy-ptc"].label).endswith("4 allowed      >")
+                    str(buttons["settings-access-policy-ptc"].label).endswith("5 allowed      >")
                 )
                 self.assertTrue(
-                    str(buttons["settings-access-policy-rubric"].label).endswith("4 allowed      >")
+                    str(buttons["settings-access-policy-rubric"].label).endswith("5 allowed      >")
                 )
                 self.assertNotIn("Adds write_todos", rendered)
                 self.assertNotIn("Enter a whole number", rendered)
@@ -7139,11 +7181,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
                 self.assertTrue(labels["settings-access-policy-plan"].startswith("Plan"))
-                self.assertTrue(labels["settings-access-policy-plan"].endswith("5 allowed      >"))
+                self.assertTrue(labels["settings-access-policy-plan"].endswith("6 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-ptc"].startswith("PTC"))
-                self.assertTrue(labels["settings-access-policy-ptc"].endswith("4 allowed      >"))
+                self.assertTrue(labels["settings-access-policy-ptc"].endswith("5 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-rubric"].startswith("Rubric"))
-                self.assertTrue(labels["settings-access-policy-rubric"].endswith("5 allowed      >"))
+                self.assertTrue(labels["settings-access-policy-rubric"].endswith("6 allowed      >"))
                 plan_button = panel.query_one("#settings-access-policy-plan", Button)
                 execute_select = panel.query_one("#settings-execute-env-mode", Select)
                 self.assertEqual(plan_button.region.width, 56)
@@ -7217,6 +7259,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
+                        "validate_skill",
                         "write_file",
                         "edit_file",
                         "delete",
@@ -7254,7 +7297,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(
                     str(panel.query_one("#settings-access-policy-rubric", Button).label).endswith(
-                        "6 allowed      >"
+                        "7 allowed      >"
                     )
                 )
 
@@ -7317,6 +7360,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
+                        "validate_skill",
                         "write_file",
                         "edit_file",
                         "delete",

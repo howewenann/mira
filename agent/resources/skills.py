@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import Any
+
+from deepagents.middleware.skills import SkillMetadata, _list_skills
 
 from agent.resources.items import merge_project_overrides
 from agent.resources.paths import (
     SKILLS_DIR,
-    default_dir,
     default_virtual_dir,
-    project_dir,
     project_virtual_dir,
 )
 
 
-def load_skills(workspace: Path) -> tuple[list[str], list[dict[str, str]]]:
+def load_skills(backend: Any) -> tuple[list[str], list[dict[str, str]]]:
+    """Discover MIRA skill roots with DeepAgents' canonical parser."""
     default_source = default_virtual_dir(SKILLS_DIR)
     project_source = project_virtual_dir(SKILLS_DIR)
 
-    defaults = skill_files(default_dir(SKILLS_DIR), default_source, "default")
-    projects = skill_files(project_dir(workspace, SKILLS_DIR), project_source, "project")
+    defaults = skill_files(backend, default_source, "default")
+    projects = skill_files(backend, project_source, "project")
 
     sources = []
     if defaults:
@@ -30,40 +31,16 @@ def load_skills(workspace: Path) -> tuple[list[str], list[dict[str, str]]]:
     return sources, merge_project_overrides(defaults, projects)
 
 
-def skill_files(root: Path, virtual_root: str, source: str) -> list[dict[str, str]]:
-    if not root.exists():
-        return []
-
-    items = []
-    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
-        skill_file = directory / "SKILL.md"
-        if not skill_file.exists():
-            continue
-
-        items.append(
-            {
-                "name": frontmatter_name(skill_file) or directory.name,
-                "path": f"{virtual_root}/{directory.name}/SKILL.md",
-                "source": source,
-                "replaces": "",
-            }
-        )
-
-    return items
+def skill_files(backend: Any, virtual_root: str, source: str) -> list[dict[str, str]]:
+    """Project DeepAgents metadata into MIRA's display shape."""
+    return [skill_item(skill, source) for skill in _list_skills(backend, virtual_root)]
 
 
-def frontmatter_name(path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        return ""
-
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return ""
-
-    for line in parts[1].splitlines():
-        key, separator, value = line.partition(":")
-        if separator and key.strip() == "name":
-            return value.strip().strip("\"'")
-
-    return ""
+def skill_item(skill: SkillMetadata, source: str) -> dict[str, str]:
+    return {
+        "name": skill["name"],
+        "description": skill["description"],
+        "path": skill["path"],
+        "source": source,
+        "replaces": "",
+    }

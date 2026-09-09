@@ -36,7 +36,7 @@ RUBRIC_MODEL = "rubric"
 SUMMARIZATION_MODEL = "summarization"
 SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
-READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep")
+READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep", "validate_skill")
 INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task")
 INBUILT_TOOLS = (*READ_ONLY_BUILTIN_TOOLS, *INBUILT_DANGEROUS_TOOLS)
 PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task"})
@@ -105,6 +105,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "read_file": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "glob": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "grep": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            "validate_skill": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},

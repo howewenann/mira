@@ -40,9 +40,21 @@ DEFAULT_TOOL_SPECS = [
     {"name": "finalize_goal", "description": "Finalize a Goal title after Success Criteria generation."},
     {"name": "show_plan", "description": "Render the exact retained current Plan."},
     {"name": "show_goal", "description": "Render the exact retained current Goal."},
-    *({"name": name, "description": ""} for name in (
-        "write_todos", "ls", "read_file", "write_file", "edit_file", "glob", "grep", "eval", "task"
-    )),
+    *(
+        {"name": name, "description": ""}
+        for name in (
+            "write_todos",
+            "ls",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "validate_skill",
+            "eval",
+            "task",
+        )
+    ),
 ]
 
 
@@ -331,7 +343,15 @@ def normalize_resource_items(items: Any) -> list[dict[str, str]]:
             continue
         name, path, source = (str(item.get(key) or "") for key in ("name", "path", "source"))
         if name and path and source:
-            normalized.append({"name": name, "path": path, "source": source, "replaces": str(item.get("replaces") or "")})
+            normalized_item = {
+                "name": name,
+                "path": path,
+                "source": source,
+                "replaces": str(item.get("replaces") or ""),
+            }
+            if item.get("description"):
+                normalized_item["description"] = str(item["description"])
+            normalized.append(normalized_item)
     return normalized
 
 

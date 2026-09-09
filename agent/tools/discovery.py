@@ -31,6 +31,7 @@ BUILT_IN_TOOL_NAMES = {
     "grep",
     "eval",
     "task",
+    "validate_skill",
 }
 
 

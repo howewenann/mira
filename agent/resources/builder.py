@@ -18,6 +18,7 @@ from agent.resources.skills import load_skills
 from agent.subagents.discovery import SubagentDiscovery, discover_subagents, effective_subagent_specs
 from agent.tools.discovery import load_tools, tool_name
 from agent.tools.failures import ToolLoadFailure, tool_failure_issues
+from agent.tools.skill_validation import VALIDATE_SKILL_TOOL, build_validate_skill_tool
 from core.diagnostics.issues import Issue
 from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
@@ -81,11 +82,16 @@ def build_resources(
     backends = build_backends(workspace, settings=settings, enable_execute=enable_execute)
 
     memories = load_memories(workspace)
-    skill_sources, skills = load_skills(workspace)
+    skill_sources, skills = load_skills(backends.combined)
     discovery = subagent_discovery or discover_subagents(workspace)
     subagents = effective_subagent_specs(discovery, config) if config is not None else []
     subagent_info = [item.display_item() for item in discovery.items]
     tools, tool_info, tool_failures = load_tools(workspace, backends.project, settings)
+    tools = [
+        build_validate_skill_tool(backends.combined),
+        *(tool for tool in tools if tool_name(tool) != VALIDATE_SKILL_TOOL),
+    ]
+    tool_info = [item for item in tool_info if item["name"] != VALIDATE_SKILL_TOOL]
     active_tools = enabled_tools(tools, tool_info, settings)
 
     return ResourceBundle(

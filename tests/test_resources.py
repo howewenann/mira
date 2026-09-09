@@ -113,7 +113,8 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 if path.is_file()
             }
             self.assertEqual(actual_examples, expected_examples)
-            self.assertEqual(resources.skills, [])
+            self.assertEqual(resources.skills, ["/mira-defaults/skills"])
+            self.assertEqual(resources.metadata["skills"][0]["name"], "skill-creator")
             self.assertEqual(
                 resources.memory[:2],
                 [
@@ -362,17 +363,16 @@ description: Project-specific workflow.
 
             resources = build_resources(workspace, create_examples=False)
 
-            self.assertEqual(resources.skills, ["/.mira/skills"])
+            self.assertEqual(resources.skills, ["/mira-defaults/skills", "/.mira/skills"])
             self.assertEqual(
-                resources.metadata["skills"],
-                [
-                    {
-                        "name": "project-skill",
-                        "path": "/.mira/skills/custom-folder/SKILL.md",
-                        "source": "project",
-                        "replaces": "",
-                    }
-                ],
+                next(item for item in resources.metadata["skills"] if item["name"] == "project-skill"),
+                {
+                    "name": "project-skill",
+                    "description": "Project-specific workflow.",
+                    "path": "/.mira/skills/custom-folder/SKILL.md",
+                    "source": "project",
+                    "replaces": "",
+                },
             )
 
     def test_project_subagent_is_discovered_disabled_then_can_be_enabled(self) -> None:
@@ -416,8 +416,8 @@ description: Project-specific workflow.
         with tempfile.TemporaryDirectory() as directory:
             resources = build_resources(Path(directory), create_examples=False)
 
-            self.assertEqual(resources.skills, [])
-            self.assertEqual(resources.metadata["skills"], [])
+            self.assertEqual(resources.skills, ["/mira-defaults/skills"])
+            self.assertEqual([item["name"] for item in resources.metadata["skills"]], ["skill-creator"])
             self.assertEqual(resources.subagents, [])
             self.assertEqual(resources.metadata["subagents"][0]["name"], "general-purpose")
 
@@ -587,6 +587,7 @@ def project_status() -> str:
             self.assertEqual(
                 names,
                 [
+                    "validate_skill",
                     "ask_user",
                     "finalize_goal",
                     "finalize_plan",
@@ -598,7 +599,8 @@ def project_status() -> str:
                     "project_status",
                 ],
             )
-            self.assertEqual(resources.tools[5].invoke({"pattern": "needle"}), "project grep: needle")
+            project_grep_tool = next(tool for tool in resources.tools if tool.name == "grep")
+            self.assertEqual(project_grep_tool.invoke({"pattern": "needle"}), "project grep: needle")
             self.assertEqual(
                 resources.metadata["tools"],
                 [
@@ -844,7 +846,7 @@ def get_tools(project_backend):
             )
         )
         self.assertTrue(any(isinstance(middleware, FileReferenceMiddleware) for middleware in kwargs["middleware"]))
-        self.assertEqual(kwargs["skills"], [])
+        self.assertEqual(kwargs["skills"], ["/mira-defaults/skills"])
         self.assertEqual(kwargs["memory"][0], "/mira-defaults/memories/AGENTS.md")
         self.assertEqual([subagent["name"] for subagent in kwargs["subagents"]], ["general-purpose"])
         self.assertTrue(any(tool.name == "grep" for tool in kwargs["tools"]))
@@ -959,7 +961,7 @@ def read_file_as_bytes(path: str) -> str:
         """QuickJS PTC should expose read-only exploration tools, not writes or interrupts."""
         ptc_tools = set(QUICKJS_PTC_TOOLS)
 
-        self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep"})
+        self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep", "validate_skill"})
         self.assertEqual(QUICKJS_PTC_TOOLS, READ_ONLY_BUILTIN_TOOLS)
         self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
 
@@ -979,7 +981,7 @@ def read_file_as_bytes(path: str) -> str:
 
         resolved = factory.effective_ptc_tool_names(config, [], [], excluded)
 
-        self.assertEqual(resolved, ["ls", "read_file", "glob"])
+        self.assertEqual(resolved, ["ls", "read_file", "glob", "validate_skill"])
 
     def test_effective_ptc_tools_use_only_resolved_tools_and_runtime_names(self) -> None:
         """Saved PTC flags should not bypass effective local or MCP availability."""

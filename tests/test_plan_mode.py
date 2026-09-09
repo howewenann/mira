@@ -397,7 +397,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             code_middleware.call_args.kwargs["ptc"],
-            ["ls", "read_file", "glob", "grep"],
+            ["ls", "read_file", "glob", "grep", "validate_skill"],
         )
         self.assertFalse(code_middleware.call_args.kwargs["subagents"])
 
@@ -428,7 +428,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         call = rubric.call_args.kwargs
         self.assertEqual(
             [tool.name for tool in call["verifier_tools"]],
-            ["ls", "read_file", "glob", "grep"],
+            ["ls", "read_file", "glob", "grep", "validate_skill"],
         )
         self.assertEqual(call["verifier_middleware"], [])
         self.assertEqual(call["model"], "model")
@@ -546,7 +546,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("read_file", plan_excluded)
         self.assertEqual(
             factory.effective_ptc_tool_names(config, [], [], action_excluded),
-            ["ls", "read_file", "grep"],
+            ["ls", "read_file", "grep", "validate_skill"],
         )
 
         rubric_tools, _interrupts = factory.effective_rubric_tools(
@@ -614,7 +614,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["model"], "grader-model")
         self.assertEqual(
             [tool.name for tool in call["verifier_tools"]],
-            ["ls", "read_file", "glob", "grep"],
+            ["ls", "read_file", "glob", "grep", "validate_skill"],
         )
         self.assertEqual(call["verifier_middleware"], [])
         self.assertEqual(call["max_iterations"], 2)

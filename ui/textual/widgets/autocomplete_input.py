@@ -40,7 +40,10 @@ EXCLUDED_FILE_COMPONENTS = {
 class CompletionItem:
     """The source-neutral data needed to render and insert one completion."""
 
-    kind: Literal["tool", "subagent", "file", "mcp_resource", "native_command", "prompt_command", "status"]
+    kind: Literal[
+        "tool", "subagent", "file", "mcp_resource", "native_command",
+        "prompt_command", "skill_command", "status",
+    ]
     display: str
     insertion: str
     description: str = ""
@@ -118,12 +121,14 @@ class AutocompleteInput(Vertical):
         project_backend: Any = None,
         tool_provider: Callable[[], list[dict[str, str]]] | None = None,
         subagent_provider: Callable[[], list[dict[str, str]]] | None = None,
+        skill_registry_provider: Callable[[], Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
         self.project_backend = project_backend
         self.tool_provider = tool_provider
         self.subagent_provider = subagent_provider
+        self.skill_registry_provider = skill_registry_provider
         self._items: list[CompletionItem] = []
         self._file_paths: list[str] | None = None
         self._fragment: _CompletionFragment | None = None
@@ -290,7 +295,9 @@ class AutocompleteInput(Vertical):
             self._file_paths = None
             self._interaction_start = None
             self._fragment = fragment
-            self._show_items(command_items(fragment.query, self._prompt_registry()))
+            self._show_items(
+                command_items(fragment.query, self._prompt_registry(), self._skill_registry())
+            )
             if self.mcp_manager is not None:
                 generation = self._generation
                 self._prompt_worker = self.run_worker(
@@ -397,10 +404,15 @@ class AutocompleteInput(Vertical):
         self._prompt_worker = None
         fragment = self._fragment
         if fragment is not None and fragment.kind == "command" and fragment.start == interaction_start:
-            self._show_items(command_items(fragment.query, self._prompt_registry()))
+            self._show_items(
+                command_items(fragment.query, self._prompt_registry(), self._skill_registry())
+            )
 
     def _prompt_registry(self) -> Any:
         return self.mcp_manager.prompt_registry if self.mcp_manager is not None else None
+
+    def _skill_registry(self) -> Any:
+        return self.skill_registry_provider() if self.skill_registry_provider is not None else None
 
     def _resource_errors(self) -> list[str]:
         return self.mcp_manager.resource_errors() if self.mcp_manager is not None else []
@@ -455,9 +467,17 @@ class AutocompleteInput(Vertical):
                 setattr(self, attribute, None)
 
 
-def command_items(query: str, prompt_registry: Any = None) -> list[CompletionItem]:
-    """Merge native and prompt command matches while preserving their kinds."""
-    items = [*native_command_items(query), *prompt_command_items(query, prompt_registry)]
+def command_items(
+    query: str,
+    prompt_registry: Any = None,
+    skill_registry: Any = None,
+) -> list[CompletionItem]:
+    """Merge native, prompt, and skill commands while preserving their kinds."""
+    items = [
+        *native_command_items(query),
+        *prompt_command_items(query, prompt_registry),
+        *skill_command_items(query, skill_registry),
+    ]
     return sorted(items, key=lambda item: (item.display.casefold(), item.display))
 
 
@@ -492,6 +512,24 @@ def prompt_command_items(query: str, prompt_registry: Any = None) -> list[Comple
         )
         for spec in specs.values()
         if folded in spec.usage.casefold()
+    ]
+
+
+def skill_command_items(query: str, skill_registry: Any = None) -> list[CompletionItem]:
+    """Return exact dynamic commands from MIRA's discovered skill registry."""
+    if skill_registry is None:
+        return []
+    folded = query.casefold()
+    return [
+        CompletionItem(
+            kind="skill_command",
+            display=command,
+            insertion=command,
+            description=str(skill.get("description") or ""),
+            metadata=skill,
+        )
+        for command, skill in skill_registry.commands.items()
+        if folded in command.casefold()
     ]
 
 
@@ -644,6 +682,7 @@ def _completion_row(item: CompletionItem) -> Text:
         "file": ("FILE", "#aeb8be"),
         "native_command": ("CMND", "#d2a957"),
         "prompt_command": ("PRMT", "#8fb9e8"),
+        "skill_command": ("SKIL", "#78d5cf"),
     }
     label, color = labels[item.kind]
     row.append(label, style=f"bold {color}")
@@ -678,4 +717,5 @@ __all__ = [
     "file_items",
     "native_command_items",
     "prompt_command_items",
+    "skill_command_items",
 ]

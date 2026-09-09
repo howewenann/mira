@@ -238,7 +238,7 @@ def autocomplete_table() -> Table:
     table.add_column("Selection")
     table.add_row(
         "/",
-        "CMND commands and PRMT prompts",
+        "CMND commands, PRMT prompts and SKIL skills",
         "Inserts the command without a trailing space",
     )
     table.add_row(
