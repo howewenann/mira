@@ -6,8 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.execution.streams.subagents import SubagentTranscriptCapture
-from session.recorder import SessionRecorder
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from core.execution.streams.subagents import SubagentProtocolCapture, SubagentTranscriptCapture
+from session.recorder import SessionEventEmitter, SessionRecorder
 from session.store import SessionStore
 from session.subagent_runs import (
     CANCELLED,
@@ -34,6 +36,13 @@ class Store:
 
 def record() -> dict:
     return {"events": [], "runs": [], "turns": 2}
+
+
+def values_protocol_event(namespace: tuple[str, ...], messages: list[object]) -> dict:
+    return {
+        "method": "values",
+        "params": {"namespace": namespace, "data": {"messages": messages}},
+    }
 
 
 class SubagentRunTests(unittest.TestCase):
@@ -94,6 +103,18 @@ class SubagentRunTests(unittest.TestCase):
         self.assertEqual(first["events"][0]["text"], "first")
         self.assertEqual(second["events"][0]["text"], "second")
 
+    def test_sequential_runs_preserve_creation_order_and_identity(self) -> None:
+        session = record()
+        first = start_run(session, anchor_id="a", turn_id="1", task_call_id="task-1")
+        append_run_event(session, first["id"], {"type": "assistant", "text": "first"})
+        finish_run(session, first["id"], status=DONE)
+        second = start_run(session, anchor_id="b", turn_id="1", task_call_id="task-2")
+        append_run_event(session, second["id"], {"type": "assistant", "text": "second"})
+        finish_run(session, second["id"], status=DONE)
+
+        self.assertEqual([run["id"] for run in session["runs"]], [first["id"], second["id"]])
+        self.assertEqual([run["task_call_id"] for run in session["runs"]], ["task-1", "task-2"])
+
     def test_capture_persists_reasoning_messages_tools_and_results(self) -> None:
         class Sink:
             def __init__(self) -> None:
@@ -113,6 +134,61 @@ class SubagentRunTests(unittest.TestCase):
             [event["type"] for event in sink.events],
             ["reasoning", "assistant", "tool_call", "tool_result"],
         )
+
+    def test_eval_protocol_snapshots_capture_every_parallel_child(self) -> None:
+        session = record()
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call("eval", {}, call_id="eval-1")
+        for letter in "ABC":
+            recorder.eval_subagent_started(
+                f"worker [{letter}]",
+                f"Return {letter}.",
+                eval_id="eval-1",
+                task_call_id=f"ptc-{letter}",
+            )
+
+        emitter = SessionEventEmitter(object(), recorder)
+        capture = SubagentProtocolCapture(emitter)
+        human_a = HumanMessage("Return A.")
+        capture.handle(values_protocol_event(("tools:one",), [human_a]))
+        for letter in "ABC":
+            capture.run_started(
+                {"id": f"ptc-{letter}", "description": f"Return {letter}."}
+            )
+
+        tool_call = AIMessage(
+            content="",
+            additional_kwargs={"reasoning_content": "inspect first"},
+            tool_calls=[{"name": "read_file", "args": {"path": "README.md"}, "id": "tool-1"}],
+        )
+        tool_result = ToolMessage("contents", tool_call_id="tool-1", name="read_file")
+        final_a = AIMessage("A")
+        capture.handle(values_protocol_event(("tools:one",), [human_a, tool_call]))
+        capture.handle(
+            values_protocol_event(("tools:one",), [human_a, tool_call, tool_result])
+        )
+        capture.handle(
+            values_protocol_event(
+                ("tools:one",), [human_a, tool_call, tool_result, final_a]
+            )
+        )
+        for index, letter in enumerate("BC", start=1):
+            capture.handle(
+                values_protocol_event(
+                    ("tools:one", str(index)),
+                    [HumanMessage(f"Return {letter}."), AIMessage(letter)],
+                )
+            )
+
+        runs = {run["task_call_id"]: run for run in session["runs"]}
+        self.assertEqual(runs["ptc-A"]["stream_path"], ["tools:one"])
+        self.assertEqual(
+            [event["type"] for event in runs["ptc-A"]["events"]],
+            ["reasoning", "tool_call", "tool_result", "assistant"],
+        )
+        self.assertEqual(runs["ptc-A"]["output"], "A")
+        self.assertEqual(runs["ptc-B"]["events"][0]["text"], "B")
+        self.assertEqual(runs["ptc-C"]["events"][0]["text"], "C")
 
     def test_generated_display_name_is_normalized_without_regeneration(self) -> None:
         session = record()

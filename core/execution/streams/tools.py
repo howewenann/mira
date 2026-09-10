@@ -179,13 +179,21 @@ def render_projected_tool_errors(
         )
 
 
-async def consume_live_tool_errors(events: Any, renderer: Any, result: Any | None = None) -> None:
-    """Render newly added native error ToolMessages from root graph values."""
+async def consume_live_tool_errors(
+    events: Any,
+    renderer: Any,
+    result: Any | None = None,
+    *,
+    subagent_capture: Any | None = None,
+) -> None:
+    """Render root errors and forward namespaced child value snapshots."""
     if not hasattr(events, "__aiter__"):
         return
 
     seen: Counter[tuple[str, ...]] | None = None
     async for event in events:
+        if subagent_capture is not None:
+            subagent_capture.handle(event)
         if not isinstance(event, dict) or event.get("method") != "values":
             continue
         params = event.get("params")

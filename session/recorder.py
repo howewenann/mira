@@ -448,14 +448,24 @@ class SessionRecorder:
                 finish_run(self.record, str(run.get("id") or ""), status=CANCELLED)
         self.save()
 
-    def subagent_run_event(self, task_call_id: str, event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    def subagent_run_event(
+        self,
+        task_call_id: str,
+        event: dict[str, Any],
+        *,
+        stream_path: list[str] | tuple[str, ...] = (),
+    ) -> tuple[str, dict[str, Any]] | None:
         """Persist one child event independently of inspector visibility."""
         run = run_for_task_call(self.record, task_call_id)
         if run is None:
             return None
+        if stream_path and not run.get("stream_path"):
+            run["stream_path"] = [str(part) for part in stream_path]
         stored = append_run_event(self.record, str(run["id"]), json_value(event))
         if stored is None:
             return None
+        if stored.get("type") == "assistant" and stored.get("text"):
+            run["output"] = str(stored["text"])
         self.save()
         return str(run["id"]), stored
 
@@ -1435,9 +1445,19 @@ class SessionEventEmitter:
                 task_call_id=row_id,
             )
 
-    def subagent_run_event(self, task_call_id: str, event: dict[str, Any]) -> None:
+    def subagent_run_event(
+        self,
+        task_call_id: str,
+        event: dict[str, Any],
+        *,
+        stream_path: list[str] | tuple[str, ...] = (),
+    ) -> None:
         """Persist one child transcript event, then notify an open live inspector."""
-        stored = self.recorder.subagent_run_event(task_call_id, event)
+        stored = self.recorder.subagent_run_event(
+            task_call_id,
+            event,
+            stream_path=stream_path,
+        )
         if stored is None:
             return
         run_id, durable_event = stored

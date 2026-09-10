@@ -27,7 +27,12 @@ from core.execution.streams.output import (
     output_tool_lifecycle,
 )
 from core.execution.streams.rubric import RubricEventRenderer
-from core.execution.streams.subagents import DYNAMIC_TOOL_SUBAGENT, EVAL_SUBAGENT, consume_subagents
+from core.execution.streams.subagents import (
+    DYNAMIC_TOOL_SUBAGENT,
+    EVAL_SUBAGENT,
+    SubagentProtocolCapture,
+    consume_subagents,
+)
 from core.execution.streams.tool_args import normalized_call, tool_call_args
 from core.execution.streams.tools import (
     CONTROL_TOOLS,
@@ -327,8 +332,9 @@ class SubagentRequestRenderer:
 class EvalSubagentRenderer:
     """Render QuickJS eval-internal subagent lifecycle events."""
 
-    def __init__(self, renderer: Any) -> None:
+    def __init__(self, renderer: Any, capture: SubagentProtocolCapture | None = None) -> None:
         self.renderer = renderer
+        self.capture = capture
         self._labels: dict[str, str] = {}
 
     def handle(self, event: dict[str, Any]) -> None:
@@ -356,6 +362,8 @@ class EvalSubagentRenderer:
                     str(event.get("description") or ""),
                     origin=EVAL_SUBAGENT,
                 )
+            if self.capture is not None:
+                self.capture.run_started(event)
         elif phase == "complete":
             name = self._labels.pop(subagent_id, eval_subagent_name(event))
             callback = getattr(self.renderer, "eval_subagent_finished", None)
@@ -386,9 +394,14 @@ class EvalSubagentRenderer:
                 self.renderer.subagent_cancelled(name, error)
 
 
-async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventRenderer) -> None:
+async def consume_custom_events(
+    stream: Any,
+    renderer: Any,
+    rubric: RubricEventRenderer,
+    capture: SubagentProtocolCapture | None = None,
+) -> None:
     """Dispatch custom events without competing stream consumers."""
-    eval_renderer = EvalSubagentRenderer(renderer)
+    eval_renderer = EvalSubagentRenderer(renderer, capture)
     async for event in stream:
         if isinstance(event, dict) and event.get("type") == CORRECTION_EVENT:
             render_correction_event(event, renderer)
@@ -506,6 +519,7 @@ async def run_turn(
             ],
         )
         event_renderer = SubagentRequestRenderer(renderer)
+        subagent_capture = SubagentProtocolCapture(event_renderer)
         rubric_renderer = RubricEventRenderer(
             event_renderer,
             rubric_max_iterations,
@@ -521,8 +535,18 @@ async def run_turn(
 
         try:
             await asyncio.gather(
-                consume_live_tool_errors(stream, event_renderer, result),
-                consume_custom_events(stream.custom, event_renderer, rubric_renderer),
+                consume_live_tool_errors(
+                    stream,
+                    event_renderer,
+                    result,
+                    subagent_capture=subagent_capture,
+                ),
+                consume_custom_events(
+                    stream.custom,
+                    event_renderer,
+                    rubric_renderer,
+                    subagent_capture,
+                ),
                 consume_messages(
                     stream.messages,
                     event_renderer,

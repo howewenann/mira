@@ -47,6 +47,9 @@ def normalize_runs(value: Any) -> list[dict[str, Any]]:
             "task_call_id": str(item.get("task_call_id") or ""),
             "tool_call_id": str(item.get("tool_call_id") or ""),
             "eval_id": str(item.get("eval_id") or ""),
+            "stream_path": [str(part) for part in item.get("stream_path", [])]
+            if isinstance(item.get("stream_path"), list)
+            else [],
             "name": str(item.get("name") or "subagent"),
             "display_name": str(item.get("display_name") or item.get("name") or "subagent"),
             "task_input": str(item.get("task_input") or ""),
@@ -124,6 +127,7 @@ def start_run(
     task_call_id: str = "",
     tool_call_id: str = "",
     eval_id: str = "",
+    stream_path: list[str] | tuple[str, ...] = (),
     name: str = "subagent",
     display_name: str = "",
     task_input: str = "",
@@ -138,6 +142,7 @@ def start_run(
             "turn_id": turn_id,
             "tool_call_id": tool_call_id,
             "eval_id": eval_id,
+            "stream_path": [str(part) for part in stream_path],
             "name": name,
             "display_name": display_name or name,
             "task_input": task_input,
@@ -157,6 +162,7 @@ def start_run(
         "task_call_id": str(task_call_id),
         "tool_call_id": str(tool_call_id),
         "eval_id": str(eval_id),
+        "stream_path": [str(part) for part in stream_path],
         "name": str(name or "subagent"),
         "display_name": str(display_name or name or "subagent"),
         "task_input": str(task_input or ""),
@@ -215,7 +221,8 @@ def finish_run(
     if terminal not in TERMINAL_STATUSES:
         terminal = ERROR
     run["status"] = terminal
-    run["output"] = str(output or "")
+    if output or not run.get("output"):
+        run["output"] = str(output or "")
     finished_at = now_iso()
     if duration_ms is None and run.get("duration_ms") is None:
         try:

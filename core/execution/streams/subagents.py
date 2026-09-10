@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict, deque
 from contextlib import suppress
 from itertools import count
 from typing import Any
 
 from agent.rubric.graphs import INTERNAL_RUBRIC_GRAPHS
-from core.execution.streams.output import message_text, visible_message_text
+from core.context.usage import field
+from core.execution.streams.output import (
+    is_tool_message,
+    message_text,
+    normalized_output_tool_call,
+    visible_message_text,
+)
 from core.execution.streams.output import call_renderer as call_frontend
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.rubric import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer
+from core.execution.streams.tool_args import normalized_call
 from core.execution.streams.tools import consume_tool_calls, tool_output_text
 from session.subagent_runs import now_iso
 
@@ -149,7 +157,7 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         tool_call_id=task_call_id,
     )
 
-    capture = SubagentTranscriptCapture(renderer, task_call_id)
+    capture = SubagentTranscriptCapture(renderer, task_call_id, stream_path=namespace)
     consumers = []
     messages = getattr(subagent, "messages", None)
     if messages is not None:
@@ -201,12 +209,96 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
     )
 
 
+class SubagentProtocolCapture:
+    """Capture eval-created child state snapshots omitted by the high-level lane.
+
+    QuickJS invokes ``task`` outside ToolNode, so LangGraph's high-level
+    ``subagents`` projection can collapse parallel siblings. The v3 protocol
+    still exposes a distinct namespace and actual message state for every
+    child. This narrow adapter consumes those native value snapshots and maps
+    them to QuickJS's persisted ``ptc_task_*`` lifecycle identities.
+    """
+
+    def __init__(self, renderer: Any) -> None:
+        self.renderer = renderer
+        self._waiting_runs: dict[str, deque[str]] = defaultdict(deque)
+        self._pending_snapshots: dict[tuple[str, ...], list[Any]] = {}
+        self._run_by_namespace: dict[tuple[str, ...], str] = {}
+        self._message_counts: dict[tuple[str, ...], int] = {}
+
+    def run_started(self, event: dict[str, Any]) -> None:
+        """Register one QuickJS task identity before or after its first snapshot."""
+        task_call_id = str(event.get("id") or "")
+        description = str(event.get("description") or "")
+        if not task_call_id or not description:
+            return
+        self._waiting_runs[description].append(task_call_id)
+        self._bind_pending()
+
+    def handle(self, event: Any) -> None:
+        """Consume one namespaced v3 ``values`` protocol event."""
+        if not isinstance(event, dict) or event.get("method") != "values":
+            return
+        params = event.get("params")
+        if not isinstance(params, dict):
+            return
+        namespace = tuple(str(part) for part in params.get("namespace") or ())
+        values = params.get("data")
+        messages = values.get("messages") if isinstance(values, dict) else None
+        if not namespace or not isinstance(messages, list) or not messages:
+            return
+        self._pending_snapshots[namespace] = messages
+        if namespace not in self._run_by_namespace:
+            self._bind_namespace(namespace, messages)
+        self._emit_snapshot(namespace, messages)
+
+    def _bind_pending(self) -> None:
+        for namespace, messages in self._pending_snapshots.items():
+            if namespace not in self._run_by_namespace:
+                self._bind_namespace(namespace, messages)
+            self._emit_snapshot(namespace, messages)
+
+    def _bind_namespace(self, namespace: tuple[str, ...], messages: list[Any]) -> None:
+        task_input = _first_human_text(messages)
+        if not task_input:
+            return
+        for description, task_ids in self._waiting_runs.items():
+            if task_ids and _same_task_input(description, task_input):
+                self._run_by_namespace[namespace] = task_ids.popleft()
+                return
+
+    def _emit_snapshot(self, namespace: tuple[str, ...], messages: list[Any]) -> None:
+        task_call_id = self._run_by_namespace.get(namespace)
+        if not task_call_id:
+            return
+        start = self._message_counts.get(namespace, 0)
+        if start >= len(messages):
+            return
+        for message in messages[start:]:
+            for event in _run_events_from_message(message):
+                call_frontend(
+                    self.renderer,
+                    "subagent_run_event",
+                    task_call_id,
+                    event,
+                    stream_path=namespace,
+                )
+        self._message_counts[namespace] = len(messages)
+
+
 class SubagentTranscriptCapture:
     """Project native child streams into the durable run event schema."""
 
-    def __init__(self, renderer: Any, task_call_id: str) -> None:
+    def __init__(
+        self,
+        renderer: Any,
+        task_call_id: str,
+        *,
+        stream_path: tuple[str, ...] = (),
+    ) -> None:
         self.renderer = renderer
         self.task_call_id = task_call_id
+        self.stream_path = stream_path
         self._stream_sequence = count(1)
         self._active_type = ""
         self._active_stream_id = ""
@@ -220,6 +312,7 @@ class SubagentTranscriptCapture:
             "subagent_run_event",
             self.task_call_id,
             event,
+            stream_path=self.stream_path,
         )
 
     def _text(self, event_type: str, delta: str) -> None:
@@ -305,6 +398,79 @@ class SubagentTranscriptCapture:
             self.model_stream_finished()
             self._text("assistant", text)
             self.model_stream_finished()
+
+
+def _first_human_text(messages: list[Any]) -> str:
+    for message in messages:
+        if str(field(message, "type") or "") in {"human", "user"}:
+            return message_text(message)
+    return ""
+
+
+def _same_task_input(description: str, task_input: str) -> bool:
+    return description == task_input or (
+        len(description) == 200 and task_input.startswith(description)
+    )
+
+
+def _run_events_from_message(message: Any) -> list[dict[str, Any]]:
+    """Project one actual child state message into the inspector event schema."""
+    if is_tool_message(message):
+        return [
+            {
+                "type": "tool_result",
+                "name": str(field(message, "name") or "tool"),
+                "output": message_text(message),
+                "call_id": str(field(message, "tool_call_id") or field(message, "id") or ""),
+                "status": "error" if str(field(message, "status") or "") == "error" else "success",
+            }
+        ]
+
+    if str(field(message, "type") or "") not in {"ai", "assistant"}:
+        return []
+
+    events: list[dict[str, Any]] = []
+    reasoning = _message_reasoning(message)
+    if reasoning:
+        events.append({"type": "reasoning", "text": reasoning})
+    text = visible_message_text(message)
+    if text:
+        events.append({"type": "assistant", "text": text})
+    for value in field(message, "tool_calls") or []:
+        call = normalized_call(normalized_output_tool_call(value))
+        if call.get("name") == "task":
+            events.append({"type": "delegation", "calls": [call]})
+        else:
+            events.append(
+                {
+                    "type": "tool_call",
+                    "name": str(call.get("name") or "tool"),
+                    "args": call.get("args", {}),
+                    "call_id": str(call.get("id") or ""),
+                }
+            )
+    return events
+
+
+def _message_reasoning(message: Any) -> str:
+    values: list[str] = []
+    blocks = field(message, "content_blocks")
+    if callable(blocks):
+        blocks = blocks()
+    if not isinstance(blocks, list | tuple):
+        blocks = field(message, "content")
+    if isinstance(blocks, list | tuple):
+        for block in blocks:
+            if isinstance(block, dict) and str(block.get("type") or "") == "reasoning":
+                text = str(block.get("reasoning") or block.get("text") or "")
+                if text:
+                    values.append(text)
+    additional = field(message, "additional_kwargs")
+    if isinstance(additional, dict):
+        text = str(additional.get("reasoning_content") or additional.get("reasoning") or "")
+        if text and text not in values:
+            values.append(text)
+    return "".join(values)
 
 
 def subagent_task_call_id(subagent: Any) -> str:
