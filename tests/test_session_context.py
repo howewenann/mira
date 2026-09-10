@@ -239,6 +239,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "current_plan",
                 "current_goal",
                 "events",
+                "runs",
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
@@ -1481,7 +1482,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("origin", subagents[0])
         self.assertNotIn("origin", subagents[1])
 
-    def test_eval_subagent_renderer_events_are_not_persisted_as_subagents(self) -> None:
+    def test_eval_subagent_renderer_events_persist_runs_not_main_subagent_events(self) -> None:
         class EvalForwarder:
             def __init__(self) -> None:
                 self.events: list[tuple[Any, ...]] = []
@@ -1527,11 +1528,14 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(context.normalize_events(record["events"]), [])
+        self.assertEqual(len(record["runs"]), 1)
+        self.assertEqual(record["runs"][0]["task_call_id"], "row-a")
+        run_id = record["runs"][0]["id"]
         self.assertEqual(
             renderer.events,
             [
-                ("eval_subagent_started", "general-purpose [one]", "judge pair", "eval-round-a", "row-a", "claude-haiku"),
-                ("eval_subagent_finished", "general-purpose [one]", "", "eval-round-a", "row-a", 1200),
+                ("eval_subagent_started", "general-purpose [one]", "judge pair", "eval-round-a", run_id, "claude-haiku"),
+                ("eval_subagent_finished", "general-purpose [one]", "", "eval-round-a", run_id, 1200),
             ],
         )
 

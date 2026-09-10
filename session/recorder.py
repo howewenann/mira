@@ -10,17 +10,23 @@ from inspect import Parameter, signature
 from typing import Any
 
 from agent.middleware.context_overflow import pop_context_overflow_notice
-from core.application.artifacts import (
-    prepare_artifact_review,
-    resolve_artifact_review,
-    update_artifact_event_status,
-)
 from core.execution.streams.output import normalize_response_delta
 from core.execution.streams.corrections import normalize_correction_event
 from core.execution.streams.rubric import elapsed_ms
 from session.context import append_event, sync_deepagents_compaction, update_event_text
 from session.goals import current_goal, goal_artifact_text
 from session.plans import current_plan, plan_artifact_text
+from session.subagent_runs import (
+    CANCELLED,
+    DONE,
+    ERROR,
+    INTERRUPTED,
+    append_run_event,
+    finish_run,
+    new_anchor_id,
+    run_for_task_call,
+    start_run,
+)
 
 COMPACTION_POLL_SECONDS = 10.0
 
@@ -43,6 +49,10 @@ class SessionRecorder:
         self._running_subagent_event_ids: dict[str, int] = {}
         self._rubric_event_ids: dict[tuple[str, int], int] = {}
         self._delegation_keys: set[tuple[str, str]] = set()
+        self.turn_id = str(int(record.get("turns") or 0) + 1)
+        self._tool_anchor_ids: dict[str, str] = {}
+        self._task_anchor_ids: dict[str, str] = {}
+        self._pending_task_anchors: deque[tuple[str, str]] = deque()
 
     def save(self) -> None:
         self.store.save(self.record)
@@ -98,6 +108,10 @@ class SessionRecorder:
         if call_id:
             event["call_id"] = call_id
         stored = append_event(self.record, event)
+        anchor_id = str(stored["id"])
+        stored["anchor_id"] = anchor_id
+        if call_id:
+            self._tool_anchor_ids[call_id] = anchor_id
         self.save()
         return stored
 
@@ -205,7 +219,21 @@ class SessionRecorder:
         if not calls:
             return None
         self.finish_main()
-        stored = append_event(self.record, {"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
+        durable_calls = []
+        for call in calls:
+            durable = dict(json_value(call))
+            anchor_id = str(durable.get("anchor_id") or new_anchor_id())
+            durable["anchor_id"] = anchor_id
+            call_id = str(durable.get("id") or durable.get("call_id") or durable.get("tool_call_id") or "")
+            if call_id:
+                self._task_anchor_ids[call_id] = anchor_id
+            args = durable.get("args") if isinstance(durable.get("args"), dict) else {}
+            self._pending_task_anchors.append((anchor_id, str(args.get("description") or "")))
+            durable_calls.append(durable)
+        stored = append_event(
+            self.record,
+            {"type": "delegation", "mode": self.mode, "calls": durable_calls},
+        )
         self.save()
         return stored
 
@@ -220,7 +248,18 @@ class SessionRecorder:
             new_calls.append(call)
         return new_calls
 
-    def subagent_started(self, name: str, task_input: str = "", *, origin: str = "") -> dict[str, Any]:
+    def subagent_started(
+        self,
+        name: str,
+        task_input: str = "",
+        *,
+        origin: str = "",
+        task_call_id: str = "",
+        tool_call_id: str = "",
+        eval_id: str = "",
+        label: str = "",
+        model: str = "",
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         self.finish_main()
         self._running_subagents[name] = task_input
         self._running_subagent_origins[name] = origin
@@ -229,8 +268,66 @@ class SessionRecorder:
             payload["origin"] = origin
         event = append_event(self.record, payload)
         self._running_subagent_event_ids[name] = int(event["id"])
+        anchor_id = self.subagent_anchor_id(task_call_id, task_input, eval_id=eval_id)
+        run = start_run(
+            self.record,
+            anchor_id=anchor_id,
+            turn_id=self.turn_id,
+            task_call_id=task_call_id,
+            tool_call_id=tool_call_id or task_call_id,
+            eval_id=eval_id,
+            name=name,
+            display_name=name,
+            task_input=task_input,
+            label=label,
+            model=model,
+        )
         self.save()
-        return event
+        return event, run
+
+    def eval_subagent_started(
+        self,
+        name: str,
+        task_input: str,
+        *,
+        eval_id: str,
+        task_call_id: str,
+        model: str = "",
+        label: str = "",
+    ) -> dict[str, Any]:
+        """Persist a task-created run announced from inside QuickJS eval."""
+        anchor_id = self.subagent_anchor_id(task_call_id, task_input, eval_id=eval_id)
+        run = start_run(
+            self.record,
+            anchor_id=anchor_id,
+            turn_id=self.turn_id,
+            task_call_id=task_call_id,
+            tool_call_id=task_call_id,
+            eval_id=eval_id,
+            name=name,
+            display_name=name,
+            task_input=task_input,
+            label=label,
+            model=model,
+        )
+        self.save()
+        return run
+
+    def subagent_anchor_id(self, task_call_id: str, task_input: str = "", *, eval_id: str = "") -> str:
+        """Resolve a task run to its MIRA-owned originating tool identity."""
+        if eval_id and eval_id in self._tool_anchor_ids:
+            return self._tool_anchor_ids[eval_id]
+        if task_call_id and task_call_id in self._task_anchor_ids:
+            return self._task_anchor_ids[task_call_id]
+        if task_input:
+            for anchor_id, description in self._pending_task_anchors:
+                if description == task_input:
+                    return anchor_id
+        if eval_id:
+            return self._tool_anchor_ids.setdefault(eval_id, new_anchor_id())
+        if task_call_id:
+            return self._task_anchor_ids.setdefault(task_call_id, new_anchor_id())
+        return new_anchor_id()
 
     def subagent_request_updated(self, name: str, task_input: str) -> None:
         if not task_input:
@@ -241,9 +338,25 @@ class SessionRecorder:
         if event_id is not None:
             update_event_field(self.record, event_id, "task_input", task_input)
             update_event_field(self.record, event_id, "origin", "")
+            for run in reversed(self.record.get("runs", [])):
+                if (
+                    isinstance(run, dict)
+                    and run.get("display_name") == name
+                    and run.get("status") == "RUNNING"
+                ):
+                    run["task_input"] = task_input
+                    break
             self.save()
 
-    def subagent_finished(self, name: str, output: str = "") -> dict[str, Any]:
+    def subagent_finished(
+        self,
+        name: str,
+        output: str = "",
+        *,
+        task_call_id: str = "",
+        status: str = DONE,
+        duration_ms: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         task_input = self._running_subagents.pop(name, "")
         origin = self._running_subagent_origins.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
@@ -251,17 +364,45 @@ class SessionRecorder:
             "type": "subagent",
             "mode": self.mode,
             "name": name,
-            "status": "DONE",
+            "status": status,
             "task_input": task_input,
             "output": output,
         }
         if origin:
             payload["origin"] = origin
         stored = append_event(self.record, payload)
+        run = run_for_task_call(self.record, task_call_id)
+        if run is None:
+            run = next(
+                (
+                    item
+                    for item in reversed(self.record.get("runs", []))
+                    if isinstance(item, dict)
+                    and item.get("display_name") == name
+                    and item.get("status") == "RUNNING"
+                ),
+                None,
+            )
+        if run is not None:
+            finish_run(
+                self.record,
+                str(run["id"]),
+                status=status,
+                output=output,
+                duration_ms=duration_ms,
+            )
         self.save()
-        return stored
+        return stored, run
 
-    def subagent_cancelled(self, name: str, output: str = "") -> dict[str, Any]:
+    def subagent_cancelled(
+        self,
+        name: str,
+        output: str = "",
+        *,
+        task_call_id: str = "",
+        status: str = CANCELLED,
+        duration_ms: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         task_input = self._running_subagents.pop(name, "")
         origin = self._running_subagent_origins.pop(name, "")
         self._running_subagent_event_ids.pop(name, None)
@@ -269,19 +410,54 @@ class SessionRecorder:
             "type": "subagent",
             "mode": self.mode,
             "name": name,
-            "status": "CANCELLED",
+            "status": status,
             "task_input": task_input,
             "output": output,
         }
         if origin:
             payload["origin"] = origin
         stored = append_event(self.record, payload)
+        run = run_for_task_call(self.record, task_call_id)
+        if run is None:
+            run = next(
+                (
+                    item
+                    for item in reversed(self.record.get("runs", []))
+                    if isinstance(item, dict)
+                    and item.get("display_name") == name
+                    and item.get("status") == "RUNNING"
+                ),
+                None,
+            )
+        if run is not None:
+            finish_run(
+                self.record,
+                str(run["id"]),
+                status=status,
+                output=output,
+                duration_ms=duration_ms,
+            )
         self.save()
-        return stored
+        return stored, run
 
     def subagents_cancelled(self) -> None:
         for name in list(self._running_subagents):
             self.subagent_cancelled(name)
+        for run in self.record.get("runs", []):
+            if isinstance(run, dict) and run.get("status") == "RUNNING":
+                finish_run(self.record, str(run.get("id") or ""), status=CANCELLED)
+        self.save()
+
+    def subagent_run_event(self, task_call_id: str, event: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        """Persist one child event independently of inspector visibility."""
+        run = run_for_task_call(self.record, task_call_id)
+        if run is None:
+            return None
+        stored = append_run_event(self.record, str(run["id"]), json_value(event))
+        if stored is None:
+            return None
+        self.save()
+        return str(run["id"]), stored
 
     def system_error(self, text: str) -> dict[str, Any]:
         self.finish_main()
@@ -613,6 +789,12 @@ class SessionEventEmitter:
         return await self._finalize_artifact("goal", interrupt)
 
     async def _finalize_artifact(self, kind: str, interrupt: Any) -> dict[str, Any]:
+        from core.application.artifacts import (
+            prepare_artifact_review,
+            resolve_artifact_review,
+            update_artifact_event_status,
+        )
+
         if self.semantic_state is None:
             callback = getattr(self.renderer, f"finalize_{kind}")
             outcome = callback(interrupt)
@@ -1056,17 +1238,32 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         model: str = "",
+        label: str = "",
+        task_call_id: str = "",
+        tool_call_id: str = "",
         **frontend_identity: Any,
     ) -> None:
-        event = self.recorder.subagent_started(subagent, task_input, origin=origin)
+        event, run = self.recorder.subagent_started(
+            subagent,
+            task_input,
+            origin=origin,
+            task_call_id=task_call_id,
+            tool_call_id=tool_call_id,
+            eval_id=eval_id,
+            label=label,
+            model=model,
+        )
         call_renderer(
             self.renderer.subagent_started,
             subagent,
             task_input,
             origin=origin,
             eval_id=eval_id,
-            row_id=row_id,
+            row_id=str(run["id"]),
             model=model,
+            label=label,
+            task_call_id=task_call_id,
+            tool_call_id=tool_call_id,
             created_at=event_created_at(event),
             **frontend_identity,
         )
@@ -1085,16 +1282,26 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        task_call_id: str = "",
+        status: str = DONE,
         **frontend_identity: Any,
     ) -> None:
-        event = self.recorder.subagent_finished(subagent, result)
+        event, run = self.recorder.subagent_finished(
+            subagent,
+            result,
+            task_call_id=task_call_id,
+            status=status,
+            duration_ms=duration_ms,
+        )
         call_renderer(
             self.renderer.subagent_finished,
             subagent,
             result,
             eval_id=eval_id,
-            row_id=row_id,
+            row_id=str(run.get("id") or row_id) if run is not None else row_id,
             duration_ms=duration_ms,
+            status=status,
+            task_call_id=task_call_id,
             created_at=event_created_at(event),
             **frontend_identity,
         )
@@ -1107,17 +1314,27 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        task_call_id: str = "",
+        status: str = CANCELLED,
     ) -> None:
         callback = getattr(self.renderer, "subagent_cancelled", None)
-        event = self.recorder.subagent_cancelled(subagent, result)
+        event, run = self.recorder.subagent_cancelled(
+            subagent,
+            result,
+            task_call_id=task_call_id,
+            status=status,
+            duration_ms=duration_ms,
+        )
         if callable(callback):
             call_renderer(
                 callback,
                 subagent,
                 result,
                 eval_id=eval_id,
-                row_id=row_id,
+                row_id=str(run.get("id") or row_id) if run is not None else row_id,
                 duration_ms=duration_ms,
+                status=status,
+                task_call_id=task_call_id,
                 created_at=event_created_at(event),
             )
 
@@ -1131,10 +1348,27 @@ class SessionEventEmitter:
         model: str = "",
         label: str = "",
     ) -> None:
-        """Forward eval-internal subagent telemetry without recording it."""
+        """Persist and forward one eval-internal task-created run."""
+        run = self.recorder.eval_subagent_started(
+            subagent,
+            task_input,
+            eval_id=eval_id,
+            task_call_id=row_id,
+            model=model,
+            label=label,
+        )
         callback = getattr(self.renderer, "eval_subagent_started", None)
         if callable(callback):
-            call_renderer(callback, subagent, task_input, eval_id=eval_id, row_id=row_id, model=model, label=label)
+            call_renderer(
+                callback,
+                subagent,
+                task_input,
+                eval_id=eval_id,
+                row_id=str(run["id"]),
+                model=model,
+                label=label,
+                task_call_id=row_id,
+            )
 
     def eval_subagent_finished(
         self,
@@ -1145,10 +1379,28 @@ class SessionEventEmitter:
         row_id: str = "",
         duration_ms: int | None = None,
     ) -> None:
-        """Forward eval-internal subagent completion without recording it."""
+        """Persist and forward eval-internal completion."""
+        run = run_for_task_call(self.recorder.record, row_id)
+        if run is not None:
+            finish_run(
+                self.recorder.record,
+                str(run["id"]),
+                status=DONE,
+                output=result,
+                duration_ms=duration_ms,
+            )
+            self.recorder.save()
         callback = getattr(self.renderer, "eval_subagent_finished", None)
         if callable(callback):
-            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
+            call_renderer(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=str(run.get("id") or row_id) if run is not None else row_id,
+                duration_ms=duration_ms,
+                task_call_id=row_id,
+            )
 
     def eval_subagent_cancelled(
         self,
@@ -1159,10 +1411,39 @@ class SessionEventEmitter:
         row_id: str = "",
         duration_ms: int | None = None,
     ) -> None:
-        """Forward eval-internal subagent failure without recording it."""
+        """Persist and forward eval-internal failure."""
+        run = run_for_task_call(self.recorder.record, row_id)
+        terminal = ERROR if result else CANCELLED
+        if run is not None:
+            finish_run(
+                self.recorder.record,
+                str(run["id"]),
+                status=terminal,
+                output=result,
+                duration_ms=duration_ms,
+            )
+            self.recorder.save()
         callback = getattr(self.renderer, "eval_subagent_cancelled", None)
         if callable(callback):
-            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
+            call_renderer(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=str(run.get("id") or row_id) if run is not None else row_id,
+                duration_ms=duration_ms,
+                task_call_id=row_id,
+            )
+
+    def subagent_run_event(self, task_call_id: str, event: dict[str, Any]) -> None:
+        """Persist one child transcript event, then notify an open live inspector."""
+        stored = self.recorder.subagent_run_event(task_call_id, event)
+        if stored is None:
+            return
+        run_id, durable_event = stored
+        callback = getattr(self.renderer, "subagent_run_event", None)
+        if callable(callback):
+            callback(run_id, durable_event)
 
     def rubric_evaluation_started(
         self,

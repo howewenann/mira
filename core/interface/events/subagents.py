@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Mapping
 
 from core.interface.events.base import EventIdentity
 
@@ -25,6 +25,7 @@ class SubagentEvent(EventIdentity):
         "eval_start",
         "eval_finish",
         "eval_cancel",
+        "run_event",
     ]
     subagent_id: str = ""
     name: str = ""
@@ -35,6 +36,11 @@ class SubagentEvent(EventIdentity):
     row_id: str = ""
     model: str = ""
     label: str = ""
+    run_id: str = ""
+    task_call_id: str = ""
+    tool_call_id: str = ""
+    status: str = ""
+    transcript_event: Mapping[str, Any] | None = None
 
 
 __all__ = ["SubagentEvent"]

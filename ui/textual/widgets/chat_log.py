@@ -252,7 +252,7 @@ class ChatLog(VerticalScroll):
                         origin=str(event.get("origin") or ""),
                         created_at=created_at,
                     )
-                elif event.get("status") == "CANCELLED":
+                elif event.get("status") in {"CANCELLED", "INTERRUPTED", "ERROR"}:
                     self.subagent_cancelled(
                         event["name"],
                         event.get("output", ""),

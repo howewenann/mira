@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from itertools import count
 from typing import Any
 
 from agent.rubric.graphs import INTERNAL_RUBRIC_GRAPHS
 from core.execution.streams.output import message_text, visible_message_text
 from core.execution.streams.output import call_renderer as call_frontend
+from core.execution.streams.messages import consume_messages
 from core.execution.streams.rubric import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer
-from core.execution.streams.tools import tool_output_text
+from core.execution.streams.tools import consume_tool_calls, tool_output_text
+from session.subagent_runs import now_iso
 
 DYNAMIC_TOOL_SUBAGENT = "dynamic_tool_subagent"
 EVAL_SUBAGENT = "eval_subagent"
@@ -124,10 +127,11 @@ async def animate_subagents(renderer: Any) -> None:
 
 
 async def consume_subagent(subagent: Any, renderer: Any) -> None:
-    """Render one subagent lifecycle and capture its final answer text."""
+    """Render one subagent lifecycle and continuously capture its transcript."""
     name = renderer.subagent_label(subagent)
     task_input = getattr(subagent, "task_input", "")
     origin = subagent_origin(subagent)
+    task_call_id = subagent_task_call_id(subagent)
     path = getattr(subagent, "path", ())
     namespace = tuple(str(item) for item in path) if isinstance(path, (list, tuple)) else ()
     metadata = {
@@ -141,13 +145,50 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         origin=origin,
         namespace=namespace,
         metadata=metadata,
+        task_call_id=task_call_id,
+        tool_call_id=task_call_id,
     )
 
+    capture = SubagentTranscriptCapture(renderer, task_call_id)
+    consumers = []
+    messages = getattr(subagent, "messages", None)
+    if messages is not None:
+        consumers.append(consume_messages(messages, capture, render_normal_tools=False))
+    tool_calls = getattr(subagent, "tool_calls", None)
+    if tool_calls is not None:
+        consumers.append(consume_tool_calls(tool_calls, capture))
+
     try:
-        result = await subagent_result(subagent)
+        values = await asyncio.gather(*consumers, subagent_result(subagent))
+        result = values[-1]
+    except asyncio.CancelledError:
+        call_frontend(
+            renderer,
+            "subagent_cancelled",
+            name,
+            result="",
+            namespace=namespace,
+            metadata=metadata,
+            task_call_id=task_call_id,
+            status="CANCELLED",
+        )
+        raise
     except Exception as exc:
         result = f"error: {exc}"
+        capture.ensure_final_output(result)
+        call_frontend(
+            renderer,
+            "subagent_cancelled",
+            name,
+            result=result,
+            namespace=namespace,
+            metadata=metadata,
+            task_call_id=task_call_id,
+            status="ERROR",
+        )
+        return
 
+    capture.ensure_final_output(str(result))
     call_frontend(
         renderer,
         "subagent_finished",
@@ -155,7 +196,126 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         result=str(result),
         namespace=namespace,
         metadata=metadata,
+        task_call_id=task_call_id,
+        status="DONE",
     )
+
+
+class SubagentTranscriptCapture:
+    """Project native child streams into the durable run event schema."""
+
+    def __init__(self, renderer: Any, task_call_id: str) -> None:
+        self.renderer = renderer
+        self.task_call_id = task_call_id
+        self._stream_sequence = count(1)
+        self._active_type = ""
+        self._active_stream_id = ""
+        self._active_text = ""
+        self._assistant_texts: list[str] = []
+
+    def _append(self, event: dict[str, Any]) -> None:
+        event.setdefault("created_at", now_iso())
+        call_frontend(
+            self.renderer,
+            "subagent_run_event",
+            self.task_call_id,
+            event,
+        )
+
+    def _text(self, event_type: str, delta: str) -> None:
+        if not delta:
+            return
+        if self._active_type != event_type:
+            self._active_type = event_type
+            self._active_stream_id = f"message-{next(self._stream_sequence)}"
+            self._active_text = ""
+        self._active_text += str(delta)
+        if event_type == "assistant":
+            self._assistant_texts.append(str(delta))
+        self._append(
+            {
+                "type": event_type,
+                "text": self._active_text,
+                "stream_id": self._active_stream_id,
+            }
+        )
+
+    def reasoning_delta(self, delta: str, **_identity: Any) -> None:
+        self._text("reasoning", delta)
+
+    def text_delta(self, delta: str, **_identity: Any) -> None:
+        self._text("assistant", delta)
+
+    def model_stream_finished(self) -> None:
+        self._active_type = ""
+        self._active_stream_id = ""
+        self._active_text = ""
+
+    def discard_reasoning(self) -> None:
+        self.model_stream_finished()
+
+    def tool_call_delta(self, name: str, args: Any, call_id: str = "", **_identity: Any) -> None:
+        self.tool_call(name, args, call_id=call_id)
+
+    def tool_call_updated(self, name: str, args: Any, call_id: str = "", **_identity: Any) -> None:
+        self.tool_call(name, args, call_id=call_id)
+
+    def tool_call(self, name: str, args: Any, call_id: str = "", **_identity: Any) -> None:
+        self.model_stream_finished()
+        self._append({"type": "tool_call", "name": name, "args": args, "call_id": call_id})
+
+    def tool_result(self, name: str, result: Any, call_id: str = "", **identity: Any) -> None:
+        self._tool_result(name, result, call_id=call_id, is_error=False, **identity)
+
+    def completed_tool_result(self, name: str, result: Any, call_id: str = "", **identity: Any) -> None:
+        self._tool_result(name, result, call_id=call_id, is_error=False, **identity)
+
+    def completed_tool_error(self, name: str, result: Any, call_id: str = "", **identity: Any) -> None:
+        self._tool_result(name, result, call_id=call_id, is_error=True, **identity)
+
+    def _tool_result(
+        self,
+        name: str,
+        result: Any,
+        *,
+        call_id: str,
+        is_error: bool,
+        duration_ms: int | None = None,
+        **_identity: Any,
+    ) -> None:
+        event = {
+            "type": "tool_result",
+            "name": name,
+            "output": str(result or ""),
+            "call_id": call_id,
+        }
+        if is_error:
+            event["status"] = "error"
+        if duration_ms is not None:
+            event["duration_ms"] = duration_ms
+        self._append(event)
+
+    def delegation_started(self, calls: list[Any], **_identity: Any) -> None:
+        self.model_stream_finished()
+        self._append({"type": "delegation", "calls": calls})
+
+    def ensure_final_output(self, text: str) -> None:
+        """Keep the final child answer inspectable when no message stream exposed it."""
+        if text and text not in "".join(self._assistant_texts):
+            self.model_stream_finished()
+            self._text("assistant", text)
+            self.model_stream_finished()
+
+
+def subagent_task_call_id(subagent: Any) -> str:
+    """Return the task invocation that caused this native child run."""
+    trigger = getattr(subagent, "trigger_call_id", None)
+    if trigger:
+        return str(trigger)
+    cause = getattr(subagent, "cause", None)
+    if isinstance(cause, dict):
+        return str(cause.get("tool_call_id") or "")
+    return ""
 
 
 def subagent_origin(subagent: Any) -> str:

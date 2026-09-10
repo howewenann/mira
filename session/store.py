@@ -11,6 +11,7 @@ from typing import Any
 
 from session.context import normalize_session
 from session.dashboard import normalize_dashboard
+from session.subagent_runs import reconcile_stale_runs
 
 
 def new_session_id() -> str:
@@ -74,6 +75,7 @@ class SessionStore:
             "current_plan": None,
             "current_goal": None,
             "events": [],
+            "runs": [],
         }
 
     def save(self, record: dict[str, Any]) -> None:
@@ -99,7 +101,10 @@ class SessionStore:
     def read(self, path: Path) -> dict[str, Any]:
         """Read a session record from a JSON file."""
         record = json.loads(path.read_text(encoding="utf-8"))
-        return normalize_session(record)
+        record = normalize_session(record)
+        if reconcile_stale_runs(record):
+            self._write(record, update_timestamp=False)
+        return record
 
     def latest(self) -> Path | None:
         """Return the most recently modified session file, if any exist."""

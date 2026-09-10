@@ -152,6 +152,9 @@ class RendererAdapter:
             self._call("stop_active_tools", event.status)
 
     def _subagent(self, event: SubagentEvent) -> None:
+        if event.phase == "run_event":
+            self._call("subagent_run_event", event.run_id, dict(event.transcript_event or {}))
+            return
         lifecycle = {
             "live_start": "start_subagent_live",
             "live_tick": "tick_subagents",
@@ -189,6 +192,9 @@ class RendererAdapter:
             model=event.model,
             label=event.label,
             duration_ms=event.metadata.get("duration_ms"),
+            task_call_id=event.task_call_id,
+            tool_call_id=event.tool_call_id,
+            status=event.status,
             created_at=event.created_at,
         )
 

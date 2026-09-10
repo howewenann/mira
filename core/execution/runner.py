@@ -246,6 +246,9 @@ class SubagentRequestRenderer:
         eval_id: str = "",
         row_id: str = "",
         model: str = "",
+        label: str = "",
+        task_call_id: str = "",
+        tool_call_id: str = "",
     ) -> None:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
         request = task_input or queued_request
@@ -261,6 +264,9 @@ class SubagentRequestRenderer:
             eval_id=eval_id,
             row_id=row_id,
             model=model,
+            label=label,
+            task_call_id=task_call_id,
+            tool_call_id=tool_call_id,
         )
         if not request:
             self._pending_subagents.append(subagent)
@@ -273,6 +279,8 @@ class SubagentRequestRenderer:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        task_call_id: str = "",
+        status: str = "DONE",
     ) -> None:
         if subagent in self._hidden_subagents:
             self._hidden_subagents.remove(subagent)
@@ -284,6 +292,8 @@ class SubagentRequestRenderer:
             eval_id=eval_id,
             row_id=row_id,
             duration_ms=duration_ms,
+            task_call_id=task_call_id,
+            status=status,
         )
 
     def subagent_cancelled(
@@ -294,6 +304,8 @@ class SubagentRequestRenderer:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        task_call_id: str = "",
+        status: str = "CANCELLED",
     ) -> None:
         if subagent in self._hidden_subagents:
             self._hidden_subagents.remove(subagent)
@@ -307,6 +319,8 @@ class SubagentRequestRenderer:
                 eval_id=eval_id,
                 row_id=row_id,
                 duration_ms=duration_ms,
+                task_call_id=task_call_id,
+                status=status,
             )
 
 

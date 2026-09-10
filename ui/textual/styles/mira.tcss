@@ -678,6 +678,54 @@ MCPPanelScreen {
     layers: base resize;
 }
 
+#subagent-inspector {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    border: solid #B7A4E8;
+    background: #0c0f10;
+}
+
+#subagent-inspector-header {
+    width: 1fr;
+    height: 1;
+    color: #ECE7FF;
+    text-style: bold;
+}
+
+#subagent-inspector-title {
+    width: 1fr;
+    height: 1;
+}
+
+#subagent-inspector-close {
+    width: 5;
+    min-width: 5;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #d2d8dc;
+}
+
+#subagent-inspector-task {
+    width: 1fr;
+    height: auto;
+    max-height: 3;
+    margin: 1 0;
+    color: #b8c1c7;
+}
+
+#subagent-inspector-log {
+    width: 1fr;
+    height: 1fr;
+    padding: 0;
+    border: none;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
 #prompt-resize-handle {
     layer: resize;
     dock: left;

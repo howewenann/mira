@@ -67,6 +67,7 @@ from session.plans import (
     plan_artifact_text,
 )
 from session.recorder import update_goal_event_status, update_plan_event_status
+from session.subagent_runs import get_run
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -95,6 +96,7 @@ from ui.textual.widgets import (
     StatusBar,
     TelemetryBar,
     SubagentsPanel,
+    SubagentInspector,
     IssuesScreen,
     MCPPanelScreen,
 )
@@ -224,6 +226,7 @@ class MiraApp(App[None]):
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
         self._pending_artifact_review: PendingArtifactReview | None = None
+        self._subagent_inspector_visibility: dict[str, bool] = {}
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -243,6 +246,12 @@ class MiraApp(App[None]):
                     yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="issues-button")
                 yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
+                inspector = SubagentInspector(
+                    tool_output_chars=self.tool_output_chars,
+                    id="subagent-inspector",
+                )
+                inspector.display = False
+                yield inspector
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
                 yield AutocompleteInput(
@@ -2650,6 +2659,7 @@ class MiraApp(App[None]):
         row_id: str = "",
         model: str = "",
         created_at: str = "",
+        status: str = "RUNNING",
     ) -> None:
         """Render a subagent start."""
         self.trace.subagent_started(subagent, task_input)
@@ -2681,6 +2691,7 @@ class MiraApp(App[None]):
         row_id: str = "",
         duration_ms: int | None = None,
         created_at: str = "",
+        status: str = "DONE",
     ) -> None:
         """Render a subagent finish."""
         self.trace.subagent_finished(subagent, result)
@@ -2692,6 +2703,7 @@ class MiraApp(App[None]):
             row_id=row_id,
             eval_id=eval_id,
             duration_ms=duration_ms,
+            status=status,
         )
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
@@ -2706,6 +2718,7 @@ class MiraApp(App[None]):
         row_id: str = "",
         duration_ms: int | None = None,
         created_at: str = "",
+        status: str = "CANCELLED",
     ) -> None:
         """Render a subagent cancellation."""
         self.trace.subagent_cancelled(subagent, result)
@@ -2717,7 +2730,7 @@ class MiraApp(App[None]):
             row_id=row_id,
             eval_id=eval_id,
             duration_ms=duration_ms,
-            status="CANCELLED",
+            status=status,
         )
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
@@ -2783,6 +2796,49 @@ class MiraApp(App[None]):
             duration_ms=duration_ms,
             status="ERROR" if result else "CANCELLED",
         )
+
+    def subagent_run_event(self, run_id: str, _event: dict[str, Any]) -> None:
+        """Refresh the live inspector from the authoritative durable record."""
+        inspector = self.query_one(SubagentInspector)
+        if inspector.display and inspector.run_id == run_id:
+            run = get_run(self.session, run_id)
+            if run is not None:
+                inspector.show_run(run)
+
+    @on(SubagentsPanel.RunSelected)
+    def open_selected_subagent(self, event: SubagentsPanel.RunSelected) -> None:
+        event.stop()
+        self.open_subagent_inspector(event.run_id)
+
+    def open_subagent_inspector(self, run_id: str) -> None:
+        """Replace the conversation viewport with one persisted child transcript."""
+        run = get_run(self.session, run_id)
+        if run is None:
+            return
+        selectors = ("#chat-log", "#prompt-panel", "#subagents-panel", "#autocomplete-input", "#telemetry-row")
+        self._subagent_inspector_visibility = {}
+        for selector in selectors:
+            try:
+                widget = self.query_one(selector)
+            except NoMatches:
+                continue
+            self._subagent_inspector_visibility[selector] = bool(widget.display)
+            widget.display = False
+        inspector = self.query_one(SubagentInspector)
+        inspector.show_run(run)
+        self.call_after_refresh(lambda: self.set_focus(None))
+
+    @on(SubagentInspector.Closed)
+    def close_subagent_inspector(self, event: SubagentInspector.Closed) -> None:
+        event.stop()
+        self.query_one(SubagentInspector).display = False
+        for selector, visible in self._subagent_inspector_visibility.items():
+            try:
+                self.query_one(selector).display = visible
+            except NoMatches:
+                continue
+        self._subagent_inspector_visibility = {}
+        self.call_after_refresh(lambda: self.set_focus(None))
 
     def rubric_evaluation_started(
         self,

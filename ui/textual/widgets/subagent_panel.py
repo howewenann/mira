@@ -14,6 +14,7 @@ from rich.text import Text
 from textual import events, on
 from textual.containers import Grid, Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Button, Collapsible, DataTable, Label, OptionList
 from textual.widgets.option_list import Option
 
@@ -24,6 +25,7 @@ STATUS_RUNNING = "RUNNING"
 STATUS_DONE = "DONE"
 STATUS_CANCELLED = "CANCELLED"
 STATUS_ERROR = "ERROR"
+STATUS_INTERRUPTED = "INTERRUPTED"
 TASKS_GROUP = "__regular_tasks__"
 STATUS_COL = 11
 TIME_COL = 7
@@ -71,6 +73,11 @@ class SubagentsPanel(Vertical):
 
     can_focus = False
 
+    class RunSelected(Message):
+        def __init__(self, run_id: str) -> None:
+            super().__init__()
+            self.run_id = run_id
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._records: dict[str, SubagentRecord] = {}
@@ -97,11 +104,12 @@ class SubagentsPanel(Vertical):
         )
         tasks = DataTable(
             id="subagents-tasks",
-            cursor_type="none",
+            cursor_type="row",
             zebra_stripes=False,
-            show_cursor=False,
+            show_cursor=True,
             show_header=False,
         )
+        tasks.can_focus = False
         task_header = Grid(
             Label("TASK", id="subagents-task-heading"),
             Label("STATUS", id="subagents-status-heading"),
@@ -177,6 +185,7 @@ class SubagentsPanel(Vertical):
         row_id: str = "",
         eval_id: str = "",
         label: str = "",
+        display_name: str = "",
     ) -> None:
         """Add or update a running subagent row."""
         if self._pending_reset:
@@ -187,7 +196,12 @@ class SubagentsPanel(Vertical):
             return
         group_key = self._group_key_for_eval(eval_key) if eval_key else ""
         key = str(row_id or "")
-        display_name = self._display_name(name, key=key, track=not bool(eval_key), force=bool(eval_key))
+        display_name = display_name or self._display_name(
+            name,
+            key=key,
+            track=not bool(eval_key),
+            force=bool(eval_key),
+        )
         if not key:
             key = display_name
 
@@ -214,6 +228,37 @@ class SubagentsPanel(Vertical):
         if group_key and self._groups[group_key].terminal_status:
             self._cancel_record(record, time.monotonic())
         self._show()
+
+    def restore(self, runs: list[dict[str, Any]]) -> None:
+        """Reconstruct panel facts from durable records without cached widget state."""
+        self.reset()
+        now = time.monotonic()
+        for run in runs:
+            run_id = str(run.get("id") or "")
+            if not run_id:
+                continue
+            self.start_subagent(
+                str(run.get("name") or "subagent"),
+                str(run.get("task_input") or ""),
+                row_id=run_id,
+                eval_id=str(run.get("eval_id") or ""),
+                label=str(run.get("label") or ""),
+                display_name=str(run.get("display_name") or ""),
+            )
+            record = self._records[run_id]
+            duration = run.get("duration_ms")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                record.started = now - max(0, float(duration)) / 1000
+            status = str(run.get("status") or STATUS_RUNNING)
+            if status != STATUS_RUNNING:
+                self.finish_subagent(
+                    record.name,
+                    str(run.get("output") or ""),
+                    row_id=run_id,
+                    eval_id=str(run.get("eval_id") or ""),
+                    status=status,
+                    duration_ms=int(duration) if isinstance(duration, (int, float)) else None,
+                )
 
     def update_subagent_request(self, name: str, task: str) -> None:
         """Fill late-arriving task text for a running ungrouped row."""
@@ -338,6 +383,14 @@ class SubagentsPanel(Vertical):
         self._refresh_group_prompt(event.option_id)
         self._refresh_tasks()
         self._refresh_body_height()
+
+    @on(DataTable.RowSelected, "#subagents-tasks")
+    def select_run(self, event: DataTable.RowSelected) -> None:
+        """Open the durable run represented by a mouse-selected row."""
+        event.stop()
+        run_id = str(event.row_key.value or "")
+        if run_id:
+            self.post_message(self.RunSelected(run_id))
 
     def has_running_subagents(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())
@@ -620,7 +673,7 @@ class SubagentsPanel(Vertical):
         total = len(items)
         done = sum(1 for record in items if record.status != STATUS_RUNNING)
         failed = sum(1 for record in items if record.status == STATUS_ERROR)
-        cancelled = sum(1 for record in items if record.status == STATUS_CANCELLED)
+        cancelled = sum(1 for record in items if record.status in {STATUS_CANCELLED, STATUS_INTERRUPTED})
         return done, total, failed, cancelled
 
     def _eval_only(self) -> bool:
@@ -632,7 +685,7 @@ def status_icon(status: str, spinner_index: int) -> tuple[str, str]:
         return SPINNER_FRAMES[spinner_index], "bold yellow"
     if status == STATUS_DONE:
         return "v", "bold green"
-    if status == STATUS_CANCELLED:
+    if status in {STATUS_CANCELLED, STATUS_INTERRUPTED}:
         return "-", "bold yellow"
     return "x", "bold red"
 
@@ -692,7 +745,7 @@ def truncate_cells(value: str, width: int) -> str:
 
 
 def terminal_hint(record: SubagentRecord) -> str:
-    if record.status in {STATUS_ERROR, STATUS_CANCELLED} and record.output:
+    if record.status in {STATUS_ERROR, STATUS_CANCELLED, STATUS_INTERRUPTED} and record.output:
         if record.hint:
             return f"{record.hint} - {record.output}"
         return record.output

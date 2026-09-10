@@ -253,6 +253,16 @@ class FrontendEmitter:
     def eval_subagent_cancelled(self, name: str, result: str = "", **kwargs: Any) -> None:
         self._subagent("eval_cancel", name, result=result, **kwargs)
 
+    def subagent_run_event(self, run_id: str, event: Mapping[str, Any]) -> None:
+        self.frontend.emit(
+            SubagentEvent(
+                phase="run_event",
+                run_id=run_id,
+                transcript_event=dict(event),
+                **self._identity(),
+            )
+        )
+
     def _subagent(
         self,
         phase: str,
@@ -265,6 +275,9 @@ class FrontendEmitter:
         row_id: str = "",
         model: str = "",
         label: str = "",
+        task_call_id: str = "",
+        tool_call_id: str = "",
+        status: str = "",
         duration_ms: int | None = None,
         **identity: Any,
     ) -> None:
@@ -284,6 +297,9 @@ class FrontendEmitter:
                 row_id=row_id,
                 model=model,
                 label=label,
+                task_call_id=task_call_id,
+                tool_call_id=tool_call_id,
+                status=status,
                 **self._identity(**identity),
             )
         )
