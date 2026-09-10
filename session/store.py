@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from session.context import normalize_session
+from session.context import append_event, normalize_session
 from session.dashboard import normalize_dashboard
 from session.subagent_runs import reconcile_stale_runs
 
@@ -102,7 +102,37 @@ class SessionStore:
         """Read a session record from a JSON file."""
         record = json.loads(path.read_text(encoding="utf-8"))
         record = normalize_session(record)
-        if reconcile_stale_runs(record):
+        stale_anchors = list(
+            dict.fromkeys(
+                str(run.get("anchor_id") or "")
+                for run in record.get("runs", [])
+                if isinstance(run, dict) and run.get("status") == "RUNNING" and run.get("anchor_id")
+            )
+        )
+        changed = reconcile_stale_runs(record)
+        anchored = {
+            str(event.get("anchor_id") or "")
+            for event in record.get("events", [])
+            if isinstance(event, dict) and event.get("type") == "subagent_anchor"
+        }
+        for anchor_id in (item for item in stale_anchors if item not in anchored):
+            runs = [
+                run
+                for run in record.get("runs", [])
+                if isinstance(run, dict) and str(run.get("anchor_id") or "") == anchor_id
+            ]
+            append_event(
+                record,
+                {
+                    "type": "subagent_anchor",
+                    "mode": "action",
+                    "anchor_id": anchor_id,
+                    "tool_name": "eval" if any(run.get("eval_id") for run in runs) else "task",
+                    "status": "interrupted",
+                },
+            )
+            changed = True
+        if changed:
             self._write(record, update_timestamp=False)
         return record
 

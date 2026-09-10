@@ -155,6 +155,9 @@ class RendererAdapter:
         if event.phase == "run_event":
             self._call("subagent_run_event", event.run_id, dict(event.transcript_event or {}))
             return
+        if event.phase == "anchor":
+            self._call("subagent_anchor", event.anchor_id, created_at=event.created_at)
+            return
         lifecycle = {
             "live_start": "start_subagent_live",
             "live_tick": "tick_subagents",

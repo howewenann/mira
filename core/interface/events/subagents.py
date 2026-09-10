@@ -26,6 +26,7 @@ class SubagentEvent(EventIdentity):
         "eval_finish",
         "eval_cancel",
         "run_event",
+        "anchor",
     ]
     subagent_id: str = ""
     name: str = ""
@@ -41,6 +42,7 @@ class SubagentEvent(EventIdentity):
     tool_call_id: str = ""
     status: str = ""
     transcript_event: Mapping[str, Any] | None = None
+    anchor_id: str = ""
 
 
 __all__ = ["SubagentEvent"]

@@ -67,7 +67,7 @@ from session.plans import (
     plan_artifact_text,
 )
 from session.recorder import update_goal_event_status, update_plan_event_status
-from session.subagent_runs import get_run
+from session.subagent_runs import get_run, runs_for_anchor
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -97,10 +97,12 @@ from ui.textual.widgets import (
     TelemetryBar,
     SubagentsPanel,
     SubagentInspector,
+    SubagentAnchor,
     IssuesScreen,
     MCPPanelScreen,
 )
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
+from ui.textual.subagent_replay import persisted_session, replay_run, restore_anchor
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
     HistoryToggleButton,
@@ -227,6 +229,7 @@ class MiraApp(App[None]):
         self._subagent_live_active = False
         self._pending_artifact_review: PendingArtifactReview | None = None
         self._subagent_inspector_visibility: dict[str, bool] = {}
+        self._subagent_replay_anchor = ""
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
@@ -2394,6 +2397,7 @@ class MiraApp(App[None]):
         """Rebuild visible chat output from the active session."""
         chat = self.query_one(ChatLog)
         self.query_one(SubagentsPanel).reset()
+        self._subagent_replay_anchor = ""
         chat.clear_log()
         chat.startup(
             model_name=self.model_name,
@@ -2618,6 +2622,7 @@ class MiraApp(App[None]):
 
     def start_subagent_live(self) -> None:
         """Prepare subagent display."""
+        self._subagent_replay_anchor = ""
         self._subagent_live_active = True
         self.query_one(ChatLog).start_subagent_live()
 
@@ -2805,14 +2810,31 @@ class MiraApp(App[None]):
             if run is not None:
                 inspector.show_run(run)
 
+    def subagent_anchor(self, anchor_id: str, *, created_at: str = "") -> None:
+        """Render a terminal anchor using a count derived from durable runs."""
+        count = len(runs_for_anchor(self.session, anchor_id))
+        if count:
+            self.query_one(ChatLog).subagent_anchor(anchor_id, count, created_at=created_at)
+
+    @on(Button.Pressed, ".subagent-anchor")
+    def open_subagent_anchor(self, event: Button.Pressed) -> None:
+        if not isinstance(event.button, SubagentAnchor):
+            return
+        event.stop()
+        saved = persisted_session(self.store, self.session)
+        runs = restore_anchor(self.query_one(SubagentsPanel), saved, event.button.anchor_id)
+        if runs:
+            self._subagent_replay_anchor = event.button.anchor_id
+
     @on(SubagentsPanel.RunSelected)
     def open_selected_subagent(self, event: SubagentsPanel.RunSelected) -> None:
         event.stop()
-        self.open_subagent_inspector(event.run_id)
+        source = persisted_session(self.store, self.session) if self._subagent_replay_anchor else self.session
+        self.open_subagent_inspector(event.run_id, source=source)
 
-    def open_subagent_inspector(self, run_id: str) -> None:
+    def open_subagent_inspector(self, run_id: str, *, source: dict[str, Any] | None = None) -> None:
         """Replace the conversation viewport with one persisted child transcript."""
-        run = get_run(self.session, run_id)
+        run = replay_run(source, run_id) if source is not None else get_run(self.session, run_id)
         if run is None:
             return
         selectors = ("#chat-log", "#prompt-panel", "#subagents-panel", "#autocomplete-input", "#telemetry-row")

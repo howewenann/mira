@@ -28,6 +28,7 @@ from core.execution.streams.rubric import (
 from core.execution.streams.corrections import correction_text, correction_title
 from session.context import normalize_events
 from session.goals import GOAL_STATUSES
+from session.subagent_runs import runs_for_anchor
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.shared.terminal.colors import (
@@ -37,6 +38,7 @@ from ui.shared.terminal.colors import (
 from ui.textual.splash import loading_splash_text, splash_text
 from ui.textual.widgets.rubric_bubble import RubricBubble
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
+from ui.textual.widgets.subagent_anchor import SubagentAnchor
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -267,6 +269,11 @@ class ChatLog(VerticalScroll):
                         origin=str(event.get("origin") or ""),
                         created_at=created_at,
                     )
+            elif event_type == "subagent_anchor":
+                anchor_id = str(event.get("anchor_id") or "")
+                count = len(runs_for_anchor(session, anchor_id))
+                if count:
+                    self.subagent_anchor(anchor_id, count, created_at=created_at)
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type == "plan":
@@ -1025,6 +1032,14 @@ class ChatLog(VerticalScroll):
         widget.border_title = escape("rubric review")
         self.mount(widget)
         self._rubric_widgets[key] = widget
+        self._scroll_to_end()
+
+    def subagent_anchor(self, anchor_id: str, count: int, *, created_at: str = "") -> None:
+        """Append a small retrospective navigation affordance."""
+        if not anchor_id or count <= 0:
+            return
+        self.finish_main()
+        self.mount(SubagentAnchor(anchor_id, count))
         self._scroll_to_end()
 
     def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:

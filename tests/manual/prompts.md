@@ -1654,3 +1654,23 @@ prompt. Confirm the hierarchy renders as one tree and the exporter sends the
 same enriched spans. Start once with pre-existing `LANGSMITH_TRACING` and
 `LANGSMITH_TRACING_MODE` values; disable or reload tracing and confirm both
 original values are restored.
+
+## Durable Subagent Inspector And Replay
+
+Use a disposable workspace with one enabled subagent. Ask MIRA first to use a
+single `task` call and then to use `eval` with `Promise.all` to launch three
+`task()` calls. While either invocation runs, confirm the existing Subagents
+panel remains unchanged. Select every row and confirm the conversation and
+prompt swap to a read-only Subagent Inspector containing that run's reasoning,
+assistant messages, ordinary tools, results, final status, and output. Closing
+the inspector must restore the main conversation without losing scroll or panel
+state. Nested task/eval calls rendered inside the inspector must not be links.
+
+After each outer task or eval reaches a terminal result, confirm a compact
+`Subagents · N` anchor appears directly after it. Open each anchor and verify
+that the same panel lists only its own runs in creation order; selecting a row
+must open the same inspector. Exit MIRA, restart with the saved session, and
+repeat both clicks. The reconstructed panel, statuses, and transcript must be
+identical and must come from the session JSON. Also interrupt one active run,
+restart, and confirm it is shown as `INTERRUPTED` behind a durable anchor. A
+normal turn without task-created subagents must produce no anchor.

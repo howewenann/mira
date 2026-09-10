@@ -726,6 +726,25 @@ MCPPanelScreen {
     scrollbar-background: #122023;
 }
 
+Button.subagent-anchor {
+    width: auto;
+    min-width: 14;
+    height: 1;
+    min-height: 1;
+    margin: 0 1 1 1;
+    padding: 0 1;
+    border: none;
+    background: #201b2f;
+    color: #B7A4E8;
+    text-style: bold;
+}
+
+Button.subagent-anchor:hover,
+Button.subagent-anchor.-active {
+    background: #302746;
+    color: #ECE7FF;
+}
+
 #prompt-resize-handle {
     layer: resize;
     dock: left;

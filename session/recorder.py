@@ -25,6 +25,7 @@ from session.subagent_runs import (
     finish_run,
     new_anchor_id,
     run_for_task_call,
+    runs_for_anchor,
     start_run,
 )
 
@@ -468,6 +469,80 @@ class SessionRecorder:
             run["output"] = str(stored["text"])
         self.save()
         return str(run["id"]), stored
+
+    def subagent_anchor(
+        self,
+        tool_name: str,
+        call_id: str = "",
+        *,
+        status: str = "success",
+        anchor_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Append one terminal navigation event when the tool produced runs."""
+        anchor_id = anchor_id or self._anchor_id_for_tool(tool_name, call_id)
+        if not anchor_id or not runs_for_anchor(self.record, anchor_id):
+            return None
+        for event in self.record.get("events", []):
+            if (
+                isinstance(event, dict)
+                and event.get("type") == "subagent_anchor"
+                and event.get("anchor_id") == anchor_id
+            ):
+                return None
+        stored = append_event(
+            self.record,
+            {
+                "type": "subagent_anchor",
+                "mode": self.mode,
+                "anchor_id": anchor_id,
+                "tool_name": tool_name,
+                "status": status,
+            },
+        )
+        self.save()
+        return stored
+
+    def unanchored_subagent_anchors(self, *, status: str) -> list[dict[str, Any]]:
+        """Create terminal anchors for interrupted/cancelled run owners."""
+        existing = {
+            str(event.get("anchor_id") or "")
+            for event in self.record.get("events", [])
+            if isinstance(event, dict) and event.get("type") == "subagent_anchor"
+        }
+        events = []
+        for run in self.record.get("runs", []):
+            anchor_id = str(run.get("anchor_id") or "") if isinstance(run, dict) else ""
+            if not anchor_id or anchor_id in existing:
+                continue
+            stored = self.subagent_anchor(
+                "eval" if run.get("eval_id") else "task",
+                status=status,
+                anchor_id=anchor_id,
+            )
+            if stored is not None:
+                existing.add(anchor_id)
+                events.append(stored)
+        return events
+
+    def _anchor_id_for_tool(self, tool_name: str, call_id: str) -> str:
+        if tool_name == "task":
+            if call_id and call_id in self._task_anchor_ids:
+                return self._task_anchor_ids[call_id]
+        elif tool_name == "eval":
+            if call_id and call_id in self._tool_anchor_ids:
+                return self._tool_anchor_ids[call_id]
+        for event in reversed(self.record.get("events", [])):
+            if not isinstance(event, dict):
+                continue
+            if tool_name == "eval" and event.get("type") == "tool_call" and event.get("name") == "eval":
+                if not call_id or str(event.get("call_id") or "") == call_id:
+                    return str(event.get("anchor_id") or event.get("id") or "")
+            if tool_name == "task" and event.get("type") == "delegation":
+                for call in reversed(event.get("calls") or []):
+                    candidate = str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
+                    if not call_id or candidate == call_id:
+                        return str(call.get("anchor_id") or "")
+        return ""
 
     def system_error(self, text: str) -> dict[str, Any]:
         self.finish_main()
@@ -971,6 +1046,7 @@ class SessionEventEmitter:
             duration_ms=duration_ms,
             **frontend_identity,
         )
+        self._render_subagent_anchor(name, call_id, status="success")
 
     def _discard_open_idless_tool_call(self, name: str) -> None:
         for index, (_event_id, pending_name) in enumerate(self._open_idless_tool_calls):
@@ -1017,6 +1093,8 @@ class SessionEventEmitter:
                 **frontend_identity,
             )
 
+        self._render_subagent_anchor(name, call_id, status="success")
+
     def completed_tool_error(
         self,
         name: str,
@@ -1056,6 +1134,8 @@ class SessionEventEmitter:
                 **frontend_identity,
             )
 
+        self._render_subagent_anchor(name, call_id, status="error")
+
     def recovered_tool_result(
         self,
         name: str,
@@ -1072,6 +1152,8 @@ class SessionEventEmitter:
             call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
         else:
             call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+
+        self._render_subagent_anchor(name, call_id, status="success")
 
     def recovered_tool_call(
         self,
@@ -1104,6 +1186,23 @@ class SessionEventEmitter:
             call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
         else:
             call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+
+        self._render_subagent_anchor(name, call_id, status="error")
+
+    def _render_subagent_anchor(self, name: str, call_id: str, *, status: str) -> None:
+        """Persist and render a terminal task/eval navigation anchor."""
+        if name not in {"task", "eval"}:
+            return
+        event = self.recorder.subagent_anchor(name, call_id, status=status)
+        if event is None:
+            return
+        callback = getattr(self.renderer, "subagent_anchor", None)
+        if callable(callback):
+            call_renderer(
+                callback,
+                str(event.get("anchor_id") or ""),
+                created_at=event_created_at(event),
+            )
 
     def delegation_started(
         self,
@@ -1210,6 +1309,7 @@ class SessionEventEmitter:
                     status=status,
                     duration_ms=duration_ms,
                 )
+            self._render_subagent_anchor(name, call_id, status=status)
         if stopped_event_ids:
             self._open_idless_tool_calls = [
                 item for item in self._open_idless_tool_calls if item[0] not in stopped_event_ids
@@ -1536,6 +1636,14 @@ class SessionEventEmitter:
         if callable(callback):
             callback()
         self.recorder.subagents_cancelled()
+        anchor_callback = getattr(self.renderer, "subagent_anchor", None)
+        for event in self.recorder.unanchored_subagent_anchors(status="cancelled"):
+            if callable(anchor_callback):
+                call_renderer(
+                    anchor_callback,
+                    str(event.get("anchor_id") or ""),
+                    created_at=event_created_at(event),
+                )
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         callback = getattr(self.renderer, "system_message", None)

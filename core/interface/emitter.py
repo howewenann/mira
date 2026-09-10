@@ -263,6 +263,15 @@ class FrontendEmitter:
             )
         )
 
+    def subagent_anchor(self, anchor_id: str, **identity: Any) -> None:
+        self.frontend.emit(
+            SubagentEvent(
+                phase="anchor",
+                anchor_id=anchor_id,
+                **self._identity(**identity),
+            )
+        )
+
     def _subagent(
         self,
         phase: str,
