@@ -7,9 +7,50 @@ compatibility: designed for MIRA
 
 # Skill Creator
 
-Create skills that give MIRA reusable domain knowledge, workflows, and tool guidance.
+Create project skills that give MIRA reusable domain knowledge, workflows, and tool guidance.
 
-## Skill location and precedence
+## Start New Skills From This Template
+
+For every new skill, begin with this concrete `SKILL.md` shape and fill it in:
+
+```markdown
+---
+name: my-skill
+description: Clear, specific description of what this skill does and when it should be used.
+---
+
+# Skill Name
+
+## Overview
+
+Brief explanation of the skill's purpose.
+
+## When to Use
+
+Conditions or requests where this skill applies.
+
+## Instructions
+
+1. Give concrete steps for the agent to follow.
+2. Include important decision rules and constraints.
+3. Explain how to complete the task correctly.
+
+## Completion Criteria
+
+Before finishing, verify that:
+
+- [ ] The requested outcome has been produced.
+- [ ] Required constraints have been followed.
+- [ ] Any task-specific verification has passed.
+```
+
+YAML frontmatter alone is incomplete. Every skill requires a non-empty Markdown instruction body after the closing `---` delimiter.
+
+The headings above are a recommended creation template, not validator requirements. A short legitimate body is valid without these exact headings. When updating an existing skill, read it first and improve it in place; do not force an otherwise valid skill into this heading structure.
+
+## How to Fill the Template
+
+### Choose the location and name
 
 Create project skills at:
 
@@ -17,145 +58,104 @@ Create project skills at:
 .mira/skills/<skill-name>/SKILL.md
 ```
 
-MIRA also ships packaged default skills. Packaged defaults are read-only. A project skill under `.mira/skills` overrides a packaged default with the same frontmatter `name`.
+MIRA's packaged default skills are read-only. To customize a packaged default, create a project skill with the same frontmatter `name`; the project skill overrides the default.
 
-For a basic skill, create only the required `SKILL.md`. Do not create placeholder directories or files.
+Make `name` match the skill's parent directory exactly. Use at most 64 characters made from lowercase letters, digits, and single hyphens, with no leading, trailing, or consecutive hyphens.
 
-## Core principles
+### Write discovery metadata
 
-### Keep instructions concise
+Make `description` clearly explain both:
 
-Assume the agent already understands general concepts. Include only specialized knowledge, repeatable procedure, important constraints, and non-obvious pitfalls. Prefer short examples over long explanations.
+- what the skill does;
+- when it should be used or triggered.
 
-### Match specificity to risk
+The description is always available during skill discovery, while the body is loaded only after the skill is selected. Put important trigger conditions in `description`, keep it at 1024 characters or fewer, and do not use angle brackets.
 
-- Use flexible prose when multiple approaches are valid.
-- Use ordered steps or pseudocode when a preferred sequence matters.
-- Use exact commands or scripts only when execution is fragile or must be deterministic.
+Use only these frontmatter fields: `name`, `description`, `license`, `compatibility`, `allowed-tools`, and `metadata`. When supplied, `compatibility` must be a string of at most 500 characters.
 
-### Design for progressive disclosure
+### Write concrete instructions
 
-Skills have three possible levels:
+Replace the template placeholders with direct, imperative instructions. Include only what helps the agent perform the work:
 
-1. Frontmatter `name` and `description`, always available for discovery.
-2. The `SKILL.md` body, loaded when the skill applies or is invoked directly.
-3. Optional bundled resources, loaded only when the instructions say they are needed.
+- the skill's objective and intended result;
+- ordered steps when sequence matters;
+- decision rules for meaningful branches;
+- important inputs, outputs, constraints, and pitfalls;
+- verification and completion criteria.
 
-Keep the body focused. When detailed reference material is genuinely necessary, put it in a clearly named optional resource and tell the agent exactly when to read it.
+Keep the instructions concise. Prefer a short example over general background, and match specificity to risk: flexible prose when several approaches are valid, ordered steps or pseudocode when a preferred sequence matters, and exact commands only when execution must be deterministic.
 
-## Skill anatomy
+### Define completion criteria
 
-The minimum valid structure is:
+`Instructions` describe how to do the work. `Completion Criteria` describe what must be true before finishing. Keep the criteria short, observable, checkable, and specific to the skill. Focus on the small set of important final-state checks that help the executing model decide whether the work is actually done.
+
+Prefer checkable outcomes over vague quality statements. For example, avoid:
 
 ```text
-skill-name/
-└── SKILL.md
+- [ ] The result is high quality.
+- [ ] The answer looks professional.
 ```
 
-Advanced skills may add resources only when the task requires them:
+Prefer observable criteria such as:
+
+```text
+- [ ] All user-supplied constraints are reflected in the output.
+- [ ] Required verification has completed successfully.
+- [ ] Any unresolved blocker is explicitly identified.
+```
+
+Generate criteria appropriate to the specific skill rather than copying these examples into every skill. Use conditional wording when a criterion does not apply to every invocation. Do not duplicate every instruction as a criterion, and do not introduce requirements unsupported by the skill's purpose.
+
+`Completion Criteria` is recommended authoring guidance only. It is not MIRA Goal Success Criteria, RubricMiddleware, an evaluator or judge, or a heading enforced by `validate_skill`. Preserve an existing skill's structure instead of adding this heading unless it is appropriate to the user's requested improvement.
+
+### Add optional resources only when useful
+
+Start with only `SKILL.md`. Do not create placeholder directories, unnecessary documentation files, or unused resources.
+
+Add optional content only when it reduces repeated work or keeps the main instructions focused:
 
 ```text
 skill-name/
 ├── SKILL.md
 ├── scripts/       # deterministic or repeatedly reused executable logic
-├── references/    # detailed material loaded on demand
-└── assets/        # templates or files used in generated output
+├── references/    # detailed material loaded only when needed
+└── assets/        # templates or concrete files used in generated output
 ```
 
-Do not scaffold `scripts/`, `references/`, or `assets/` by default.
+Use progressive disclosure:
 
-## Required SKILL.md format
+1. `name` and `description` support discovery.
+2. The `SKILL.md` body provides the core workflow after selection.
+3. Optional resources provide deeper detail only when the body says exactly when to load or use them.
 
-Start the file with YAML frontmatter:
+### Clarify only material uncertainty
 
-```yaml
----
-name: skill-name
-description: Describe what the skill does and the requests or contexts that should trigger it.
----
-```
+Before writing, identify representative requests, expected inputs and outputs, tools, constraints, and completion conditions. Use MIRA's `ask_user` tool only when material behavior, inputs, outputs, trigger conditions, or constraints are unclear. Ask the minimum focused questions needed; do not ask when the user's intent is already clear.
 
-Follow these authoring rules:
+## Update Existing Skills In Place
 
-- Make `name` match the parent directory exactly.
-- Use lowercase letters, digits, and single hyphens in `name`.
-- Keep `name` at 64 characters or fewer.
-- Make `description` explain both capability and trigger conditions.
-- Keep `description` at 1024 characters or fewer and omit angle brackets.
-- Use only `name`, `description`, `license`, `compatibility`, `allowed-tools`, and `metadata` in frontmatter.
-- Keep `compatibility` at 500 characters or fewer when present.
-- Write the body as direct imperative instructions.
+Read the existing project skill and any resources its body references. Preserve useful structure and content while fixing ambiguity, missing constraints, repeated work, or unnecessary context. Do not modify packaged defaults and do not add resources merely to match the new-skill template.
 
-The description is the primary automatic trigger. Put all important "when to use" language there because the body is not available until after discovery chooses the skill.
+## Validate Every Change
 
-## Creation workflow
-
-### 1. Understand the skill through examples
-
-Identify concrete requests that should use the skill and requests that should not. Determine the expected inputs, outputs, tools, constraints, and completion conditions.
-
-When the behavior, trigger conditions, inputs, outputs, or intended use are materially unclear, use MIRA's `ask_user` tool rather than guessing. Ask only the minimum focused questions necessary, and ask a small number at a time. Do not ask questions when the user's intent is already clear.
-
-Useful clarification topics include:
-
-- representative user requests;
-- required output format;
-- tools or external systems involved;
-- constraints that must always hold;
-- examples of failure or unwanted behavior.
-
-### 2. Plan reusable content
-
-For each example, identify the steps and knowledge the agent would otherwise have to rediscover. Decide whether concise instructions are sufficient.
-
-Add a script only for logic that benefits from deterministic execution or would otherwise be rewritten repeatedly. Add a reference only for substantial detail that is needed in some cases but not every invocation. Add an asset only when the output must reuse a concrete file.
-
-### 3. Create or update SKILL.md
-
-Create `.mira/skills/<skill-name>/SKILL.md`, or edit the existing project skill. Do not attempt to modify a packaged default. To customize a default, create a project skill with the same name.
-
-Organize the body around the actual workflow. Include:
-
-- a concise objective;
-- ordered steps where sequence matters;
-- decision rules for meaningful branches;
-- references to optional resources and when to load them;
-- verification and completion criteria;
-- important pitfalls.
-
-Avoid generic motivational prose, duplicated background, and documentation files that are not needed to execute the skill.
-
-### 4. Validate with the tool
-
-After every creation or modification, call:
+Validation is mandatory after creating or modifying a skill. Call:
 
 ```text
 validate_skill(path=".mira/skills/<skill-name>")
 ```
 
-Do not rely on visually inspecting YAML. If validation returns errors, fix `SKILL.md` and call `validate_skill` again. Finish only after validation returns `valid: true`.
+If validation returns errors, address every returned repair action before calling `validate_skill` again. Do not rely on visual inspection of the YAML and do not finish while any validation error remains.
+
+Finish only after validation returns `valid: true`.
 
 Required loop:
 
 ```text
 create or update SKILL.md
 → validate_skill
-→ fix every reported error if invalid
+→ fix every returned error
 → validate_skill again
-→ finish only when valid
+→ finish only when valid: true
 ```
 
-### 5. Review usefulness
-
-Check the skill against the concrete examples:
-
-- Does the description trigger on the intended requests?
-- Does it avoid claiming unrelated requests?
-- Can the agent follow the body without hidden assumptions?
-- Are optional resources discoverable from the body?
-- Are steps precise enough for the task's risk level?
-- Is every section worth its context cost?
-
-### 6. Improve from real use
-
-After the skill is used, update it when actual behavior reveals ambiguity, missing constraints, repeated work, or unnecessary context. Re-run `validate_skill` after every update and finish only when it passes.
+After validation passes, check the skill against representative requests: its description should trigger for the intended use, its body should be actionable without hidden assumptions, optional resources should be discoverable, and every instruction should earn its context cost.

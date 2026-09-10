@@ -83,6 +83,24 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertIn(".mira/skills/<skill-name>/SKILL.md", text)
         self.assertIn("ask_user", text)
         self.assertIn("validate_skill", text)
+        self.assertIn("YAML frontmatter alone is incomplete", text)
+        self.assertIn("# Skill Name\n\n## Overview\n", text)
+        self.assertIn("## When to Use\n", text)
+        self.assertIn("## Instructions\n", text)
+        self.assertIn("## Completion Criteria\n\nBefore finishing, verify that:", text)
+        self.assertIn(
+            "`Instructions` describe how to do the work. `Completion Criteria` describe what must be true before finishing.",
+            text,
+        )
+        self.assertIn("short, observable, checkable, and specific to the skill", text)
+        self.assertIn("Prefer checkable outcomes over vague quality statements", text)
+        self.assertIn("Use conditional wording", text)
+        self.assertIn("Do not duplicate every instruction as a criterion", text)
+        self.assertIn("do not introduce requirements unsupported by the skill's purpose", text)
+        self.assertIn("not MIRA Goal Success Criteria, RubricMiddleware", text)
+        self.assertIn("or a heading enforced by `validate_skill`", text)
+        self.assertIn("recommended creation template, not validator requirements", text)
+        self.assertIn("read it first and improve it in place", text)
         self.assertIn("Finish only after validation returns `valid: true`", text)
         for forbidden in (
             "$DEEPAGENTS_HOME",
