@@ -14,6 +14,7 @@ from rich.text import Text
 from textual import events, on
 from textual.containers import Grid, Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Button, Collapsible, DataTable, Label, OptionList
 from textual.widgets.option_list import Option
 
@@ -48,6 +49,7 @@ class SubagentRecord:
     duration_ms: int | None = None
     output: str = ""
     finished_at: float | None = None
+    inspection_id: str = ""
 
     def elapsed_seconds(self) -> float:
         if self.duration_ms is not None:
@@ -64,6 +66,36 @@ class SubagentGroup:
     index: int
     order: list[str] = field(default_factory=list)
     terminal_status: str = ""
+
+
+class SubagentSelected(Message):
+    """Request that the app open one live inspection transcript."""
+
+    def __init__(self, inspection_id: str) -> None:
+        super().__init__()
+        self.inspection_id = inspection_id
+
+
+class SubagentRunTable(DataTable):
+    """Mouse-only task table that activates a row on its first click."""
+
+    can_focus = False
+
+    class RowClicked(Message):
+        def __init__(self, row_key: str) -> None:
+            super().__init__()
+            self.row_key = row_key
+
+    async def _on_click(self, event: events.Click) -> None:
+        self._set_hover_cursor(True)
+        row_index = event.style.meta.get("row")
+        if not isinstance(row_index, int) or not 0 <= row_index < len(self.ordered_rows):
+            await super()._on_click(event)
+            return
+        row_key = str(self.ordered_rows[row_index].key.value or "")
+        if row_key:
+            self.post_message(self.RowClicked(row_key))
+            event.stop()
 
 
 class SubagentsPanel(Vertical):
@@ -95,11 +127,11 @@ class SubagentsPanel(Vertical):
             OptionList(id="subagents-groups", compact=True),
             id="subagents-groups-column",
         )
-        tasks = DataTable(
+        tasks = SubagentRunTable(
             id="subagents-tasks",
-            cursor_type="none",
+            cursor_type="row",
             zebra_stripes=False,
-            show_cursor=False,
+            show_cursor=True,
             show_header=False,
         )
         task_header = Grid(
@@ -177,14 +209,15 @@ class SubagentsPanel(Vertical):
         row_id: str = "",
         eval_id: str = "",
         label: str = "",
-    ) -> None:
+        inspection_id: str = "",
+    ) -> SubagentRecord | None:
         """Add or update a running subagent row."""
         if self._pending_reset:
             self.reset()
 
         eval_key = str(eval_id or "")
         if eval_key in self._retired_eval_ids:
-            return
+            return None
         group_key = self._group_key_for_eval(eval_key) if eval_key else ""
         key = str(row_id or "")
         display_name = self._display_name(name, key=key, track=not bool(eval_key), force=bool(eval_key))
@@ -209,19 +242,22 @@ class SubagentsPanel(Vertical):
             name=sanitize(display_name, max_chars=MAX_LABEL_CHARS),
             hint=compact_subagent_hint(label, task),
             group_key=group_key,
+            inspection_id=inspection_id,
         )
         self._records[key] = record
         if group_key and self._groups[group_key].terminal_status:
             self._cancel_record(record, time.monotonic())
         self._show()
+        return record
 
-    def update_subagent_request(self, name: str, task: str) -> None:
+    def update_subagent_request(self, name: str, task: str) -> SubagentRecord | None:
         """Fill late-arriving task text for a running ungrouped row."""
         record = self._record_for_name(name)
         if record is None or not task:
-            return
+            return None
         record.hint = compact_hint(task)
         self._refresh()
+        return record
 
     def finish_subagent(
         self,
@@ -338,6 +374,14 @@ class SubagentsPanel(Vertical):
         self._refresh_group_prompt(event.option_id)
         self._refresh_tasks()
         self._refresh_body_height()
+
+    @on(SubagentRunTable.RowClicked)
+    def select_subagent(self, event: SubagentRunTable.RowClicked) -> None:
+        """Emit selection only; viewport ownership stays with the app."""
+        event.stop()
+        record = self._records.get(event.row_key)
+        if record is not None and record.inspection_id:
+            self.post_message(SubagentSelected(record.inspection_id))
 
     def has_running_subagents(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())

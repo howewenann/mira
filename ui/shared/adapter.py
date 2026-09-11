@@ -189,6 +189,7 @@ class RendererAdapter:
             model=event.model,
             label=event.label,
             duration_ms=event.metadata.get("duration_ms"),
+            inspection_id=str(event.metadata.get("inspection_id") or ""),
             created_at=event.created_at,
         )
 

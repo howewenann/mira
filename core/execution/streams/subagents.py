@@ -7,6 +7,13 @@ from contextlib import suppress
 from typing import Any
 
 from agent.rubric.graphs import INTERNAL_RUBRIC_GRAPHS
+from core.execution.inspection.subagents import (
+    SubagentInspectionCapture,
+    SubagentInspectionCoordinator,
+    capture_child_streams,
+    live_inspection_store,
+    native_inspection_hint,
+)
 from core.execution.streams.output import message_text, visible_message_text
 from core.execution.streams.output import call_renderer as call_frontend
 from core.execution.streams.rubric import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer
@@ -20,6 +27,7 @@ async def consume_subagents(
     subagents: Any,
     renderer: Any,
     rubric: RubricEventRenderer | None = None,
+    inspection: SubagentInspectionCoordinator | None = None,
 ) -> None:
     """Consume subagent streams while the status animation is active."""
     animation = None
@@ -34,6 +42,14 @@ async def consume_subagents(
                     drain_internal_rubric_subgraph(subagent, rubric)
                 )
             else:
+                inspection_id = inspection.claim_eval_child(subagent) if inspection else ""
+                if inspection_id:
+                    task = asyncio.create_task(
+                        consume_eval_inspection(subagent, renderer, inspection_id)
+                    )
+                    tasks.append(task)
+                    await asyncio.sleep(0)
+                    continue
                 if not visible_started:
                     visible_started = True
                     if hasattr(renderer, "start_subagent_live"):
@@ -124,9 +140,12 @@ async def animate_subagents(renderer: Any) -> None:
 
 
 async def consume_subagent(subagent: Any, renderer: Any) -> None:
-    """Render one subagent lifecycle and capture its final answer text."""
+    """Render one subagent lifecycle while observing its native child streams."""
     name = renderer.subagent_label(subagent)
     task_input = getattr(subagent, "task_input", "")
+    store = live_inspection_store(renderer)
+    inspection_id = store.allocate_id(native_inspection_hint(subagent)) if store else ""
+    capture = SubagentInspectionCapture(store, inspection_id)
     origin = subagent_origin(subagent)
     path = getattr(subagent, "path", ())
     namespace = tuple(str(item) for item in path) if isinstance(path, (list, tuple)) else ()
@@ -141,13 +160,28 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         origin=origin,
         namespace=namespace,
         metadata=metadata,
+        inspection_id=inspection_id,
     )
 
     try:
-        result = await subagent_result(subagent)
+        _, result = await asyncio.gather(
+            capture_child_streams(subagent, capture),
+            subagent_result(subagent),
+        )
+    except asyncio.CancelledError:
+        capture.fail("", status="CANCELLED")
+        raise
     except Exception as exc:
         result = f"error: {exc}"
-
+        if store is not None:
+            store.finish(
+                inspection_id,
+                status="ERROR",
+                error=result,
+                final_response=result,
+            )
+    else:
+        capture.ensure_final_response(str(result))
     call_frontend(
         renderer,
         "subagent_finished",
@@ -155,7 +189,52 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         result=str(result),
         namespace=namespace,
         metadata=metadata,
+        inspection_id=inspection_id,
     )
+
+
+async def consume_eval_inspection(
+    subagent: Any,
+    renderer: Any,
+    inspection_id: str,
+) -> None:
+    """Complete an Eval capture without duplicating protocol snapshot events."""
+    store = live_inspection_store(renderer)
+    streams = [
+        stream
+        for stream in (
+            getattr(subagent, "messages", None),
+            getattr(subagent, "tool_calls", None),
+        )
+        if stream is not None
+    ]
+    try:
+        values = await asyncio.gather(
+            *(_drain_stream(stream) for stream in streams),
+            subagent_result(subagent),
+        )
+        result = values[-1]
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if store is not None:
+            store.finish(
+                inspection_id,
+                status="ERROR",
+                error=f"error: {exc}",
+            )
+        return
+    if store is not None:
+        store.finish(
+            inspection_id,
+            status="DONE",
+            final_response=str(result),
+        )
+
+
+async def _drain_stream(stream: Any) -> None:
+    async for _ in stream:
+        pass
 
 
 def subagent_origin(subagent: Any) -> str:

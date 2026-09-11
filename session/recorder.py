@@ -1130,11 +1130,21 @@ class SessionEventEmitter:
         row_id: str = "",
         model: str = "",
         label: str = "",
+        **frontend_identity: Any,
     ) -> None:
         """Forward eval-internal subagent telemetry without recording it."""
         callback = getattr(self.renderer, "eval_subagent_started", None)
         if callable(callback):
-            call_renderer(callback, subagent, task_input, eval_id=eval_id, row_id=row_id, model=model, label=label)
+            call_renderer(
+                callback,
+                subagent,
+                task_input,
+                eval_id=eval_id,
+                row_id=row_id,
+                model=model,
+                label=label,
+                **frontend_identity,
+            )
 
     def eval_subagent_finished(
         self,
@@ -1144,11 +1154,20 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        **frontend_identity: Any,
     ) -> None:
         """Forward eval-internal subagent completion without recording it."""
         callback = getattr(self.renderer, "eval_subagent_finished", None)
         if callable(callback):
-            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
+            call_renderer(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=row_id,
+                duration_ms=duration_ms,
+                **frontend_identity,
+            )
 
     def eval_subagent_cancelled(
         self,
@@ -1158,11 +1177,20 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        **frontend_identity: Any,
     ) -> None:
         """Forward eval-internal subagent failure without recording it."""
         callback = getattr(self.renderer, "eval_subagent_cancelled", None)
         if callable(callback):
-            callback(subagent, result, eval_id=eval_id, row_id=row_id, duration_ms=duration_ms)
+            call_renderer(
+                callback,
+                subagent,
+                result,
+                eval_id=eval_id,
+                row_id=row_id,
+                duration_ms=duration_ms,
+                **frontend_identity,
+            )
 
     def rubric_evaluation_started(
         self,

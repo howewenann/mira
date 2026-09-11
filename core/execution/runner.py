@@ -16,6 +16,10 @@ from langgraph.stream.transformers import CustomTransformer
 from agent.middleware.correction import CORRECTION_EVENT
 from agent.planning.policy import PLANNING_STAGES
 from core.execution.streams.corrections import normalize_correction_event
+from core.execution.inspection.subagents import (
+    SubagentInspectionCoordinator,
+    live_inspection_store,
+)
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from core.execution.streams.output import (
@@ -246,6 +250,7 @@ class SubagentRequestRenderer:
         eval_id: str = "",
         row_id: str = "",
         model: str = "",
+        inspection_id: str = "",
     ) -> None:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
         request = task_input or queued_request
@@ -261,6 +266,7 @@ class SubagentRequestRenderer:
             eval_id=eval_id,
             row_id=row_id,
             model=model,
+            inspection_id=inspection_id,
         )
         if not request:
             self._pending_subagents.append(subagent)
@@ -273,6 +279,7 @@ class SubagentRequestRenderer:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        inspection_id: str = "",
     ) -> None:
         if subagent in self._hidden_subagents:
             self._hidden_subagents.remove(subagent)
@@ -284,6 +291,7 @@ class SubagentRequestRenderer:
             eval_id=eval_id,
             row_id=row_id,
             duration_ms=duration_ms,
+            inspection_id=inspection_id,
         )
 
     def subagent_cancelled(
@@ -313,8 +321,13 @@ class SubagentRequestRenderer:
 class EvalSubagentRenderer:
     """Render QuickJS eval-internal subagent lifecycle events."""
 
-    def __init__(self, renderer: Any) -> None:
+    def __init__(
+        self,
+        renderer: Any,
+        inspection: SubagentInspectionCoordinator | None = None,
+    ) -> None:
         self.renderer = renderer
+        self.inspection = inspection
         self._labels: dict[str, str] = {}
 
     def handle(self, event: dict[str, Any]) -> None:
@@ -325,6 +338,7 @@ class EvalSubagentRenderer:
         if phase == "start":
             name = eval_subagent_name(event)
             self._labels[subagent_id] = name
+            inspection_id = self.inspection.eval_started(event) if self.inspection else ""
             callback = getattr(self.renderer, "eval_subagent_started", None)
             if callable(callback):
                 call_renderer_with_supported_kwargs(
@@ -335,6 +349,7 @@ class EvalSubagentRenderer:
                     row_id=subagent_id,
                     model=str(event.get("model") or ""),
                     label=str(event.get("label") or ""),
+                    inspection_id=inspection_id,
                 )
             else:
                 self.renderer.subagent_started(
@@ -343,6 +358,8 @@ class EvalSubagentRenderer:
                     origin=EVAL_SUBAGENT,
                 )
         elif phase == "complete":
+            if self.inspection:
+                self.inspection.eval_finished(event)
             name = self._labels.pop(subagent_id, eval_subagent_name(event))
             callback = getattr(self.renderer, "eval_subagent_finished", None)
             if callable(callback):
@@ -356,6 +373,8 @@ class EvalSubagentRenderer:
             else:
                 self.renderer.subagent_finished(name)
         elif phase == "error":
+            if self.inspection:
+                self.inspection.eval_finished(event)
             name = self._labels.pop(subagent_id, eval_subagent_name(event))
             error = str(event.get("error") or "error")
             callback = getattr(self.renderer, "eval_subagent_cancelled", None)
@@ -372,9 +391,14 @@ class EvalSubagentRenderer:
                 self.renderer.subagent_cancelled(name, error)
 
 
-async def consume_custom_events(stream: Any, renderer: Any, rubric: RubricEventRenderer) -> None:
+async def consume_custom_events(
+    stream: Any,
+    renderer: Any,
+    rubric: RubricEventRenderer,
+    inspection: SubagentInspectionCoordinator | None = None,
+) -> None:
     """Dispatch custom events without competing stream consumers."""
-    eval_renderer = EvalSubagentRenderer(renderer)
+    eval_renderer = EvalSubagentRenderer(renderer, inspection)
     async for event in stream:
         if isinstance(event, dict) and event.get("type") == CORRECTION_EVENT:
             render_correction_event(event, renderer)
@@ -492,6 +516,9 @@ async def run_turn(
             ],
         )
         event_renderer = SubagentRequestRenderer(renderer)
+        inspection = SubagentInspectionCoordinator(
+            live_inspection_store(event_renderer)
+        )
         rubric_renderer = RubricEventRenderer(
             event_renderer,
             rubric_max_iterations,
@@ -507,8 +534,18 @@ async def run_turn(
 
         try:
             await asyncio.gather(
-                consume_live_tool_errors(stream, event_renderer, result),
-                consume_custom_events(stream.custom, event_renderer, rubric_renderer),
+                consume_live_tool_errors(
+                    stream,
+                    event_renderer,
+                    result,
+                    subagent_capture=inspection,
+                ),
+                consume_custom_events(
+                    stream.custom,
+                    event_renderer,
+                    rubric_renderer,
+                    inspection,
+                ),
                 consume_messages(
                     stream.messages,
                     event_renderer,
@@ -522,7 +559,12 @@ async def run_turn(
                     result,
                     projected_tool_errors,
                 ),
-                consume_subagents(stream.subagents, event_renderer, rubric_renderer),
+                consume_subagents(
+                    stream.subagents,
+                    event_renderer,
+                    rubric_renderer,
+                    inspection,
+                ),
                 capture_output(stream.output(), output),
             )
         except BaseException:
@@ -531,6 +573,7 @@ async def run_turn(
                 event_renderer,
                 result,
             )
+            inspection.cancel_running()
             rubric_renderer.cancel()
             raise
 

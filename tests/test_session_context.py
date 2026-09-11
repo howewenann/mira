@@ -1443,6 +1443,48 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(subagents[3]["status"], "CANCELLED")
         self.assertEqual(subagents[3]["task_input"], "find tests")
 
+    def test_inspection_identity_is_forwarded_but_never_persisted(self) -> None:
+        class Sink:
+            def __init__(self) -> None:
+                self.inspection_ids: list[str] = []
+
+            def subagent_started(
+                self,
+                _name: str,
+                _task: str,
+                *,
+                inspection_id: str = "",
+                **_kwargs: Any,
+            ) -> None:
+                self.inspection_ids.append(inspection_id)
+
+            def subagent_finished(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+        record: dict[str, Any] = {"events": []}
+        sink = Sink()
+        emitter = SessionEventEmitter(
+            sink,
+            SessionRecorder(record, Store(), "action"),
+        )
+
+        emitter.subagent_started(
+            "worker [fox]",
+            "inspect",
+            inspection_id="subagent:call",
+        )
+        emitter.subagent_finished(
+            "worker [fox]",
+            "done",
+            inspection_id="subagent:call",
+        )
+
+        self.assertEqual(sink.inspection_ids, ["subagent:call"])
+        self.assertTrue(record["events"])
+        self.assertTrue(
+            all("inspection_id" not in event for event in record["events"])
+        )
+
     def test_recorder_updates_blank_running_subagent_request(self) -> None:
         record = {"events": []}
         recorder = SessionRecorder(record, Store(), "action")

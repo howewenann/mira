@@ -663,11 +663,67 @@ MCPPanelScreen {
 .mcp-attention.failed { border-left: solid #ff8f8f; background: #301d1f; color: #ffc2c2; }
 .mcp-attention.warning { border-left: solid #e2b44f; background: #332a18; color: #fff0ad; }
 
+#transcript-viewport {
+    width: 1fr;
+    height: 1fr;
+}
+
 #chat-log {
     width: 1fr;
     height: 1fr;
     padding: 0 1;
     border: solid #2d5661;
+    scrollbar-color: #5bb8b1;
+    scrollbar-background: #122023;
+}
+
+#inspector {
+    display: none;
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+    border: solid #B7A4E8;
+    background: #0c0f10;
+}
+
+#inspector-header {
+    width: 1fr;
+    height: 1;
+    color: #ECE7FF;
+    text-style: bold;
+}
+
+#inspector-title {
+    width: 1fr;
+    height: 1;
+}
+
+#inspector-close {
+    width: 5;
+    min-width: 5;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #d2d8dc;
+}
+
+#inspector-close:focus,
+#inspector-close:hover,
+#inspector-close:focus:hover,
+#inspector-close.-active {
+    border: none;
+    background: transparent;
+    color: #d2d8dc;
+    tint: transparent;
+}
+
+#inspector-log {
+    width: 1fr;
+    height: 1fr;
+    padding: 0;
+    border: none;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;
 }
@@ -892,7 +948,12 @@ MCPPanelScreen {
     scrollbar-size-horizontal: 0;
 }
 
-#subagents-tasks > .datatable--hover,
+#subagents-tasks > .datatable--hover {
+    background: #1b3036;
+    color: #ECE7FF;
+    text-style: none;
+}
+
 #subagents-tasks > .datatable--header-hover,
 #subagents-tasks > .datatable--cursor,
 #subagents-tasks > .datatable--header-cursor {

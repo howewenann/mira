@@ -179,14 +179,19 @@ class AutocompleteInput(Vertical):
         """Return the live prompt ceiling while preserving the main layout."""
         prompt = self.query_one(PromptBox)
         try:
-            chat = self.screen.query_one("#chat-log")
+            chat = self.screen.query_one("#transcript-viewport")
             main_panel = self.screen.query_one("#main-panel")
             telemetry = self.screen.query_one("#telemetry-row")
+            inspector = self.screen.query_one("#inspector")
         except NoMatches:
             return max(MIN_PROMPT_HEIGHT, prompt.region.height)
 
         bottom_space = main_panel.content_region.bottom - telemetry.region.bottom
-        reclaimable_chat = chat.content_region.height - 1
+        # The viewport itself has no border. Preserve enough outer height for
+        # ChatLog's two border rows plus one visible transcript row. Inspector
+        # uses the same slot and adds a one-row header.
+        minimum_viewport_height = 4 if inspector.display else 3
+        reclaimable_chat = chat.content_region.height - minimum_viewport_height
         return max(
             MIN_PROMPT_HEIGHT,
             prompt.region.height + reclaimable_chat + bottom_space,

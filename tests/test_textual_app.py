@@ -84,6 +84,7 @@ from core.application import MiraSession
 from core.diagnostics.issues import Issue
 from core.diagnostics.logging import get_diagnostics_logger, setup_diagnostics_logging
 from core.execution.streams.rubric import RubricEventRenderer
+from core.execution.inspection.live import InspectionEvent
 from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
 from tracing.stream import TraceStream
@@ -114,6 +115,7 @@ from ui.textual.widgets import (
     ChatLog,
     ContextReportScreen,
     ContextStatus,
+    Inspector,
     MCPElicitationForm,
     PromptBox,
     PromptPanel,
@@ -10912,6 +10914,90 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ok)
             self.assertFalse(git_protection_preference(load_settings(workspace)))
             self.assertFalse(app.issues)
+
+    async def test_live_subagent_row_opens_updates_closes_and_reopens_inspector(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            inspection_id = app.live_inspections.allocate_id("task-call")
+            full_task = "Inspect every relevant file and preserve this complete request."
+            app.start_subagent_live()
+            app.subagent_started(
+                "researcher [fox]",
+                full_task,
+                inspection_id=inspection_id,
+            )
+            app.live_inspections.append_delta(inspection_id, "reasoning", "Checking the repository.")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            table = panel.query_one("#subagents-tasks", DataTable)
+            record = next(iter(panel._records.values()))
+            hover = table.get_component_styles("datatable--hover")
+            cursor = table.get_component_styles("datatable--cursor")
+            self.assertNotEqual(hover.background, Color.parse("transparent"))
+            self.assertEqual(cursor.background, Color.parse("transparent"))
+            self.assertFalse(table.can_focus)
+
+            await pilot.click("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+
+            inspector = app.query_one(Inspector)
+            inspector_log = inspector.query_one("#inspector-log", ChatLog)
+            self.assertTrue(inspector.display)
+            self.assertFalse(app.query_one("#chat-log", ChatLog).display)
+            self.assertTrue(panel.display)
+            self.assertTrue(app.query_one(PromptBox).has_focus)
+            self.assertFalse(table.has_focus)
+            self.assertIn(record.name, renderable_plain(inspector.query_one("#inspector-title")))
+            self.assertEqual(renderable_plain(inspector_log.children[0]), full_task)
+            self.assertIn("Checking the repository.", renderable_plain(inspector_log.children[1]))
+
+            app.live_inspections.append_delta(inspection_id, "reasoning", " Still live.")
+            app.live_inspections.append(
+                inspection_id,
+                InspectionEvent(
+                    "tool_call",
+                    name="read_file",
+                    args={"path": "README.md"},
+                    call_id="read-one",
+                ),
+            )
+            app.live_inspections.append(
+                inspection_id,
+                InspectionEvent(
+                    "tool_result",
+                    text="README output",
+                    name="read_file",
+                    call_id="read-one",
+                ),
+            )
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(child) for child in inspector_log.children)
+            self.assertIn("Still live", rendered)
+            self.assertIn("README output", rendered)
+
+            initial_prompt_height = app.query_one(PromptBox).region.height
+            _prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, start_y - 2)
+            await pilot.mouse_up(offset=(x, start_y - 2))
+            await pilot.pause()
+            self.assertGreater(app.query_one(PromptBox).region.height, initial_prompt_height)
+            self.assertGreaterEqual(inspector.content_region.height, 2)
+
+            await pilot.click("#inspector-close")
+            await pilot.pause()
+            self.assertFalse(inspector.display)
+            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+
+            app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
+            await pilot.click("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+            reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
+            self.assertTrue(inspector.display)
+            self.assertIn(full_task, reopened)
+            self.assertIn("Finished while closed.", reopened)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from ui.textual.widgets.settings_panel import SettingsPanel
 from ui.textual.widgets.session_history import SessionHistory
 from ui.textual.widgets.status_bar import ContextStatus, StatusBar, TelemetryBar
 from ui.textual.widgets.subagent_panel import SubagentsPanel
+from ui.textual.widgets.inspector import Inspector
 from ui.textual.widgets.issues import IssuesScreen
 from ui.textual.widgets.mcp_panel import MCPPanelScreen
 from ui.textual.widgets.mcp_form import MCPElicitationForm
@@ -26,6 +27,7 @@ __all__ = [
     "StatusBar",
     "TelemetryBar",
     "SubagentsPanel",
+    "Inspector",
     "IssuesScreen",
     "MCPPanelScreen",
     "MCPElicitationForm",

@@ -1654,3 +1654,31 @@ prompt. Confirm the hierarchy renders as one tree and the exporter sends the
 same enriched spans. Start once with pre-existing `LANGSMITH_TRACING` and
 `LANGSMITH_TRACING_MODE` values; disable or reload tracing and confirm both
 original values are restored.
+
+## Live Subagent Inspection (Phase 1)
+
+Use a disposable workspace with a configured model and enabled subagents.
+
+1. Ask MIRA to delegate a standalone task with a distinctive, multi-sentence
+   request. While it runs, hover a row in the Subagents panel. Expected: the row
+   receives the purple hover treatment without moving, resizing, or taking
+   keyboard focus. Click anywhere on the row. The main transcript is replaced
+   by an Inspector titled with the row's existing cool name; Prompt, Subagents,
+   Status, and telemetry remain visible and the Prompt retains focus.
+2. Confirm the Inspector's first bubble contains the complete delegated request,
+   then watch reasoning, assistant text, nested tool calls, tool results, and
+   visible errors arrive while the child runs. Expected: the exact response
+   returned to the parent is the final assistant bubble. Close and reopen the
+   Inspector while the child is running; content accumulated while closed is
+   present and continues live, while the parent ChatLog is unchanged.
+3. Ask MIRA to use `eval` with two concurrent `task()` calls. Expected: each Eval
+   row is clickable and opens its own child transcript, with no duplicate rows
+   for the native child streams. Successful rows reach DONE and failed rows
+   reach ERROR with stable elapsed durations and no running timer left behind.
+4. Cancel a turn containing an active Eval task, then repeat with an interrupted
+   tool approval. Expected: active rows finalize using MIRA's existing
+   cancellation/interruption behavior, elapsed durations stop, the Inspector
+   remains process-local, and no inspection events appear in the session JSON.
+5. Start a new process and resume the session. Expected: normal parent transcript
+   replay works exactly as before; Phase 1 does not restore Inspector content or
+   provide historical-row inspection.

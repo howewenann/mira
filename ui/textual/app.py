@@ -53,6 +53,7 @@ from core.diagnostics.error_report import clear_error_reports, write_error_repor
 from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
 from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
+from core.execution.inspection.live import LiveInspectionStore
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -88,6 +89,7 @@ from ui.textual.widgets import (
     ChatLog,
     ContextReportScreen,
     ContextStatus,
+    Inspector,
     PromptBox,
     PromptPanel,
     SessionHistory,
@@ -98,6 +100,7 @@ from ui.textual.widgets import (
     IssuesScreen,
     MCPPanelScreen,
 )
+from ui.textual.widgets.subagent_panel import SubagentSelected
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
@@ -223,6 +226,7 @@ class MiraApp(App[None]):
         self.agent_unavailable_message = "Main model is not configured. Run /models."
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
+        self.live_inspections = LiveInspectionStore()
         self._pending_artifact_review: PendingArtifactReview | None = None
 
     def compose(self) -> ComposeResult:
@@ -242,7 +246,13 @@ class MiraApp(App[None]):
                     yield Button("Artifact", id="artifact-status-button")
                     yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="issues-button")
-                yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
+                with Vertical(id="transcript-viewport"):
+                    yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
+                    yield Inspector(
+                        self.live_inspections,
+                        tool_output_chars=self.tool_output_chars,
+                        id="inspector",
+                    )
                 yield PromptPanel()
                 yield SubagentsPanel(id="subagents-panel")
                 yield AutocompleteInput(
@@ -377,6 +387,7 @@ class MiraApp(App[None]):
         )
 
         chat = self.query_one(ChatLog)
+        self._restore_chat_viewport()
         self.query_one(SubagentsPanel).reset()
         chat.clear_log()
         chat.startup(
@@ -1803,6 +1814,7 @@ class MiraApp(App[None]):
 
     def clear_log(self) -> None:
         """Clear chat output."""
+        self._restore_chat_viewport()
         self.query_one(ChatLog).clear_log()
         self.query_one(SubagentsPanel).reset()
 
@@ -2384,6 +2396,7 @@ class MiraApp(App[None]):
     def _render_current_session(self) -> None:
         """Rebuild visible chat output from the active session."""
         chat = self.query_one(ChatLog)
+        self._restore_chat_viewport()
         self.query_one(SubagentsPanel).reset()
         chat.clear_log()
         chat.startup(
@@ -2636,6 +2649,34 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).tick_subagents()
         self.query_one(SubagentsPanel).tick()
 
+    @on(SubagentSelected)
+    def open_subagent_inspector(self, event: SubagentSelected) -> None:
+        """Replace only the chat viewport with the selected live transcript."""
+        event.stop()
+        inspector = self.query_one(Inspector)
+        if not inspector.open(event.inspection_id):
+            return
+        self.query_one("#chat-log", ChatLog).display = False
+        inspector.display = True
+        self.call_after_refresh(self.action_focus_prompt)
+
+    @on(Inspector.Closed)
+    def close_inspector(self, event: Inspector.Closed) -> None:
+        """Restore the normal transcript while preserving surrounding panels."""
+        event.stop()
+        self._restore_chat_viewport()
+        self.call_after_refresh(self.action_focus_prompt)
+
+    def _restore_chat_viewport(self) -> None:
+        try:
+            inspector = self.query_one(Inspector)
+            chat = self.query_one("#chat-log", ChatLog)
+        except NoMatches:
+            return
+        inspector.stop_inspection()
+        inspector.display = False
+        chat.display = True
+
     def subagent_label(self, subagent: Any) -> str:
         """Return a stable display label for a subagent."""
         return self.query_one(ChatLog).subagent_label(subagent)
@@ -2650,17 +2691,21 @@ class MiraApp(App[None]):
         row_id: str = "",
         model: str = "",
         created_at: str = "",
+        inspection_id: str = "",
     ) -> None:
         """Render a subagent start."""
         self.trace.subagent_started(subagent, task_input)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(SubagentsPanel).start_subagent(
+        record = self.query_one(SubagentsPanel).start_subagent(
             subagent,
             task_input,
             row_id=row_id,
             eval_id=eval_id,
+            inspection_id=inspection_id,
         )
+        if record is not None and inspection_id:
+            self.live_inspections.start(inspection_id, record.name, task_input)
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
         self._rearm_waiting_if_busy()
@@ -2668,7 +2713,9 @@ class MiraApp(App[None]):
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Fill in a subagent request that arrived after the block started."""
         self.waiting_finished()
-        self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
+        record = self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
+        if record is not None and record.inspection_id:
+            self.live_inspections.update_task(record.inspection_id, task_input)
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
 
@@ -2731,17 +2778,21 @@ class MiraApp(App[None]):
         row_id: str = "",
         model: str = "",
         label: str = "",
+        inspection_id: str = "",
     ) -> None:
         """Render an eval-created subagent only in the live panel."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(SubagentsPanel).start_subagent(
+        record = self.query_one(SubagentsPanel).start_subagent(
             subagent,
             task_input,
             row_id=row_id,
             eval_id=eval_id,
             label=label,
+            inspection_id=inspection_id,
         )
+        if record is not None and inspection_id:
+            self.live_inspections.start(inspection_id, record.name, task_input)
 
     def eval_subagent_finished(
         self,

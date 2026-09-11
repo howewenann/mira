@@ -269,8 +269,11 @@ class FrontendEmitter:
         **identity: Any,
     ) -> None:
         metadata = dict(identity.pop("metadata", {}) or {})
+        inspection_id = str(identity.pop("inspection_id", "") or "")
         if duration_ms is not None:
             metadata["duration_ms"] = duration_ms
+        if inspection_id:
+            metadata["inspection_id"] = inspection_id
         identity["metadata"] = metadata
         self.frontend.emit(
             SubagentEvent(
