@@ -50,11 +50,6 @@ class ToolCallDrafts:
             record_draft(name, str(call.get("id") or ""))
 
         draft_call = self.draft_call(call)
-        if name == "task":
-            task_calls = [self.draft_call(value) for value in self._calls.values() if value.get("name") == "task"]
-            call_renderer(self.renderer, "delegation_delta", task_calls, **self.identity)
-            return
-
         call_renderer(
             self.renderer,
             "tool_call_delta",

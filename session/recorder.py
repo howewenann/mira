@@ -223,9 +223,13 @@ class SessionRecorder:
         durable_calls = []
         for call in calls:
             durable = dict(json_value(call))
-            anchor_id = str(durable.get("anchor_id") or new_anchor_id())
-            durable["anchor_id"] = anchor_id
             call_id = str(durable.get("id") or durable.get("call_id") or durable.get("tool_call_id") or "")
+            anchor_id = str(
+                durable.get("anchor_id")
+                or self._tool_anchor_ids.get(call_id)
+                or new_anchor_id()
+            )
+            durable["anchor_id"] = anchor_id
             if call_id:
                 self._task_anchor_ids[call_id] = anchor_id
             args = durable.get("args") if isinstance(durable.get("args"), dict) else {}

@@ -61,10 +61,16 @@ async def consume_tool_calls(
 
             if name == "task":
                 if is_new_call:
+                    call_renderer(
+                        renderer,
+                        "tool_call",
+                        name,
+                        normalized.get("args", {}),
+                        call_id=call_id,
+                        **identity,
+                    )
                     call_renderer(renderer, "delegation_started", [normalized], **identity)
-                continue
-
-            if is_new_call:
+            elif is_new_call:
                 call_renderer(
                     renderer,
                     "tool_call",

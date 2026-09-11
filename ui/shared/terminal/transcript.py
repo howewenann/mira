@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Callable
 
@@ -85,12 +84,7 @@ class TerminalTranscript:
         self.tool_error(name, error)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
-        """Write a compact task delegation block."""
-        descriptions = delegation_descriptions(calls)
-        if descriptions:
-            lines = [f"delegating to {len(descriptions)} subagent(s)"]
-            lines.extend(f"request: {self.truncate(description)}" for description in descriptions)
-            self.block("task", "\n".join(lines))
+        """Keep task lifecycle compatibility without duplicate terminal output."""
 
     def system_message(self, text: str, *, kind: str = "system") -> None:
         """Write a system/status/error block."""
@@ -226,21 +220,6 @@ class TerminalTranscript:
     def _next_suffix(self) -> str:
         """Return a readable subagent suffix."""
         return generate_slug(fallback=self._slug_fallback)
-
-
-def delegation_descriptions(calls: list[dict[str, Any]]) -> list[str]:
-    """Return task delegation descriptions from tool-call payloads."""
-    descriptions = []
-    for call in calls:
-        raw_args = call.get("args", {}) if isinstance(call, dict) else {}
-        if isinstance(raw_args, str):
-            try:
-                raw_args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                raw_args = {}
-        if isinstance(raw_args, dict) and raw_args.get("description"):
-            descriptions.append(str(raw_args["description"]))
-    return descriptions
 
 
 def subagent_title(subagent: str) -> str:

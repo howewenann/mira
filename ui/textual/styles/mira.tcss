@@ -2042,11 +2042,6 @@ Button.settings-access-back:hover {
     color: #CBD1D5;
 }
 
-.message.delegation {
-    border: solid #C7A86B;
-    color: #F0E1BD;
-}
-
 .message.subagent {
     border: solid #B7A4E8;
     color: #ECE7FF;

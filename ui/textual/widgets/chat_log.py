@@ -59,10 +59,6 @@ class ChatLog(VerticalScroll):
         self._reasoning_text = ""
         self._reasoning_block: Static | None = None
         self._waiting_block: Static | None = None
-        self._delegation_block: Static | None = None
-        self._delegation_draft_block: Static | None = None
-        self._delegation_calls: list[dict[str, Any]] = []
-        self._delegation_keys: set[tuple[str, str]] = set()
         self._startup_block: Static | None = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -192,13 +188,11 @@ class ChatLog(VerticalScroll):
 
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
-        self._reset_delegation_group()
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
     def timestamped_user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
         """Append a persisted user message with its session timestamp."""
-        self._reset_delegation_group()
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user", created_at=created_at)
 
@@ -243,8 +237,6 @@ class ChatLog(VerticalScroll):
                     created_at=created_at,
                     duration_ms=event.get("duration_ms"),
                 )
-            elif event_type == "delegation":
-                self.delegation_started(event["calls"], created_at=created_at)
             elif event_type == "subagent":
                 if event.get("status") == "DONE":
                     self.subagent_finished(
@@ -401,13 +393,11 @@ class ChatLog(VerticalScroll):
         """Close live turn state without clearing persisted transcript history."""
         self.finish_main()
         self.hide_waiting()
-        self._discard_delegation_draft()
         if cancelled:
             self.subagents_cancelled()
             self._discard_tool_drafts()
             self.stop_live_tools(tool_status)
             self._cancel_compaction()
-            self._reset_delegation_group()
 
     def discard_reasoning(self) -> None:
         """Remove the current streamed reasoning block."""
@@ -726,73 +716,11 @@ class ChatLog(VerticalScroll):
             self._remove_tool_queue_key(str(block.get("name") or "tool"), key)
             self._update_tool_block(key, scroll=False)
 
-    def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
-        """Append a compact task delegation summary."""
-        new_calls = self._new_delegation_calls(calls)
-        if not new_calls:
-            return
-        self._delegation_calls.extend(new_calls)
-        text = self._render_delegation(self._delegation_calls, draft=False)
-        if text is None:
-            return
-
-        self.hide_waiting()
-        self.finish_main()
-        if self._delegation_draft_block is not None:
-            self._delegation_draft_block.update(text)
-            self._scroll_to_end()
-            self._delegation_block = self._delegation_draft_block
-            self._delegation_draft_block = None
-            return
-        if self._delegation_block is not None:
-            self._delegation_block.update(text)
-            self._scroll_to_end()
-            return
-        self._delegation_block = self._add_block("task", text, "message delegation", created_at=created_at)
-
-    def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
-        """Create or update a live draft of streamed task delegation input."""
-        text = self._render_delegation(calls, draft=True)
-        if text is None:
-            self.hide_waiting()
-            self.finish_main()
-            placeholder = Text("preparing subagent tasks...")
-            if self._delegation_draft_block is None:
-                self._delegation_draft_block = self._add_block("info", placeholder, "message info")
-                return
-            self._style_block(self._delegation_draft_block, title="info", classes="message info")
-            self._delegation_draft_block.update(placeholder)
-            self._scroll_to_end()
-            return
-
-        self.hide_waiting()
-        self.finish_main()
-        if self._delegation_draft_block is None:
-            self._delegation_draft_block = self._add_block("task", text, "message delegation")
-            return
-        self._style_block(self._delegation_draft_block, title="task", classes="message delegation")
-        self._delegation_draft_block.update(text)
-        self._scroll_to_end()
-
     def start_subagent_live(self) -> None:
         """Reset subagent state for a new delegation group."""
-        self.discard_delegation_summary()
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._subagent_aliases = {}
-
-    def discard_delegation_summary(self) -> None:
-        """Remove the current live delegation summary from the transcript."""
-        blocks = [self._delegation_draft_block, self._delegation_block]
-        removed = False
-        for block in blocks:
-            if block is None or block not in self.children:
-                continue
-            block.remove()
-            removed = True
-        self._reset_delegation_group()
-        if removed:
-            self._scroll_to_end()
 
     def stop_subagent_live(self) -> None:
         """Finalize subagent display."""
@@ -1224,7 +1152,6 @@ class ChatLog(VerticalScroll):
         self._waiting_block = None
         self._waiting_elapsed = False
         self._waiting_started_at = 0.0
-        self._reset_delegation_group()
         self._startup_block = None
         self._startup_state = "starting"
         self._startup_workspace = ""
@@ -1434,47 +1361,6 @@ class ChatLog(VerticalScroll):
         finally:
             self._programmatic_tail_scroll = False
 
-    def _delegation_details(self, calls: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
-        """Return valid task descriptions and compact parse errors."""
-        descriptions: list[str] = []
-        errors: list[str] = []
-        for call in calls:
-            raw_args = call.get("args", {}) if isinstance(call, dict) else {}
-            if isinstance(raw_args, str):
-                try:
-                    raw_args = json.loads(raw_args)
-                except (TypeError, json.JSONDecodeError):
-                    errors.append(f"could not parse args: {str(raw_args)[:60]}")
-                    continue
-            args = raw_args if isinstance(raw_args, dict) else {}
-            description = args.get("description")
-            if description:
-                descriptions.append(str(description))
-            else:
-                errors.append(f"missing description in args: {str(args)[:60]}")
-        return descriptions, errors
-
-    def _new_delegation_calls(self, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        new_calls = []
-        for call in calls:
-            key = self._delegation_key(call)
-            if key in self._delegation_keys:
-                continue
-            self._delegation_keys.add(key)
-            new_calls.append(call)
-        return new_calls
-
-    def _reset_delegation_group(self) -> None:
-        self._delegation_block = None
-        self._delegation_draft_block = None
-        self._delegation_calls = []
-        self._delegation_keys = set()
-
-    def _discard_delegation_draft(self) -> None:
-        if self._delegation_draft_block is not None:
-            self._delegation_draft_block.remove()
-            self._delegation_draft_block = None
-
     def _discard_tool_drafts(self) -> None:
         draft_keys = [
             key
@@ -1500,54 +1386,6 @@ class ChatLog(VerticalScroll):
         self._compaction_block.update(Text("context compaction cancelled", style="bold yellow"))
         self._compaction_block = None
         self._scroll_to_end()
-
-    def _delegation_key(self, call: dict[str, Any]) -> tuple[str, str]:
-        call_id = str(call.get("id") or call.get("call_id") or call.get("tool_call_id") or "")
-        if call_id:
-            return ("id", call_id)
-        raw_args = call.get("args", call.get("input", {}))
-        if isinstance(raw_args, str):
-            try:
-                raw_args = json.loads(raw_args)
-            except (TypeError, json.JSONDecodeError):
-                raw_args = {"raw": raw_args}
-        args = raw_args if isinstance(raw_args, dict) else {"raw": str(raw_args)}
-        return (
-            "request",
-            json.dumps(
-                [
-                    str(call.get("name") or call.get("tool_name") or "task"),
-                    str(args.get("description") or ""),
-                    str(args.get("subagent_type") or ""),
-                ],
-                sort_keys=True,
-            ),
-        )
-
-    def _render_delegation(self, calls: list[dict[str, Any]], *, draft: bool) -> Text | None:
-        """Render a task delegation summary or live draft."""
-        descriptions, errors = self._delegation_details(calls)
-        if not descriptions and not errors:
-            return None
-        if draft and not descriptions:
-            return None
-
-        text = Text()
-        label = "subagent" if len(descriptions) == 1 else "subagents"
-        if descriptions:
-            verb = "preparing" if draft else "delegating to"
-            text.append(f"{verb} {len(descriptions)} {label}\n", style="bold yellow")
-        for description in descriptions:
-            text.append("request: ", style="bold cyan")
-            text.append(self.truncate(description) + "\n")
-        if draft:
-            for _ in errors:
-                text.append("request: ", style="bold cyan")
-                text.append("drafting request...\n", style="dim")
-        if not draft:
-            for error in errors:
-                text.append(f"failed: {error}\n", style="red")
-        return text
 
     def _compaction_text(self, compaction: dict[str, Any]) -> Text:
         """Render a DeepAgents compaction marker."""

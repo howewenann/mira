@@ -2606,16 +2606,7 @@ class MiraApp(App[None]):
             self.query_one(SubagentsPanel).finish_eval_group(call_id, failed=failed)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
-        """Render task delegation summary."""
-        self.trace.delegation_started(calls)
-        self._finish_main_stream_activity()
-        self.waiting_finished()
-        if self._subagent_panel_is_live():
-            self._set_status(state="running")
-            self._rearm_waiting_if_busy()
-            return
-        self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
-        self._rearm_waiting_if_busy()
+        """Keep task provenance without adding a redundant transcript bubble."""
 
     def start_subagent_live(self) -> None:
         """Prepare subagent display."""

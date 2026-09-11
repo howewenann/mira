@@ -379,16 +379,21 @@ def render_tool_calls(
 ) -> None:
     """Render fallback finalized calls from message projections."""
     normalized = [normalized_call(call) for call in call_list]
-    task_calls = [call for call in call_list if tool_call_name(call) == "task"]
-    if render_normal_tools and task_calls:
-        call_renderer(renderer, "delegation_started", task_calls, **(identity or {}))
-
     for call in normalized:
         name = str(call["name"])
         call_id = str(call.get("id") or "")
         if name == "task":
-            if result is not None and render_normal_tools:
-                result.record_tool_call(name, call_id)
+            if result is not None and not result.record_tool_call(name, call_id):
+                continue
+            call_renderer(
+                renderer,
+                "tool_call",
+                name,
+                call.get("args", {}),
+                call_id=call_id,
+                **(identity or {}),
+            )
+            call_renderer(renderer, "delegation_started", [call], **(identity or {}))
             continue
 
         if not render_normal_tools and name not in CONTROL_TOOLS:
