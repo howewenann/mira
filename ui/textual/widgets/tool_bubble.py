@@ -12,7 +12,7 @@ from rich.markup import escape
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.events import Click
 from textual.widgets import Collapsible, Static, TextArea
 
@@ -26,6 +26,7 @@ from ui.shared.terminal.colors import (
     TOOL_PREPARING_COLOR,
     TOOL_RUNNING_COLOR,
 )
+from ui.textual.widgets.subagent_anchor import SubagentAnchor
 
 
 TOOL_ARGS_PREVIEW_CHARS = 112
@@ -181,6 +182,10 @@ class ToolBubble(Vertical):
         )
         self.output = Static(classes="tool-output")
         self.status = Static(classes="tool-status")
+        self.subagent_anchor = SubagentAnchor("", 0)
+        self.subagent_anchor.display = False
+        self.actions = Horizontal(self.subagent_anchor, classes="tool-actions")
+        self.actions.display = False
         self.output.styles.display = "none"
         self.status.styles.display = "none"
         self.update_call(name, args, draft=draft)
@@ -189,6 +194,7 @@ class ToolBubble(Vertical):
         yield self.args_collapsible
         yield self.output
         yield self.status
+        yield self.actions
 
     def on_click(self, event: Click) -> None:
         """Keep native tool interactions from moving focus to the transcript."""
@@ -219,6 +225,13 @@ class ToolBubble(Vertical):
         self.status.update(self._status_text)
         self.output.styles.display = "block" if self._output_text.plain else "none"
         self.status.styles.display = "block" if self._status_text.plain else "none"
+
+    def set_subagent_anchor(self, anchor_id: str, count: int) -> None:
+        """Show the retrospective action inside its originating tool bubble."""
+        self.subagent_anchor.anchor_id = anchor_id
+        self.subagent_anchor.label = f"Subagents · {count}"
+        self.subagent_anchor.display = True
+        self.actions.display = True
 
     @on(Collapsible.Expanded)
     def refit_expanded_arguments(self, event: Collapsible.Expanded) -> None:

@@ -14,8 +14,10 @@ from langchain_quickjs import CodeInterpreterMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
+from langgraph.prebuilt.tool_node import ToolRuntime
 
 from agent.factory import _action_permissions, _write_interrupts
+from agent.middleware.code_interpreter import _runtime_with_task_callbacks
 from agent.resources import build_resources
 from agent.tools.specs import collect_tool_specs
 from core.execution.runner import annotate_filesystem_approvals, run_turn
@@ -294,6 +296,34 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("41", str(first.content))
         self.assertIn("42", str(second.content))
         self.assertIn("undefined/undefined/undefined", str(isolated.content))
+
+    async def test_eval_task_runtime_forwards_parent_callbacks(self) -> None:
+        seen: list[object] = []
+
+        class TaskTool:
+            name = "task"
+
+            async def arun(self, *_args: object, callbacks: object = None, **_kwargs: object) -> str:
+                seen.append(callbacks)
+                return "done"
+
+        callbacks = object()
+        runtime = ToolRuntime(
+            state={},
+            context=None,
+            config={"callbacks": callbacks},
+            stream_writer=lambda _event: None,
+            tool_call_id="eval-call",
+            store=None,
+            tools=[TaskTool()],
+        )
+
+        wrapped = _runtime_with_task_callbacks(runtime)
+        result = await wrapped.tools[0].arun({})
+
+        self.assertEqual(result, "done")
+        self.assertEqual(seen, [callbacks])
+        self.assertIsNot(wrapped.tools[0], runtime.tools[0])
 
     async def test_errors_timeout_configuration_and_cancellation_propagate(self) -> None:
         middleware = CodeInterpreterMiddleware(timeout=0.05, mode="call")

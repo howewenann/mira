@@ -8843,7 +8843,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("old", renderable_plain(tool_blocks[0]))
 
     async def test_delegation_delta_updates_in_place_when_final_call_arrives(self) -> None:
-        """Draft task requests should finalize in the same transcript block."""
+        """Draft task requests should stay hidden until the final call arrives."""
         app = make_app()
         draft_call = [{"name": "task", "args": {"description": "summarize"}}]
         final_call = [{"name": "task", "args": {"description": "summarize README"}}]
@@ -8854,21 +8854,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.delegation_delta(draft_call)
             await pilot.pause()
             draft_blocks = list(app.query_one(ChatLog).children)
-            draft = renderable_plain(draft_blocks[-1])
-            self.assertIn("preparing 1 subagent", draft)
-            self.assertIn("summarize", draft)
 
             app.delegation_started(final_call)
             await pilot.pause()
             final_blocks = list(app.query_one(ChatLog).children)
             final = renderable_plain(final_blocks[-1])
 
-            self.assertEqual(len(final_blocks), len(draft_blocks))
+            self.assertEqual(len(final_blocks), len(draft_blocks) + 1)
             self.assertIn("delegating to 1 subagent", final)
             self.assertIn("summarize README", final)
 
     async def test_cancel_turn_discards_delegation_drafts(self) -> None:
-        """Delegation drafts from a cancelled turn should not promote later."""
+        """Hidden delegation drafts from a cancelled turn should not promote later."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8876,15 +8873,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_delta([{"id": "task-old", "name": "task", "args": {"description": "old task"}}])
             await pilot.pause()
-            old_draft = app.query_one(ChatLog).children[-1]
-            self.assertIn("old task", renderable_plain(old_draft))
+            blocks_before_cancel = list(app.query_one(ChatLog).children)
 
             app.busy = True
             app.turn_worker = FakeWorker()
             app._cancel_turn()
             await pilot.pause()
 
-            self.assertNotIn(old_draft, list(app.query_one(ChatLog).children))
+            self.assertEqual(list(app.query_one(ChatLog).children), blocks_before_cancel)
 
             app.delegation_started([{"id": "task-new", "name": "task", "args": {"description": "new task"}}])
             await pilot.pause()
@@ -8895,25 +8891,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("old task", renderable_plain(delegation_blocks[0]))
 
     async def test_empty_delegation_delta_renders_info_placeholder(self) -> None:
-        """Empty task drafts should show a live info placeholder, not an empty task box."""
+        """Empty task drafts should remain invisible."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
+            initial_blocks = list(app.query_one(ChatLog).children)
 
             app.delegation_delta([{"id": "task-1", "name": "task", "args": {}}])
             await pilot.pause()
             blocks = list(app.query_one(ChatLog).children)
-            block = blocks[-1]
-            rendered = renderable_plain(block)
-
-            self.assertEqual(str(getattr(block, "border_title", "")), "info")
-            self.assertIn("info", block.classes)
-            self.assertIn("preparing subagent tasks...", rendered)
-            self.assertNotIn("request:", rendered)
+            self.assertEqual(blocks, initial_blocks)
 
     async def test_delegation_delta_promotes_info_placeholder_to_task(self) -> None:
-        """The first readable task request should replace the info placeholder in place."""
+        """Readable task-call deltas should also remain invisible."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8931,14 +8922,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.pause()
             task_blocks = list(app.query_one(ChatLog).children)
-            block = task_blocks[-1]
-            rendered = renderable_plain(block)
-
-            self.assertEqual(len(task_blocks), len(info_blocks))
-            self.assertEqual(str(getattr(block, "border_title", "")), "task")
-            self.assertIn("delegation", block.classes)
-            self.assertIn("scary story", rendered)
-            self.assertIn("drafting request...", rendered)
+            self.assertEqual(task_blocks, info_blocks)
 
     async def test_delegation_started_calls_update_one_task_block(self) -> None:
         """One-by-one task calls should coalesce into one visible task block."""
@@ -8962,7 +8946,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("funny story", final)
 
     async def test_live_subagent_panel_removes_existing_delegation_draft(self) -> None:
-        """Opening the panel should remove the transient task draft for the same work."""
+        """Opening the panel should not expose a transient task draft."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8970,8 +8954,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_delta([{"id": "task-1", "name": "task", "args": {"description": "judge haiku"}}])
             await pilot.pause()
-            draft = app.query_one(ChatLog).children[-1]
-            self.assertIn("judge haiku", renderable_plain(draft))
+            blocks_before_panel = list(app.query_one(ChatLog).children)
 
             app.start_subagent_live()
             app.subagent_started("general-purpose [one]", "judge haiku")
@@ -8980,7 +8963,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
             panel_text = data_table_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", DataTable))
 
-            self.assertNotIn(draft, list(app.query_one(ChatLog).children))
+            self.assertEqual(list(app.query_one(ChatLog).children), blocks_before_panel)
             self.assertEqual(delegation_blocks, [])
             self.assertIn("general-purpose [one]", panel_text)
 
@@ -9893,7 +9876,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 duration_ms=1500,
             )
             app.eval_subagent_started(
-                "general-purpose [final]",
+                "general-purpose [mauve-mammoth]",
                 "judge",
                 eval_id="eval-round-b",
                 row_id="task-b",
@@ -9919,7 +9902,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("judge", tasks)
             self.assertNotIn("MODEL", tasks)
             self.assertNotIn("claude-haiku", tasks)
-            self.assertNotIn("final]", tasks)
+            self.assertIn("mauve-mammoth]", tasks)
             self.assertNotIn("eval-round", groups)
             self.assertNotIn("eval-round", tasks)
 

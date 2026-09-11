@@ -79,14 +79,21 @@ def normalize_run_events(value: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         event_type = str(item.get("type") or "")
-        if event_type not in {"assistant", "reasoning", "tool_call", "tool_result", "delegation"}:
+        if event_type not in {
+            "assistant",
+            "reasoning",
+            "tool_call",
+            "tool_result",
+            "delegation",
+            "system_error",
+        }:
             continue
         event = {
             "id": int(item.get("id") or index),
             "type": event_type,
             "created_at": str(item.get("created_at") or now_iso()),
         }
-        if event_type in {"assistant", "reasoning"}:
+        if event_type in {"assistant", "reasoning", "system_error"}:
             event["text"] = str(item.get("text") or "")
             if not event["text"]:
                 continue

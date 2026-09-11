@@ -273,7 +273,12 @@ class ChatLog(VerticalScroll):
                 anchor_id = str(event.get("anchor_id") or "")
                 count = len(runs_for_anchor(session, anchor_id))
                 if count:
-                    self.subagent_anchor(anchor_id, count, created_at=created_at)
+                    self.subagent_anchor(
+                        anchor_id,
+                        count,
+                        tool_name=str(event.get("tool_name") or ""),
+                        created_at=created_at,
+                    )
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type == "plan":
@@ -1034,13 +1039,40 @@ class ChatLog(VerticalScroll):
         self._rubric_widgets[key] = widget
         self._scroll_to_end()
 
-    def subagent_anchor(self, anchor_id: str, count: int, *, created_at: str = "") -> None:
+    def subagent_anchor(
+        self,
+        anchor_id: str,
+        count: int,
+        *,
+        tool_name: str = "",
+        created_at: str = "",
+    ) -> None:
         """Append a small retrospective navigation affordance."""
         if not anchor_id or count <= 0:
             return
         self.finish_main()
+        tool = self._tool_bubble_for_anchor(tool_name, anchor_id)
+        if tool is not None:
+            tool.set_subagent_anchor(anchor_id, count)
+            self._scroll_to_end()
+            return
         self.mount(SubagentAnchor(anchor_id, count))
         self._scroll_to_end()
+
+    def _tool_bubble_for_anchor(self, tool_name: str, anchor_id: str) -> ToolBubble | None:
+        """Return the newest matching tool bubble without another anchor."""
+        if not tool_name:
+            return None
+        for block in reversed(self._tool_blocks.values()):
+            if str(block.get("name") or "") != tool_name:
+                continue
+            widget = block.get("widget")
+            if not isinstance(widget, ToolBubble):
+                continue
+            current = widget.subagent_anchor.anchor_id
+            if current == anchor_id or not widget.subagent_anchor.display:
+                return widget
+        return None
 
     def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
         """Project one nested verifier/grader event inside its Rubric bubble."""

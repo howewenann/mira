@@ -8,8 +8,8 @@ from typing import Any
 
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain_quickjs import CodeInterpreterMiddleware
 
+from agent.middleware.code_interpreter import MiraCodeInterpreterMiddleware as CodeInterpreterMiddleware
 from agent.middleware.compaction import (
     create_mira_summarization_middleware,
     create_mira_summarization_tool_middleware,

@@ -1660,17 +1660,23 @@ original values are restored.
 Use a disposable workspace with one enabled subagent. Ask MIRA first to use a
 single `task` call and then to use `eval` with `Promise.all` to launch three
 `task()` calls. While either invocation runs, confirm the existing Subagents
-panel remains unchanged. Select every row and confirm the conversation and
-prompt swap to a read-only Subagent Inspector containing that run's reasoning,
-assistant messages, ordinary tools, results, final status, and output. Closing
-the inspector must restore the main conversation without losing scroll or panel
-state. Nested task/eval calls rendered inside the inspector must not be links.
+panel remains unchanged. Hovering a row should highlight it without retaining a
+white selection or keyboard focus, and one click should open it. Confirm only
+the main chat is replaced by a read-only Subagent Inspector: the prompt,
+telemetry, and open Subagents panel remain in place below it. The Inspector must
+contain the run's complete untruncated task, reasoning, assistant messages,
+ordinary tools, results, final status, and output. Closing it must restore the
+main conversation without losing scroll or panel state. Nested task/eval calls
+rendered inside the inspector must not be links. Confirm there is one blank
+column between the TIME values and the vertical scrollbar.
 
 After each outer task or eval reaches a terminal result, confirm a compact
-`Subagents · N` anchor appears directly after it. Open each anchor and verify
-that the same panel lists only its own runs in creation order; selecting a row
-must open the same inspector. Exit MIRA, restart with the saved session, and
-repeat both clicks. The reconstructed panel, statuses, and transcript must be
+`Subagents · N` anchor appears inside its originating tool bubble in a footer
+like the assistant Copy/Markdown actions. Open each anchor and verify that the
+same panel lists only its own runs in creation order; one click on a row must
+open the same inspector. Exit MIRA, restart with the saved session, and repeat
+both clicks. The reconstructed panel, statuses, and transcript must be
 identical and must come from the session JSON. Also interrupt one active run,
-restart, and confirm it is shown as `INTERRUPTED` behind a durable anchor. A
-normal turn without task-created subagents must produce no anchor.
+restart, and confirm it is shown as `INTERRUPTED` behind a durable anchor. Force
+one eval task to fail and confirm its actual error message appears in the
+Inspector. A normal turn without task-created subagents must produce no anchor.

@@ -8,6 +8,7 @@ from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
+from types import SimpleNamespace
 from typing import Any
 
 from langgraph.types import Command
@@ -336,6 +337,7 @@ class EvalSubagentRenderer:
         self.renderer = renderer
         self.capture = capture
         self._labels: dict[str, str] = {}
+        self._label_handles: list[Any] = []
 
     def handle(self, event: dict[str, Any]) -> None:
         phase = str(event.get("phase") or "")
@@ -344,6 +346,11 @@ class EvalSubagentRenderer:
             return
         if phase == "start":
             name = eval_subagent_name(event)
+            labeler = getattr(self.renderer, "subagent_label", None)
+            if callable(labeler):
+                handle = SimpleNamespace(name=name)
+                self._label_handles.append(handle)
+                name = str(labeler(handle))
             self._labels[subagent_id] = name
             callback = getattr(self.renderer, "eval_subagent_started", None)
             if callable(callback):
@@ -431,12 +438,8 @@ def custom_event_data(event: Any) -> dict[str, Any] | None:
 
 
 def eval_subagent_name(event: dict[str, Any]) -> str:
-    """Build a stable visible label for one eval-internal subagent."""
-    subagent_type = str(event.get("subagent_type") or "subagent")
-    label = str(event.get("label") or "").strip()
-    if not label:
-        label = str(event.get("id") or "")[-8:] or "eval"
-    return f"{subagent_type} [{label}]"
+    """Return the base identity before the frontend assigns one cool name."""
+    return str(event.get("subagent_type") or "subagent")
 
 
 def event_duration_ms(event: dict[str, Any]) -> int | None:
@@ -560,7 +563,12 @@ async def run_turn(
                     result,
                     projected_tool_errors,
                 ),
-                consume_subagents(stream.subagents, event_renderer, rubric_renderer),
+                consume_subagents(
+                    stream.subagents,
+                    event_renderer,
+                    rubric_renderer,
+                    subagent_capture,
+                ),
                 capture_output(stream.output(), output),
             )
         except BaseException:

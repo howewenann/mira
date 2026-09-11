@@ -25,6 +25,7 @@ class SubagentEvent(EventIdentity):
         "eval_start",
         "eval_finish",
         "eval_cancel",
+        "task_input_update",
         "run_event",
         "anchor",
     ]

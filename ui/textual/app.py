@@ -2446,13 +2446,10 @@ class MiraApp(App[None]):
         self._set_status(state="running")
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
-        """Render a live draft of streamed task delegation input."""
+        """Track live task delegation without flashing a temporary transcript block."""
         self.waiting_finished()
         self._mark_main_stream_active()
-        if self._subagent_panel_is_live():
-            self._set_status(state="running")
-            return
-        self.query_one(ChatLog).delegation_delta(calls)
+        self.query_one(ChatLog).finish_stream_phase()
         self._set_status(state="running")
 
     def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
@@ -2810,11 +2807,31 @@ class MiraApp(App[None]):
             if run is not None:
                 inspector.show_run(run)
 
-    def subagent_anchor(self, anchor_id: str, *, created_at: str = "") -> None:
+    def subagent_task_input_updated(self, run_id: str, task_input: str) -> None:
+        """Refresh durable full task text in the panel and an open Inspector."""
+        self.query_one(SubagentsPanel).update_run_task(run_id, task_input)
+        inspector = self.query_one(SubagentInspector)
+        if inspector.display and inspector.run_id == run_id:
+            run = get_run(self.session, run_id)
+            if run is not None:
+                inspector.show_run(run)
+
+    def subagent_anchor(
+        self,
+        anchor_id: str,
+        *,
+        tool_name: str = "",
+        created_at: str = "",
+    ) -> None:
         """Render a terminal anchor using a count derived from durable runs."""
         count = len(runs_for_anchor(self.session, anchor_id))
         if count:
-            self.query_one(ChatLog).subagent_anchor(anchor_id, count, created_at=created_at)
+            self.query_one(ChatLog).subagent_anchor(
+                anchor_id,
+                count,
+                tool_name=tool_name,
+                created_at=created_at,
+            )
 
     @on(Button.Pressed, ".subagent-anchor")
     def open_subagent_anchor(self, event: Button.Pressed) -> None:
@@ -2837,16 +2854,16 @@ class MiraApp(App[None]):
         run = replay_run(source, run_id) if source is not None else get_run(self.session, run_id)
         if run is None:
             return
-        selectors = ("#chat-log", "#prompt-panel", "#subagents-panel", "#autocomplete-input", "#telemetry-row")
-        self._subagent_inspector_visibility = {}
-        for selector in selectors:
-            try:
-                widget = self.query_one(selector)
-            except NoMatches:
-                continue
-            self._subagent_inspector_visibility[selector] = bool(widget.display)
-            widget.display = False
         inspector = self.query_one(SubagentInspector)
+        if not inspector.display:
+            self._subagent_inspector_visibility = {}
+            for selector in ("#chat-log",):
+                try:
+                    widget = self.query_one(selector)
+                except NoMatches:
+                    continue
+                self._subagent_inspector_visibility[selector] = bool(widget.display)
+                widget.display = False
         inspector.show_run(run)
         self.call_after_refresh(lambda: self.set_focus(None))
 
@@ -2859,6 +2876,8 @@ class MiraApp(App[None]):
                 self.query_one(selector).display = visible
             except NoMatches:
                 continue
+        if not self._subagent_inspector_visibility:
+            self.query_one(ChatLog).display = True
         self._subagent_inspector_visibility = {}
         self.call_after_refresh(lambda: self.set_focus(None))
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from core.execution.runner import EvalSubagentRenderer
 from core.execution.streams.subagents import SubagentProtocolCapture, SubagentTranscriptCapture
 from session.recorder import SessionEventEmitter, SessionRecorder
 from session.store import SessionStore
@@ -26,6 +28,7 @@ from session.subagent_runs import (
 )
 from ui.textual.widgets import ChatLog, SubagentAnchor, SubagentInspector, SubagentsPanel
 from ui.textual.subagent_replay import persisted_session, replay_run, restore_anchor
+from ui.textual.widgets.tool_bubble import ToolBubble
 
 
 class Store:
@@ -44,6 +47,21 @@ def values_protocol_event(namespace: tuple[str, ...], messages: list[object]) ->
     return {
         "method": "values",
         "params": {"namespace": namespace, "data": {"messages": messages}},
+    }
+
+
+def messages_protocol_event(
+    namespace: tuple[str, ...],
+    payload: dict,
+    *,
+    run_id: str = "model-run",
+) -> dict:
+    return {
+        "method": "messages",
+        "params": {
+            "namespace": namespace,
+            "data": (payload, {"run_id": run_id}),
+        },
     }
 
 
@@ -191,6 +209,154 @@ class SubagentRunTests(unittest.TestCase):
         self.assertEqual(runs["ptc-A"]["output"], "A")
         self.assertEqual(runs["ptc-B"]["events"][0]["text"], "B")
         self.assertEqual(runs["ptc-C"]["events"][0]["text"], "C")
+
+    def test_protocol_message_deltas_capture_reasoning_and_restore_full_task(self) -> None:
+        session = record()
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call("eval", {}, call_id="eval-1")
+        full_task = "Investigate the native protocol carefully. " + "Full detail. " * 20
+        shortened = full_task[:200]
+        run = recorder.eval_subagent_started(
+            "worker [one]",
+            shortened,
+            eval_id="eval-1",
+            task_call_id="ptc-one",
+        )
+        capture = SubagentProtocolCapture(SessionEventEmitter(object(), recorder))
+        capture.run_started({"id": "ptc-one", "description": shortened})
+        namespace = ("tools:eval",)
+        capture.handle(values_protocol_event(namespace, [HumanMessage(full_task)]))
+        capture.handle(
+            messages_protocol_event(
+                namespace,
+                {
+                    "event": "content-block-delta",
+                    "delta": {
+                        "type": "reasoning-delta",
+                        "reasoning": "check evidence",
+                    },
+                },
+            )
+        )
+        capture.handle(
+            messages_protocol_event(
+                namespace,
+                {
+                    "event": "content-block-delta",
+                    "delta": {"type": "text-delta", "text": "final answer"},
+                },
+            )
+        )
+        capture.handle(
+            values_protocol_event(
+                namespace,
+                [
+                    HumanMessage(full_task),
+                    AIMessage(
+                        "final answer",
+                        id="message-one",
+                        additional_kwargs={"reasoning_content": "check evidence"},
+                    ),
+                ],
+            )
+        )
+
+        self.assertEqual(run["task_input"], full_task)
+        self.assertEqual(
+            [(event["type"], event["text"]) for event in run["events"]],
+            [("reasoning", "check evidence"), ("assistant", "final answer")],
+        )
+
+    def test_high_level_eval_child_reuses_protocol_run_identity(self) -> None:
+        session = record()
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call("eval", {}, call_id="eval-1")
+        run = recorder.eval_subagent_started(
+            "worker [one]",
+            "inspect",
+            eval_id="eval-1",
+            task_call_id="ptc-one",
+        )
+        capture = SubagentProtocolCapture(SessionEventEmitter(object(), recorder))
+        capture.run_started(
+            {"id": "ptc-one", "description": "inspect", "eval_id": "eval-1"}
+        )
+        namespace = ("tools:eval-1",)
+
+        claimed = capture.claim_high_level_subagent(
+            SimpleNamespace(task_input="", path=namespace)
+        )
+        capture.handle(
+            values_protocol_event(
+                namespace,
+                [HumanMessage("inspect with the complete native task input")],
+            )
+        )
+        capture.handle(
+            messages_protocol_event(
+                namespace,
+                {
+                    "event": "content-block-delta",
+                    "delta": {"type": "text-delta", "text": "duplicate"},
+                },
+            )
+        )
+
+        self.assertEqual(claimed, "ptc-one")
+        self.assertEqual(session["runs"], [run])
+        self.assertEqual(run["task_input"], "inspect with the complete native task input")
+        self.assertEqual(run["events"], [])
+
+    def test_eval_description_fallback_receives_a_cool_name(self) -> None:
+        class Renderer:
+            def __init__(self) -> None:
+                self.started: list[str] = []
+
+            def subagent_label(self, subagent: object) -> str:
+                return f"{getattr(subagent, 'name')} [mauve-mammoth]"
+
+            def eval_subagent_started(self, name: str, *_args: object, **_kwargs: object) -> None:
+                self.started.append(name)
+
+        renderer = Renderer()
+        description = "Write a story that is exactly 20 words long."
+        EvalSubagentRenderer(renderer).handle(
+            {
+                "type": "subagent",
+                "phase": "start",
+                "id": "ptc-one",
+                "subagent_type": "general-purpose",
+                "description": description,
+                "label": "final",
+            }
+        )
+
+        self.assertEqual(renderer.started, ["general-purpose [mauve-mammoth]"])
+
+    def test_eval_failure_persists_visible_error_transcript_event(self) -> None:
+        session = record()
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call("eval", {}, call_id="eval-1")
+        run = recorder.eval_subagent_started(
+            "worker [one]",
+            "fail clearly",
+            eval_id="eval-1",
+            task_call_id="ptc-one",
+        )
+
+        SessionEventEmitter(object(), recorder).eval_subagent_cancelled(
+            "worker [one]",
+            "context limit exceeded",
+            eval_id="eval-1",
+            row_id="ptc-one",
+        )
+
+        self.assertEqual(run["status"], ERROR)
+        self.assertEqual(run["output"], "context limit exceeded")
+        self.assertEqual(
+            [(event["type"], event["text"]) for event in run["events"]],
+            [("system_error", "context limit exceeded")],
+        )
 
     def test_generated_display_name_is_normalized_without_regeneration(self) -> None:
         session = record()
@@ -385,10 +551,173 @@ class SubagentReplayTests(unittest.TestCase):
 
 class SubagentInspectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_panel_run_id_opens_shared_inspector_from_session_data(self) -> None:
-        from tests.test_textual_app import make_app
+        from tests.test_textual_app import make_app, renderable_plain
 
         session = {
             "id": "thread-1",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "events": [],
+            "runs": [],
+        }
+        full_task = "Inspect every relevant implementation detail without truncation. " * 8
+        run = start_run(
+            session,
+            anchor_id="anchor",
+            turn_id="1",
+            task_call_id="task-1",
+            name="researcher [fox]",
+            display_name="researcher [fox]",
+            task_input=full_task,
+        )
+        append_run_event(session, run["id"], {"type": "assistant", "text": "child answer"})
+        app = make_app(session=session)
+
+        async with app.run_test(size=(100, 32)) as pilot:
+            panel = app.query_one(SubagentsPanel)
+            panel.restore(session["runs"])
+            await pilot.pause()
+            self.assertIn(run["id"], panel._records)
+            table = panel.query_one("#subagents-tasks")
+            self.assertTrue(table.show_cursor)
+            self.assertFalse(table.can_focus)
+            self.assertEqual(table.styles.padding.right, 1)
+            completion = app.query_one("#autocomplete-input")
+            prompt = completion.query_one("#prompt")
+            panel_ceiling = completion.safe_prompt_height
+            self.assertGreater(panel_ceiling, prompt.region.height)
+            prompt.styles.height = panel_ceiling
+            await pilot.pause()
+            self.assertEqual(prompt.region.height, panel_ceiling)
+            prompt.styles.height = 3
+            await pilot.pause()
+
+            await pilot.click("#subagents-tasks", offset=(4, 0))
+            await pilot.pause()
+
+            inspector = app.query_one(SubagentInspector)
+            self.assertTrue(inspector.display)
+            self.assertEqual(inspector.run_id, run["id"])
+            self.assertFalse(app.query_one("#chat-log", ChatLog).display)
+            self.assertTrue(panel.display)
+            self.assertTrue(app.query_one("#autocomplete-input").display)
+            self.assertTrue(app.query_one("#telemetry-row").display)
+            self.assertIsNone(app.focused)
+            inspector_ceiling = completion.safe_prompt_height
+            self.assertGreater(inspector_ceiling, prompt.region.height)
+            prompt.styles.height = inspector_ceiling
+            await pilot.pause()
+            self.assertEqual(prompt.region.height, inspector_ceiling)
+            task = inspector.query_one("#subagent-inspector-task")
+            self.assertIn(full_task, renderable_plain(task))
+            self.assertGreater(task.region.height, 3)
+            inner_titles = [
+                str(getattr(item, "border_title", ""))
+                for item in inspector.query_one(ChatLog).children
+            ]
+            self.assertIn("mira", inner_titles)
+            self.assertTrue(app.query_one("#status-row").display)
+
+            app.open_subagent_inspector(run["id"])
+            await pilot.pause()
+
+            await pilot.click("#subagent-inspector-close")
+            await pilot.pause()
+            self.assertFalse(inspector.display)
+            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+
+    async def test_eval_anchor_is_an_unfocused_tool_bubble_action(self) -> None:
+        from tests.test_textual_app import make_app
+
+        session = {
+            "id": "thread-anchor",
+            "title": "Anchor test",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "current_plan": None,
+            "current_goal": None,
+            "events": [],
+            "runs": [],
+        }
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call("eval", {"code": "await task(...)"}, call_id="eval-one")
+        run = recorder.eval_subagent_started(
+            "worker [one]",
+            "inspect",
+            eval_id="eval-one",
+            task_call_id="ptc-one",
+        )
+        finish_run(session, run["id"], status=DONE)
+        recorder.completed_tool_result("eval", "done", call_id="eval-one")
+        recorder.subagent_anchor("eval", "eval-one")
+        app = make_app(session=session)
+        async with app.run_test(size=(100, 28)) as pilot:
+            chat = app.query_one(ChatLog)
+            anchor = chat.query_one(SubagentAnchor)
+            ancestors = []
+            parent = anchor.parent
+            while parent is not None:
+                ancestors.append(parent)
+                parent = parent.parent
+            self.assertTrue(any(isinstance(widget, ToolBubble) for widget in ancestors))
+            self.assertFalse(anchor.can_focus)
+            anchor.press()
+            await pilot.pause()
+            await pilot.pause()
+            self.assertIn(run["id"], app.query_one(SubagentsPanel)._records)
+
+    async def test_task_anchor_is_inside_its_tool_bubble_and_opens_panel(self) -> None:
+        from tests.test_textual_app import make_app
+
+        session = {
+            "id": "thread-task-anchor",
+            "title": "Task anchor test",
+            "custom_title": False,
+            "pinned": False,
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "current_plan": None,
+            "current_goal": None,
+            "events": [],
+            "runs": [],
+        }
+        recorder = SessionRecorder(session, Store(), "action")
+        recorder.tool_call(
+            "task",
+            {"description": "inspect", "subagent_type": "general-purpose"},
+            call_id="task-one",
+        )
+        recorder.delegation_started(
+            [{"id": "task-one", "name": "task", "args": {"description": "inspect"}}]
+        )
+        _, run = recorder.subagent_started(
+            "worker [one]", "inspect", task_call_id="task-one"
+        )
+        recorder.subagent_finished("worker [one]", "done", task_call_id="task-one")
+        recorder.completed_tool_result("task", "done", call_id="task-one")
+        recorder.subagent_anchor("task", "task-one")
+
+        app = make_app(session=session)
+        async with app.run_test(size=(100, 28)) as pilot:
+            anchor = app.query_one(ChatLog).query_one(SubagentAnchor)
+            self.assertTrue(any(isinstance(parent, ToolBubble) for parent in anchor.ancestors))
+            anchor.press()
+            await pilot.pause()
+            await pilot.pause()
+            self.assertIn(run["id"], app.query_one(SubagentsPanel)._records)
+
+    async def test_legacy_error_output_is_visible_in_inspector(self) -> None:
+        from tests.test_textual_app import make_app, renderable_plain
+
+        session = {
+            "id": "thread-error",
             "workspace": ".",
             "created_at": "2026-01-01T00:00:00+00:00",
             "turns": 0,
@@ -399,34 +728,20 @@ class SubagentInspectorTests(unittest.IsolatedAsyncioTestCase):
             session,
             anchor_id="anchor",
             turn_id="1",
-            task_call_id="task-1",
-            name="researcher [fox]",
-            display_name="researcher [fox]",
-            task_input="inspect code",
+            task_call_id="task-error",
+            task_input="fail",
         )
-        append_run_event(session, run["id"], {"type": "assistant", "text": "child answer"})
+        finish_run(session, run["id"], status=ERROR, output="context limit exceeded")
         app = make_app(session=session)
 
-        async with app.run_test(size=(100, 32)) as pilot:
-            panel = app.query_one(SubagentsPanel)
-            panel.restore(session["runs"])
-            self.assertIn(run["id"], panel._records)
-
-            panel.post_message(panel.RunSelected(run["id"]))
-            await pilot.pause()
-
+        async with app.run_test(size=(100, 28)) as pilot:
             inspector = app.query_one(SubagentInspector)
-            self.assertTrue(inspector.display)
-            self.assertEqual(inspector.run_id, run["id"])
-            self.assertFalse(app.query_one("#chat-log", ChatLog).display)
-            inner_titles = [str(getattr(item, "border_title", "")) for item in inspector.query_one(ChatLog).children]
-            self.assertIn("mira", inner_titles)
-            self.assertTrue(app.query_one("#status-row").display)
-
-            await pilot.click("#subagent-inspector-close")
+            inspector.show_run(run)
             await pilot.pause()
-            self.assertFalse(inspector.display)
-            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+            transcript = "\n".join(
+                renderable_plain(widget) for widget in inspector.query_one(ChatLog).children
+            )
+            self.assertIn("context limit exceeded", transcript)
 
     async def test_restart_anchor_reconstructs_panel_and_inspector_from_file(self) -> None:
         from tests.test_textual_app import make_app, renderable_plain

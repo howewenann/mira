@@ -46,7 +46,15 @@ class SubagentInspector(Vertical):
         )
         chat = self.query_one("#subagent-inspector-log", ChatLog)
         chat.clear_log()
-        chat.restore_session({"events": list(run.get("events") or [])})
+        events = list(run.get("events") or [])
+        if run.get("status") == "ERROR" and run.get("output") and not any(
+            event.get("type") == "system_error"
+            or (event.get("type") == "tool_result" and event.get("status") == "error")
+            for event in events
+            if isinstance(event, dict)
+        ):
+            events.append({"type": "system_error", "text": str(run["output"])})
+        chat.restore_session({"events": events})
         self.display = True
 
     @on(Button.Pressed, "#subagent-inspector-close")

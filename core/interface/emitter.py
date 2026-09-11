@@ -238,6 +238,16 @@ class FrontendEmitter:
     def subagent_request_updated(self, name: str, task_input: str) -> None:
         self._subagent("request_update", name, task_input=task_input)
 
+    def subagent_task_input_updated(self, run_id: str, task_input: str) -> None:
+        self.frontend.emit(
+            SubagentEvent(
+                phase="task_input_update",
+                run_id=run_id,
+                task_input=task_input,
+                **self._identity(),
+            )
+        )
+
     def subagent_finished(self, name: str, result: str = "", **kwargs: Any) -> None:
         self._subagent("finish", name, result=result, **kwargs)
 
@@ -263,11 +273,18 @@ class FrontendEmitter:
             )
         )
 
-    def subagent_anchor(self, anchor_id: str, **identity: Any) -> None:
+    def subagent_anchor(
+        self,
+        anchor_id: str,
+        *,
+        tool_name: str = "",
+        **identity: Any,
+    ) -> None:
         self.frontend.emit(
             SubagentEvent(
                 phase="anchor",
                 anchor_id=anchor_id,
+                name=tool_name,
                 **self._identity(**identity),
             )
         )

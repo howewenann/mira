@@ -68,6 +68,29 @@ class SubagentGroup:
     terminal_status: str = ""
 
 
+class SubagentRunTable(DataTable):
+    """Mouse-only table that activates a run on the first click."""
+
+    can_focus = False
+
+    class RowClicked(Message):
+        def __init__(self, row_key: str) -> None:
+            super().__init__()
+            self.row_key = row_key
+
+    async def _on_click(self, event: events.Click) -> None:
+        """Bypass DataTable's click-once-to-highlight, click-again-to-select flow."""
+        self._set_hover_cursor(True)
+        row_index = event.style.meta.get("row")
+        if not isinstance(row_index, int) or not 0 <= row_index < len(self.ordered_rows):
+            await super()._on_click(event)
+            return
+        row_key = str(self.ordered_rows[row_index].key.value or "")
+        if row_key:
+            self.post_message(self.RowClicked(row_key))
+            event.stop()
+
+
 class SubagentsPanel(Vertical):
     """Bottom panel for live subagent telemetry."""
 
@@ -97,19 +120,20 @@ class SubagentsPanel(Vertical):
         self._fallback_suffixes = count(1)
 
     def compose(self) -> Any:
+        group_options = OptionList(id="subagents-groups", compact=True)
+        group_options.can_focus = False
         groups = Vertical(
             Label("GROUPS", id="subagents-groups-label"),
-            OptionList(id="subagents-groups", compact=True),
+            group_options,
             id="subagents-groups-column",
         )
-        tasks = DataTable(
+        tasks = SubagentRunTable(
             id="subagents-tasks",
             cursor_type="row",
             zebra_stripes=False,
             show_cursor=True,
             show_header=False,
         )
-        tasks.can_focus = False
         task_header = Grid(
             Label("TASK", id="subagents-task-heading"),
             Label("STATUS", id="subagents-status-heading"),
@@ -200,7 +224,6 @@ class SubagentsPanel(Vertical):
             name,
             key=key,
             track=not bool(eval_key),
-            force=bool(eval_key),
         )
         if not key:
             key = display_name
@@ -263,6 +286,14 @@ class SubagentsPanel(Vertical):
     def update_subagent_request(self, name: str, task: str) -> None:
         """Fill late-arriving task text for a running ungrouped row."""
         record = self._record_for_name(name)
+        if record is None or not task:
+            return
+        record.hint = compact_hint(task)
+        self._refresh()
+
+    def update_run_task(self, run_id: str, task: str) -> None:
+        """Replace one truncated persisted request without changing row identity."""
+        record = self._records.get(str(run_id or ""))
         if record is None or not task:
             return
         record.hint = compact_hint(task)
@@ -384,11 +415,11 @@ class SubagentsPanel(Vertical):
         self._refresh_tasks()
         self._refresh_body_height()
 
-    @on(DataTable.RowSelected, "#subagents-tasks")
-    def select_run(self, event: DataTable.RowSelected) -> None:
-        """Open the durable run represented by a mouse-selected row."""
+    @on(SubagentRunTable.RowClicked)
+    def select_run(self, event: SubagentRunTable.RowClicked) -> None:
+        """Open the durable run represented by one mouse click."""
         event.stop()
-        run_id = str(event.row_key.value or "")
+        run_id = event.row_key
         if run_id:
             self.post_message(self.RunSelected(run_id))
 

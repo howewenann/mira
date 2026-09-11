@@ -712,7 +712,6 @@ MCPPanelScreen {
 #subagent-inspector-task {
     width: 1fr;
     height: auto;
-    max-height: 3;
     margin: 1 0;
     color: #b8c1c7;
 }
@@ -743,6 +742,18 @@ Button.subagent-anchor:hover,
 Button.subagent-anchor.-active {
     background: #302746;
     color: #ECE7FF;
+}
+
+.tool-actions {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    margin-top: 1;
+    align-horizontal: left;
+}
+
+.tool-actions Button.subagent-anchor {
+    margin: 0;
 }
 
 #prompt-resize-handle {
@@ -955,11 +966,17 @@ Button.subagent-anchor.-active {
 
 #subagents-tasks {
     width: 1fr;
+    padding-right: 1;
     overflow-x: hidden;
     scrollbar-size-horizontal: 0;
+    scrollbar-gutter: stable;
 }
 
-#subagents-tasks > .datatable--hover,
+#subagents-tasks > .datatable--hover {
+    background: #1b3036;
+    color: #eef7f8;
+}
+
 #subagents-tasks > .datatable--header-hover,
 #subagents-tasks > .datatable--cursor,
 #subagents-tasks > .datatable--header-cursor {

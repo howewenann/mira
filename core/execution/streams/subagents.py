@@ -18,6 +18,7 @@ from core.execution.streams.output import (
 )
 from core.execution.streams.output import call_renderer as call_frontend
 from core.execution.streams.messages import consume_messages
+from core.execution.streams.provider import event_delta
 from core.execution.streams.rubric import RUBRIC_TOOL_END, RUBRIC_TOOL_START, RubricEventRenderer
 from core.execution.streams.tool_args import normalized_call
 from core.execution.streams.tools import consume_tool_calls, tool_output_text
@@ -31,6 +32,7 @@ async def consume_subagents(
     subagents: Any,
     renderer: Any,
     rubric: RubricEventRenderer | None = None,
+    protocol_capture: "SubagentProtocolCapture | None" = None,
 ) -> None:
     """Consume subagent streams while the status animation is active."""
     animation = None
@@ -45,6 +47,18 @@ async def consume_subagents(
                     drain_internal_rubric_subgraph(subagent, rubric)
                 )
             else:
+                eval_task_call_id = (
+                    protocol_capture.claim_high_level_subagent(subagent)
+                    if protocol_capture is not None
+                    else ""
+                )
+                if eval_task_call_id:
+                    task = asyncio.create_task(
+                        consume_eval_subagent(subagent, renderer, eval_task_call_id)
+                    )
+                    tasks.append(task)
+                    await asyncio.sleep(0)
+                    continue
                 if not visible_started:
                     visible_started = True
                     if hasattr(renderer, "start_subagent_live"):
@@ -183,7 +197,6 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         raise
     except Exception as exc:
         result = f"error: {exc}"
-        capture.ensure_final_output(result)
         call_frontend(
             renderer,
             "subagent_cancelled",
@@ -209,6 +222,38 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
     )
 
 
+async def consume_eval_subagent(
+    subagent: Any,
+    renderer: Any,
+    task_call_id: str,
+) -> None:
+    """Drain a QuickJS child through its existing eval lifecycle identity."""
+    path = getattr(subagent, "path", ())
+    namespace = tuple(str(item) for item in path) if isinstance(path, (list, tuple)) else ()
+    capture = SubagentTranscriptCapture(renderer, task_call_id, stream_path=namespace)
+    consumers = []
+    messages = getattr(subagent, "messages", None)
+    if messages is not None:
+        consumers.append(consume_messages(messages, capture, render_normal_tools=False))
+    tool_calls = getattr(subagent, "tool_calls", None)
+    if tool_calls is not None:
+        consumers.append(consume_tool_calls(tool_calls, capture))
+    try:
+        values = await asyncio.gather(*consumers, subagent_result(subagent))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        call_frontend(
+            renderer,
+            "subagent_run_event",
+            task_call_id,
+            {"type": "system_error", "text": f"error: {exc}"},
+            stream_path=namespace,
+        )
+        return
+    capture.ensure_final_output(str(values[-1]))
+
+
 class SubagentProtocolCapture:
     """Capture eval-created child state snapshots omitted by the high-level lane.
 
@@ -222,9 +267,14 @@ class SubagentProtocolCapture:
     def __init__(self, renderer: Any) -> None:
         self.renderer = renderer
         self._waiting_runs: dict[str, deque[str]] = defaultdict(deque)
+        self._waiting_eval_runs: dict[str, deque[str]] = defaultdict(deque)
         self._pending_snapshots: dict[tuple[str, ...], list[Any]] = {}
+        self._pending_message_events: dict[tuple[str, ...], list[Any]] = defaultdict(list)
         self._run_by_namespace: dict[tuple[str, ...], str] = {}
         self._message_counts: dict[tuple[str, ...], int] = {}
+        self._raw_text: dict[tuple[str, str, str], str] = {}
+        self._raw_text_values: dict[tuple[str, str], set[str]] = defaultdict(set)
+        self._high_level_namespaces: set[tuple[str, ...]] = set()
 
     def run_started(self, event: dict[str, Any]) -> None:
         """Register one QuickJS task identity before or after its first snapshot."""
@@ -233,11 +283,58 @@ class SubagentProtocolCapture:
         if not task_call_id or not description:
             return
         self._waiting_runs[description].append(task_call_id)
+        eval_id = str(event.get("eval_id") or "")
+        if eval_id:
+            self._waiting_eval_runs[eval_id].append(task_call_id)
         self._bind_pending()
 
+    def claim_high_level_subagent(self, subagent: Any) -> str:
+        """Bind a restored high-level eval child without creating a second run."""
+        task_input = str(getattr(subagent, "task_input", "") or "")
+        path = getattr(subagent, "path", ())
+        namespace = tuple(str(item) for item in path) if isinstance(path, (list, tuple)) else ()
+        if not namespace:
+            return ""
+        task_call_id = self._run_by_namespace.get(namespace, "")
+        if task_call_id:
+            self._discard_waiting_id(task_call_id)
+            self._high_level_namespaces.add(namespace)
+            return task_call_id
+        for part in namespace:
+            if not part.startswith("tools:"):
+                continue
+            task_ids = self._waiting_eval_runs.get(part.split(":", 1)[1])
+            if task_ids:
+                task_call_id = task_ids.popleft()
+                self._discard_waiting_id(task_call_id)
+                self._run_by_namespace[namespace] = task_call_id
+                self._high_level_namespaces.add(namespace)
+                return task_call_id
+        if not task_input:
+            return ""
+        for description, task_ids in self._waiting_runs.items():
+            if task_ids and _same_task_input(description, task_input):
+                task_call_id = task_ids.popleft()
+                self._discard_waiting_id(task_call_id)
+                self._run_by_namespace[namespace] = task_call_id
+                self._high_level_namespaces.add(namespace)
+                call_frontend(
+                    self.renderer,
+                    "subagent_task_input_updated",
+                    task_call_id,
+                    task_input,
+                )
+                return task_call_id
+        return ""
+
     def handle(self, event: Any) -> None:
-        """Consume one namespaced v3 ``values`` protocol event."""
-        if not isinstance(event, dict) or event.get("method") != "values":
+        """Consume namespaced v3 message deltas and durable value snapshots."""
+        if not isinstance(event, dict):
+            return
+        if event.get("method") == "messages":
+            self._handle_message_event(event)
+            return
+        if event.get("method") != "values":
             return
         params = event.get("params")
         if not isinstance(params, dict):
@@ -250,6 +347,15 @@ class SubagentProtocolCapture:
         self._pending_snapshots[namespace] = messages
         if namespace not in self._run_by_namespace:
             self._bind_namespace(namespace, messages)
+        task_call_id = self._run_by_namespace.get(namespace, "")
+        task_input = _first_human_text(messages)
+        if task_call_id and task_input:
+            call_frontend(
+                self.renderer,
+                "subagent_task_input_updated",
+                task_call_id,
+                task_input,
+            )
         self._emit_snapshot(namespace, messages)
 
     def _bind_pending(self) -> None:
@@ -264,18 +370,42 @@ class SubagentProtocolCapture:
             return
         for description, task_ids in self._waiting_runs.items():
             if task_ids and _same_task_input(description, task_input):
-                self._run_by_namespace[namespace] = task_ids.popleft()
+                task_call_id = task_ids.popleft()
+                self._discard_waiting_id(task_call_id)
+                self._run_by_namespace[namespace] = task_call_id
+                call_frontend(
+                    self.renderer,
+                    "subagent_task_input_updated",
+                    task_call_id,
+                    task_input,
+                )
+                self._drain_pending_message_events()
                 return
+
+    def _discard_waiting_id(self, task_call_id: str) -> None:
+        """Remove one claimed task from every fallback matching queue."""
+        for queue in (*self._waiting_runs.values(), *self._waiting_eval_runs.values()):
+            try:
+                queue.remove(task_call_id)
+            except ValueError:
+                continue
 
     def _emit_snapshot(self, namespace: tuple[str, ...], messages: list[Any]) -> None:
         task_call_id = self._run_by_namespace.get(namespace)
         if not task_call_id:
+            return
+        if self._uses_high_level_lane(namespace):
+            self._message_counts[namespace] = len(messages)
             return
         start = self._message_counts.get(namespace, 0)
         if start >= len(messages):
             return
         for message in messages[start:]:
             for event in _run_events_from_message(message):
+                if event.get("type") in {"reasoning", "assistant"} and str(
+                    event.get("text") or ""
+                ) in self._raw_text_values[(task_call_id, str(event.get("type") or ""))]:
+                    continue
                 call_frontend(
                     self.renderer,
                     "subagent_run_event",
@@ -284,6 +414,152 @@ class SubagentProtocolCapture:
                     stream_path=namespace,
                 )
         self._message_counts[namespace] = len(messages)
+
+    def _handle_message_event(self, event: dict[str, Any]) -> None:
+        params = event.get("params")
+        if not isinstance(params, dict):
+            return
+        namespace = tuple(str(part) for part in params.get("namespace") or ())
+        if not namespace:
+            return
+        if self._uses_high_level_lane(namespace):
+            return
+        data = params.get("data")
+        task_call_id = self._task_call_for_namespace(namespace)
+        if not task_call_id:
+            self._pending_message_events[namespace].append(data)
+            return
+        self._emit_message_event(namespace, task_call_id, data)
+
+    def _drain_pending_message_events(self) -> None:
+        for namespace in list(self._pending_message_events):
+            task_call_id = self._task_call_for_namespace(namespace)
+            if not task_call_id:
+                continue
+            events = self._pending_message_events.pop(namespace)
+            for data in events:
+                self._emit_message_event(namespace, task_call_id, data)
+
+    def _task_call_for_namespace(self, namespace: tuple[str, ...]) -> str:
+        exact = self._run_by_namespace.get(namespace)
+        if exact:
+            return exact
+        matches = [
+            (len(child_namespace), task_call_id)
+            for child_namespace, task_call_id in self._run_by_namespace.items()
+            if len(child_namespace) <= len(namespace)
+            and namespace[: len(child_namespace)] == child_namespace
+        ]
+        return max(matches, default=(0, ""))[1]
+
+    def _uses_high_level_lane(self, namespace: tuple[str, ...]) -> bool:
+        return any(
+            len(parent) <= len(namespace) and namespace[: len(parent)] == parent
+            for parent in self._high_level_namespaces
+        )
+
+    def _emit_message_event(
+        self,
+        namespace: tuple[str, ...],
+        task_call_id: str,
+        data: Any,
+    ) -> None:
+        if not isinstance(data, list | tuple) or not data:
+            return
+        payload = data[0]
+        metadata = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}
+        if not isinstance(payload, dict):
+            self._emit_whole_message(namespace, task_call_id, payload)
+            return
+
+        protocol_type = str(payload.get("event") or "")
+        run_id = str(
+            metadata.get("run_id")
+            or payload.get("message_id")
+            or payload.get("id")
+            or "message"
+        )
+        if protocol_type == "error":
+            error = str(
+                payload.get("message")
+                or payload.get("error")
+                or "subagent model failed"
+            )
+            call_frontend(
+                self.renderer,
+                "subagent_run_event",
+                task_call_id,
+                {"type": "system_error", "text": error},
+                stream_path=namespace,
+            )
+            return
+        if protocol_type != "content-block-delta":
+            return
+        delta = event_delta(payload)
+        delta_type = str(delta.get("type") or "")
+        if delta_type == "reasoning-delta":
+            self._emit_raw_text(
+                namespace,
+                task_call_id,
+                run_id,
+                "reasoning",
+                str(delta.get("reasoning") or delta.get("text") or ""),
+            )
+        elif delta_type == "text-delta":
+            self._emit_raw_text(
+                namespace,
+                task_call_id,
+                run_id,
+                "assistant",
+                str(delta.get("text") or ""),
+            )
+
+    def _emit_whole_message(
+        self,
+        namespace: tuple[str, ...],
+        task_call_id: str,
+        message: Any,
+    ) -> None:
+        message_id = str(field(message, "id") or "message")
+        for event in _run_events_from_message(message):
+            event_type = str(event.get("type") or "")
+            if event_type in {"reasoning", "assistant"}:
+                text = str(event.get("text") or "")
+                event["stream_id"] = f"protocol-{message_id}-{event_type}"
+                self._raw_text_values[(task_call_id, event_type)].add(text)
+            call_frontend(
+                self.renderer,
+                "subagent_run_event",
+                task_call_id,
+                event,
+                stream_path=namespace,
+            )
+
+    def _emit_raw_text(
+        self,
+        namespace: tuple[str, ...],
+        task_call_id: str,
+        run_id: str,
+        event_type: str,
+        delta: str,
+    ) -> None:
+        if not delta:
+            return
+        key = (task_call_id, run_id, event_type)
+        text = self._raw_text.get(key, "") + delta
+        self._raw_text[key] = text
+        self._raw_text_values[(task_call_id, event_type)].add(text)
+        call_frontend(
+            self.renderer,
+            "subagent_run_event",
+            task_call_id,
+            {
+                "type": event_type,
+                "text": text,
+                "stream_id": f"protocol-{run_id}-{event_type}",
+            },
+            stream_path=namespace,
+        )
 
 
 class SubagentTranscriptCapture:

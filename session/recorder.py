@@ -349,6 +349,44 @@ class SessionRecorder:
                     break
             self.save()
 
+    def subagent_task_input_updated(
+        self,
+        task_call_id: str,
+        task_input: str,
+    ) -> tuple[str, str] | None:
+        """Replace a truncated eval task request with its native full text."""
+        run = run_for_task_call(self.record, task_call_id)
+        if run is None or not task_input or run.get("task_input") == task_input:
+            return None
+        run["task_input"] = str(task_input)
+        self.save()
+        return str(run.get("id") or ""), str(task_input)
+
+    def subagent_run_error(
+        self,
+        task_call_id: str,
+        error: str,
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Persist a child failure as a visible Inspector transcript event."""
+        run = run_for_task_call(self.record, task_call_id)
+        if run is None or not error:
+            return None
+        for event in reversed(run.get("events", [])):
+            if not isinstance(event, dict):
+                continue
+            if event.get("type") == "system_error" and event.get("text") == error:
+                return str(run.get("id") or ""), event
+            break
+        stored = append_run_event(
+            self.record,
+            str(run.get("id") or ""),
+            {"type": "system_error", "text": str(error)},
+        )
+        if stored is None:
+            return None
+        self.save()
+        return str(run.get("id") or ""), stored
+
     def subagent_finished(
         self,
         name: str,
@@ -431,6 +469,8 @@ class SessionRecorder:
                 None,
             )
         if run is not None:
+            if output and status == ERROR:
+                self.subagent_run_error(str(run.get("task_call_id") or task_call_id), output)
             finish_run(
                 self.record,
                 str(run["id"]),
@@ -1201,6 +1241,7 @@ class SessionEventEmitter:
             call_renderer(
                 callback,
                 str(event.get("anchor_id") or ""),
+                tool_name=name,
                 created_at=event_created_at(event),
             )
 
@@ -1213,7 +1254,7 @@ class SessionEventEmitter:
         if event is not None:
             call_renderer(
                 self.renderer.delegation_started,
-                calls,
+                list(event.get("calls") or calls),
                 created_at=event_created_at(event),
                 **frontend_identity,
             )
@@ -1384,6 +1425,16 @@ class SessionEventEmitter:
             callback(subagent, task_input)
         self.recorder.subagent_request_updated(subagent, task_input)
 
+    def subagent_task_input_updated(self, task_call_id: str, task_input: str) -> None:
+        """Persist and forward a native full task request for one run."""
+        stored = self.recorder.subagent_task_input_updated(task_call_id, task_input)
+        if stored is None:
+            return
+        run_id, full_task_input = stored
+        callback = getattr(self.renderer, "subagent_task_input_updated", None)
+        if callable(callback):
+            callback(run_id, full_task_input)
+
     def subagent_finished(
         self,
         subagent: str,
@@ -1525,6 +1576,8 @@ class SessionEventEmitter:
         run = run_for_task_call(self.recorder.record, row_id)
         terminal = ERROR if result else CANCELLED
         if run is not None:
+            if result:
+                self.recorder.subagent_run_error(row_id, result)
             finish_run(
                 self.recorder.record,
                 str(run["id"]),
@@ -1642,6 +1695,7 @@ class SessionEventEmitter:
                 call_renderer(
                     anchor_callback,
                     str(event.get("anchor_id") or ""),
+                    tool_name=str(event.get("tool_name") or "task"),
                     created_at=event_created_at(event),
                 )
 

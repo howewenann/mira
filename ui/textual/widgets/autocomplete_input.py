@@ -180,13 +180,15 @@ class AutocompleteInput(Vertical):
         prompt = self.query_one(PromptBox)
         try:
             chat = self.screen.query_one("#chat-log")
+            inspector = self.screen.query_one("#subagent-inspector")
             main_panel = self.screen.query_one("#main-panel")
             telemetry = self.screen.query_one("#telemetry-row")
         except NoMatches:
             return max(MIN_PROMPT_HEIGHT, prompt.region.height)
 
         bottom_space = main_panel.content_region.bottom - telemetry.region.bottom
-        reclaimable_chat = chat.content_region.height - 1
+        transcript = inspector if inspector.display else chat
+        reclaimable_chat = transcript.content_region.height - 1
         return max(
             MIN_PROMPT_HEIGHT,
             prompt.region.height + reclaimable_chat + bottom_space,
