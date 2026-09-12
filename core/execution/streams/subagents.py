@@ -41,15 +41,11 @@ async def consume_subagents(
                 task = asyncio.create_task(
                     drain_internal_rubric_subgraph(subagent, rubric)
                 )
+            elif inspection is not None and inspection.is_eval_child(subagent):
+                task = asyncio.create_task(
+                    consume_eval_inspection(subagent, renderer, inspection)
+                )
             else:
-                inspection_id = inspection.claim_eval_child(subagent) if inspection else ""
-                if inspection_id:
-                    task = asyncio.create_task(
-                        consume_eval_inspection(subagent, renderer, inspection_id)
-                    )
-                    tasks.append(task)
-                    await asyncio.sleep(0)
-                    continue
                 if not visible_started:
                     visible_started = True
                     if hasattr(renderer, "start_subagent_live"):
@@ -196,10 +192,10 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
 async def consume_eval_inspection(
     subagent: Any,
     renderer: Any,
-    inspection_id: str,
+    inspection: SubagentInspectionCoordinator,
 ) -> None:
-    """Complete an Eval capture without duplicating protocol snapshot events."""
-    store = live_inspection_store(renderer)
+    """Drain one native Eval handle without emitting panel lifecycle events."""
+    inspection_id = await inspection.wait_for_eval_inspection(subagent)
     streams = [
         stream
         for stream in (
@@ -217,14 +213,16 @@ async def consume_eval_inspection(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        if store is not None:
+        store = live_inspection_store(renderer)
+        if inspection_id and store is not None:
             store.finish(
                 inspection_id,
                 status="ERROR",
                 error=f"error: {exc}",
             )
         return
-    if store is not None:
+    store = live_inspection_store(renderer)
+    if inspection_id and store is not None:
         store.finish(
             inspection_id,
             status="DONE",

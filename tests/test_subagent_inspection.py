@@ -4,22 +4,33 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from langchain_core.messages import ToolMessage
+from langchain_quickjs import CodeInterpreterMiddleware
 
+from agent.middleware import builder as middleware_builder
+from agent.middleware.code_interpreter import (
+    EVAL_SUBAGENT_ROW_METADATA,
+    InspectableCodeInterpreterMiddleware,
+    runtime_with_task_callbacks,
+)
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
 from core.execution.inspection.subagents import (
+    EvalInspectionTransformer,
     SubagentInspectionCapture,
     SubagentInspectionCoordinator,
     capture_child_streams,
     live_inspection_store,
 )
-from core.execution.streams.subagents import consume_subagent
+from core.execution.streams.subagents import (
+    consume_subagent,
+    consume_subagents,
+)
 from core.interface import FrontendEmitter
 from ui.shared.adapter import RendererAdapter
-from agent.middleware.code_interpreter import runtime_with_task_callbacks
 
 
 class AsyncItems:
@@ -74,6 +85,91 @@ class LiveInspectionStoreTests(unittest.TestCase):
         self.assertEqual(inspection.events[0], InspectionEvent("user", text="Complete unshortened request"))
         self.assertEqual(inspection.events[1].text, "first second")
         self.assertEqual(inspection.events[-1], InspectionEvent("assistant", text="exact parent response"))
+
+    def test_fully_streamed_final_response_is_not_duplicated(self) -> None:
+        store = LiveInspectionStore()
+        inspection_id = store.allocate_id("fully-streamed")
+        store.start(inspection_id, "worker [fox]", "inspect")
+        store.append_delta(inspection_id, "assistant", "The answer is Candidate A.")
+
+        store.finish(
+            inspection_id,
+            status="DONE",
+            final_response="The answer is Candidate A.",
+        )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        assistant = [event for event in inspection.events if event.kind == "assistant"]
+        self.assertEqual(assistant, [InspectionEvent("assistant", text="The answer is Candidate A.")])
+
+    def test_streamed_prefix_receives_only_final_suffix(self) -> None:
+        store = LiveInspectionStore()
+        inspection_id = store.allocate_id("streamed-prefix")
+        store.start(inspection_id, "worker [fox]", "inspect")
+        store.append_delta(inspection_id, "assistant", "The answer")
+        received: list[str] = []
+
+        def listener(_inspection_id: str, update: Any) -> None:
+            if update.operation == "delta" and update.event is not None:
+                received.append(update.event.text)
+
+        store.subscribe(inspection_id, listener)
+        store.finish(
+            inspection_id,
+            status="DONE",
+            final_response="The answer is Candidate A.",
+        )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        assistant = [event for event in inspection.events if event.kind == "assistant"]
+        self.assertEqual(received, [" is Candidate A."])
+        self.assertEqual(assistant, [InspectionEvent("assistant", text="The answer is Candidate A.")])
+
+    def test_no_stream_appends_exact_final_response_once(self) -> None:
+        store = LiveInspectionStore()
+        inspection_id = store.allocate_id("no-stream")
+        store.start(inspection_id, "worker [fox]", "inspect")
+
+        store.finish(
+            inspection_id,
+            status="DONE",
+            final_response="The complete response.",
+        )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        assistant = [event for event in inspection.events if event.kind == "assistant"]
+        self.assertEqual(assistant, [InspectionEvent("assistant", text="The complete response.")])
+
+    def test_inspector_header_divider_and_spacing_styles_are_explicit(self) -> None:
+        styles = Path("ui/textual/styles/mira.tcss").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "#inspector {\n"
+            "    display: none;\n"
+            "    width: 1fr;\n"
+            "    height: 1fr;\n"
+            "    padding: 0;",
+            styles,
+        )
+        self.assertIn(
+            "#inspector-header {\n"
+            "    width: 1fr;\n"
+            "    height: 2;\n"
+            "    padding: 0 1;\n"
+            "    margin-bottom: 1;\n"
+            "    border-bottom: solid #B7A4E8;",
+            styles,
+        )
+        self.assertIn(
+            "#inspector-log {\n"
+            "    width: 1fr;\n"
+            "    height: 1fr;\n"
+            "    padding: 0 1;",
+            styles,
+        )
 
     def test_mid_run_subscription_receives_later_events_without_losing_history(self) -> None:
         store = LiveInspectionStore()
@@ -135,6 +231,152 @@ class LiveInspectionStoreTests(unittest.TestCase):
         )
 
 class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
+    def test_eval_middleware_restores_callbacks_without_replacing_quickjs(self) -> None:
+        self.assertIs(
+            middleware_builder.CodeInterpreterMiddleware,
+            InspectableCodeInterpreterMiddleware,
+        )
+        self.assertTrue(issubclass(InspectableCodeInterpreterMiddleware, CodeInterpreterMiddleware))
+
+    async def test_quickjs_bridge_forwards_callbacks_only_to_task(self) -> None:
+        seen: list[tuple[Any, Any]] = []
+
+        class TaskTool:
+            name = "task"
+
+            async def arun(
+                self,
+                *_args: Any,
+                callbacks: Any = None,
+                config: Any = None,
+                **_kwargs: Any,
+            ) -> str:
+                seen.append((callbacks, config))
+                return "done"
+
+        @dataclass
+        class Runtime:
+            config: dict[str, Any]
+            tools: list[Any]
+
+        callbacks = object()
+        other = SimpleNamespace(name="read_file")
+        runtime = Runtime(config={"callbacks": callbacks}, tools=[TaskTool(), other])
+
+        wrapped = runtime_with_task_callbacks(runtime)
+        result = await wrapped.tools[0].arun(
+            {},
+            config={"metadata": {"existing": True}},
+            tool_call_id="ptc_task_exact",
+        )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(seen[0][0], callbacks)
+        self.assertEqual(
+            seen[0][1]["metadata"],
+            {"existing": True, EVAL_SUBAGENT_ROW_METADATA: "ptc_task_exact"},
+        )
+        self.assertIs(wrapped.tools[1], other)
+        self.assertIsNot(wrapped.tools[0], runtime.tools[0])
+
+    async def test_quickjs_bridge_reuses_logical_rows_across_eval_replay(self) -> None:
+        observed: list[tuple[str, str, str]] = []
+
+        class TaskTool:
+            name = "task"
+
+            async def arun(
+                self,
+                payload: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                tool_call_id: str,
+                **_kwargs: Any,
+            ) -> str:
+                observed.append(
+                    (
+                        tool_call_id,
+                        payload["runtime"].tool_call_id,
+                        config["metadata"][EVAL_SUBAGENT_ROW_METADATA],
+                    )
+                )
+                return "done"
+
+        @dataclass
+        class ChildRuntime:
+            tool_call_id: str
+
+        @dataclass
+        class Runtime:
+            config: dict[str, Any]
+            tools: list[Any]
+            stream_writer: Any
+
+        async def replay(raw_ids: list[str]) -> list[str]:
+            events: list[dict[str, Any]] = []
+            runtime = Runtime(
+                config={"callbacks": object()},
+                tools=[TaskTool()],
+                stream_writer=events.append,
+            )
+            wrapped = runtime_with_task_callbacks(runtime)
+            for raw_id in raw_ids:
+                wrapped.stream_writer(
+                    {
+                        "type": "subagent",
+                        "phase": "start",
+                        "id": raw_id,
+                        "eval_id": "eval-call",
+                        "subagent_type": "general-purpose",
+                        "description": "same request",
+                        "label": "candidate",
+                    }
+                )
+                await wrapped.tools[0].arun(
+                    {"runtime": ChildRuntime(raw_id)},
+                    config={"metadata": {}},
+                    tool_call_id=raw_id,
+                )
+                wrapped.stream_writer(
+                    {
+                        "type": "subagent",
+                        "phase": "complete",
+                        "id": raw_id,
+                        "eval_id": "eval-call",
+                    }
+                )
+            return [str(event["id"]) for event in events]
+
+        first = await replay(["ptc_task_raw_a", "ptc_task_raw_b"])
+        second = await replay(["ptc_task_raw_c", "ptc_task_raw_d"])
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(set(first[::2])), 2)
+        self.assertEqual(first[0], first[1])
+        self.assertEqual(first[2], first[3])
+        self.assertTrue(all(len(set(values)) == 1 for values in observed))
+        self.assertEqual([values[0] for values in observed[:2]], first[::2])
+        self.assertEqual([values[0] for values in observed[2:]], second[::2])
+
+    async def test_direct_child_assistant_output_streams_incrementally(self) -> None:
+        store = LiveInspectionStore()
+        inspection_id = store.allocate_id("direct-stream")
+        store.start(inspection_id, "worker [fox]", "inspect")
+        received: list[str] = []
+
+        def listener(_inspection_id: str, update: Any) -> None:
+            if update.event is not None and update.event.kind == "assistant":
+                received.append(update.event.text)
+
+        store.subscribe(inspection_id, listener)
+        capture = SubagentInspectionCapture(store, inspection_id)
+        await capture_child_streams(
+            SimpleNamespace(messages=AsyncItems([StreamedMessage([], ["The", " answer"])])),
+            capture,
+        )
+
+        self.assertEqual(received, ["The", " answer"])
+
     async def test_native_child_streams_capture_reasoning_text_tools_and_errors(self) -> None:
         store = LiveInspectionStore()
         inspection_id = store.allocate_id("native")
@@ -165,26 +407,69 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(event.text for event in inspection.events if event.kind == "reasoning"), "think carefully")
         self.assertEqual(inspection.events[-1].text, "returned answer")
 
-    async def test_eval_coordinator_reuses_custom_row_inspection(self) -> None:
-        store = LiveInspectionStore()
-        coordinator = SubagentInspectionCoordinator(store)
-        inspection_id = coordinator.eval_started(
-            {
-                "id": "ptc-task-one",
-                "eval_id": "eval-call",
-                "description": "full eval task",
-                "subagent_type": "researcher",
-            }
+    async def test_standalone_child_keeps_native_lifecycle(self) -> None:
+        class Renderer:
+            manages_subagent_animation = True
+
+            def __init__(self) -> None:
+                self.live_inspections = LiveInspectionStore()
+                self.events: list[tuple[str, ...]] = []
+
+            def start_subagent_live(self) -> None:
+                self.events.append(("live_started",))
+
+            def stop_subagent_live(self) -> None:
+                self.events.append(("live_stopped",))
+
+            def subagent_label(self, _subagent: Any) -> str:
+                return "general-purpose [fox]"
+
+            def subagent_started(
+                self,
+                name: str,
+                task: str,
+                *,
+                inspection_id: str = "",
+                **_kwargs: Any,
+            ) -> None:
+                self.live_inspections.start(inspection_id, name, task)
+                self.events.append(("subagent_started", name, task, inspection_id))
+
+            def subagent_finished(
+                self,
+                name: str,
+                result: str,
+                **_kwargs: Any,
+            ) -> None:
+                self.events.append(("subagent_finished", name, result))
+
+        async def result() -> str:
+            return "parent-facing result"
+
+        renderer = Renderer()
+        subagent = SimpleNamespace(
+            name="general-purpose",
+            task_input="shared task text",
+            trigger_call_id="direct-call",
+            path=("tools:direct-call", "general-purpose:child"),
+            messages=AsyncItems([StreamedMessage([], ["parent-facing result"])]),
+            output=result(),
         )
 
-        claimed = coordinator.claim_eval_child(
-            SimpleNamespace(path=("tools:eval-call", "researcher:child"), task_input="")
-        )
+        await consume_subagents(AsyncItems([subagent]), renderer)
 
-        self.assertEqual(claimed, inspection_id)
-        inspection = store.get(inspection_id)
+        self.assertEqual(renderer.events[0], ("live_started",))
+        self.assertEqual(renderer.events[-1], ("live_stopped",))
+        started = next(event for event in renderer.events if event[0] == "subagent_started")
+        self.assertEqual(started[1:3], ("general-purpose [fox]", "shared task text"))
+        self.assertEqual(
+            next(event for event in renderer.events if event[0] == "subagent_finished")[1:],
+            ("general-purpose [fox]", "parent-facing result"),
+        )
+        inspection = renderer.live_inspections.get(started[3])
         assert inspection is not None
-        self.assertEqual(inspection.events[0].text, "full eval task")
+        self.assertEqual(inspection.status, "DONE")
+        self.assertEqual(inspection.events[-1].text, "parent-facing result")
 
     async def test_eval_protocol_captures_siblings_missing_from_high_level_lane(self) -> None:
         store = LiveInspectionStore()
@@ -204,6 +489,12 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
                 "description": "Report EVAL-B",
                 "subagent_type": "general-purpose",
             }
+        )
+        coordinator.register_eval_namespace(
+            ("general-purpose:child-a",), "ptc-task-a"
+        )
+        coordinator.register_eval_namespace(
+            ("general-purpose:child-b",), "ptc-task-b"
         )
 
         coordinator.handle_protocol_event(
@@ -249,6 +540,207 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.events[0].text, "Report EVAL-B")
         self.assertEqual(second.events[-1].text, "EVAL-B")
 
+    async def test_eval_protocol_snapshot_growth_emits_only_text_deltas(self) -> None:
+        store = LiveInspectionStore()
+        coordinator = SubagentInspectionCoordinator(store)
+        inspection_id = coordinator.eval_started(
+            {"id": "ptc-growing", "description": "Report the answer"}
+        )
+        coordinator.register_eval_namespace(
+            ("general-purpose:growing",), "ptc-growing"
+        )
+        received: list[str] = []
+
+        def listener(_inspection_id: str, update: Any) -> None:
+            if update.event is not None and update.event.kind == "assistant":
+                received.append(update.event.text)
+
+        store.subscribe(inspection_id, listener)
+        for text in ("The", "The answer", "The answer is Candidate A."):
+            coordinator.handle_protocol_event(
+                {
+                    "method": "values",
+                    "params": {
+                        "namespace": ["general-purpose:growing"],
+                        "data": {
+                            "messages": [
+                                {"type": "human", "content": "Report the answer"},
+                                {"type": "ai", "content": text},
+                            ]
+                        },
+                    },
+                }
+            )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        assistant = [event for event in inspection.events if event.kind == "assistant"]
+        self.assertEqual(received, ["The", " answer", " is Candidate A."])
+        self.assertEqual(assistant, [InspectionEvent("assistant", text="The answer is Candidate A.")])
+
+    async def test_eval_raw_protocol_streams_reasoning_and_text_without_snapshot_duplicates(
+        self,
+    ) -> None:
+        store = LiveInspectionStore()
+        coordinator = SubagentInspectionCoordinator(store)
+        inspection_id = coordinator.eval_started(
+            {
+                "id": "ptc_task_streamed",
+                "description": "Stream the answer",
+                "subagent_type": "general-purpose",
+            }
+        )
+        namespace = ("general-purpose:ptc_task_streamed", "model:run-one")
+        for delta in (
+            {"type": "reasoning-delta", "reasoning": "Think "},
+            {"type": "reasoning-delta", "reasoning": "carefully."},
+            {"type": "text-delta", "text": "Final "},
+            {"type": "text-delta", "text": "answer."},
+        ):
+            coordinator.handle_protocol_event(
+                {
+                    "method": "messages",
+                    "params": {
+                        "namespace": namespace,
+                        "data": [{"event": "content-block-delta", "delta": delta}, {}],
+                    },
+                }
+            )
+        coordinator.handle_protocol_event(
+            {
+                "method": "values",
+                "params": {
+                    "namespace": namespace[:1],
+                    "data": {
+                        "messages": [
+                            {"type": "human", "content": "Stream the answer"},
+                            {
+                                "type": "ai",
+                                "content": [
+                                    {"type": "reasoning", "reasoning": "Think carefully."},
+                                    {"type": "text", "text": "Final answer."},
+                                ],
+                            },
+                        ]
+                    },
+                },
+            }
+        )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        self.assertEqual(
+            [(event.kind, event.text) for event in inspection.events],
+            [
+                ("user", "Stream the answer"),
+                ("reasoning", "Think carefully."),
+                ("assistant", "Final answer."),
+            ],
+        )
+
+    async def test_eval_native_handle_is_inspection_only_by_exact_trigger_id(self) -> None:
+        class Renderer:
+            manages_subagent_animation = True
+
+            def __init__(self) -> None:
+                self.live_inspections = LiveInspectionStore()
+                self.events: list[str] = []
+
+            def start_subagent_live(self) -> None:
+                self.events.append("start")
+
+            def stop_subagent_live(self) -> None:
+                self.events.append("stop")
+
+            def subagent_label(self, _subagent: Any) -> str:
+                raise AssertionError("Eval handle must not enter normal lifecycle")
+
+        async def result() -> str:
+            return "Eval final response"
+
+        renderer = Renderer()
+        coordinator = SubagentInspectionCoordinator(renderer.live_inspections)
+        inspection_id = coordinator.eval_started(
+            {
+                "id": "ptc_task_exact",
+                "description": "same task text",
+                "subagent_type": "general-purpose",
+            }
+        )
+        transformer = EvalInspectionTransformer((), coordinator)
+        self.assertTrue(
+            transformer.process(
+                {
+                    "method": "tasks",
+                    "params": {
+                        "namespace": ["general-purpose:native-task-uuid"],
+                        "data": {
+                            "metadata": {
+                                EVAL_SUBAGENT_ROW_METADATA: "ptc_task_exact"
+                            }
+                        },
+                    },
+                }
+            )
+        )
+        subagent = SimpleNamespace(
+            trigger_call_id="native-task-uuid",
+            task_input="same task text",
+            path=("general-purpose:native-task-uuid",),
+            messages=AsyncItems([]),
+            tool_calls=AsyncItems([]),
+            output=result(),
+        )
+        ordinary = SimpleNamespace(trigger_call_id="ordinary-task-uuid")
+
+        self.assertFalse(coordinator.is_eval_child(ordinary))
+
+        await consume_subagents(
+            AsyncItems([subagent]),
+            renderer,
+            inspection=coordinator,
+        )
+
+        self.assertEqual(renderer.events, [])
+        inspection = renderer.live_inspections.get(inspection_id)
+        assert inspection is not None
+        self.assertEqual(inspection.status, "DONE")
+        self.assertEqual(inspection.events[-1].text, "Eval final response")
+
+    async def test_eval_protocol_replaces_truncated_hint_with_full_task(self) -> None:
+        store = LiveInspectionStore()
+        coordinator = SubagentInspectionCoordinator(store)
+        full_task = "Inspect this complete Eval request: " + "long detail " * 30
+        self.assertGreater(len(full_task), 200)
+        inspection_id = coordinator.eval_started(
+            {"id": "ptc-long", "description": full_task[:200]}
+        )
+        coordinator.register_eval_namespace(
+            ("general-purpose:long",), "ptc-long"
+        )
+
+        coordinator.handle_protocol_event(
+            {
+                "method": "values",
+                "params": {
+                    "namespace": ["general-purpose:long"],
+                    "data": {
+                        "messages": [
+                            {"type": "human", "content": full_task},
+                            {"type": "ai", "content": "Done"},
+                        ]
+                    },
+                },
+            }
+        )
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        user_events = [event for event in inspection.events if event.kind == "user"]
+        self.assertEqual(user_events, [InspectionEvent("user", text=full_task)])
+        self.assertGreater(len(user_events[0].text), 200)
+        self.assertNotIn("…", user_events[0].text)
+
     async def test_eval_cancellation_finalizes_only_live_inspection_state(self) -> None:
         store = LiveInspectionStore()
         coordinator = SubagentInspectionCoordinator(store)
@@ -287,33 +779,6 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(success.status, "DONE")
         self.assertEqual(error.status, "ERROR")
         self.assertEqual(error.events[-1], InspectionEvent("error", text="child failed"))
-
-    async def test_quickjs_bridge_forwards_callbacks_only_to_task(self) -> None:
-        seen: list[Any] = []
-
-        class TaskTool:
-            name = "task"
-
-            async def arun(self, *_args: Any, callbacks: Any = None, **_kwargs: Any) -> str:
-                seen.append(callbacks)
-                return "done"
-
-        callbacks = object()
-        other = SimpleNamespace(name="read_file")
-        @dataclass
-        class Runtime:
-            config: dict[str, Any]
-            tools: list[Any]
-
-        runtime = Runtime(config={"callbacks": callbacks}, tools=[TaskTool(), other])
-
-        wrapped = runtime_with_task_callbacks(runtime)
-        result = await wrapped.tools[0].arun({})
-
-        self.assertEqual(result, "done")
-        self.assertEqual(seen, [callbacks])
-        self.assertIs(wrapped.tools[1], other)
-        self.assertIsNot(wrapped.tools[0], runtime.tools[0])
 
     async def test_capture_failure_marks_standalone_lifecycle_terminal(self) -> None:
         class Renderer:

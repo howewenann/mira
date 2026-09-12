@@ -16,8 +16,11 @@ from langchain_core.messages import AIMessage
 from langchain_core.tools import tool
 
 from agent.factory import _action_permissions, _write_interrupts
+from agent.middleware.code_interpreter import InspectableCodeInterpreterMiddleware
 from agent.resources import build_resources
+from agent.resources.builder import build_backends
 from agent.tools.specs import collect_tool_specs
+from core.execution.inspection.live import LiveInspectionStore
 from core.execution.runner import annotate_filesystem_approvals, run_turn
 from session.checkpoint import make_checkpointer
 from ui.shared.interrupts import APPROVAL_CONSEQUENCE, action_preview, action_text
@@ -335,7 +338,10 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="The answer is 42."),
             ]
         )
-        middleware = CodeInterpreterMiddleware(mode="call", ptc=["double"])
+        middleware = InspectableCodeInterpreterMiddleware(
+            mode="call",
+            ptc=["double"],
+        )
         agent = create_deep_agent(
             model=model,
             tools=[double],
@@ -349,6 +355,140 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("eval", result.tool_calls)
         self.assertIn("double", result.tool_calls)
         self.assertLess(result.tool_calls.index("eval"), result.tool_calls.index("double"))
+
+    async def test_eval_child_hitl_is_replay_safe_and_inspector_contained(self) -> None:
+        executions: list[str] = []
+        workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(workspace.cleanup)
+        backends = build_backends(Path(workspace.name), enable_execute=True)
+        original_execute = backends.project.execute
+
+        def counted_execute(command: str, *, timeout: int | None = None) -> object:
+            executions.append(command)
+            return original_execute(command, timeout=timeout)
+
+        backends.project.execute = counted_execute
+
+        model = BindableFakeMessagesListChatModel(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "eval",
+                            "args": {
+                                "code": (
+                                    "globalThis.counter = (globalThis.counter || 0) + 1; "
+                                    "const answer = await task({description: 'check date', "
+                                    "subagentType: 'general-purpose', label: 'date-check'}); "
+                                    "`${counter}:${answer}`"
+                                )
+                            },
+                            "id": "eval-call",
+                        }
+                    ],
+                ),
+                AIMessage(
+                    content=[
+                        {
+                            "type": "reasoning",
+                            "reasoning": "child thinking",
+                        }
+                    ],
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "date /T"},
+                            "id": "child-execute",
+                        }
+                    ],
+                ),
+                AIMessage(content="child complete"),
+                AIMessage(content="main complete"),
+            ]
+        )
+        middleware = InspectableCodeInterpreterMiddleware(
+            mode="thread",
+            ptc=["execute"],
+        )
+        self.addCleanup(middleware._registry.close)
+        agent = create_deep_agent(
+            model=model,
+            backend=backends.combined,
+            middleware=[middleware],
+            interrupt_on={
+                "execute": {
+                    "allowed_decisions": ["approve", "edit", "reject"]
+                }
+            },
+            checkpointer=make_checkpointer(),
+        )
+
+        class InspectorRenderer(ApprovalRenderer):
+            def __init__(self) -> None:
+                super().__init__({"type": "approve"})
+                self.live_inspections = LiveInspectionStore()
+                self.root_tools: list[str] = []
+                self.rows: list[tuple[str, str]] = []
+
+            def tool_call(
+                self,
+                name: str,
+                _args: object,
+                *,
+                call_id: str = "",
+            ) -> None:
+                self.root_tools.append(name)
+
+            def eval_subagent_started(
+                self,
+                _name: str,
+                _task_input: str = "",
+                *,
+                row_id: str = "",
+                inspection_id: str = "",
+                **_kwargs: object,
+            ) -> None:
+                self.rows.append((row_id, inspection_id))
+
+            def subagent_label(self, subagent: object) -> str:
+                return f"{getattr(subagent, 'name', 'subagent')} [date-check]"
+
+        renderer = InspectorRenderer()
+        result = await run_turn(
+            agent,
+            "Check the date in an Eval child",
+            renderer,
+            "quickjs-hitl-replay",
+        )
+
+        self.assertEqual(executions, ["date /T"])
+        self.assertEqual(result.final_text, "main complete")
+        self.assertEqual(result.tool_calls, ["eval"])
+        self.assertEqual(renderer.root_tools, ["eval"])
+        self.assertEqual(len(renderer.approvals), 1)
+        self.assertEqual(len(renderer.rows), 1)
+        row_id, inspection_id = renderer.rows[0]
+        self.assertTrue(row_id.startswith("ptc_task_"))
+        inspection = renderer.live_inspections.get(inspection_id)
+        assert inspection is not None
+        self.assertEqual(inspection.status, "DONE")
+        self.assertEqual(
+            [event.text for event in inspection.events if event.kind == "reasoning"],
+            ["child thinking"],
+        )
+        self.assertEqual(
+            [event.name for event in inspection.events if event.kind == "tool_call"],
+            ["execute"],
+        )
+        child_results = [
+            event.text
+            for event in inspection.events
+            if event.kind == "tool_result"
+        ]
+        self.assertEqual(len(child_results), 1)
+        self.assertTrue(child_results[0].strip())
+        self.assertEqual(result.tool_results, ["<result>1:child complete</result>"])
 
 
 if __name__ == "__main__":

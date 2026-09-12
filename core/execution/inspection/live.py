@@ -26,6 +26,7 @@ class LiveInspection:
 
     id: str
     title: str
+    inspection_type: str = "subagent"
     events: list[InspectionEvent] = field(default_factory=list)
     status: str = "RUNNING"
 
@@ -59,13 +60,21 @@ class LiveInspectionStore:
             suffix += 1
         return candidate
 
-    def start(self, inspection_id: str, title: str, task: str = "") -> LiveInspection:
+    def start(
+        self,
+        inspection_id: str,
+        title: str,
+        task: str = "",
+        *,
+        inspection_type: str = "subagent",
+    ) -> LiveInspection:
         """Create a transcript whose first item is always the child request."""
         current = self._items.get(inspection_id)
         if current is None:
             current = LiveInspection(
                 id=inspection_id,
                 title=title,
+                inspection_type=inspection_type,
                 events=[InspectionEvent("user", text=str(task or ""))],
             )
             self._items[inspection_id] = current
@@ -74,6 +83,9 @@ class LiveInspectionStore:
         changed = False
         if title and current.title != title:
             current.title = title
+            changed = True
+        if inspection_type and current.inspection_type != inspection_type:
+            current.inspection_type = inspection_type
             changed = True
         if task and current.events and current.events[0].kind == "user":
             if current.events[0].text != task:
@@ -150,11 +162,21 @@ class LiveInspectionStore:
             self.append(inspection_id, InspectionEvent("error", text=error))
         if final_response is not None:
             response = str(final_response)
-            if not (
-                current.events
-                and current.events[-1].kind == "assistant"
-                and current.events[-1].text == response
-            ):
+            last = current.events[-1] if current.events else None
+            if last is not None and last.kind == "assistant":
+                streamed = last.text
+                if response == streamed:
+                    pass
+                elif response.startswith(streamed):
+                    self.append_delta(
+                        inspection_id,
+                        "assistant",
+                        response[len(streamed) :],
+                    )
+                else:
+                    last.text = response
+                    self._notify(inspection_id, InspectionUpdate("reset"))
+            else:
                 self.append(inspection_id, InspectionEvent("assistant", text=response))
         current.status = status
         self._notify(inspection_id, InspectionUpdate("status"))

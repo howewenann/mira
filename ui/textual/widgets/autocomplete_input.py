@@ -189,8 +189,8 @@ class AutocompleteInput(Vertical):
         bottom_space = main_panel.content_region.bottom - telemetry.region.bottom
         # The viewport itself has no border. Preserve enough outer height for
         # ChatLog's two border rows plus one visible transcript row. Inspector
-        # uses the same slot and adds a one-row header.
-        minimum_viewport_height = 4 if inspector.display else 3
+        # uses the same slot and also keeps its header, divider, and one-row gap.
+        minimum_viewport_height = 6 if inspector.display else 3
         reclaimable_chat = chat.content_region.height - minimum_viewport_height
         return max(
             MIN_PROMPT_HEIGHT,

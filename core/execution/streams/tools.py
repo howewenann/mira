@@ -10,6 +10,7 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from agent.middleware.code_interpreter import EVAL_SUBAGENT_ROW_METADATA
 from core.execution.streams.output import output_tool_lifecycle
 from core.execution.streams.output import call_renderer
 from core.execution.streams.tool_args import normalized_call
@@ -46,6 +47,8 @@ async def consume_tool_calls(
     renderer: Any,
     result: Any | None = None,
     projected_errors: list[ProjectedToolError] | None = None,
+    hidden_eval_calls: list[dict[str, Any]] | None = None,
+    inspection: Any | None = None,
 ) -> None:
     """Consume DeepAgents tool-call projections and render starts promptly."""
     watchers: set[asyncio.Task[None]] = set()
@@ -55,6 +58,27 @@ async def consume_tool_calls(
             identity = native_event_identity(call)
             name = str(normalized["name"])
             call_id = str(normalized.get("id") or "")
+            eval_owned = bool(
+                identity["metadata"].get(EVAL_SUBAGENT_ROW_METADATA)
+            ) or bool(
+                inspection is not None
+                and inspection.is_eval_tool_call(call_id)
+            )
+            if eval_owned:
+                if hidden_eval_calls is not None:
+                    row_id = str(
+                        identity["metadata"].get(EVAL_SUBAGENT_ROW_METADATA)
+                        or call_id
+                    )
+                    hidden_eval_calls.append(
+                        {
+                            "name": name,
+                            "args": normalized.get("args", {}),
+                            "call_id": call_id,
+                            "row_id": row_id,
+                        }
+                    )
+                continue
             is_new_call = True
             if result is not None:
                 is_new_call = result.record_tool_call(name, call_id)

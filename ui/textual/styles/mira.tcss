@@ -681,14 +681,18 @@ MCPPanelScreen {
     display: none;
     width: 1fr;
     height: 1fr;
-    padding: 0 1;
+    padding: 0;
     border: solid #B7A4E8;
     background: #0c0f10;
 }
 
 #inspector-header {
     width: 1fr;
-    height: 1;
+    height: 2;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-bottom: solid #B7A4E8;
+    background: #15191b;
     color: #ECE7FF;
     text-style: bold;
 }
@@ -722,7 +726,7 @@ MCPPanelScreen {
 #inspector-log {
     width: 1fr;
     height: 1fr;
-    padding: 0;
+    padding: 0 1;
     border: none;
     scrollbar-color: #5bb8b1;
     scrollbar-background: #122023;

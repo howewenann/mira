@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from agent.middleware.correction import CORRECTION_SOURCE
+from agent.middleware.code_interpreter import EVAL_SUBAGENT_ROW_METADATA
 from core.execution.streams.message_metadata import MessageInvocationMetadata
 from core.execution.streams.output import (
     is_correction_metadata_message,
@@ -38,6 +39,13 @@ async def consume_messages(
     """
     async for message in messages:
         identity = message_identity(message, invocation_metadata)
+        if identity["metadata"].get(EVAL_SUBAGENT_ROW_METADATA):
+            await _drain_message(message)
+            if result is not None:
+                usage = usage_from_message(message)
+                if has_usage(usage):
+                    result.add_stream_usage(usage)
+            continue
         is_success_criteria = (
             invocation_metadata is not None and invocation_metadata.is_success_criteria(message)
         ) or is_success_criteria_metadata_message(message)

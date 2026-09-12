@@ -12,6 +12,7 @@ from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command, Interrupt
 
+from agent.middleware.code_interpreter import EVAL_SUBAGENT_ROW_METADATA
 from agent.middleware.compaction import (
     MiraSummarizationMiddleware,
     observe_summarization_counts,
@@ -22,6 +23,7 @@ from agent.middleware import CORRECTION_EVENT, CORRECTION_SOURCE
 from agent.planning.response_status import PLANNING_RESPONSE_STATUS_FAILURE
 from core.context.observation import context_usage_scope
 from core.execution import runner
+from core.execution.inspection.live import LiveInspectionStore
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from core.execution.streams.output import final_text
@@ -1353,6 +1355,13 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_turn_forwards_eval_subagent_group_metadata(self) -> None:
         class EvalAwareRenderer(RunTurnRenderer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live_inspections = LiveInspectionStore()
+
+            def subagent_label(self, subagent: Any) -> str:
+                return f"{subagent.name} [amber-fox]"
+
             def eval_subagent_started(
                 self,
                 name: str,
@@ -1361,8 +1370,19 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 eval_id: str = "",
                 row_id: str = "",
                 model: str = "",
+                inspection_id: str = "",
             ) -> None:
-                self.events.append(("eval_subagent_started", name, task_input, eval_id, row_id, model))
+                self.events.append(
+                    (
+                        "eval_subagent_started",
+                        name,
+                        task_input,
+                        eval_id,
+                        row_id,
+                        model,
+                        inspection_id,
+                    )
+                )
 
             def eval_subagent_finished(
                 self,
@@ -1404,18 +1424,220 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             (
                 "eval_subagent_started",
-                "general-purpose [haiku 1]",
+                "general-purpose [amber-fox]",
                 "generate haiku 1",
                 "eval-round-a",
                 "ptc_task_one",
                 "claude-haiku",
+                "subagent:ptc_task_one",
             ),
             renderer.events,
         )
         self.assertIn(
-            ("eval_subagent_finished", "general-purpose [haiku 1]", "", "eval-round-a", "ptc_task_one", 1500),
+            (
+                "eval_subagent_finished",
+                "general-purpose [amber-fox]",
+                "",
+                "eval-round-a",
+                "ptc_task_one",
+                1500,
+            ),
             renderer.events,
         )
+        inspection = renderer.live_inspections.get("subagent:ptc_task_one")
+        assert inspection is not None
+        self.assertEqual(inspection.title, "general-purpose [amber-fox]")
+
+    async def test_eval_hitl_replay_reuses_row_and_hides_child_tool(self) -> None:
+        row_id = "ptc_task_stable"
+        interrupt = {
+            "action_requests": [
+                {"name": "execute", "args": {"command": "date"}}
+            ]
+        }
+        execute = ToolCall(
+            "execute",
+            {"command": "date"},
+            "interrupted",
+            "call-execute",
+        )
+        execute.metadata = {EVAL_SUBAGENT_ROW_METADATA: row_id}
+        started = {
+            "type": "subagent",
+            "phase": "start",
+            "id": row_id,
+            "eval_id": "eval-call",
+            "subagent_type": "general-purpose",
+            "description": "check the date",
+        }
+        first = FakeStream(
+            output={"messages": []},
+            interrupts=[interrupt],
+            tool_calls=[execute],
+            custom_events=[started],
+        )
+        resumed = FakeStream(
+            output={"messages": [OutputMessage("done")]},
+            custom_events=[
+                started,
+                {
+                    "type": "subagent",
+                    "phase": "complete",
+                    "id": row_id,
+                    "eval_id": "eval-call",
+                },
+            ],
+        )
+        renderer = RunTurnRenderer()
+
+        result = await runner.run_turn(
+            FakeAgent([first, resumed]),
+            "delegate via eval",
+            renderer,
+            "thread-1",
+        )
+
+        starts = [event for event in renderer.events if event[0] == "subagent_started"]
+        finishes = [event for event in renderer.events if event[0] == "subagent_finished"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(finishes), 1)
+        self.assertFalse(
+            any(
+                event[0] == "tool_call" and event[1] == "execute"
+                for event in renderer.events
+            )
+        )
+        self.assertEqual(result.tool_calls, [])
+        self.assertEqual(len(renderer.approvals), 1)
+
+    async def test_eval_child_messages_are_inspector_only(self) -> None:
+        message = Message(
+            reasoning=AsyncItems(["child reasoning"]),
+            text=AsyncItems(["child answer"]),
+        )
+        message.metadata = {
+            EVAL_SUBAGENT_ROW_METADATA: "ptc_task_stable"
+        }
+        renderer = RecordingRenderer()
+
+        await consume_messages(AsyncItems([message]), renderer)
+
+        self.assertEqual(renderer.events, [])
+
+    async def test_eval_child_edits_and_rejections_remain_inspector_only(self) -> None:
+        original = {"command": "date"}
+        edited = {"command": "date /t"}
+
+        for decision in (
+            {
+                "type": "edit",
+                "edited_action": {"name": "execute", "args": edited},
+            },
+            {"type": "reject"},
+        ):
+            with self.subTest(decision=decision["type"]):
+                row_id = f"ptc_task_{decision['type']}"
+                started = {
+                    "type": "subagent",
+                    "phase": "start",
+                    "id": row_id,
+                    "eval_id": "eval-call",
+                    "subagent_type": "general-purpose",
+                    "description": "check the date",
+                }
+                child_call = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": original,
+                            "id": "child-execute",
+                        }
+                    ],
+                )
+                interrupt = {
+                    "action_requests": [
+                        {"name": "execute", "args": original}
+                    ]
+                }
+                child_values = values_event(
+                    [
+                        {"type": "human", "content": "check the date"},
+                        child_call,
+                    ],
+                    namespace=(f"tools:{row_id}",),
+                )
+                child_values["params"]["interrupts"] = [interrupt]
+                first = FakeStream(
+                    output={"messages": []},
+                    interrupts=[interrupt],
+                    tool_calls=[
+                        IncompleteToolCall(
+                            "task",
+                            {
+                                "description": "check the date",
+                                "subagent_type": "general-purpose",
+                            },
+                            None,
+                            row_id,
+                        )
+                    ],
+                    custom_events=[started],
+                    raw_events=AsyncItems([child_values]),
+                )
+                resumed = FakeStream(
+                    output={"messages": [OutputMessage("done")]},
+                    custom_events=[
+                        started,
+                        {
+                            "type": "subagent",
+                            "phase": "complete",
+                            "id": row_id,
+                            "eval_id": "eval-call",
+                        },
+                    ],
+                )
+
+                class InspectorRenderer(RunTurnRenderer):
+                    def __init__(self) -> None:
+                        super().__init__(decisions=[decision])
+                        self.live_inspections = LiveInspectionStore()
+
+                renderer = InspectorRenderer()
+                agent = FakeAgent([first, resumed])
+
+                result = await runner.run_turn(
+                    agent,
+                    "delegate via eval",
+                    renderer,
+                    f"thread-{decision['type']}",
+                )
+
+                self.assertEqual(result.tool_calls, [])
+                self.assertFalse(
+                    any(
+                        event[0] in {"tool_call", "tool_call_updated"}
+                        and event[1] == "execute"
+                        for event in renderer.events
+                    )
+                )
+                self.assertEqual(
+                    agent.payloads[1].resume,
+                    {"decisions": [decision]},
+                )
+                inspection = renderer.live_inspections.get(
+                    f"subagent:{row_id}"
+                )
+                assert inspection is not None
+                tool_event = next(
+                    event
+                    for event in inspection.events
+                    if event.kind == "tool_call"
+                )
+                self.assertEqual(
+                    tool_event.args,
+                    edited if decision["type"] == "edit" else original,
+                )
 
     async def test_run_turn_routes_rubric_and_eval_events_and_reconciles_cap(self) -> None:
         stream = FakeStream(
@@ -1793,6 +2015,102 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(("subagent_started", "general-purpose [one]", ""), renderer.events)
         self.assertIn(("subagent_request_updated", "general-purpose [one]", "late request"), renderer.events)
+
+    async def test_run_turn_promotes_dynamic_child_when_task_projection_arrives_late(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.subagents = AsyncItems(
+            [
+                Subagent(
+                    "general-purpose [one]",
+                    [ToolCall("noop", {}, "one")],
+                    task_input="",
+                    path=["tools:task-call"],
+                )
+            ]
+        )
+        stream.tool_calls = DelayedAsyncItems(
+            [
+                DocumentedToolCall(
+                    "task",
+                    {"description": "late dynamic request"},
+                    call_id="task-1",
+                )
+            ]
+        )
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        self.assertIn(
+            ("subagent_started", "general-purpose [one]", "late dynamic request"),
+            renderer.events,
+        )
+        self.assertIn(
+            ("subagent_finished", "general-purpose [one]", "one"),
+            renderer.events,
+        )
+
+    async def test_run_turn_preserves_task_request_across_approval_resume(self) -> None:
+        description = "Tell a story exactly 20 words long."
+        interrupt = {
+            "action_requests": [
+                {
+                    "name": "task",
+                    "args": {
+                        "description": description,
+                        "subagent_type": "general-purpose",
+                    },
+                }
+            ]
+        }
+        interrupted = FakeStream(
+            output={
+                "messages": [
+                    {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "task-1",
+                                "name": "task",
+                                "args": {
+                                    "description": description,
+                                    "subagent_type": "general-purpose",
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+            interrupts=[interrupt],
+        )
+        resumed = FakeStream(output={"messages": [OutputMessage("one")]})
+        resumed.subagents = AsyncItems(
+            [
+                Subagent(
+                    "general-purpose [one]",
+                    [ToolCall("noop", {}, "one")],
+                    task_input="",
+                    path=["tools:task-1"],
+                )
+            ]
+        )
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        await runner.run_turn(
+            FakeAgent([interrupted, resumed]),
+            "delegate",
+            renderer,
+            "thread-1",
+        )
+
+        self.assertIn(
+            ("subagent_started", "general-purpose [one]", description),
+            renderer.events,
+        )
+        self.assertIn(
+            ("subagent_finished", "general-purpose [one]", "one"),
+            renderer.events,
+        )
 
     async def test_run_turn_supports_output_interrupt_fallback(self) -> None:
         interrupt = {

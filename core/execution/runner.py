@@ -8,6 +8,7 @@ from collections import Counter, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
+from types import SimpleNamespace
 from typing import Any
 
 from langgraph.types import Command
@@ -17,6 +18,7 @@ from agent.middleware.correction import CORRECTION_EVENT
 from agent.planning.policy import PLANNING_STAGES
 from core.execution.streams.corrections import normalize_correction_event
 from core.execution.inspection.subagents import (
+    EvalInspectionTransformer,
     SubagentInspectionCoordinator,
     live_inspection_store,
 )
@@ -219,6 +221,18 @@ class TurnResult:
             )
 
 
+@dataclass
+class _DeferredSubagent:
+    """Native tool child waiting for its matching task projection."""
+
+    name: str
+    eval_id: str
+    row_id: str
+    model: str
+    inspection_id: str
+    terminal: tuple[str, str, str, str, int | None, str] | None = None
+
+
 class SubagentRequestRenderer:
     """Fill empty subagent request text from preceding task delegations."""
 
@@ -226,20 +240,49 @@ class SubagentRequestRenderer:
         self.renderer = renderer
         self._pending_requests: deque[str] = deque()
         self._pending_subagents: deque[str] = deque()
-        self._hidden_subagents: set[str] = set()
+        self._deferred_subagents: dict[str, _DeferredSubagent] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
+        self._remember_task_requests(calls)
+        self.renderer.delegation_started(calls)
+
+    def tool_call(
+        self,
+        name: str,
+        args: Any,
+        call_id: str = "",
+        **kwargs: Any,
+    ) -> Any:
+        """Remember task calls recovered from an approval interrupt."""
+        if name == "task":
+            self._remember_task_requests(
+                [{"id": call_id, "name": name, "args": args}]
+            )
+        return call_renderer_with_supported_kwargs(
+            self.renderer.tool_call,
+            name,
+            args,
+            call_id=call_id,
+            **kwargs,
+        )
+
+    def _remember_task_requests(self, calls: list[dict[str, Any]]) -> None:
         for description in task_descriptions(calls):
             if self._pending_subagents:
-                callback = getattr(self.renderer, "subagent_request_updated", None)
-                if callable(callback):
-                    callback(self._pending_subagents.popleft(), description)
+                subagent = self._pending_subagents.popleft()
+                deferred = self._deferred_subagents.pop(subagent, None)
+                if deferred is not None:
+                    self._render_deferred_start(deferred, description)
+                    self._render_deferred_terminal(deferred)
+                else:
+                    callback = getattr(self.renderer, "subagent_request_updated", None)
+                    if callable(callback):
+                        callback(subagent, description)
             else:
                 self._pending_requests.append(description)
-        self.renderer.delegation_started(calls)
 
     def subagent_started(
         self,
@@ -255,7 +298,14 @@ class SubagentRequestRenderer:
         queued_request = self._pending_requests.popleft() if self._pending_requests else ""
         request = task_input or queued_request
         if origin == DYNAMIC_TOOL_SUBAGENT and not request:
-            self._hidden_subagents.add(subagent)
+            self._deferred_subagents[subagent] = _DeferredSubagent(
+                name=subagent,
+                eval_id=eval_id,
+                row_id=row_id,
+                model=model,
+                inspection_id=inspection_id,
+            )
+            self._pending_subagents.append(subagent)
             return
         display_origin = "" if queued_request else origin
         call_renderer_with_supported_kwargs(
@@ -281,8 +331,16 @@ class SubagentRequestRenderer:
         duration_ms: int | None = None,
         inspection_id: str = "",
     ) -> None:
-        if subagent in self._hidden_subagents:
-            self._hidden_subagents.remove(subagent)
+        deferred = self._deferred_subagents.get(subagent)
+        if deferred is not None:
+            deferred.terminal = (
+                "subagent_finished",
+                result,
+                eval_id,
+                row_id,
+                duration_ms,
+                inspection_id,
+            )
             return
         call_renderer_with_supported_kwargs(
             self.renderer.subagent_finished,
@@ -303,8 +361,16 @@ class SubagentRequestRenderer:
         row_id: str = "",
         duration_ms: int | None = None,
     ) -> None:
-        if subagent in self._hidden_subagents:
-            self._hidden_subagents.remove(subagent)
+        deferred = self._deferred_subagents.get(subagent)
+        if deferred is not None:
+            deferred.terminal = (
+                "subagent_cancelled",
+                result,
+                eval_id,
+                row_id,
+                duration_ms,
+                "",
+            )
             return
         callback = getattr(self.renderer, "subagent_cancelled", None)
         if callable(callback):
@@ -315,6 +381,36 @@ class SubagentRequestRenderer:
                 eval_id=eval_id,
                 row_id=row_id,
                 duration_ms=duration_ms,
+            )
+
+    def _render_deferred_start(self, deferred: _DeferredSubagent, request: str) -> None:
+        """Promote a tool child once a real task projection proves ownership."""
+        call_renderer_with_supported_kwargs(
+            self.renderer.subagent_started,
+            deferred.name,
+            request,
+            origin="",
+            eval_id=deferred.eval_id,
+            row_id=deferred.row_id,
+            model=deferred.model,
+            inspection_id=deferred.inspection_id,
+        )
+
+    def _render_deferred_terminal(self, deferred: _DeferredSubagent) -> None:
+        """Replay a terminal event that raced ahead of task correlation."""
+        if deferred.terminal is None:
+            return
+        method, result, eval_id, row_id, duration_ms, inspection_id = deferred.terminal
+        callback = getattr(self.renderer, method, None)
+        if callable(callback):
+            call_renderer_with_supported_kwargs(
+                callback,
+                deferred.name,
+                result,
+                eval_id=eval_id,
+                row_id=row_id,
+                duration_ms=duration_ms,
+                inspection_id=inspection_id,
             )
 
 
@@ -329,6 +425,8 @@ class EvalSubagentRenderer:
         self.renderer = renderer
         self.inspection = inspection
         self._labels: dict[str, str] = {}
+        self._label_handles: list[Any] = []
+        self._terminal_rows: set[str] = set()
 
     def handle(self, event: dict[str, Any]) -> None:
         phase = str(event.get("phase") or "")
@@ -336,9 +434,21 @@ class EvalSubagentRenderer:
         if not subagent_id:
             return
         if phase == "start":
+            if subagent_id in self._labels:
+                return
             name = eval_subagent_name(event)
+            base_name = str(event.get("subagent_type") or "subagent")
+            labeler = getattr(self.renderer, "subagent_label", None)
+            if callable(labeler):
+                handle = SimpleNamespace(name=base_name)
+                self._label_handles.append(handle)
+                generated = str(labeler(handle) or "")
+                if generated and generated != base_name:
+                    name = generated
             self._labels[subagent_id] = name
             inspection_id = self.inspection.eval_started(event) if self.inspection else ""
+            if self.inspection:
+                self.inspection.update_title(subagent_id, name)
             callback = getattr(self.renderer, "eval_subagent_started", None)
             if callable(callback):
                 call_renderer_with_supported_kwargs(
@@ -358,9 +468,12 @@ class EvalSubagentRenderer:
                     origin=EVAL_SUBAGENT,
                 )
         elif phase == "complete":
+            if subagent_id in self._terminal_rows:
+                return
+            self._terminal_rows.add(subagent_id)
             if self.inspection:
                 self.inspection.eval_finished(event)
-            name = self._labels.pop(subagent_id, eval_subagent_name(event))
+            name = self._labels.get(subagent_id, eval_subagent_name(event))
             callback = getattr(self.renderer, "eval_subagent_finished", None)
             if callable(callback):
                 call_renderer_with_supported_kwargs(
@@ -373,9 +486,12 @@ class EvalSubagentRenderer:
             else:
                 self.renderer.subagent_finished(name)
         elif phase == "error":
+            if subagent_id in self._terminal_rows:
+                return
+            self._terminal_rows.add(subagent_id)
             if self.inspection:
                 self.inspection.eval_finished(event)
-            name = self._labels.pop(subagent_id, eval_subagent_name(event))
+            name = self._labels.get(subagent_id, eval_subagent_name(event))
             error = str(event.get("error") or "error")
             callback = getattr(self.renderer, "eval_subagent_cancelled", None)
             if callable(callback):
@@ -396,9 +512,10 @@ async def consume_custom_events(
     renderer: Any,
     rubric: RubricEventRenderer,
     inspection: SubagentInspectionCoordinator | None = None,
+    eval_renderer: EvalSubagentRenderer | None = None,
 ) -> None:
     """Dispatch custom events without competing stream consumers."""
-    eval_renderer = EvalSubagentRenderer(renderer, inspection)
+    eval_renderer = eval_renderer or EvalSubagentRenderer(renderer, inspection)
     async for event in stream:
         if isinstance(event, dict) and event.get("type") == CORRECTION_EVENT:
             render_correction_event(event, renderer)
@@ -502,8 +619,17 @@ async def run_turn(
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
     historical_tool_lifecycle = await checkpoint_tool_lifecycle(agent, config)
+    # Keep task-to-child correlation alive across HITL resume streams. The task
+    # request is recovered before approval, while its native child is exposed
+    # only by the resumed stream.
+    event_renderer = SubagentRequestRenderer(renderer)
+    inspection = SubagentInspectionCoordinator(
+        live_inspection_store(event_renderer)
+    )
+    eval_renderer = EvalSubagentRenderer(event_renderer, inspection)
 
     while True:
+        inspection.begin_pass()
         message_metadata = MessageInvocationMetadata()
         stream = await agent.astream_events(
             payload,
@@ -512,12 +638,9 @@ async def run_turn(
             **({"context": planning_context} if planning_context is not None else {}),
             transformers=[
                 CustomTransformer,
+                lambda scope: EvalInspectionTransformer(scope, inspection),
                 lambda scope: MessageInvocationMetadataTransformer(scope, message_metadata),
             ],
-        )
-        event_renderer = SubagentRequestRenderer(renderer)
-        inspection = SubagentInspectionCoordinator(
-            live_inspection_store(event_renderer)
         )
         rubric_renderer = RubricEventRenderer(
             event_renderer,
@@ -526,6 +649,7 @@ async def run_turn(
         )
         output: dict[str, Any] = {}
         projected_tool_errors = []
+        hidden_eval_calls: list[dict[str, Any]] = []
         tool_call_start = len(result.tool_calls)
         tool_draft_start = len(result._tool_call_drafts)
         waiting_started = getattr(renderer, "waiting_started", None)
@@ -545,6 +669,7 @@ async def run_turn(
                     event_renderer,
                     rubric_renderer,
                     inspection,
+                    eval_renderer,
                 ),
                 consume_messages(
                     stream.messages,
@@ -558,6 +683,8 @@ async def run_turn(
                     event_renderer,
                     result,
                     projected_tool_errors,
+                    hidden_eval_calls,
+                    inspection,
                 ),
                 consume_subagents(
                     stream.subagents,
@@ -636,12 +763,14 @@ async def run_turn(
                 result.final_text = ""
             return result
 
+        hidden_eval_calls.extend(inspection.eval_interrupt_calls())
         approval_bindings = render_interrupt_tool_calls(
             interrupts,
             output.get("value"),
             event_renderer,
             result,
             tool_call_start,
+            hidden_eval_calls,
         )
         finalize_goal_interrupt = first_typed_interrupt(interrupts, "finalize_goal")
         finalize_plan_interrupt = first_typed_interrupt(interrupts, "finalize_plan")
@@ -754,6 +883,7 @@ async def run_turn(
                 approval_bindings,
                 event_renderer,
                 result,
+                inspection,
             )
             payload = Command(resume={"decisions": decisions})
 
@@ -866,6 +996,7 @@ def render_interrupt_tool_calls(
     renderer: Any,
     result: TurnResult,
     tool_call_start: int,
+    hidden_eval_calls: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover interrupting calls before opening their dedicated surfaces."""
     for raw_call in output_tool_calls(output):
@@ -876,6 +1007,10 @@ def render_interrupt_tool_calls(
             renderer.tool_call(name, call.get("args", {}), call_id=call_id)
 
     observed = Counter(result.tool_calls[tool_call_start:])
+    hidden = Counter(
+        approval_action_identity(call)
+        for call in (hidden_eval_calls or [])
+    )
     for interrupt in interrupts:
         value = interrupt_value(interrupt)
         if not isinstance(value, dict):
@@ -887,6 +1022,10 @@ def render_interrupt_tool_calls(
             if not isinstance(action, dict):
                 continue
             name = str(action.get("name") or "tool")
+            hidden_identity = approval_action_identity(action)
+            if hidden[hidden_identity] > 0:
+                hidden[hidden_identity] -= 1
+                continue
             if observed[name] > 0:
                 observed[name] -= 1
                 continue
@@ -904,17 +1043,25 @@ def render_interrupt_tool_calls(
                 call_id=call_id,
             )
 
-    return approval_call_bindings(interrupts, result, tool_call_start)
+    return approval_call_bindings(
+        interrupts,
+        result,
+        tool_call_start,
+        hidden_eval_calls,
+    )
 
 
 def approval_call_bindings(
     interrupts: list[Any],
     result: TurnResult,
     tool_call_start: int,
+    hidden_eval_calls: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Pair approval actions with current-loop calls in prompt order."""
     available = list(range(tool_call_start, len(result.tool_calls)))
     used: set[int] = set()
+    hidden_available = list(enumerate(hidden_eval_calls or []))
+    hidden_used: set[int] = set()
     bindings: list[dict[str, Any]] = []
     for interrupt in interrupts:
         value = interrupt_value(interrupt)
@@ -923,6 +1070,30 @@ def approval_call_bindings(
             continue
         for action in actions:
             name = str(action.get("name") or "tool") if isinstance(action, dict) else "tool"
+            hidden_match = next(
+                (
+                    (index, call)
+                    for index, call in hidden_available
+                    if index not in hidden_used
+                    and approval_action_identity(call)
+                    == approval_action_identity(action)
+                ),
+                None,
+            )
+            if hidden_match is not None:
+                hidden_index, hidden_call = hidden_match
+                hidden_used.add(hidden_index)
+                bindings.append(
+                    {
+                        "name": name,
+                        "args": action.get("args", {}) if isinstance(action, dict) else {},
+                        "call_id": str(hidden_call.get("call_id") or ""),
+                        "row_id": str(hidden_call.get("row_id") or ""),
+                        "result_index": None,
+                        "hidden": True,
+                    }
+                )
+                continue
             match = next(
                 (
                     index
@@ -939,9 +1110,24 @@ def approval_call_bindings(
                     "args": action.get("args", {}) if isinstance(action, dict) else {},
                     "call_id": result._tool_call_ids[match] if match is not None else "",
                     "result_index": match,
+                    "hidden": False,
                 }
             )
     return bindings
+
+
+def approval_action_identity(action: Any) -> tuple[str, str]:
+    """Return the ordered matching key shared by calls and HITL actions."""
+    if not isinstance(action, dict):
+        return ("tool", "{}")
+    name = str(action.get("name") or "tool")
+    args = json.dumps(
+        action.get("args", {}),
+        sort_keys=True,
+        default=str,
+        ensure_ascii=False,
+    )
+    return (name, args)
 
 
 def render_edited_tool_calls(
@@ -949,10 +1135,27 @@ def render_edited_tool_calls(
     bindings: list[dict[str, Any]],
     renderer: Any,
     result: TurnResult,
+    inspection: SubagentInspectionCoordinator | None = None,
 ) -> None:
     """Replace proposed call args with the action selected for execution."""
     callback = getattr(renderer, "tool_call_updated", None)
     for decision, binding in zip(decisions, bindings, strict=False):
+        if binding.get("hidden"):
+            if (
+                isinstance(decision, dict)
+                and decision.get("type") == "edit"
+                and isinstance(decision.get("edited_action"), dict)
+            ):
+                edited = decision["edited_action"]
+                args = edited.get("args")
+                if inspection is not None and isinstance(args, dict):
+                    inspection.update_eval_tool_call(
+                        str(binding.get("row_id") or ""),
+                        str(binding.get("call_id") or ""),
+                        str(edited.get("name") or binding["name"]),
+                        args,
+                    )
+            continue
         if not isinstance(decision, dict) or decision.get("type") != "edit":
             resolve_unedited_tool_call(renderer, binding)
             continue

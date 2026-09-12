@@ -13,6 +13,7 @@ from textual.widgets import Button, Static
 from core.execution.inspection.live import (
     InspectionEvent,
     InspectionUpdate,
+    LiveInspection,
     LiveInspectionStore,
 )
 from ui.textual.widgets.chat_log import ChatLog, DEFAULT_TOOL_OUTPUT_CHARS
@@ -40,7 +41,7 @@ class Inspector(Vertical):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="inspector-header"):
-            yield Static("Inspector", id="inspector-title")
+            yield Static("Inspector", id="inspector-title", markup=False)
             yield Button("x", id="inspector-close", compact=True)
         yield ChatLog(
             tool_output_chars=self.tool_output_chars,
@@ -55,9 +56,7 @@ class Inspector(Vertical):
             return False
         self._unsubscribe()
         self.inspection_id = inspection_id
-        self.query_one("#inspector-title", Static).update(
-            f"Inspector  ·  {inspection.title}"
-        )
+        self._update_header(inspection)
         self._replay()
         self.store.subscribe(inspection_id, self._inspection_updated)
         return True
@@ -89,9 +88,7 @@ class Inspector(Vertical):
         if update.operation == "reset":
             inspection = self.store.get(inspection_id)
             if inspection is not None:
-                self.query_one("#inspector-title", Static).update(
-                    f"Inspector  ·  {inspection.title}"
-                )
+                self._update_header(inspection)
             self._replay()
         elif update.event is not None:
             self._render_event(update.event)
@@ -121,6 +118,11 @@ class Inspector(Vertical):
             log.tool_error(event.name or "tool", event.text, call_id=event.call_id)
         elif event.kind == "error":
             log.system_message(event.text, kind="error")
+
+    def _update_header(self, inspection: LiveInspection) -> None:
+        self.query_one("#inspector-title", Static).update(
+            f"Inspector · {inspection.inspection_type} · {inspection.title}"
+        )
 
 
 __all__ = ["Inspector"]

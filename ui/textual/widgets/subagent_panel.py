@@ -86,7 +86,19 @@ class SubagentRunTable(DataTable):
             super().__init__()
             self.row_key = row_key
 
+    def _on_mouse_move(self, event: events.MouseMove) -> None:
+        """Enable DataTable's cursor only while it represents real hover."""
+        self.show_cursor = True
+        super()._on_mouse_move(event)
+        if not event.style.meta:
+            self.show_cursor = False
+
+    def _on_leave(self, event: events.Leave) -> None:
+        super()._on_leave(event)
+        self.show_cursor = False
+
     async def _on_click(self, event: events.Click) -> None:
+        self.show_cursor = True
         self._set_hover_cursor(True)
         row_index = event.style.meta.get("row")
         if not isinstance(row_index, int) or not 0 <= row_index < len(self.ordered_rows):
@@ -131,7 +143,7 @@ class SubagentsPanel(Vertical):
             id="subagents-tasks",
             cursor_type="row",
             zebra_stripes=False,
-            show_cursor=True,
+            show_cursor=False,
             show_header=False,
         )
         task_header = Grid(

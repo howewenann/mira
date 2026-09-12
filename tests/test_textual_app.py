@@ -85,6 +85,9 @@ from core.diagnostics.issues import Issue
 from core.diagnostics.logging import get_diagnostics_logger, setup_diagnostics_logging
 from core.execution.streams.rubric import RubricEventRenderer
 from core.execution.inspection.live import InspectionEvent
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
+from core.execution.runner import SubagentRequestRenderer
+from core.execution.streams.subagents import consume_subagents
 from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
 from tracing.stream import TraceStream
@@ -10915,6 +10918,191 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(git_protection_preference(load_settings(workspace)))
             self.assertFalse(app.issues)
 
+    async def test_standalone_task_stream_opens_and_completes_live_panel_row(self) -> None:
+        task_input = "Tell a story exactly 20 words long."
+        parent_result = "Small lanterns guided travelers home while patient stars watched over quiet hills, silver rivers, and one sleeping village below."
+        output_started = asyncio.Event()
+        release_output = asyncio.Event()
+
+        class DirectSubagent:
+            name = "general-purpose"
+            trigger_call_id = "direct-task-call"
+            path = ("tools:direct-task-call", "general-purpose:child")
+
+            def __init__(self) -> None:
+                self.task_input = ""
+
+            async def output(self) -> str:
+                output_started.set()
+                await release_output.wait()
+                return parent_result
+
+        async def discovered_subagents() -> Any:
+            yield DirectSubagent()
+
+        app = make_app()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            panel = app.query_one(SubagentsPanel)
+            request_renderer = SubagentRequestRenderer(app)
+            live_start_calls = 0
+            start_subagent_live = app.start_subagent_live
+            parent_results: list[str] = []
+            subagent_finished = app.subagent_finished
+
+            def tracked_start_subagent_live() -> None:
+                nonlocal live_start_calls
+                live_start_calls += 1
+                start_subagent_live()
+
+            def tracked_subagent_finished(
+                subagent: str,
+                result: str = "",
+                *,
+                eval_id: str = "",
+                row_id: str = "",
+                duration_ms: int | None = None,
+                created_at: str = "",
+            ) -> None:
+                parent_results.append(result)
+                subagent_finished(
+                    subagent,
+                    result,
+                    eval_id=eval_id,
+                    row_id=row_id,
+                    duration_ms=duration_ms,
+                    created_at=created_at,
+                )
+
+            app.start_subagent_live = tracked_start_subagent_live  # type: ignore[method-assign]
+            app.subagent_finished = tracked_subagent_finished  # type: ignore[method-assign]
+            with patch.object(panel, "start_subagent", wraps=panel.start_subagent) as panel_start:
+                consumer = asyncio.create_task(
+                    consume_subagents(
+                        discovered_subagents(),
+                        request_renderer,
+                    )
+                )
+                await asyncio.wait_for(output_started.wait(), timeout=1)
+                await pilot.pause()
+
+                self.assertEqual(live_start_calls, 1)
+                panel_start.assert_not_called()
+                self.assertFalse(panel.display)
+
+                request_renderer.tool_call(
+                    "task",
+                    {"description": task_input},
+                    call_id="direct-task-call",
+                )
+                await pilot.pause()
+
+                self.assertEqual(live_start_calls, 1)
+                panel_start.assert_called_once()
+                self.assertTrue(panel.display)
+                self.assertTrue(app._subagent_live_active)
+                self.assertEqual(len(panel._records), 1)
+                record = next(iter(panel._records.values()))
+                self.assertEqual(record.status, "RUNNING")
+                self.assertTrue(record.inspection_id)
+
+                running_elapsed = record.elapsed_seconds()
+                await asyncio.sleep(0.02)
+                panel.tick()
+                self.assertGreater(record.elapsed_seconds(), running_elapsed)
+
+                release_output.set()
+                await consumer
+                await pilot.pause()
+
+                self.assertFalse(app._subagent_live_active)
+                self.assertEqual(record.status, "DONE")
+                self.assertEqual(parent_results, [parent_result])
+                self.assertTrue(parent_result.startswith(record.output.removesuffix("...")))
+                self.assertIsNotNone(record.duration_ms)
+                stopped_elapsed = record.elapsed_seconds()
+                await asyncio.sleep(0.02)
+                panel.tick()
+                self.assertEqual(record.elapsed_seconds(), stopped_elapsed)
+                inspection = app.live_inspections.get(record.inspection_id)
+                assert inspection is not None
+                self.assertEqual(inspection.status, "DONE")
+                self.assertEqual(inspection.events[-1].text, parent_result)
+
+    async def test_eval_custom_lifecycle_owns_one_grouped_inspectable_row(self) -> None:
+        task_input = "Evaluate this child task."
+        child_result = "Eval child completed."
+
+        app = make_app()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            coordinator = SubagentInspectionCoordinator(app.live_inspections)
+            event = {
+                "id": "eval-row",
+                "eval_id": "eval-call",
+                "description": task_input,
+                "subagent_type": "general-purpose",
+            }
+            inspection_id = coordinator.eval_started(event)
+            coordinator.register_eval_namespace(
+                ("general-purpose:eval-child",), "eval-row"
+            )
+            app.eval_subagent_started(
+                "general-purpose [eval-child]",
+                task_input,
+                eval_id="eval-call",
+                row_id="eval-row",
+                inspection_id=inspection_id,
+            )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            self.assertTrue(panel.display)
+            self.assertEqual(len(panel._records), 1)
+            record = panel._records["eval-row"]
+            self.assertEqual(record.status, "RUNNING")
+            self.assertRegex(record.name, r"^general-purpose \[[^]]+\]$")
+            self.assertEqual(panel._regular_order, [])
+            self.assertEqual(len(panel._group_order), 1)
+
+            coordinator.handle_protocol_event(
+                {
+                    "method": "values",
+                    "params": {
+                        "namespace": ["general-purpose:eval-child"],
+                        "data": {
+                            "messages": [
+                                {"type": "human", "content": task_input},
+                                {"type": "ai", "content": child_result},
+                            ]
+                        },
+                    },
+                }
+            )
+            coordinator.eval_finished({"id": "eval-row", "phase": "complete"})
+            app.eval_subagent_finished(
+                "general-purpose [eval-child]",
+                eval_id="eval-call",
+                row_id="eval-row",
+            )
+            await pilot.pause()
+
+            self.assertEqual(len(panel._records), 1)
+            self.assertEqual(panel._regular_order, [])
+            self.assertEqual(panel._records["eval-row"].status, "DONE")
+            self.assertFalse(app._subagent_live_active)
+            inspection = app.live_inspections.get(inspection_id)
+            assert inspection is not None
+            self.assertEqual(inspection.status, "DONE")
+            self.assertEqual(inspection.events[-1].text, child_result)
+
+            await pilot.click("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+            self.assertEqual(
+                renderable_plain(app.query_one("#inspector-title")),
+                f"Inspector · subagent · {record.name}",
+            )
+
     async def test_live_subagent_row_opens_updates_closes_and_reopens_inspector(self) -> None:
         app = make_app()
 
@@ -10939,20 +11127,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(hover.background, Color.parse("transparent"))
             self.assertEqual(cursor.background, Color.parse("transparent"))
             self.assertFalse(table.can_focus)
+            self.assertFalse(table.show_cursor)
+
+            await pilot.hover("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+            self.assertTrue(table.show_cursor)
+            self.assertTrue(table._show_hover_cursor)
+            await pilot.hover("#status-row")
+            await pilot.pause()
+            self.assertFalse(table.show_cursor)
 
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
 
             inspector = app.query_one(Inspector)
+            inspector_header = inspector.query_one("#inspector-header", Horizontal)
             inspector_log = inspector.query_one("#inspector-log", ChatLog)
             self.assertTrue(inspector.display)
             self.assertFalse(app.query_one("#chat-log", ChatLog).display)
             self.assertTrue(panel.display)
             self.assertTrue(app.query_one(PromptBox).has_focus)
             self.assertFalse(table.has_focus)
-            self.assertIn(record.name, renderable_plain(inspector.query_one("#inspector-title")))
+            self.assertEqual(
+                renderable_plain(inspector.query_one("#inspector-title")),
+                f"Inspector · subagent · {record.name}",
+            )
             self.assertEqual(renderable_plain(inspector_log.children[0]), full_task)
             self.assertIn("Checking the repository.", renderable_plain(inspector_log.children[1]))
+            self.assertEqual(inspector_header.region.height, 2)
+            self.assertEqual(inspector_log.region.y - inspector_header.region.bottom, 1)
 
             app.live_inspections.append_delta(inspection_id, "reasoning", " Still live.")
             app.live_inspections.append(
@@ -10986,9 +11189,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(app.query_one(PromptBox).region.height, initial_prompt_height)
             self.assertGreaterEqual(inspector.content_region.height, 2)
 
+            _prompt, _handle, x, _start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, 0)
+            await pilot.mouse_up(offset=(x, 0))
+            await pilot.pause()
+            self.assertGreaterEqual(inspector_log.content_region.height, 1)
+
             await pilot.click("#inspector-close")
             await pilot.pause()
             self.assertFalse(inspector.display)
+            self.assertFalse(table.show_cursor)
             self.assertTrue(app.query_one("#chat-log", ChatLog).display)
 
             app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
