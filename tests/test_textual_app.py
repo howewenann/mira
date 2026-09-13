@@ -1167,6 +1167,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(prompt.has_focus)
             self.assertFalse(app.query_one(AutocompleteInput).active)
 
+    async def test_escape_dismisses_completion_before_clearing_prompt(self) -> None:
+        app = make_app()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            completion = app.query_one(AutocompleteInput)
+            prompt.value = "/"
+            await pilot.pause()
+
+            self.assertTrue(completion.active)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(completion.active)
+            self.assertEqual(prompt.value, "/")
+
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "")
+            self.assertTrue(prompt.has_focus)
+
     async def test_closed_completion_preserves_submit_newline_and_history(self) -> None:
         app = AutocompleteTestApp()
 
@@ -4888,11 +4908,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("error", titles)
             self.assertIn("warning", titles)
             self.assertIn("tool - read_file", titles)
-            self.assertIn("task", titles)
+            self.assertNotIn("task", titles)
             self.assertIn("subagent - general-purpose [luna]", titles)
             self.assertIn("session compacted", titles)
             for minute in range(1, 13):
-                if minute == 9:
+                if minute in {9, 10}:
                     continue
                 self.assertIn(f"2026-06-24 09:{minute:02d}", subtitles)
 
@@ -8847,8 +8867,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("new", renderable_plain(tool_blocks[0]))
             self.assertNotIn("old", renderable_plain(tool_blocks[0]))
 
-    async def test_delegation_delta_updates_in_place_when_final_call_arrives(self) -> None:
-        """Draft task requests should finalize in the same transcript block."""
+    async def test_delegation_updates_stay_out_of_textual_transcript(self) -> None:
+        """Draft and final task requests should not create transcript bubbles."""
         app = make_app()
         draft_call = [{"name": "task", "args": {"description": "summarize"}}]
         final_call = [{"name": "task", "args": {"description": "summarize README"}}]
@@ -8856,21 +8876,21 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
 
-            app.delegation_delta(draft_call)
-            await pilot.pause()
-            draft_blocks = list(app.query_one(ChatLog).children)
-            draft = renderable_plain(draft_blocks[-1])
-            self.assertIn("preparing 1 subagent", draft)
-            self.assertIn("summarize", draft)
+            initial_blocks = list(app.query_one(ChatLog).children)
 
+            app.delegation_delta(draft_call)
             app.delegation_started(final_call)
             await pilot.pause()
             final_blocks = list(app.query_one(ChatLog).children)
-            final = renderable_plain(final_blocks[-1])
 
-            self.assertEqual(len(final_blocks), len(draft_blocks))
-            self.assertIn("delegating to 1 subagent", final)
-            self.assertIn("summarize README", final)
+            self.assertEqual(final_blocks, initial_blocks)
+            self.assertFalse(any("delegation" in block.classes for block in final_blocks))
+
+            app.tool_call("task", {"description": "summarize README"}, call_id="task-call")
+            await pilot.pause()
+            self.assertTrue(
+                any(str(getattr(block, "border_title", "")) == "tool - task" for block in app.query_one(ChatLog).children)
+            )
 
     async def test_cancel_turn_discards_delegation_drafts(self) -> None:
         """Delegation drafts from a cancelled turn should not promote later."""
@@ -8881,26 +8901,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_delta([{"id": "task-old", "name": "task", "args": {"description": "old task"}}])
             await pilot.pause()
-            old_draft = app.query_one(ChatLog).children[-1]
-            self.assertIn("old task", renderable_plain(old_draft))
-
             app.busy = True
             app.turn_worker = FakeWorker()
             app._cancel_turn()
             await pilot.pause()
 
-            self.assertNotIn(old_draft, list(app.query_one(ChatLog).children))
-
             app.delegation_started([{"id": "task-new", "name": "task", "args": {"description": "new task"}}])
             await pilot.pause()
             delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
 
-            self.assertEqual(len(delegation_blocks), 1)
-            self.assertIn("new task", renderable_plain(delegation_blocks[0]))
-            self.assertNotIn("old task", renderable_plain(delegation_blocks[0]))
+            self.assertEqual(delegation_blocks, [])
 
-    async def test_empty_delegation_delta_renders_info_placeholder(self) -> None:
-        """Empty task drafts should show a live info placeholder, not an empty task box."""
+    async def test_empty_delegation_delta_stays_out_of_textual_transcript(self) -> None:
+        """Incomplete task drafts should remain invisible in the transcript."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8909,16 +8922,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.delegation_delta([{"id": "task-1", "name": "task", "args": {}}])
             await pilot.pause()
             blocks = list(app.query_one(ChatLog).children)
-            block = blocks[-1]
-            rendered = renderable_plain(block)
+            self.assertFalse(any("delegation" in block.classes for block in blocks))
+            self.assertNotIn("preparing subagent tasks...", "\n".join(renderable_plain(block) for block in blocks))
 
-            self.assertEqual(str(getattr(block, "border_title", "")), "info")
-            self.assertIn("info", block.classes)
-            self.assertIn("preparing subagent tasks...", rendered)
-            self.assertNotIn("request:", rendered)
-
-    async def test_delegation_delta_promotes_info_placeholder_to_task(self) -> None:
-        """The first readable task request should replace the info placeholder in place."""
+    async def test_completed_delegation_delta_stays_out_of_textual_transcript(self) -> None:
+        """Completing a streamed task request should remain invisible."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8926,7 +8934,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_delta([{"id": "task-1", "name": "task", "args": {}}])
             await pilot.pause()
-            info_blocks = list(app.query_one(ChatLog).children)
+            initial_blocks = list(app.query_one(ChatLog).children)
 
             app.delegation_delta(
                 [
@@ -8936,17 +8944,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.pause()
             task_blocks = list(app.query_one(ChatLog).children)
-            block = task_blocks[-1]
-            rendered = renderable_plain(block)
 
-            self.assertEqual(len(task_blocks), len(info_blocks))
-            self.assertEqual(str(getattr(block, "border_title", "")), "task")
-            self.assertIn("delegation", block.classes)
-            self.assertIn("scary story", rendered)
-            self.assertIn("drafting request...", rendered)
+            self.assertEqual(task_blocks, initial_blocks)
+            self.assertFalse(any("delegation" in block.classes for block in task_blocks))
 
-    async def test_delegation_started_calls_update_one_task_block(self) -> None:
-        """One-by-one task calls should coalesce into one visible task block."""
+    async def test_delegation_started_calls_stay_out_of_textual_transcript(self) -> None:
+        """One-by-one task calls should not create visible task summaries."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8954,20 +8957,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_started([{"id": "task-1", "name": "task", "args": {"description": "scary story"}}])
             await pilot.pause()
-            first_blocks = list(app.query_one(ChatLog).children)
-
             app.delegation_started([{"id": "task-2", "name": "task", "args": {"description": "funny story"}}])
             await pilot.pause()
             second_blocks = list(app.query_one(ChatLog).children)
-            final = renderable_plain(second_blocks[-1])
 
-            self.assertEqual(len(second_blocks), len(first_blocks))
-            self.assertIn("delegating to 2 subagents", final)
-            self.assertIn("scary story", final)
-            self.assertIn("funny story", final)
+            self.assertFalse(any("delegation" in block.classes for block in second_blocks))
 
-    async def test_live_subagent_panel_removes_existing_delegation_draft(self) -> None:
-        """Opening the panel should remove the transient task draft for the same work."""
+    async def test_live_subagent_panel_replaces_hidden_delegation_activity(self) -> None:
+        """Opening the panel should remain the only visible delegation projection."""
         app = make_app()
 
         async with app.run_test(size=(100, 30)) as pilot:
@@ -8975,8 +8972,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.delegation_delta([{"id": "task-1", "name": "task", "args": {"description": "judge haiku"}}])
             await pilot.pause()
-            draft = app.query_one(ChatLog).children[-1]
-            self.assertIn("judge haiku", renderable_plain(draft))
+            self.assertFalse(any("delegation" in block.classes for block in app.query_one(ChatLog).children))
 
             app.start_subagent_live()
             app.subagent_started("general-purpose [one]", "judge haiku")
@@ -8985,7 +8981,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             delegation_blocks = [block for block in app.query_one(ChatLog).children if "delegation" in block.classes]
             panel_text = data_table_plain(app.query_one(SubagentsPanel).query_one("#subagents-tasks", DataTable))
 
-            self.assertNotIn(draft, list(app.query_one(ChatLog).children))
             self.assertEqual(delegation_blocks, [])
             self.assertIn("general-purpose [one]", panel_text)
 
@@ -9431,7 +9426,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("responsive tail marker", wide)
 
     async def test_subagent_panel_caps_height_with_internal_scrolling(self) -> None:
-        """The expanded body should cap at eight rows and scroll overflowing tasks."""
+        """The expanded body should show five task rows and scroll overflow."""
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
@@ -9451,6 +9446,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             task_header = panel.query_one("#subagents-tasks-header")
 
             self.assertEqual(body.styles.height.value, PANEL_BODY_ROWS)
+            self.assertEqual(table.region.height, 5)
             self.assertGreater(table.max_scroll_y, 0)
             self.assertEqual(len(table.rows), 14)
             self.assertFalse(table.show_header)
@@ -9472,8 +9468,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(groups.region.y, groups_label.region.bottom)
             self.assertEqual(groups.vertical_scrollbar.region.y, groups.region.y)
 
-    async def test_subagent_panel_starts_at_fixed_eight_row_height(self) -> None:
-        """Small workloads should still reserve the full eight-row body."""
+    async def test_subagent_panel_starts_at_fixed_five_task_row_height(self) -> None:
+        """Small workloads should still reserve five task rows plus the header."""
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
@@ -9487,6 +9483,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             close_cell = panel.query_one("#subagents-close-cell")
 
             self.assertEqual(body.styles.height.value, PANEL_BODY_ROWS)
+            self.assertEqual(panel.query_one("#subagents-tasks", DataTable).region.height, 5)
             self.assertEqual(title.styles.border_bottom, title.styles.border_top)
             self.assertEqual(title.styles.border_left, title.styles.border_top)
             self.assertEqual(close_cell.styles.border_top, title.styles.border_top)
@@ -10990,10 +10987,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel_start.assert_not_called()
                 self.assertFalse(panel.display)
 
-                request_renderer.tool_call(
-                    "task",
-                    {"description": task_input},
-                    call_id="direct-task-call",
+                request_renderer.delegation_started(
+                    [
+                        {
+                            "id": "direct-task-call",
+                            "name": "task",
+                            "args": {"description": task_input},
+                        }
+                    ]
                 )
                 await pilot.pause()
 
@@ -11001,6 +11002,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel_start.assert_called_once()
                 self.assertTrue(panel.display)
                 self.assertTrue(app._subagent_live_active)
+                self.assertFalse(
+                    any("delegation" in block.classes for block in app.query_one(ChatLog).children)
+                )
                 self.assertEqual(len(panel._records), 1)
                 record = next(iter(panel._records.values()))
                 self.assertEqual(record.status, "RUNNING")
@@ -11146,7 +11150,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(inspector.display)
             self.assertFalse(app.query_one("#chat-log", ChatLog).display)
             self.assertTrue(panel.display)
-            self.assertTrue(app.query_one(PromptBox).has_focus)
+            self.assertTrue(inspector_log.has_focus)
+            self.assertFalse(app.query_one(PromptBox).has_focus)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
             self.assertFalse(table.has_focus)
             self.assertEqual(
                 renderable_plain(inspector.query_one("#inspector-title")),
@@ -11156,6 +11162,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Checking the repository.", renderable_plain(inspector_log.children[1]))
             self.assertEqual(inspector_header.region.height, 2)
             self.assertEqual(inspector_log.region.y - inspector_header.region.bottom, 1)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertFalse(inspector.display)
+            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+            self.assertTrue(app.query_one(PromptBox).has_focus)
+
+            await pilot.click("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+            self.assertTrue(inspector.display)
+            self.assertTrue(inspector_log.has_focus)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
 
             app.live_inspections.append_delta(inspection_id, "reasoning", " Still live.")
             app.live_inspections.append(
@@ -11181,6 +11199,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Still live", rendered)
             self.assertIn("README output", rendered)
 
+            await pilot.click("#inspector-close")
+            await pilot.pause()
+            self.assertFalse(inspector.display)
+            self.assertFalse(table.show_cursor)
+            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+            self.assertTrue(app.query_one(PromptBox).has_focus)
+
+            app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
+            await pilot.click("#subagents-tasks", offset=(2, 0))
+            await pilot.pause()
+            reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
+            self.assertTrue(inspector.display)
+            self.assertTrue(inspector_log.has_focus)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertIn(full_task, reopened)
+            self.assertIn("Finished while closed.", reopened)
+
             initial_prompt_height = app.query_one(PromptBox).region.height
             _prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
             await move_captured_mouse(pilot, x, start_y - 2)
@@ -11193,21 +11228,44 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await move_captured_mouse(pilot, x, 0)
             await pilot.mouse_up(offset=(x, 0))
             await pilot.pause()
-            self.assertGreaterEqual(inspector_log.content_region.height, 1)
+            self.assertEqual(inspector.content_region.height, inspector_header.region.height)
+            self.assertEqual(
+                inspector_log.region.intersection(inspector.content_region).height,
+                0,
+            )
 
-            await pilot.click("#inspector-close")
+            _prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
+            await move_captured_mouse(pilot, x, start_y + 2)
+            await pilot.mouse_up(offset=(x, start_y + 2))
+            await pilot.pause()
+            self.assertGreater(inspector_log.content_region.height, 0)
+            self.assertEqual(inspector_log.region.y - inspector_header.region.bottom, 1)
+            restored = "\n".join(renderable_plain(child) for child in inspector_log.children)
+            self.assertIn(full_task, restored)
+            self.assertIn("README output", restored)
+
+            prompt = app.query_one(PromptBox)
+            prompt.value = "clear this draft"
+            await pilot.click(prompt)
+            await pilot.pause()
+            self.assertTrue(prompt.has_focus)
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual(prompt.value, "")
+            self.assertTrue(inspector.display)
+
+            prompt.value = "preserve this draft"
+            await pilot.click("#inspector-title")
+            await pilot.pause()
+            self.assertTrue(inspector.has_focus_within)
+            self.assertFalse(prompt.has_focus)
+
+            await pilot.press("escape")
             await pilot.pause()
             self.assertFalse(inspector.display)
-            self.assertFalse(table.show_cursor)
             self.assertTrue(app.query_one("#chat-log", ChatLog).display)
-
-            app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
-            await pilot.click("#subagents-tasks", offset=(2, 0))
-            await pilot.pause()
-            reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
-            self.assertTrue(inspector.display)
-            self.assertIn(full_task, reopened)
-            self.assertIn("Finished while closed.", reopened)
+            self.assertEqual(prompt.value, "preserve this draft")
+            self.assertTrue(prompt.has_focus)
 
 
 if __name__ == "__main__":

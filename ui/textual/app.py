@@ -18,6 +18,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.events import Key
 from textual.reactive import reactive
 from textual.widgets import Button, ListView, Static
 
@@ -2446,13 +2447,13 @@ class MiraApp(App[None]):
         self._set_status(state="running")
 
     def delegation_delta(self, calls: list[dict[str, Any]]) -> None:
-        """Render a live draft of streamed task delegation input."""
+        """Advance streamed task delegation without adding a transcript bubble."""
         self.waiting_finished()
         self._mark_main_stream_active()
         if self._subagent_panel_is_live():
             self._set_status(state="running")
             return
-        self.query_one(ChatLog).delegation_delta(calls)
+        self.query_one(ChatLog).finish_main()
         self._set_status(state="running")
 
     def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
@@ -2609,7 +2610,7 @@ class MiraApp(App[None]):
             self.query_one(SubagentsPanel).finish_eval_group(call_id, failed=failed)
 
     def delegation_started(self, calls: list[dict[str, Any]], *, created_at: str = "") -> None:
-        """Render task delegation summary."""
+        """Record task delegation without adding a transcript bubble."""
         self.trace.delegation_started(calls)
         self._finish_main_stream_activity()
         self.waiting_finished()
@@ -2617,7 +2618,7 @@ class MiraApp(App[None]):
             self._set_status(state="running")
             self._rearm_waiting_if_busy()
             return
-        self.query_one(ChatLog).delegation_started(calls, created_at=created_at)
+        self.query_one(ChatLog).finish_main()
         self._rearm_waiting_if_busy()
 
     def start_subagent_live(self) -> None:
@@ -2658,7 +2659,7 @@ class MiraApp(App[None]):
             return
         self.query_one("#chat-log", ChatLog).display = False
         inspector.display = True
-        self.call_after_refresh(self.action_focus_prompt)
+        self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
 
     @on(Inspector.Closed)
     def close_inspector(self, event: Inspector.Closed) -> None:
@@ -2673,9 +2674,30 @@ class MiraApp(App[None]):
             chat = self.query_one("#chat-log", ChatLog)
         except NoMatches:
             return
+
         inspector.stop_inspection()
         inspector.display = False
         chat.display = True
+
+    def on_key(self, event: Key) -> None:
+        """Apply Escape to the currently focused transcript or prompt."""
+        if event.key != "escape":
+            return
+        try:
+            inspector = self.query_one(Inspector)
+            prompt = self.query_one(PromptBox)
+        except NoMatches:
+            return
+        if inspector.display and inspector.has_focus_within:
+            event.stop()
+            event.prevent_default()
+            self._restore_chat_viewport()
+            self.action_focus_prompt()
+            return
+        if prompt.has_focus and prompt.value:
+            event.stop()
+            event.prevent_default()
+            prompt.value = ""
 
     def subagent_label(self, subagent: Any) -> str:
         """Return a stable display label for a subagent."""

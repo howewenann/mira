@@ -241,8 +241,6 @@ class ChatLog(VerticalScroll):
                     created_at=created_at,
                     duration_ms=event.get("duration_ms"),
                 )
-            elif event_type == "delegation":
-                self.delegation_started(event["calls"], created_at=created_at)
             elif event_type == "subagent":
                 if event.get("status") == "DONE":
                     self.subagent_finished(

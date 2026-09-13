@@ -7,6 +7,7 @@ from typing import Any
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.events import Click
 from textual.message import Message
 from textual.widgets import Button, Static
 
@@ -68,6 +69,11 @@ class Inspector(Vertical):
 
     def on_unmount(self) -> None:
         self._unsubscribe()
+
+    def on_click(self, event: Click) -> None:
+        """Give Escape ownership to the Inspector after a non-button click."""
+        if not isinstance(event.widget, Button):
+            self.query_one("#inspector-log", ChatLog).focus()
 
     @on(Button.Pressed, "#inspector-close")
     def close_pressed(self, event: Button.Pressed) -> None:
