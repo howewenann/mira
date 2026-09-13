@@ -226,11 +226,17 @@ async def run_user_turn(
         rubric_iterations: int = 3,
         supplied_messages: list[Any] | None = None,
     ) -> TurnResult:
+        from core.execution.inspection.persistence import PersistentSubagentRuns
+
         phase_recorder = SessionRecorder(session, store, phase_mode)
-        recording_emitter = SessionEventEmitter(
-            emitter,
-            phase_recorder,
-            semantic_state=mode,
+        recording_emitter = PersistentSubagentRuns(
+            SessionEventEmitter(
+                emitter,
+                phase_recorder,
+                semantic_state=mode,
+            ),
+            session,
+            store,
         )
         poller = asyncio.create_task(poll_compactions(phase_recorder, phase_agent, thread_id))
         try:
@@ -279,6 +285,7 @@ async def run_user_turn(
             phase_recorder.system_error(f"turn error: {exc}")
             raise
         finally:
+            recording_emitter.close()
             poller.cancel()
             with suppress(asyncio.CancelledError):
                 await poller

@@ -1689,3 +1689,36 @@ Use a disposable workspace with a configured model and enabled subagents.
 6. Start a new process and resume the session. Expected: normal parent transcript
    replay works exactly as before; Phase 1 does not restore Inspector content or
    provide historical-row inspection.
+
+## Retrospective Subagent Inspection (Phase 2)
+
+Use a disposable workspace and complete each Phase 1 scenario before saving and
+fully closing MIRA.
+
+1. Complete one standalone task and one multi-child Eval. Expected: their normal
+   terminal `tool - task` and `tool - eval` bubbles gain mouse-only footer links
+   labeled `Subagents · 1` and `Subagents · N`. Unrelated and still-running tool
+   bubbles have no link, and the links do not take keyboard focus.
+2. Reopen the saved session in a fresh MIRA process and click each link. Expected:
+   the Subagents panel contains only children owned by that tool event. Switching
+   links replaces the rows; Eval children remain in the existing `Group 1`
+   presentation with their exact cool names, full requests, statuses, and frozen
+   durations. No spinner remains on historical rows.
+3. Click every restored row. Expected: the existing Inspector opens read-only and
+   shows the saved request, reasoning, assistant text, nested tool calls,
+   results/errors, and untruncated final response without requiring the original
+   process-local inspection store. Escape and close retain the Phase 1 focus and
+   viewport behavior.
+4. Repeat standalone and Eval runs that pause for child HITL, then approve, edit,
+   and reject distinct nested calls. Save, restart, and inspect them. Expected:
+   every logical child appears once, keeps its original name and transcript, and
+   owns only its matching approval/result history.
+5. Kill MIRA while a child and a nested tool call are running, then resume the
+   session. Expected: the historical child is CANCELLED with a frozen duration,
+   the nested call has a retrospective interruption error, the owning top-level
+   tool is interrupted when it had no result, and the session's prior recency is
+   unchanged by that repair.
+6. With MIRA closed, copy the session JSON, then alter or remove one run before
+   clicking its link/row after restart. Expected: every click rereads disk, valid
+   edits appear on the next click, and missing/corrupt records produce a contained
+   visible error without changing live inspection or session state.

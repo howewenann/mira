@@ -9,6 +9,7 @@ from typing import Any
 from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
+from session.subagent_runs import normalize_runs
 from core.execution.streams.corrections import correction_context_text, normalize_correction_event
 
 UNTITLED_SESSION = "Untitled session"
@@ -60,6 +61,7 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "current_plan": plan,
         "current_goal": goal,
         "events": normalize_events(record.get("events")),
+        "runs": normalize_runs(record.get("runs")),
     }
 
 

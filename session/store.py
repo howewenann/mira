@@ -11,6 +11,7 @@ from typing import Any
 
 from session.context import normalize_session
 from session.dashboard import normalize_dashboard
+from session.subagent_runs import reconcile_stale_runs
 
 
 def new_session_id() -> str:
@@ -38,7 +39,7 @@ class SessionStore:
         if session_id:
             path = self.path(session_id)
             if path.exists():
-                return self.read(path)
+                return self.read(path, reconcile_running=True)
 
             record = self.new(session_id=session_id, workspace=workspace)
             self.save(record)
@@ -47,7 +48,7 @@ class SessionStore:
         if resume:
             latest = self.latest()
             if latest:
-                return self.read(latest)
+                return self.read(latest, reconcile_running=True)
 
         record = self.new(session_id=None, workspace=workspace)
         self.save(record)
@@ -74,6 +75,7 @@ class SessionStore:
             "current_plan": None,
             "current_goal": None,
             "events": [],
+            "runs": [],
         }
 
     def save(self, record: dict[str, Any]) -> None:
@@ -96,10 +98,13 @@ class SessionStore:
         if resume_context_pending:
             record["resume_context_pending"] = True
 
-    def read(self, path: Path) -> dict[str, Any]:
+    def read(self, path: Path, *, reconcile_running: bool = False) -> dict[str, Any]:
         """Read a session record from a JSON file."""
         record = json.loads(path.read_text(encoding="utf-8"))
-        return normalize_session(record)
+        normalized = normalize_session(record)
+        if reconcile_running and reconcile_stale_runs(normalized):
+            self._write(normalized, update_timestamp=False)
+        return normalized
 
     def latest(self) -> Path | None:
         """Return the most recently modified session file, if any exist."""

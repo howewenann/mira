@@ -39,6 +39,7 @@ class Inspector(Vertical):
         self.store = store
         self.tool_output_chars = tool_output_chars
         self.inspection_id = ""
+        self._snapshot: LiveInspection | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="inspector-header"):
@@ -56,16 +57,29 @@ class Inspector(Vertical):
         if inspection is None:
             return False
         self._unsubscribe()
+        self._snapshot = None
         self.inspection_id = inspection_id
         self._update_header(inspection)
         self._replay()
         self.store.subscribe(inspection_id, self._inspection_updated)
         return True
 
+    def open_snapshot(self, inspection: LiveInspection) -> bool:
+        """Open one immutable historical transcript without subscribing."""
+        if not inspection.id:
+            return False
+        self._unsubscribe()
+        self.inspection_id = inspection.id
+        self._snapshot = inspection
+        self._update_header(inspection)
+        self._replay()
+        return True
+
     def stop_inspection(self) -> None:
         """Detach from the current transcript without changing stored state."""
         self._unsubscribe()
         self.inspection_id = ""
+        self._snapshot = None
 
     def on_unmount(self) -> None:
         self._unsubscribe()
@@ -102,7 +116,7 @@ class Inspector(Vertical):
     def _replay(self) -> None:
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
-        inspection = self.store.get(self.inspection_id)
+        inspection = self._snapshot or self.store.get(self.inspection_id)
         if inspection is None:
             return
         for event in inspection.events:

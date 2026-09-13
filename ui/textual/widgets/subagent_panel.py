@@ -6,6 +6,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 from itertools import count
 from typing import Any
 
@@ -50,6 +51,7 @@ class SubagentRecord:
     output: str = ""
     finished_at: float | None = None
     inspection_id: str = ""
+    run_id: str = ""
 
     def elapsed_seconds(self) -> float:
         if self.duration_ms is not None:
@@ -71,9 +73,10 @@ class SubagentGroup:
 class SubagentSelected(Message):
     """Request that the app open one live inspection transcript."""
 
-    def __init__(self, inspection_id: str) -> None:
+    def __init__(self, inspection_id: str = "", *, run_id: str = "") -> None:
         super().__init__()
         self.inspection_id = inspection_id
+        self.run_id = run_id
 
 
 class SubagentRunTable(DataTable):
@@ -271,6 +274,43 @@ class SubagentsPanel(Vertical):
         self._refresh()
         return record
 
+    def restore_records(self, runs: list[dict[str, Any]]) -> None:
+        """Replace panel contents with terminal records loaded from session JSON."""
+        self.reset()
+        for run in runs:
+            key = str(run.get("row_id") or run.get("id") or "")
+            if not key:
+                continue
+            eval_id = str(run.get("eval_id") or "")
+            group_key = self._group_key_for_eval(eval_id) if eval_id else ""
+            started = _timestamp(run.get("started_at"))
+            duration_ms = max(0, int(run.get("duration_ms") or 0))
+            status = str(run.get("status") or STATUS_CANCELLED)
+            if status == STATUS_RUNNING:
+                status = STATUS_CANCELLED
+            record = SubagentRecord(
+                key=key,
+                name=str(run.get("display_name") or "subagent"),
+                hint=compact_subagent_hint("", run.get("task")),
+                group_key=group_key,
+                status=status,
+                started=started,
+                duration_ms=duration_ms,
+                output=str(run.get("output") or ""),
+                finished_at=started + duration_ms / 1000,
+                run_id=str(run.get("id") or ""),
+            )
+            self._records[key] = record
+            self._order.append(key)
+            if group_key:
+                self._groups[group_key].order.append(key)
+                self._active_group = group_key
+                self._selected_group = group_key
+            else:
+                self._regular_order.append(key)
+        if self._records:
+            self._show()
+
     def finish_subagent(
         self,
         name: str,
@@ -394,6 +434,8 @@ class SubagentsPanel(Vertical):
         record = self._records.get(event.row_key)
         if record is not None and record.inspection_id:
             self.post_message(SubagentSelected(record.inspection_id))
+        elif record is not None and record.run_id:
+            self.post_message(SubagentSelected(run_id=record.run_id))
 
     def has_running_subagents(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())
@@ -791,3 +833,13 @@ def format_seconds(seconds: float) -> str:
     minutes = int(seconds // 60)
     rest = int(seconds % 60)
     return f"{minutes}m{rest:02d}s"
+
+
+def _timestamp(value: Any) -> float:
+    text = str(value or "")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return 0.0

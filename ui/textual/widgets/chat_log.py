@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from datetime import datetime
 from itertools import count
 from typing import Any
@@ -27,6 +28,7 @@ from core.execution.streams.rubric import (
 )
 from core.execution.streams.corrections import correction_text, correction_title
 from session.context import normalize_events
+from session.subagent_runs import run_count
 from session.goals import GOAL_STATUSES
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
@@ -44,7 +46,13 @@ DEFAULT_TOOL_OUTPUT_CHARS = 240
 class ChatLog(VerticalScroll):
     """A small scrollable chat transcript with streaming message updates."""
 
-    def __init__(self, tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
+        *,
+        subagent_runs_provider: Callable[[], Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         self.follow_tail = True
         self._programmatic_tail_scroll = False
         self._artifact_tail_anchor: tuple[str, str] | None = None
@@ -52,6 +60,7 @@ class ChatLog(VerticalScroll):
         super().__init__(**kwargs)
         self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
+        self.subagent_runs_provider = subagent_runs_provider
         self._assistant_text = ""
         self._assistant_block: AssistantBubble | None = None
         self._reasoning_text = ""
@@ -231,6 +240,7 @@ class ChatLog(VerticalScroll):
                     start_timing=False,
                     terminal_status=str(event.get("status") or ""),
                     duration_ms=event.get("duration_ms"),
+                    origin_event_id=int(event.get("id") or 0),
                 )
             elif event_type == "tool_result":
                 callback = self.tool_error if event.get("status") == "error" else self.tool_result
@@ -453,6 +463,7 @@ class ChatLog(VerticalScroll):
         start_timing: bool = True,
         terminal_status: str = "",
         duration_ms: int | None = None,
+        origin_event_id: int = 0,
     ) -> None:
         """Append a coordinator-level tool call in transcript order."""
         self.hide_waiting()
@@ -471,8 +482,10 @@ class ChatLog(VerticalScroll):
                 "started_at": time.monotonic() if start_timing else None,
                 "duration_ms": duration_ms,
                 "terminal_status": terminal_status,
+                "terminal": bool(terminal_status),
                 "frame": 0,
                 "last_second": 0,
+                "origin_event_id": origin_event_id,
             }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
@@ -483,6 +496,9 @@ class ChatLog(VerticalScroll):
             if terminal_status in {"cancelled", "interrupted"}:
                 block["terminal_status"] = terminal_status
                 block["duration_ms"] = duration_ms
+                block["terminal"] = True
+            if origin_event_id:
+                block["origin_event_id"] = origin_event_id
 
         pending_found, pending, pending_is_error, pending_duration_ms = self._take_pending_tool_result(
             name,
@@ -491,6 +507,7 @@ class ChatLog(VerticalScroll):
         if pending_found:
             block["result"] = pending
             block["is_error"] = pending_is_error
+            block["terminal"] = True
             self._finish_tool_timing(block, pending_duration_ms)
         self._update_tool_block(key)
 
@@ -546,6 +563,7 @@ class ChatLog(VerticalScroll):
                 "started_at": time.monotonic(),
                 "duration_ms": None,
                 "terminal_status": "",
+                "terminal": False,
                 "frame": 0,
                 "last_second": 0,
             }
@@ -584,6 +602,7 @@ class ChatLog(VerticalScroll):
         block["is_error"] = False
         block["draft"] = False
         block["terminal_status"] = ""
+        block["terminal"] = True
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
@@ -615,6 +634,7 @@ class ChatLog(VerticalScroll):
         block["is_error"] = True
         block["draft"] = False
         block["terminal_status"] = ""
+        block["terminal"] = True
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key)
 
@@ -643,6 +663,7 @@ class ChatLog(VerticalScroll):
         block["is_error"] = False
         block["draft"] = False
         block["terminal_status"] = ""
+        block["terminal"] = True
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
 
@@ -672,6 +693,7 @@ class ChatLog(VerticalScroll):
         block["is_error"] = True
         block["draft"] = False
         block["terminal_status"] = ""
+        block["terminal"] = True
         self._finish_tool_timing(block, duration_ms)
         self._update_tool_block(key, scroll=False)
 
@@ -694,6 +716,7 @@ class ChatLog(VerticalScroll):
             return
         block["draft"] = False
         block["terminal_status"] = status
+        block["terminal"] = True
         self._finish_tool_timing(block, duration_ms)
         self._remove_tool_queue_key(name, key)
         self._update_tool_block(key, scroll=False)
@@ -708,6 +731,7 @@ class ChatLog(VerticalScroll):
             if block.get("started_at") is None:
                 continue
             block["terminal_status"] = status
+            block["terminal"] = True
             self._finish_tool_timing(block, None)
             self._remove_tool_queue_key(str(block.get("name") or "tool"), key)
             self._update_tool_block(key, scroll=False)
@@ -1794,6 +1818,15 @@ class ChatLog(VerticalScroll):
         widget: ToolBubble = block["widget"]
         widget.update_call(block["name"], block["args"], draft=bool(block.get("draft")))
         widget.update_details(output, status)
+        origin_event_id = int(block.get("origin_event_id") or 0)
+        terminal = bool(block.get("terminal"))
+        count = 0
+        if terminal and self.subagent_runs_provider is not None and origin_event_id:
+            try:
+                count = run_count(self.subagent_runs_provider(), origin_event_id)
+            except Exception:
+                count = 0
+        widget.update_subagents(origin_event_id, count, terminal=terminal)
         if scroll:
             self._scroll_to_end()
 

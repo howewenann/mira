@@ -55,6 +55,7 @@ from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, ini
 from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from core.execution.inspection.live import LiveInspectionStore
+from core.execution.inspection.persistence import inspection_from_run
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -69,6 +70,7 @@ from session.plans import (
     plan_artifact_text,
 )
 from session.recorder import update_goal_event_status, update_plan_event_status
+from session.subagent_runs import clear_runs, run_for_id, runs_for_origin
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -102,6 +104,7 @@ from ui.textual.widgets import (
     MCPPanelScreen,
 )
 from ui.textual.widgets.subagent_panel import SubagentSelected
+from ui.textual.widgets.tool_bubble import SubagentHistoryAnchor
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
@@ -248,7 +251,11 @@ class MiraApp(App[None]):
                     yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="issues-button")
                 with Vertical(id="transcript-viewport"):
-                    yield ChatLog(tool_output_chars=self.tool_output_chars, id="chat-log")
+                    yield ChatLog(
+                        tool_output_chars=self.tool_output_chars,
+                        subagent_runs_provider=self._current_subagent_runs,
+                        id="chat-log",
+                    )
                     yield Inspector(
                         self.live_inspections,
                         tool_output_chars=self.tool_output_chars,
@@ -2359,6 +2366,7 @@ class MiraApp(App[None]):
         self.session["title"] = "Untitled session"
         self.session["turns"] = 0
         self.session["events"] = []
+        clear_runs(self.session)
         self.session["dashboard"] = normalize_dashboard(None)
         ensure_dashboard(
             self.session,
@@ -2461,8 +2469,45 @@ class MiraApp(App[None]):
         self.trace.tool_call(name, args)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        self.query_one(ChatLog).tool_call(name, args, call_id=call_id, created_at=created_at)
+        self.query_one(ChatLog).tool_call(
+            name,
+            args,
+            call_id=call_id,
+            created_at=created_at,
+            origin_event_id=self._tool_origin_event_id(name, call_id, args),
+        )
         self._rearm_waiting_if_busy()
+
+    def _current_subagent_runs(self) -> Any:
+        """Return normalized run state owned by the current persisted session."""
+        if self.store is None or not isinstance(self.session, dict):
+            return []
+        session_id = str(self.session.get("id") or "")
+        if not session_id:
+            return []
+        saved = self.store.read(self.store.path(session_id))
+        return saved.get("runs", [])
+
+    def _tool_origin_event_id(self, name: str, call_id: str, args: Any) -> int:
+        """Resolve the just-recorded top-level tool event for a live bubble."""
+        events = self.session.get("events", []) if isinstance(self.session, dict) else []
+        task = str(args.get("description") or "") if isinstance(args, dict) else ""
+        for item in reversed(events if isinstance(events, list) else []):
+            if not isinstance(item, dict) or item.get("type") != "tool_call" or item.get("name") != name:
+                continue
+            if call_id and str(item.get("call_id") or "") == call_id:
+                return int(item.get("id") or 0)
+            item_args = item.get("args")
+            if (
+                not call_id
+                and not item.get("call_id")
+                and (
+                    not task
+                    or (isinstance(item_args, dict) and str(item_args.get("description") or "") == task)
+                )
+            ):
+                return int(item.get("id") or 0)
+        return 0
 
     def tool_call_updated(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Update an edited call without creating another transcript block."""
@@ -2652,14 +2697,46 @@ class MiraApp(App[None]):
 
     @on(SubagentSelected)
     def open_subagent_inspector(self, event: SubagentSelected) -> None:
-        """Replace only the chat viewport with the selected live transcript."""
+        """Replace the chat viewport with the selected live or historical transcript."""
         event.stop()
         inspector = self.query_one(Inspector)
-        if not inspector.open(event.inspection_id):
+        if event.run_id:
+            try:
+                saved = self._read_current_session()
+                run = run_for_id(saved.get("runs"), event.run_id)
+                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
+                    raise ValueError("the selected subagent run is no longer available")
+            except Exception as exc:
+                self.system_message(f"subagent history unavailable: {exc}", kind="error")
+                return
+        elif not inspector.open(event.inspection_id):
             return
         self.query_one("#chat-log", ChatLog).display = False
         inspector.display = True
         self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
+
+    @on(SubagentHistoryAnchor.Requested)
+    def open_subagent_history(self, event: SubagentHistoryAnchor.Requested) -> None:
+        """Reload one owning tool's durable children into the existing panel."""
+        event.stop()
+        try:
+            saved = self._read_current_session()
+            runs = runs_for_origin(saved.get("runs"), event.origin_event_id)
+            if not runs:
+                raise ValueError("no persisted subagent runs remain for this tool")
+        except Exception as exc:
+            self.system_message(f"subagent history unavailable: {exc}", kind="error")
+            return
+        self.query_one(SubagentsPanel).restore_records(runs)
+
+    def _read_current_session(self) -> dict[str, Any]:
+        """Read the active session from disk for retrospective interactions."""
+        if self.store is None or not isinstance(self.session, dict):
+            raise RuntimeError("session storage is unavailable")
+        session_id = str(self.session.get("id") or "")
+        if not session_id:
+            raise RuntimeError("the active session has no id")
+        return self.store.read(self.store.path(session_id))
 
     @on(Inspector.Closed)
     def close_inspector(self, event: Inspector.Closed) -> None:

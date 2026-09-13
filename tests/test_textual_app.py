@@ -6212,6 +6212,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "turns": 2,
             "dashboard": {"tokens": {"in": 10, "out": 5}},
             "events": [{"type": "user", "text": "clear me"}],
+            "runs": [{"id": "orphaned-run"}],
         }
         store = FakeStore()
         app = make_app(session=session, store=store)
@@ -6226,6 +6227,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(handled)
             self.assertEqual(app.session["turns"], 0)
             self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.session["runs"], [])
             self.assertEqual(app.session["dashboard"]["tokens"], {"in": 0, "out": 0})
             self.assertEqual(len(store.saves), 1)
             self.assertIn("current chat history cleared", rendered)
@@ -11266,6 +11268,232 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.query_one("#chat-log", ChatLog).display)
             self.assertEqual(prompt.value, "preserve this draft")
             self.assertTrue(prompt.has_focus)
+
+    async def test_reopened_tool_anchors_replay_only_persisted_historical_runs(self) -> None:
+        """A fresh app should drill from terminal owners into disk-backed history."""
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "sessions")
+            session = store.new("historical-thread", workspace)
+            timestamp = "2026-01-01T00:00:00+00:00"
+            session["events"] = [
+                {
+                    "id": 1,
+                    "type": "tool_call",
+                    "name": "task",
+                    "args": {"description": "standalone request"},
+                    "call_id": "task-one",
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 2,
+                    "type": "tool_result",
+                    "name": "task",
+                    "output": "standalone complete",
+                    "call_id": "task-one",
+                    "duration_ms": 1250,
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 3,
+                    "type": "tool_call",
+                    "name": "eval",
+                    "args": {"description": "evaluate"},
+                    "call_id": "eval-one",
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 4,
+                    "type": "tool_result",
+                    "name": "eval",
+                    "output": "evaluation complete",
+                    "call_id": "eval-one",
+                    "duration_ms": 2500,
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 5,
+                    "type": "tool_call",
+                    "name": "task",
+                    "args": {"description": "still running"},
+                    "call_id": "task-live",
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 6,
+                    "type": "tool_call",
+                    "name": "read_file",
+                    "args": {"path": "README.md"},
+                    "call_id": "unrelated",
+                    "created_at": timestamp,
+                },
+                {
+                    "id": 7,
+                    "type": "tool_result",
+                    "name": "read_file",
+                    "output": "ordinary output",
+                    "call_id": "unrelated",
+                    "duration_ms": 10,
+                    "created_at": timestamp,
+                },
+            ]
+
+            def historical_run(
+                run_id: str,
+                origin_event_id: int,
+                row_id: str,
+                display_name: str,
+                task: str,
+                *,
+                eval_id: str = "",
+                status: str = "DONE",
+                duration_ms: int = 100,
+            ) -> dict[str, Any]:
+                return {
+                    "id": run_id,
+                    "inspection_id": f"old-{run_id}",
+                    "origin_event_id": origin_event_id,
+                    "origin_tool": "eval" if eval_id else "task",
+                    "origin_call_id": eval_id or row_id,
+                    "row_id": row_id,
+                    "eval_id": eval_id,
+                    "inspection_type": "subagent",
+                    "display_name": display_name,
+                    "task": task,
+                    "status": status,
+                    "started_at": timestamp,
+                    "updated_at": "2026-01-01T00:00:01+00:00",
+                    "finished_at": "2026-01-01T00:00:01+00:00",
+                    "duration_ms": duration_ms,
+                    "output": f"output for {run_id}",
+                    "events": [
+                        {"kind": "user", "text": task},
+                        {"kind": "reasoning", "text": f"reasoning for {run_id}"},
+                        {
+                            "kind": "tool_call",
+                            "name": "read_file",
+                            "args": {"path": f"{run_id}.txt"},
+                            "call_id": f"nested-{run_id}",
+                        },
+                        {
+                            "kind": "tool_result",
+                            "name": "read_file",
+                            "text": f"tool result for {run_id}",
+                            "call_id": f"nested-{run_id}",
+                        },
+                        {
+                            "kind": "tool_call",
+                            "name": "write_file",
+                            "args": {"path": "denied.txt"},
+                            "call_id": f"failed-{run_id}",
+                        },
+                        {
+                            "kind": "tool_error",
+                            "name": "write_file",
+                            "text": "contained failure",
+                            "call_id": f"failed-{run_id}",
+                        },
+                        {"kind": "error", "text": "diagnostic detail"},
+                        {"kind": "assistant", "text": f"final response for {run_id}"},
+                    ],
+                }
+
+            session["runs"] = [
+                historical_run(
+                    "task-run",
+                    1,
+                    "task-one",
+                    "researcher [violet-fox]",
+                    "the complete standalone request",
+                    duration_ms=1250,
+                ),
+                historical_run(
+                    "eval-run-one",
+                    3,
+                    "eval-row-one",
+                    "critic [amber-owl]",
+                    "first evaluation task",
+                    eval_id="eval-one",
+                    duration_ms=2100,
+                ),
+                historical_run(
+                    "eval-run-two",
+                    3,
+                    "eval-row-two",
+                    "tester [silver-lynx]",
+                    "second evaluation task",
+                    eval_id="eval-one",
+                    status="ERROR",
+                    duration_ms=2300,
+                ),
+            ]
+            store.save(session)
+            reopened = store.load("historical-thread", resume=False, workspace=workspace)
+            app = make_app(workspace=workspace, session=reopened, store=store)
+
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                self.assertEqual(app.live_inspections._items, {})
+                bubbles = list(app.query(ToolBubble))
+                self.assertEqual(len(bubbles), 4)
+                self.assertEqual(bubbles[0].subagents_anchor.label, "Subagents · 1")
+                self.assertEqual(bubbles[1].subagents_anchor.label, "Subagents · 2")
+                self.assertEqual(bubbles[2].subagents_anchor.label, "")
+                self.assertEqual(bubbles[3].subagents_anchor.label, "")
+                self.assertFalse(bubbles[0].subagents_anchor.can_focus)
+
+                bubbles[0].subagents_anchor.scroll_visible()
+                await pilot.pause()
+                await pilot.click(bubbles[0].subagents_anchor)
+                await pilot.pause()
+                panel = app.query_one(SubagentsPanel)
+                self.assertEqual(list(panel._records), ["task-one"])
+                standalone = panel._records["task-one"]
+                self.assertEqual(standalone.name, "researcher [violet-fox]")
+                self.assertEqual(standalone.hint, "the complete standalone request")
+                self.assertEqual(standalone.status, "DONE")
+                self.assertEqual(standalone.duration_ms, 1250)
+                self.assertFalse(panel.has_running_subagents())
+
+                bubbles[1].subagents_anchor.scroll_visible()
+                await pilot.pause()
+                await pilot.click(bubbles[1].subagents_anchor)
+                await pilot.pause()
+                self.assertEqual(set(panel._records), {"eval-row-one", "eval-row-two"})
+                self.assertEqual(len(panel._group_order), 1)
+                group = panel._groups[panel._group_order[0]]
+                self.assertEqual(group.index, 1)
+                self.assertEqual(
+                    {record.name for record in panel._records.values()},
+                    {"critic [amber-owl]", "tester [silver-lynx]"},
+                )
+
+                changed = store.read(store.path("historical-thread"))
+                changed_run = next(run for run in changed["runs"] if run["id"] == "eval-run-one")
+                changed_run["events"][-1]["text"] = "final response changed on disk"
+                store.save_metadata(changed)
+                await pilot.click("#subagents-tasks", offset=(2, 0))
+                await pilot.pause()
+
+                inspector = app.query_one(Inspector)
+                inspector_log = inspector.query_one("#inspector-log", ChatLog)
+                rendered = "\n".join(renderable_plain(child) for child in inspector_log.children)
+                self.assertTrue(inspector.display)
+                self.assertIn("first evaluation task", rendered)
+                self.assertIn("reasoning for eval-run-one", rendered)
+                self.assertIn("tool result for eval-run-one", rendered)
+                self.assertIn("contained failure", rendered)
+                self.assertIn("diagnostic detail", rendered)
+                self.assertIn("final response changed on disk", rendered)
+                self.assertEqual(inspector.store._items, {})
+
+                await pilot.press("escape")
+                await pilot.pause()
+                bubbles[0].subagents_anchor.scroll_visible()
+                await pilot.pause()
+                await pilot.click(bubbles[0].subagents_anchor)
+                await pilot.pause()
+                self.assertEqual(list(panel._records), ["task-one"])
 
 
 if __name__ == "__main__":

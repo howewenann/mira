@@ -2018,6 +2018,20 @@ Button.settings-access-back:hover {
     color: #98a5ac;
 }
 
+.tool-subagents-anchor {
+    display: none;
+    width: auto;
+    height: 1;
+    margin-top: 0;
+    color: #B7A4E8;
+    text-style: bold;
+}
+
+.tool-subagents-anchor:hover {
+    color: #ECE7FF;
+    background: #2A2440;
+}
+
 .message.tool-result {
     border: solid #6F7782;
     color: #CBD1D5;

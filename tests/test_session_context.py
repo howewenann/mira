@@ -239,6 +239,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "current_plan",
                 "current_goal",
                 "events",
+                "runs",
             ],
         )
         self.assertEqual(record["title"], "Untitled session")
@@ -246,6 +247,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(record["pinned"])
         self.assertEqual(record["dashboard"]["context"]["percent"], 0.0)
         self.assertEqual(record["events"], [])
+        self.assertEqual(record["runs"], [])
         self.assertIsNone(record["current_plan"])
         self.assertIsNone(record["current_goal"])
         self.assertNotIn("llm_direct", record)

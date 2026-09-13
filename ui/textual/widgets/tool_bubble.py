@@ -14,6 +14,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.events import Click
+from textual.message import Message
 from textual.widgets import Collapsible, Static, TextArea
 
 from core.execution.streams.rubric import elapsed_ms, format_elapsed
@@ -164,6 +165,35 @@ class ToolArgumentTextArea(TextArea):
         )
 
 
+class SubagentHistoryAnchor(Static):
+    """Mouse-only link to persisted child inspection records."""
+
+    can_focus = False
+
+    class Requested(Message):
+        def __init__(self, origin_event_id: int) -> None:
+            super().__init__()
+            self.origin_event_id = origin_event_id
+
+    def __init__(self) -> None:
+        super().__init__("", classes="tool-subagents-anchor")
+        self.origin_event_id = 0
+        self.label = ""
+        self.styles.display = "none"
+
+    def show_count(self, origin_event_id: int, count: int, *, terminal: bool) -> None:
+        self.origin_event_id = origin_event_id
+        visible = terminal and origin_event_id > 0 and count > 0
+        self.label = f"Subagents · {count}" if visible else ""
+        self.update(self.label)
+        self.styles.display = "block" if visible else "none"
+
+    def on_click(self, event: Click) -> None:
+        if self.origin_event_id:
+            event.stop()
+            self.post_message(self.Requested(self.origin_event_id))
+
+
 class ToolBubble(Vertical):
     """A MIRA transcript tool call with collapsible, complete arguments."""
 
@@ -181,6 +211,7 @@ class ToolBubble(Vertical):
         )
         self.output = Static(classes="tool-output")
         self.status = Static(classes="tool-status")
+        self.subagents_anchor = SubagentHistoryAnchor()
         self.output.styles.display = "none"
         self.status.styles.display = "none"
         self.update_call(name, args, draft=draft)
@@ -189,6 +220,7 @@ class ToolBubble(Vertical):
         yield self.args_collapsible
         yield self.output
         yield self.status
+        yield self.subagents_anchor
 
     def on_click(self, event: Click) -> None:
         """Keep native tool interactions from moving focus to the transcript."""
@@ -202,6 +234,9 @@ class ToolBubble(Vertical):
             if section.plain:
                 rendered.append("\n")
                 rendered.append_text(section)
+        if self.subagents_anchor.label:
+            rendered.append("\n")
+            rendered.append(self.subagents_anchor.label)
         return rendered
 
     def update_call(self, name: str, args: Any, *, draft: bool) -> None:
@@ -219,6 +254,10 @@ class ToolBubble(Vertical):
         self.status.update(self._status_text)
         self.output.styles.display = "block" if self._output_text.plain else "none"
         self.status.styles.display = "block" if self._status_text.plain else "none"
+
+    def update_subagents(self, origin_event_id: int, count: int, *, terminal: bool) -> None:
+        """Show a persisted-run anchor only after this tool is terminal."""
+        self.subagents_anchor.show_count(origin_event_id, count, terminal=terminal)
 
     @on(Collapsible.Expanded)
     def refit_expanded_arguments(self, event: Collapsible.Expanded) -> None:
