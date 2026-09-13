@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections import Counter, deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from inspect import Parameter, signature
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from core.execution.inspection.subagents import (
     EvalInspectionTransformer,
     SubagentInspectionCoordinator,
     live_inspection_store,
+    native_inspection_hint,
 )
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
@@ -144,6 +146,20 @@ class TurnResult:
         self._tool_call_ids.append(call_id)
         return True
 
+    def upsert_tool_call(self, name: str, call_id: str = "") -> int | None:
+        """Record a call or refresh its name from a later native projection."""
+        if call_id:
+            try:
+                index = self._tool_call_ids.index(call_id)
+            except ValueError:
+                pass
+            else:
+                self.tool_calls[index] = name
+                return index
+        if not self.record_tool_call(name, call_id):
+            return None
+        return len(self.tool_calls) - 1
+
     def update_tool_call_name(self, index: int, name: str) -> None:
         """Keep the turn summary aligned with an edited approval action."""
         if 0 <= index < len(self.tool_calls):
@@ -238,12 +254,24 @@ class SubagentRequestRenderer:
 
     def __init__(self, renderer: Any) -> None:
         self.renderer = renderer
-        self._pending_requests: deque[str] = deque()
+        self._pending_requests: deque[tuple[str, str]] = deque()
+        self._requests_by_call_id: dict[str, str] = {}
         self._pending_subagents: deque[str] = deque()
         self._deferred_subagents: dict[str, _DeferredSubagent] = {}
+        self._labels_by_child: dict[str, str] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.renderer, name)
+
+    def subagent_label(self, subagent: Any) -> str:
+        """Keep a standalone child's cool name stable across HITL resumes."""
+        identity = native_inspection_hint(subagent)
+        if identity and identity in self._labels_by_child:
+            return self._labels_by_child[identity]
+        name = str(self.renderer.subagent_label(subagent) or "subagent")
+        if identity:
+            self._labels_by_child[identity] = name
+        return name
 
     def delegation_started(self, calls: list[dict[str, Any]]) -> None:
         self._remember_task_requests(calls)
@@ -270,7 +298,17 @@ class SubagentRequestRenderer:
         )
 
     def _remember_task_requests(self, calls: list[dict[str, Any]]) -> None:
-        for description in task_descriptions(calls):
+        for raw_call in calls:
+            call = normalized_call(raw_call)
+            if str(call.get("name") or "") != "task":
+                continue
+            args = call.get("args")
+            if not isinstance(args, dict):
+                continue
+            description = str(args.get("description") or "")
+            if not description:
+                continue
+            call_id = str(call.get("id") or "")
             if self._pending_subagents:
                 subagent = self._pending_subagents.popleft()
                 deferred = self._deferred_subagents.pop(subagent, None)
@@ -282,7 +320,9 @@ class SubagentRequestRenderer:
                     if callable(callback):
                         callback(subagent, description)
             else:
-                self._pending_requests.append(description)
+                if call_id:
+                    self._requests_by_call_id[call_id] = description
+                self._pending_requests.append((call_id, description))
 
     def subagent_started(
         self,
@@ -294,8 +334,19 @@ class SubagentRequestRenderer:
         row_id: str = "",
         model: str = "",
         inspection_id: str = "",
+        parent_call_id: str = "",
     ) -> None:
-        queued_request = self._pending_requests.popleft() if self._pending_requests else ""
+        queued_request = self._requests_by_call_id.pop(parent_call_id, "")
+        if queued_request:
+            with suppress(ValueError):
+                self._pending_requests.remove((parent_call_id, queued_request))
+        while not queued_request and self._pending_requests:
+            queued_call_id, candidate = self._pending_requests.popleft()
+            if queued_call_id:
+                current = self._requests_by_call_id.pop(queued_call_id, "")
+                if not current:
+                    continue
+            queued_request = candidate
         request = task_input or queued_request
         if origin == DYNAMIC_TOOL_SUBAGENT and not request:
             self._deferred_subagents[subagent] = _DeferredSubagent(
@@ -624,7 +675,9 @@ async def run_turn(
     # only by the resumed stream.
     event_renderer = SubagentRequestRenderer(renderer)
     inspection = SubagentInspectionCoordinator(
-        live_inspection_store(event_renderer)
+        live_inspection_store(event_renderer),
+        result,
+        event_renderer,
     )
     eval_renderer = EvalSubagentRenderer(event_renderer, inspection)
 
@@ -694,13 +747,16 @@ async def run_turn(
                 ),
                 capture_output(stream.output(), output),
             )
-        except BaseException:
+        except BaseException as exc:
             render_projected_tool_errors(
                 projected_tool_errors,
                 event_renderer,
                 result,
             )
             inspection.cancel_running()
+            inspection.cancel_standalone(
+                "" if isinstance(exc, asyncio.CancelledError) else str(exc)
+            )
             rubric_renderer.cancel()
             raise
 
@@ -771,6 +827,7 @@ async def run_turn(
             result,
             tool_call_start,
             hidden_eval_calls,
+            inspection.standalone_interrupt_actions(),
         )
         finalize_goal_interrupt = first_typed_interrupt(interrupts, "finalize_goal")
         finalize_plan_interrupt = first_typed_interrupt(interrupts, "finalize_plan")
@@ -885,7 +942,36 @@ async def run_turn(
                 result,
                 inspection,
             )
-            payload = Command(resume={"decisions": decisions})
+            payload = Command(resume=approval_resume_value(interrupts, decisions))
+
+
+def approval_resume_value(
+    interrupts: list[Any],
+    decisions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the native single- or multi-interrupt HITL resume value."""
+    if len(interrupts) <= 1:
+        return {"decisions": decisions}
+
+    counts: list[int] = []
+    for interrupt in interrupts:
+        value = interrupt_value(interrupt)
+        actions = value.get("action_requests") if isinstance(value, dict) else None
+        counts.append(len(actions) if isinstance(actions, list) else 1)
+    if sum(counts) != len(decisions):
+        raise RuntimeError(
+            "approval decisions do not match the pending interrupt actions"
+        )
+
+    resume: dict[str, Any] = {}
+    offset = 0
+    for interrupt, count in zip(interrupts, counts, strict=True):
+        interrupt_id = str(getattr(interrupt, "id", "") or "")
+        if not interrupt_id:
+            raise RuntimeError("a pending interrupt is missing its native id")
+        resume[interrupt_id] = {"decisions": decisions[offset : offset + count]}
+        offset += count
+    return resume
 
 
 async def completed_agent_state(agent: Any, config: dict[str, Any]) -> dict[str, Any]:
@@ -997,6 +1083,7 @@ def render_interrupt_tool_calls(
     result: TurnResult,
     tool_call_start: int,
     hidden_eval_calls: list[dict[str, Any]] | None = None,
+    hidden_standalone_actions: dict[tuple[str, int], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover interrupting calls before opening their dedicated surfaces."""
     for raw_call in output_tool_calls(output):
@@ -1011,6 +1098,7 @@ def render_interrupt_tool_calls(
         approval_action_identity(call)
         for call in (hidden_eval_calls or [])
     )
+    standalone = hidden_standalone_actions or {}
     for interrupt in interrupts:
         value = interrupt_value(interrupt)
         if not isinstance(value, dict):
@@ -1018,10 +1106,13 @@ def render_interrupt_tool_calls(
         actions = value.get("action_requests")
         if not isinstance(actions, list):
             continue
-        for action in actions:
+        interrupt_id = native_interrupt_id(interrupt)
+        for action_index, action in enumerate(actions):
             if not isinstance(action, dict):
                 continue
             name = str(action.get("name") or "tool")
+            if (interrupt_id, action_index) in standalone:
+                continue
             hidden_identity = approval_action_identity(action)
             if hidden[hidden_identity] > 0:
                 hidden[hidden_identity] -= 1
@@ -1048,6 +1139,7 @@ def render_interrupt_tool_calls(
         result,
         tool_call_start,
         hidden_eval_calls,
+        standalone,
     )
 
 
@@ -1056,6 +1148,7 @@ def approval_call_bindings(
     result: TurnResult,
     tool_call_start: int,
     hidden_eval_calls: list[dict[str, Any]] | None = None,
+    hidden_standalone_actions: dict[tuple[str, int], dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Pair approval actions with current-loop calls in prompt order."""
     available = list(range(tool_call_start, len(result.tool_calls)))
@@ -1063,13 +1156,25 @@ def approval_call_bindings(
     hidden_available = list(enumerate(hidden_eval_calls or []))
     hidden_used: set[int] = set()
     bindings: list[dict[str, Any]] = []
+    standalone = hidden_standalone_actions or {}
     for interrupt in interrupts:
         value = interrupt_value(interrupt)
         actions = value.get("action_requests") if isinstance(value, dict) else None
         if not isinstance(actions, list):
             continue
-        for action in actions:
+        interrupt_id = native_interrupt_id(interrupt)
+        for action_index, action in enumerate(actions):
             name = str(action.get("name") or "tool") if isinstance(action, dict) else "tool"
+            standalone_binding = standalone.get((interrupt_id, action_index))
+            if standalone_binding is not None:
+                bindings.append(
+                    {
+                        **standalone_binding,
+                        "name": name,
+                        "args": action.get("args", {}) if isinstance(action, dict) else {},
+                    }
+                )
+                continue
             hidden_match = next(
                 (
                     (index, call)
@@ -1089,7 +1194,7 @@ def approval_call_bindings(
                         "args": action.get("args", {}) if isinstance(action, dict) else {},
                         "call_id": str(hidden_call.get("call_id") or ""),
                         "row_id": str(hidden_call.get("row_id") or ""),
-                        "result_index": None,
+                        "result_index": hidden_call.get("result_index"),
                         "hidden": True,
                     }
                 )
@@ -1114,6 +1219,13 @@ def approval_call_bindings(
                 }
             )
     return bindings
+
+
+def native_interrupt_id(interrupt: Any) -> str:
+    """Return the stable identifier carried by a native Graph interrupt."""
+    if isinstance(interrupt, dict):
+        return str(interrupt.get("id") or "")
+    return str(getattr(interrupt, "id", "") or "")
 
 
 def approval_action_identity(action: Any) -> tuple[str, str]:
@@ -1148,12 +1260,22 @@ def render_edited_tool_calls(
             ):
                 edited = decision["edited_action"]
                 args = edited.get("args")
-                if inspection is not None and isinstance(args, dict):
-                    inspection.update_eval_tool_call(
+                if (
+                    inspection is not None
+                    and isinstance(args, dict)
+                    and binding.get("call_id")
+                ):
+                    inspection.update_hidden_tool_call(
                         str(binding.get("row_id") or ""),
                         str(binding.get("call_id") or ""),
                         str(edited.get("name") or binding["name"]),
                         args,
+                    )
+                result_index = binding.get("result_index")
+                if isinstance(result_index, int):
+                    result.update_tool_call_name(
+                        result_index,
+                        str(edited.get("name") or binding["name"]),
                     )
             continue
         if not isinstance(decision, dict) or decision.get("type") != "edit":

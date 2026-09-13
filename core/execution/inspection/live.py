@@ -129,6 +129,30 @@ class LiveInspectionStore:
                     return
         self.append(inspection_id, event)
 
+    def upsert_tool_completion(
+        self,
+        inspection_id: str,
+        event: InspectionEvent,
+    ) -> None:
+        """Close one exact tool call, preserving transcript order after recovery."""
+        current = self._items.get(inspection_id)
+        if current is None:
+            return
+        if event.call_id:
+            if any(
+                existing.call_id == event.call_id
+                and existing.kind in {"tool_result", "tool_error"}
+                for existing in current.events
+            ):
+                return
+            for index in range(len(current.events) - 1, -1, -1):
+                existing = current.events[index]
+                if existing.kind == "tool_call" and existing.call_id == event.call_id:
+                    current.events.insert(index + 1, event)
+                    self._notify(inspection_id, InspectionUpdate("reset"))
+                    return
+        self.append(inspection_id, event)
+
     def append_delta(self, inspection_id: str, kind: str, delta: str) -> None:
         """Append streamed text while retaining logical transcript bubbles."""
         current = self._items.get(inspection_id)

@@ -24,6 +24,7 @@ from agent.planning.response_status import PLANNING_RESPONSE_STATUS_FAILURE
 from core.context.observation import context_usage_scope
 from core.execution import runner
 from core.execution.inspection.live import LiveInspectionStore
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata, MessageInvocationMetadataTransformer
 from core.execution.streams.output import final_text
@@ -696,6 +697,76 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
+
+    async def test_run_turn_partitions_multiple_interrupt_decisions_by_native_id(self) -> None:
+        first = Interrupt(
+            value={
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "whoami"}},
+                ]
+            },
+            id="11111111111111111111111111111111",
+        )
+        second = Interrupt(
+            value={
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "date"}},
+                ]
+            },
+            id="22222222222222222222222222222222",
+        )
+        third = Interrupt(
+            value={
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "hostname"}},
+                ]
+            },
+            id="33333333333333333333333333333333",
+        )
+        decisions = [
+            {"type": "approve"},
+            {
+                "type": "edit",
+                "edited_action": {
+                    "name": "execute",
+                    "args": {"command": "Get-Location"},
+                },
+            },
+            {"type": "reject"},
+        ]
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[first, second, third]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        renderer = RunTurnRenderer(decisions=decisions)
+
+        await runner.run_turn(agent, "run diagnostics", renderer, "thread-1")
+
+        self.assertEqual(
+            agent.payloads[1].resume,
+            {
+                first.id: {"decisions": decisions[:1]},
+                second.id: {"decisions": decisions[1:2]},
+                third.id: {"decisions": decisions[2:]},
+            },
+        )
+
+    def test_multiple_interrupt_resume_rejects_mismatched_decision_count(self) -> None:
+        interrupts = [
+            Interrupt(
+                value={"action_requests": [{"name": "execute", "args": {}}]},
+                id="11111111111111111111111111111111",
+            ),
+            Interrupt(
+                value={"action_requests": [{"name": "execute", "args": {}}]},
+                id="22222222222222222222222222222222",
+            ),
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "decisions do not match"):
+            runner.approval_resume_value(interrupts, [{"type": "approve"}])
 
     async def test_run_turn_resumes_tool_projected_mcp_elicitation_without_failure(self) -> None:
         class MCPRenderer(RunTurnRenderer):
@@ -1509,6 +1580,202 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.tool_calls, [])
         self.assertEqual(len(renderer.approvals), 1)
+
+    async def test_standalone_hitl_reuses_inspector_and_hides_child_tool_in_tui(self) -> None:
+        class NativeChild:
+            graph_name = "general-purpose"
+
+            def __init__(
+                self,
+                name: str,
+                *,
+                status: str,
+                messages: list[Any],
+                tool_calls: list[Any],
+                output: dict[str, Any],
+            ) -> None:
+                self.name = name
+                self.task_input = "perform diagnostics"
+                self.cause = {
+                    "type": "toolCall",
+                    "tool_call_id": "task-one",
+                }
+                self.trigger_call_id = "pregel-task-one"
+                self.path = ["tools:pregel-task-one"]
+                self.status = status
+                self.messages = AsyncItems(messages)
+                self.tool_calls = AsyncItems(tool_calls)
+                self.output = output
+
+        interrupt = Interrupt(
+            value={
+                "action_requests": [
+                    {"name": "execute", "args": {"command": "whoami"}},
+                ]
+            },
+            id="11111111111111111111111111111111",
+        )
+        root_task = IncompleteToolCall(
+            "task",
+            {
+                "description": "perform diagnostics",
+                "subagent_type": "general-purpose",
+            },
+            None,
+            "task-one",
+        )
+        child_execute = IncompleteToolCall(
+            "execute",
+            {"command": "whoami"},
+            None,
+            "execute-one",
+        )
+        first_child = NativeChild(
+            "general-purpose [first-name]",
+            status="interrupted",
+            messages=[Message(reasoning=AsyncItems(["checking the environment"]), text=AsyncItems([]))],
+            tool_calls=[child_execute],
+            output={"messages": [{"type": "human", "content": "perform diagnostics"}]},
+        )
+        child_values = values_event(
+            [
+                {"type": "human", "content": "perform diagnostics"},
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "execute",
+                            "args": {"command": "whoami"},
+                            "id": "execute-one",
+                        }
+                    ],
+                ),
+            ],
+            namespace=("tools:pregel-task-one",),
+        )
+        child_values["params"]["interrupts"] = [interrupt]
+        first = FakeStream(
+            output={"messages": []},
+            interrupts=[interrupt],
+            tool_calls=[root_task],
+            raw_events=AsyncItems([child_values]),
+        )
+        first.subagents = AsyncItems([first_child])
+
+        resumed_child = NativeChild(
+            "general-purpose [different-name]",
+            status="completed",
+            messages=[Message(reasoning=AsyncItems([]), text=AsyncItems(["actual child answer"]))],
+            tool_calls=[],
+            output={
+                "messages": [
+                    {"type": "human", "content": "perform diagnostics"},
+                    {"type": "ai", "content": "actual child answer"},
+                ]
+            },
+        )
+        resumed = FakeStream(
+            output={"messages": [OutputMessage("parent done")]},
+            raw_events=AsyncItems(
+                [
+                    values_event(
+                        [
+                            {"type": "human", "content": "perform diagnostics"},
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "execute",
+                                        "args": {"command": "whoami"},
+                                        "id": "execute-one",
+                                    }
+                                ],
+                            ),
+                            ToolMessage(
+                                content="diagnostic output",
+                                name="execute",
+                                tool_call_id="execute-one",
+                            ),
+                            {"type": "ai", "content": "actual child answer"},
+                        ],
+                        namespace=("tools:pregel-task-one",),
+                    )
+                ]
+            ),
+        )
+        resumed.subagents = AsyncItems([resumed_child])
+
+        class InspectorRenderer(RunTurnRenderer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.live_inspections = LiveInspectionStore()
+
+        renderer = InspectorRenderer()
+        result = await runner.run_turn(
+            FakeAgent([first, resumed]),
+            "delegate",
+            renderer,
+            "thread-1",
+        )
+
+        starts = [event for event in renderer.events if event[0] == "subagent_started"]
+        finishes = [event for event in renderer.events if event[0] == "subagent_finished"]
+        self.assertEqual(starts, [("subagent_started", "general-purpose [first-name]", "perform diagnostics")])
+        self.assertEqual(finishes, [("subagent_finished", "general-purpose [first-name]", "actual child answer")])
+        self.assertFalse(
+            any(
+                event[0] in {"tool_call", "tool_result", "tool_error"}
+                and event[1] == "execute"
+                for event in renderer.events
+            )
+        )
+        self.assertEqual(result.tool_calls, ["task", "execute"])
+        self.assertEqual(result.tool_results, ["diagnostic output"])
+        inspection = renderer.live_inspections.get("subagent:task-one")
+        assert inspection is not None
+        self.assertEqual(inspection.status, "DONE")
+        self.assertEqual(inspection.title, "general-purpose [first-name]")
+        self.assertEqual(inspection.events[0].text, "perform diagnostics")
+        self.assertEqual(inspection.events[-1].kind, "assistant")
+        self.assertEqual(inspection.events[-1].text, "actual child answer")
+        self.assertNotEqual(inspection.events[-1].text, inspection.events[0].text)
+        self.assertEqual(
+            [event.kind for event in inspection.events].count("tool_call"),
+            1,
+        )
+        self.assertEqual(
+            [event.kind for event in inspection.events].count("tool_result"),
+            1,
+        )
+
+    async def test_standalone_child_tool_remains_visible_without_inspector(self) -> None:
+        coordinator = SubagentInspectionCoordinator(None)
+        coordinator.register_standalone_task("task-one")
+        result = runner.TurnResult()
+        renderer = RecordingRenderer()
+        call = ToolCall(
+            "execute",
+            {"command": "whoami"},
+            "diagnostic output",
+            "execute-one",
+        )
+        call.path = ["tools:task-one"]
+
+        await consume_tool_calls(
+            AsyncItems([call]),
+            renderer,
+            result,
+            inspection=coordinator,
+        )
+
+        self.assertIn(
+            ("tool_call", "execute", {"command": "whoami"}, "execute-one"),
+            renderer.events,
+        )
+        self.assertIn(
+            ("tool_result", "execute", "diagnostic output", "execute-one"),
+            renderer.events,
+        )
 
     async def test_eval_child_messages_are_inspector_only(self) -> None:
         message = Message(
@@ -3048,6 +3315,44 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(result.tool_results, ["tool crashed"])
+
+    async def test_run_turn_maps_parallel_task_requests_by_native_cause(self) -> None:
+        stream = FakeStream(output={"messages": []})
+        stream.tool_calls = AsyncItems(
+            [
+                DocumentedToolCall("task", {"description": "first request"}, call_id="task-1"),
+                DocumentedToolCall("task", {"description": "second request"}, call_id="task-2"),
+            ]
+        )
+        first = Subagent(
+            "general-purpose [one]",
+            [ToolCall("noop", {}, "one")],
+            task_input="",
+            path=["tools:pregel-1"],
+        )
+        first.cause = {"type": "toolCall", "tool_call_id": "task-1"}
+        first.trigger_call_id = "pregel-1"
+        second = Subagent(
+            "general-purpose [two]",
+            [ToolCall("noop", {}, "two")],
+            task_input="",
+            path=["tools:pregel-2"],
+        )
+        second.cause = {"type": "toolCall", "tool_call_id": "task-2"}
+        second.trigger_call_id = "pregel-2"
+        stream.subagents = AsyncItems([second, first])
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+
+        starts = [event for event in renderer.events if event[0] == "subagent_started"]
+        self.assertEqual(
+            starts,
+            [
+                ("subagent_started", "general-purpose [two]", "second request"),
+                ("subagent_started", "general-purpose [one]", "first request"),
+            ],
+        )
 
     async def test_prepare_commands_complete_with_sanitized_results(self) -> None:
         renderer = RecordingRenderer()
@@ -4623,7 +4928,7 @@ Await further instructions.
         self.assertEqual(renderer.events[0][0], "delegation_started")
         self.assertEqual(len(renderer.events[0][1]), 2)
 
-    async def test_subagent_prints_one_header_and_final_call(self) -> None:
+    async def test_subagent_without_inspector_keeps_child_tools_visible(self) -> None:
         renderer = RecordingRenderer()
         subagent = Subagent(
             "general-purpose [one]",
@@ -4639,6 +4944,10 @@ Await further instructions.
             renderer.events,
             [
                 ("subagent_started", "general-purpose [one]", "look around"),
+                ("tool_call", "grep", {"pattern": "TODO"}, ""),
+                ("tool_call", "read_file", {"path": "ui/renderer.py"}, ""),
+                ("tool_result", "grep", "first output", ""),
+                ("tool_result", "read_file", "final output", ""),
                 ("subagent_finished", "general-purpose [one]", "final output"),
             ],
         )

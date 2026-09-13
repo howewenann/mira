@@ -22,8 +22,9 @@ class ApprovalRequest:
     decision dictionary per action request, in encounter order, using
     ``{"type": "approve"}``, ``{"type": "reject"}`` (optionally with a
     ``message``), or ``{"type": "edit", "edited_action": {"name": str,
-    "args": dict}}``. Core resumes the graph with
-    ``Command(resume={"decisions": decisions})`` without translating them.
+    "args": dict}}``. Core keeps this frontend contract flat. It uses the
+    ordinary decision payload for one interrupt and partitions decisions by
+    native interrupt ID only when LangGraph reports multiple pending interrupts.
     """
 
     interrupts: tuple[Any, ...]

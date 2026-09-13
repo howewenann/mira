@@ -10,6 +10,7 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 from langchain_quickjs import CodeInterpreterMiddleware
+from langgraph.types import Interrupt
 
 from agent.middleware import builder as middleware_builder
 from agent.middleware.code_interpreter import (
@@ -70,6 +71,123 @@ class ToolCall:
 
 
 class LiveInspectionStoreTests(unittest.TestCase):
+    def test_standalone_native_ids_bind_identical_child_actions_exactly(self) -> None:
+        class Result:
+            def __init__(self) -> None:
+                self.calls: dict[str, str] = {}
+                self.results: dict[str, str] = {}
+
+            def upsert_tool_call(self, name: str, call_id: str) -> None:
+                self.calls[call_id] = name
+
+            def record_tool_result(
+                self,
+                text: str,
+                call_id: str,
+                _name: str,
+            ) -> bool:
+                self.results[call_id] = text
+                return True
+
+        store = LiveInspectionStore()
+        result = Result()
+        coordinator = SubagentInspectionCoordinator(store, result)
+        children = [
+            SimpleNamespace(
+                cause={"type": "toolCall", "tool_call_id": f"task-{suffix}"},
+                trigger_call_id=f"pregel-{suffix}",
+                path=(f"tools:pregel-{suffix}",),
+            )
+            for suffix in ("a", "b")
+        ]
+        interrupts = [
+            Interrupt(
+                value={
+                    "action_requests": [
+                        {"name": "execute", "args": {"command": "whoami"}}
+                    ]
+                },
+                id=interrupt_id,
+            )
+            for interrupt_id in (
+                "11111111111111111111111111111111",
+                "22222222222222222222222222222222",
+            )
+        ]
+
+        for suffix, interrupt in zip(("a", "b"), interrupts, strict=True):
+            coordinator.handle_protocol_event(
+                {
+                    "method": "values",
+                    "params": {
+                        "namespace": [f"tools:pregel-{suffix}"],
+                        "data": {
+                            "messages": [
+                                {"type": "human", "content": "same request"},
+                                {
+                                    "type": "ai",
+                                    "content": "",
+                                    "tool_calls": [
+                                        {
+                                            "name": "execute",
+                                            "args": {"command": "whoami"},
+                                            "id": f"execute-{suffix}",
+                                        }
+                                    ],
+                                },
+                            ]
+                        },
+                        "interrupts": [interrupt],
+                    },
+                }
+            )
+
+        first_id, first_row, _first = coordinator.standalone_started(
+            children[0], "general-purpose [first]", "same request"
+        )
+        second_id, second_row, _first = coordinator.standalone_started(
+            children[1], "general-purpose [second]", "same request"
+        )
+
+        self.assertEqual((first_row, second_row), ("task-a", "task-b"))
+        self.assertEqual(result.calls, {"execute-a": "execute", "execute-b": "execute"})
+        bindings = coordinator.standalone_interrupt_actions()
+        self.assertEqual(bindings[(interrupts[0].id, 0)]["row_id"], "task-a")
+        self.assertEqual(bindings[(interrupts[1].id, 0)]["row_id"], "task-b")
+
+        for suffix in ("a", "b"):
+            coordinator.handle_protocol_event(
+                {
+                    "method": "values",
+                    "params": {
+                        "namespace": [f"tools:pregel-{suffix}"],
+                        "data": {
+                            "messages": [
+                                {
+                                    "type": "tool",
+                                    "content": f"result-{suffix}",
+                                    "name": "execute",
+                                    "tool_call_id": f"execute-{suffix}",
+                                }
+                            ]
+                        },
+                    },
+                }
+            )
+
+        first = store.get(first_id)
+        second = store.get(second_id)
+        assert first is not None and second is not None
+        self.assertEqual(
+            [(event.kind, event.call_id, event.text) for event in first.events[1:]],
+            [
+                ("tool_call", "execute-a", ""),
+                ("tool_result", "execute-a", "result-a"),
+            ],
+        )
+        self.assertEqual(second.events[-1].text, "result-b")
+        self.assertEqual(result.results, {"execute-a": "result-a", "execute-b": "result-b"})
+
     def test_request_is_first_and_parent_facing_response_is_last(self) -> None:
         store = LiveInspectionStore()
         inspection_id = store.allocate_id("task-call")
@@ -85,6 +203,42 @@ class LiveInspectionStoreTests(unittest.TestCase):
         self.assertEqual(inspection.events[0], InspectionEvent("user", text="Complete unshortened request"))
         self.assertEqual(inspection.events[1].text, "first second")
         self.assertEqual(inspection.events[-1], InspectionEvent("assistant", text="exact parent response"))
+
+    def test_parent_failure_closes_pending_standalone_tool(self) -> None:
+        store = LiveInspectionStore()
+        coordinator = SubagentInspectionCoordinator(store)
+        inspection_id, _row_id, _first = coordinator.standalone_started(
+            SimpleNamespace(
+                trigger_call_id="task-call",
+                path=("tools:task-call",),
+            ),
+            "general-purpose [fox]",
+            "run diagnostics",
+        )
+        store.append(
+            inspection_id,
+            InspectionEvent(
+                "tool_call",
+                name="execute",
+                args={"command": "whoami"},
+                call_id="execute-call",
+            ),
+        )
+
+        coordinator.cancel_standalone("parent failed")
+
+        inspection = store.get(inspection_id)
+        assert inspection is not None
+        self.assertEqual(inspection.status, "ERROR")
+        self.assertIn(
+            InspectionEvent(
+                "tool_error",
+                text="parent failed",
+                name="execute",
+                call_id="execute-call",
+            ),
+            inspection.events,
+        )
 
     def test_fully_streamed_final_response_is_not_duplicated(self) -> None:
         store = LiveInspectionStore()

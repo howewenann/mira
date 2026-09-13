@@ -14,6 +14,7 @@ from core.context.usage import field as value_field
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.output import (
+    call_renderer,
     is_tool_message,
     message_text,
     normalize_response_delta,
@@ -62,14 +63,14 @@ class SubagentInspectionCapture:
         self.tool_call(name, args, call_id=call_id, **kwargs)
 
     def tool_result(self, name: str, result: str, call_id: str = "", **_kwargs: Any) -> None:
-        self._append(
+        self._append_tool_completion(
             InspectionEvent("tool_result", text=str(result), name=name, call_id=call_id)
         )
 
     completed_tool_result = tool_result
 
     def tool_error(self, name: str, error: str, call_id: str = "", **_kwargs: Any) -> None:
-        self._append(
+        self._append_tool_completion(
             InspectionEvent("tool_error", text=str(error), name=name, call_id=call_id)
         )
 
@@ -86,9 +87,25 @@ class SubagentInspectionCapture:
                 final_response=response,
             )
 
-    def fail(self, error: str, *, status: str = "ERROR") -> None:
+    def fail(
+        self,
+        error: str,
+        *,
+        status: str = "ERROR",
+        final_response: str | None = None,
+    ) -> None:
         if self.store is not None:
-            self.store.finish(self.inspection_id, status=status, error=str(error))
+            _close_pending_tools(
+                self.store,
+                self.inspection_id,
+                str(error or "cancelled"),
+            )
+            self.store.finish(
+                self.inspection_id,
+                status=status,
+                error=str(error),
+                final_response=final_response,
+            )
 
     def model_stream_finished(self) -> None:
         """The next event naturally closes the current ChatLog phase."""
@@ -97,8 +114,19 @@ class SubagentInspectionCapture:
         if self.store is not None:
             self.store.append(self.inspection_id, event)
 
+    def _append_tool_completion(self, event: InspectionEvent) -> None:
+        if self.store is None:
+            return
+        self.store.upsert_tool_completion(self.inspection_id, event)
 
-async def capture_child_streams(subagent: Any, capture: SubagentInspectionCapture) -> None:
+
+async def capture_child_streams(
+    subagent: Any,
+    capture: SubagentInspectionCapture,
+    *,
+    tool_renderer: Any | None = None,
+    result: Any | None = None,
+) -> None:
     """Observe native scoped projections without owning child lifecycle."""
     consumers = []
     messages = getattr(subagent, "messages", None)
@@ -106,7 +134,13 @@ async def capture_child_streams(subagent: Any, capture: SubagentInspectionCaptur
         consumers.append(consume_messages(messages, capture, render_normal_tools=False))
     tool_calls = getattr(subagent, "tool_calls", None)
     if tool_calls is not None:
-        consumers.append(consume_tool_calls(tool_calls, capture))
+        consumers.append(
+            consume_tool_calls(
+                tool_calls,
+                tool_renderer or capture,
+                result,
+            )
+        )
     if consumers:
         await asyncio.gather(*(_isolate_capture(item, capture) for item in consumers))
 
@@ -122,10 +156,17 @@ async def _isolate_capture(awaitable: Any, capture: SubagentInspectionCapture) -
 
 
 class SubagentInspectionCoordinator:
-    """Correlate QuickJS lifecycle IDs with restored native child handles."""
+    """Correlate inspection records with native child handles and namespaces."""
 
-    def __init__(self, store: LiveInspectionStore | None) -> None:
+    def __init__(
+        self,
+        store: LiveInspectionStore | None,
+        result: Any | None = None,
+        renderer: Any | None = None,
+    ) -> None:
         self.store = store
+        self.result = result
+        self.renderer = renderer
         self._inspection_by_row: dict[str, str] = {}
         self._eval_task_call_ids: set[str] = set()
         self._native_row_by_trigger: dict[str, str] = {}
@@ -141,12 +182,20 @@ class SubagentInspectionCoordinator:
         self._pass_tool_calls: dict[str, dict[str, Any]] = {}
         self._pass_interrupt_calls: list[dict[str, Any]] = []
         self._seen_pass_interrupt_actions: set[tuple[str, str, int]] = set()
+        self._standalone_inspection_by_row: dict[str, str] = {}
+        self._standalone_namespace_by_row: dict[str, tuple[str, ...]] = {}
+        self._standalone_started_rows: set[str] = set()
+        self._standalone_task_rows: set[str] = set()
+        self._standalone_tasks_by_call_id: dict[str, str] = {}
+        self._standalone_tool_rows: dict[str, str] = {}
+        self._standalone_interrupt_actions: dict[tuple[str, int], dict[str, Any]] = {}
 
     def begin_pass(self) -> None:
         """Forget interrupt candidates from the preceding HITL stream pass."""
         self._pass_tool_calls.clear()
         self._pass_interrupt_calls.clear()
         self._seen_pass_interrupt_actions.clear()
+        self._standalone_interrupt_actions.clear()
 
     def is_eval_tool_call(self, call_id: str) -> bool:
         """Return whether a projected call belongs to an Eval child row."""
@@ -160,15 +209,17 @@ class SubagentInspectionCoordinator:
         """Return actions interrupted inside Eval children in this pass."""
         return list(self._pass_interrupt_calls)
 
-    def update_eval_tool_call(
+    def update_hidden_tool_call(
         self,
         row_id: str,
         call_id: str,
         name: str,
         args: Any,
     ) -> None:
-        """Reflect an approved edit in the owning Inspector transcript."""
-        inspection_id = self._inspection_by_row.get(row_id, "")
+        """Reflect an approval edit in either kind of child Inspector."""
+        inspection_id = self._standalone_inspection_by_row.get(row_id, "")
+        if not inspection_id:
+            inspection_id = self._inspection_by_row.get(row_id, "")
         if inspection_id and self.store is not None:
             self.store.upsert_tool_call(
                 inspection_id,
@@ -178,6 +229,100 @@ class SubagentInspectionCoordinator:
                     args=args,
                     call_id=call_id,
                 ),
+            )
+
+    def standalone_started(
+        self,
+        subagent: Any,
+        title: str,
+        task: str,
+    ) -> tuple[str, str, bool]:
+        """Start or recover one standalone task child across HITL passes."""
+        row_id = native_inspection_hint(subagent)
+        if not row_id:
+            inspection_id = self.store.allocate_id() if self.store is not None else ""
+            if inspection_id and self.store is not None:
+                self.store.start(inspection_id, title, task)
+            return inspection_id, "", True
+
+        self._standalone_task_rows.add(row_id)
+
+        path = getattr(subagent, "path", ())
+        namespace = (
+            tuple(str(part) for part in path)
+            if isinstance(path, (list, tuple))
+            else ()
+        )
+        if namespace:
+            self._standalone_namespace_by_row[row_id] = namespace
+
+        inspection_id = self._standalone_inspection_by_row.get(row_id, "")
+        if not inspection_id and self.store is not None:
+            inspection_id = self.store.allocate_id(row_id)
+            self._standalone_inspection_by_row[row_id] = inspection_id
+        exact_task = task or self._standalone_tasks_by_call_id.get(row_id, "")
+        if inspection_id and self.store is not None:
+            self.store.start(inspection_id, title, exact_task)
+
+        first_start = row_id not in self._standalone_started_rows
+        self._standalone_started_rows.add(row_id)
+        self._drain_pending_standalone_events()
+        return inspection_id, row_id, first_start
+
+    def register_standalone_task(self, call_id: str, task: str = "") -> None:
+        """Remember a root task identity before its child handle is projected."""
+        if call_id:
+            self._standalone_task_rows.add(call_id)
+            if task:
+                self._standalone_tasks_by_call_id[call_id] = task
+
+    def standalone_row_for_namespace(self, namespace: tuple[str, ...]) -> str:
+        """Return the inspected standalone owner of a native tool namespace."""
+        if self.store is None:
+            return ""
+        return self._standalone_row_for_native_namespace(namespace)
+
+    def _standalone_row_for_native_namespace(
+        self,
+        namespace: tuple[str, ...],
+    ) -> str:
+        if not namespace:
+            return ""
+        for part in namespace:
+            _name, separator, trigger = part.partition(":")
+            if separator and trigger in self._standalone_task_rows:
+                self._standalone_namespace_by_row.setdefault(trigger, namespace)
+                return trigger
+        matches = [
+            (len(parent), row_id)
+            for row_id, parent in self._standalone_namespace_by_row.items()
+            if len(parent) <= len(namespace) and namespace[: len(parent)] == parent
+        ]
+        return max(matches, default=(0, ""))[1]
+
+    def standalone_row_for_tool_call(self, call_id: str) -> str:
+        """Return the exact standalone owner recorded for a native tool call."""
+        if self.store is None or not call_id:
+            return ""
+        return self._standalone_tool_rows.get(call_id, "")
+
+    def standalone_interrupt_actions(self) -> dict[tuple[str, int], dict[str, Any]]:
+        """Return exact namespaced standalone approval ownership for this pass."""
+        return dict(self._standalone_interrupt_actions)
+
+    def cancel_standalone(self, error: str = "") -> None:
+        """Close standalone Inspector activity after its parent turn stops."""
+        if self.store is None:
+            return
+        for inspection_id in set(self._standalone_inspection_by_row.values()):
+            current = self.store.get(inspection_id)
+            if current is None or current.status != "RUNNING":
+                continue
+            _close_pending_tools(self.store, inspection_id, error or "cancelled")
+            self.store.finish(
+                inspection_id,
+                status="ERROR" if error else "CANCELLED",
+                error=error,
             )
 
     def eval_started(self, event: dict[str, Any]) -> str:
@@ -287,10 +432,120 @@ class SubagentInspectionCoordinator:
         if not namespace or not isinstance(messages, list) or not messages:
             return
         self._pending_snapshots[namespace] = messages
+        standalone_row = self._standalone_row_for_native_namespace(namespace)
+        if standalone_row:
+            self._observe_standalone_snapshot(standalone_row, messages)
+            self._record_standalone_interrupts(
+                standalone_row,
+                params.get("interrupts"),
+            )
+            return
         if namespace not in self._protocol_row_by_namespace:
             self._bind_protocol_namespace(namespace, messages)
         self._emit_protocol_snapshot(namespace, messages)
         self._record_eval_interrupts(namespace, params.get("interrupts"))
+
+    def _drain_pending_standalone_events(self) -> None:
+        for namespace, messages in self._pending_snapshots.items():
+            row_id = self._standalone_row_for_native_namespace(namespace)
+            if row_id:
+                self._observe_standalone_snapshot(row_id, messages)
+        for namespace in list(self._pending_interrupts):
+            row_id = self._standalone_row_for_native_namespace(namespace)
+            if not row_id:
+                continue
+            interrupts = self._pending_interrupts.pop(namespace)
+            self._record_standalone_interrupts(row_id, interrupts)
+
+    def _observe_standalone_snapshot(
+        self,
+        row_id: str,
+        messages: list[Any],
+    ) -> None:
+        """Recover exact child tool lifecycles from durable graph state."""
+        inspection_id = self._standalone_inspection_by_row.get(row_id, "")
+        task_input = _first_user_text(messages)
+        if task_input and inspection_id and self.store is not None:
+            current = self.store.get(inspection_id)
+            if (
+                current is not None
+                and current.events
+                and current.events[0].kind == "user"
+                and not current.events[0].text
+            ):
+                self.store.update_task(inspection_id, task_input)
+        for message in messages:
+            if str(value_field(message, "type") or "") in {"ai", "assistant"}:
+                for event in _inspection_events_from_message(message):
+                    if event.kind != "tool_call" or not event.call_id:
+                        continue
+                    self._standalone_tool_rows[event.call_id] = row_id
+                    if inspection_id and self.store is not None:
+                        self.store.upsert_tool_call(inspection_id, event)
+                    record = getattr(self.result, "record_tool_call", None)
+                    is_new = bool(callable(record) and record(event.name, event.call_id))
+                    if not is_new:
+                        upsert = getattr(self.result, "upsert_tool_call", None)
+                        if callable(upsert):
+                            upsert(event.name, event.call_id)
+                    elif self.store is None and self.renderer is not None:
+                        call_renderer(
+                            self.renderer,
+                            "tool_call",
+                            event.name,
+                            event.args,
+                            call_id=event.call_id,
+                        )
+                continue
+            for event in _inspection_events_from_message(message):
+                if event.kind not in {"tool_result", "tool_error"} or not event.call_id:
+                    continue
+                if inspection_id and self.store is not None:
+                    self.store.upsert_tool_completion(inspection_id, event)
+                record = getattr(self.result, "record_tool_result", None)
+                is_new = bool(
+                    callable(record)
+                    and record(event.text, event.call_id, event.name)
+                )
+                if is_new and self.store is None and self.renderer is not None:
+                    call_renderer(
+                        self.renderer,
+                        "completed_tool_error"
+                        if event.kind == "tool_error"
+                        else "completed_tool_result",
+                        event.name,
+                        event.text,
+                        call_id=event.call_id,
+                    )
+
+    def _record_standalone_interrupts(
+        self,
+        row_id: str,
+        interrupts: Any,
+    ) -> None:
+        if self.store is None or not interrupts:
+            return
+        for interrupt in interrupts:
+            value = getattr(interrupt, "value", interrupt)
+            actions = value.get("action_requests") if isinstance(value, dict) else None
+            if not isinstance(actions, list):
+                continue
+            interrupt_id = str(getattr(interrupt, "id", "") or "")
+            if not interrupt_id and isinstance(interrupt, dict):
+                interrupt_id = str(interrupt.get("id") or "")
+            if not interrupt_id:
+                continue
+            for index, action in enumerate(actions):
+                if not isinstance(action, dict):
+                    continue
+                self._standalone_interrupt_actions[(interrupt_id, index)] = {
+                    "name": str(action.get("name") or "tool"),
+                    "args": action.get("args", {}),
+                    "call_id": "",
+                    "row_id": row_id,
+                    "result_index": None,
+                    "hidden": True,
+                }
 
     def _bind_pending_snapshots(self) -> None:
         for namespace, messages in self._pending_snapshots.items():
@@ -623,7 +878,10 @@ def live_inspection_store(renderer: Any) -> LiveInspectionStore | None:
 
 
 def native_inspection_hint(subagent: Any) -> str:
-    """Prefer LangGraph's triggering tool call, then its scoped path."""
+    """Prefer the native parent tool call, then scheduler and path identities."""
+    parent_call_id = native_parent_tool_call_id(subagent)
+    if parent_call_id:
+        return parent_call_id
     trigger = str(getattr(subagent, "trigger_call_id", "") or "")
     if trigger:
         return trigger
@@ -631,6 +889,45 @@ def native_inspection_hint(subagent: Any) -> str:
     if isinstance(path, (list, tuple)) and path:
         return "/".join(str(item) for item in path)
     return ""
+
+
+def native_parent_tool_call_id(subagent: Any) -> str:
+    """Return the exact tool-call cause exposed by LangChain's child handle."""
+    cause = getattr(subagent, "cause", None)
+    if not isinstance(cause, dict) or cause.get("type") != "toolCall":
+        return ""
+    return str(cause.get("tool_call_id") or "")
+
+
+def _close_pending_tools(
+    store: LiveInspectionStore,
+    inspection_id: str,
+    message: str,
+) -> None:
+    """Add terminal errors for Inspector tool calls without a completion."""
+    current = store.get(inspection_id)
+    if current is None:
+        return
+    completed: dict[tuple[str, str], int] = defaultdict(int)
+    for event in current.events:
+        if event.kind in {"tool_result", "tool_error"}:
+            completed[(event.call_id, event.name)] += 1
+    for event in current.events:
+        if event.kind != "tool_call":
+            continue
+        key = (event.call_id, event.name)
+        if completed[key]:
+            completed[key] -= 1
+            continue
+        store.append(
+            inspection_id,
+            InspectionEvent(
+                "tool_error",
+                text=message,
+                name=event.name,
+                call_id=event.call_id,
+            ),
+        )
 
 
 class EvalInspectionTransformer(StreamTransformer):
@@ -670,4 +967,5 @@ __all__ = [
     "capture_child_streams",
     "live_inspection_store",
     "native_inspection_hint",
+    "native_parent_tool_call_id",
 ]

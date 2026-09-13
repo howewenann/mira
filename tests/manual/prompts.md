@@ -1671,14 +1671,21 @@ Use a disposable workspace with a configured model and enabled subagents.
    returned to the parent is the final assistant bubble. Close and reopen the
    Inspector while the child is running; content accumulated while closed is
    present and continues live, while the parent ChatLog is unchanged.
-3. Ask MIRA to use `eval` with two concurrent `task()` calls. Expected: each Eval
+3. Enable `execute`, then ask for three parallel standalone task subagents that
+   each run a distinctive read-only command. Approve, edit, and reject one
+   command respectively. Expected: exactly three rows and three Inspector
+   records persist across the approval pass, each keeps its original cool name,
+   and no nested execute bubble appears in the main TUI transcript. Each
+   Inspector shows the matching decision/result and the real child response;
+   no response copies the delegated request.
+4. Ask MIRA to use `eval` with two concurrent `task()` calls. Expected: each Eval
    row is clickable and opens its own child transcript, with no duplicate rows
    for the native child streams. Successful rows reach DONE and failed rows
    reach ERROR with stable elapsed durations and no running timer left behind.
-4. Cancel a turn containing an active Eval task, then repeat with an interrupted
+5. Cancel a turn containing an active Eval task, then repeat with an interrupted
    tool approval. Expected: active rows finalize using MIRA's existing
    cancellation/interruption behavior, elapsed durations stop, the Inspector
    remains process-local, and no inspection events appear in the session JSON.
-5. Start a new process and resume the session. Expected: normal parent transcript
+6. Start a new process and resume the session. Expected: normal parent transcript
    replay works exactly as before; Phase 1 does not restore Inspector content or
    provide historical-row inspection.

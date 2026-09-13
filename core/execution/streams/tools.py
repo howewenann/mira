@@ -40,6 +40,7 @@ class ProjectedToolError:
     text: str
     call_id: str
     identity: dict[str, Any]
+    render: bool = True
 
 
 async def consume_tool_calls(
@@ -64,6 +65,11 @@ async def consume_tool_calls(
                 inspection is not None
                 and inspection.is_eval_tool_call(call_id)
             )
+            standalone_row = ""
+            if inspection is not None:
+                standalone_row = inspection.standalone_row_for_namespace(
+                    identity["namespace"]
+                ) or inspection.standalone_row_for_tool_call(call_id)
             if eval_owned:
                 if hidden_eval_calls is not None:
                     row_id = str(
@@ -79,16 +85,43 @@ async def consume_tool_calls(
                         }
                     )
                 continue
+            if (
+                inspection is not None
+                and name == "task"
+                and not identity["namespace"]
+            ):
+                args = normalized.get("args")
+                inspection.register_standalone_task(
+                    call_id,
+                    str(args.get("description") or "")
+                    if isinstance(args, dict)
+                    else "",
+                )
             is_new_call = True
             if result is not None:
                 is_new_call = result.record_tool_call(name, call_id)
 
+            if standalone_row and hidden_eval_calls is not None:
+                hidden_eval_calls.append(
+                    {
+                        "name": name,
+                        "args": normalized.get("args", {}),
+                        "call_id": call_id,
+                        "row_id": standalone_row,
+                        "result_index": (
+                            len(result.tool_calls) - 1
+                            if is_new_call and result is not None
+                            else None
+                        ),
+                    }
+                )
+
             if name == "task":
-                if is_new_call:
+                if is_new_call and not standalone_row:
                     call_renderer(renderer, "delegation_started", [normalized], **identity)
                 continue
 
-            if is_new_call:
+            if is_new_call and not standalone_row:
                 call_renderer(
                     renderer,
                     "tool_call",
@@ -110,6 +143,7 @@ async def consume_tool_calls(
                         result,
                         identity=identity,
                         projected_errors=projected_errors,
+                        render=not bool(standalone_row),
                     ),
                     name=f"mira-tool-result-{call_id or name}",
                 )
@@ -140,6 +174,7 @@ async def watch_tool_result(
     *,
     identity: dict[str, Any] | None = None,
     projected_errors: list[ProjectedToolError] | None = None,
+    render: bool = True,
 ) -> None:
     """Follow one call to completion and deliver a visible non-control result."""
     output, is_error, native_error = await tool_call_completion(call)
@@ -169,6 +204,7 @@ async def watch_tool_result(
                 text=tool_output_text(output) or "tool failed",
                 call_id=call_id,
                 identity=identity or {},
+                render=render,
             )
         )
         return
@@ -182,6 +218,7 @@ async def watch_tool_result(
         call_id=call_id,
         is_error=is_error,
         identity=identity,
+        render=render,
     )
 
 
@@ -200,6 +237,7 @@ def render_projected_tool_errors(
             call_id=error.call_id,
             is_error=True,
             identity=error.identity,
+            render=error.render,
         )
 
 
@@ -359,6 +397,7 @@ def render_tool_completion(
     recovered: bool = False,
     occurrence: int | None = None,
     identity: dict[str, Any] | None = None,
+    render: bool = True,
 ) -> bool:
     """Record and render one deduplicated live or recovered tool completion."""
     if result is not None and not result.record_tool_result(
@@ -368,6 +407,9 @@ def render_tool_completion(
         occurrence=occurrence,
     ):
         return False
+
+    if not render:
+        return True
 
     prefix = "recovered_" if recovered else "completed_"
     method = f"{prefix}tool_error" if is_error else f"{prefix}tool_result"

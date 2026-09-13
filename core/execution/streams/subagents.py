@@ -12,7 +12,7 @@ from core.execution.inspection.subagents import (
     SubagentInspectionCoordinator,
     capture_child_streams,
     live_inspection_store,
-    native_inspection_hint,
+    native_parent_tool_call_id,
 )
 from core.execution.streams.output import message_text, visible_message_text
 from core.execution.streams.output import call_renderer as call_frontend
@@ -52,7 +52,9 @@ async def consume_subagents(
                         renderer.start_subagent_live()
                     if not getattr(renderer, "manages_subagent_animation", False):
                         animation = asyncio.create_task(animate_subagents(renderer))
-                task = asyncio.create_task(consume_subagent(subagent, renderer))
+                task = asyncio.create_task(
+                    consume_subagent(subagent, renderer, inspection)
+                )
             tasks.append(task)
             await asyncio.sleep(0)
 
@@ -135,12 +137,21 @@ async def animate_subagents(renderer: Any) -> None:
         await asyncio.sleep(0.12)
 
 
-async def consume_subagent(subagent: Any, renderer: Any) -> None:
+async def consume_subagent(
+    subagent: Any,
+    renderer: Any,
+    inspection: SubagentInspectionCoordinator | None = None,
+) -> None:
     """Render one subagent lifecycle while observing its native child streams."""
     name = renderer.subagent_label(subagent)
     task_input = getattr(subagent, "task_input", "")
     store = live_inspection_store(renderer)
-    inspection_id = store.allocate_id(native_inspection_hint(subagent)) if store else ""
+    coordinator = inspection or SubagentInspectionCoordinator(store)
+    inspection_id, row_id, first_start = coordinator.standalone_started(
+        subagent,
+        name,
+        task_input,
+    )
     capture = SubagentInspectionCapture(store, inspection_id)
     origin = subagent_origin(subagent)
     path = getattr(subagent, "path", ())
@@ -148,20 +159,29 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
     metadata = {
         "graph_name": str(getattr(subagent, "graph_name", "") or ""),
     }
-    call_frontend(
-        renderer,
-        "subagent_started",
-        name,
-        task_input,
-        origin=origin,
-        namespace=namespace,
-        metadata=metadata,
-        inspection_id=inspection_id,
-    )
+    parent_call_id = native_parent_tool_call_id(subagent)
+    if first_start:
+        call_frontend(
+            renderer,
+            "subagent_started",
+            name,
+            task_input,
+            origin=origin,
+            namespace=namespace,
+            metadata=metadata,
+            row_id=row_id,
+            inspection_id=inspection_id,
+            parent_call_id=parent_call_id,
+        )
 
     try:
         _, result = await asyncio.gather(
-            capture_child_streams(subagent, capture),
+            capture_child_streams(
+                subagent,
+                capture,
+                tool_renderer=renderer if store is None else capture,
+                result=coordinator.result,
+            ),
             subagent_result(subagent),
         )
     except asyncio.CancelledError:
@@ -170,13 +190,10 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
     except Exception as exc:
         result = f"error: {exc}"
         if store is not None:
-            store.finish(
-                inspection_id,
-                status="ERROR",
-                error=result,
-                final_response=result,
-            )
+            capture.fail(result, final_response=result)
     else:
+        if str(getattr(subagent, "status", "") or "") == "interrupted":
+            return
         capture.ensure_final_response(str(result))
     call_frontend(
         renderer,
@@ -185,6 +202,7 @@ async def consume_subagent(subagent: Any, renderer: Any) -> None:
         result=str(result),
         namespace=namespace,
         metadata=metadata,
+        row_id=row_id,
         inspection_id=inspection_id,
     )
 
@@ -263,6 +281,13 @@ async def subagent_result(subagent: Any) -> str:
             return ""
 
         for message in reversed(messages):
+            message_type = (
+                message.get("type")
+                if isinstance(message, dict)
+                else getattr(message, "type", "")
+            )
+            if str(message_type or "") in {"human", "user", "tool"}:
+                continue
             text = visible_message_text(message) or message_text(message)
             if text:
                 return text

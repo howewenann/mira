@@ -11167,7 +11167,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     call_id="read-one",
                 ),
             )
-            app.live_inspections.append(
+            app.live_inspections.upsert_tool_completion(
                 inspection_id,
                 InspectionEvent(
                     "tool_result",
