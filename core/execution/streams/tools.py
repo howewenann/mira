@@ -119,6 +119,21 @@ async def consume_tool_calls(
             if name == "task":
                 if is_new_call and not standalone_row:
                     call_renderer(renderer, "delegation_started", [normalized], **identity)
+                if not standalone_row and supports_live_task_completion(call):
+                    watchers.add(
+                        asyncio.create_task(
+                            watch_tool_result(
+                                call,
+                                name,
+                                call_id,
+                                renderer,
+                                result,
+                                identity=identity,
+                                projected_errors=projected_errors,
+                            ),
+                            name=f"mira-tool-result-{call_id or name}",
+                        )
+                    )
                 continue
 
             if is_new_call and not standalone_row:
@@ -165,6 +180,11 @@ def supports_completion_watch(call: Any) -> bool:
     return field(call, "output_deltas") is not None or hasattr(call, "__aiter__")
 
 
+def supports_live_task_completion(call: Any) -> bool:
+    """Use only a task's native live channel, never an opaque output awaitable."""
+    return field(call, "output_deltas") is not None or hasattr(call, "__aiter__")
+
+
 async def watch_tool_result(
     call: Any,
     name: str,
@@ -189,6 +209,20 @@ async def watch_tool_result(
                 call_id=call_id,
                 identity=identity,
             )
+        elif name == "task":
+            message = command_tool_message(output, call_id)
+            if message is not None:
+                native_error = is_error_tool_message(message)
+                render_tool_completion(
+                    renderer,
+                    result,
+                    name=name,
+                    text=tool_output_text(message),
+                    call_id=call_id,
+                    is_error=native_error,
+                    identity=identity,
+                    render=render,
+                )
         return
     if name in CONTROL_TOOLS and not native_error:
         # Pinned LangGraph projects successful control-flow interrupts through
@@ -519,6 +553,23 @@ def is_error_tool_message(value: Any) -> bool:
     """Return whether a native ToolMessage carries error status."""
     is_tool = isinstance(value, ToolMessage) or field(value, "type") == "tool"
     return is_tool and str(field(value, "status") or "") == "error"
+
+
+def command_tool_message(command: Command, call_id: str) -> Any | None:
+    """Return the task result embedded in a DeepAgents state-update command."""
+    update = field(command, "update")
+    messages = update.get("messages") if isinstance(update, dict) else None
+    if not isinstance(messages, (list, tuple)):
+        return None
+    fallback = None
+    for message in messages:
+        if not (isinstance(message, ToolMessage) or field(message, "type") == "tool"):
+            continue
+        if fallback is None:
+            fallback = message
+        if call_id and str(field(message, "tool_call_id") or "") == call_id:
+            return message
+    return fallback if not call_id else None
 
 
 async def async_items(value: Any) -> Any:

@@ -11436,18 +11436,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.live_inspections._items, {})
                 bubbles = list(app.query(ToolBubble))
                 self.assertEqual(len(bubbles), 4)
-                self.assertEqual(bubbles[0].subagents_anchor.label, "Subagents · 1")
-                self.assertEqual(bubbles[1].subagents_anchor.label, "Subagents · 2")
-                self.assertEqual(bubbles[2].subagents_anchor.label, "")
-                self.assertEqual(bubbles[3].subagents_anchor.label, "")
+                self.assertIsInstance(bubbles[0].subagents_anchor, Button)
+                self.assertEqual(bubbles[0].subagents_anchor.label.plain, "Subagents · 1")
+                self.assertEqual(bubbles[1].subagents_anchor.label.plain, "Subagents · 2")
+                self.assertEqual(bubbles[2].subagents_anchor.label.plain, "")
+                self.assertEqual(bubbles[3].subagents_anchor.label.plain, "")
                 self.assertFalse(bubbles[0].subagents_anchor.can_focus)
+                self.assertEqual(bubbles[0].subagents_anchor.styles.margin.top, 1)
 
                 bubbles[0].subagents_anchor.scroll_visible()
                 await pilot.pause()
                 await pilot.click(bubbles[0].subagents_anchor)
                 await pilot.pause()
+                self.assertFalse(bubbles[0].subagents_anchor.has_focus)
                 panel = app.query_one(SubagentsPanel)
                 self.assertEqual(list(panel._records), ["task-one"])
+
                 standalone = panel._records["task-one"]
                 self.assertEqual(standalone.name, "researcher [violet-fox]")
                 self.assertEqual(standalone.hint, "the complete standalone request")
@@ -11494,6 +11498,36 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.click(bubbles[0].subagents_anchor)
                 await pilot.pause()
                 self.assertEqual(list(panel._records), ["task-one"])
+
+    async def test_task_result_then_assistant_deltas_render_incrementally(self) -> None:
+        """Native task completion should precede an unbuffered assistant stream."""
+        app = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            chat = app.query_one("#chat-log", ChatLog)
+            app.tool_call("task", {"description": "inspect timing"}, call_id="task-timing")
+            task = chat._tool_blocks["id:task-timing"]
+
+            app.subagent_finished("researcher [violet-fox]", "child output", row_id="task-timing")
+            await pilot.pause()
+            self.assertFalse(task["terminal"])
+
+            app.completed_tool_result("task", "authoritative output", call_id="task-timing")
+            await pilot.pause()
+            self.assertTrue(task["terminal"])
+            self.assertIn("authoritative output", renderable_plain(task["widget"]))
+            self.assertIsNone(chat._assistant_block)
+
+            app.text_delta("First")
+            await pilot.pause()
+            assistant = chat._assistant_block
+            self.assertIsNotNone(assistant)
+            self.assertEqual(chat._assistant_text, "First")
+
+            app.text_delta(" second")
+            await pilot.pause()
+            self.assertIs(chat._assistant_block, assistant)
+            self.assertEqual(chat._assistant_text, "First second")
 
 
 if __name__ == "__main__":

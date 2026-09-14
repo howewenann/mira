@@ -2018,18 +2018,27 @@ Button.settings-access-back:hover {
     color: #98a5ac;
 }
 
-.tool-subagents-anchor {
+Button.tool-subagents-anchor {
     display: none;
     width: auto;
+    min-width: 0;
     height: 1;
-    margin-top: 0;
+    min-height: 1;
+    margin: 1 0 0 0;
+    padding: 0 1;
+    border: none;
+    content-align: center middle;
+    text-align: center;
+    background: #211A31;
     color: #B7A4E8;
-    text-style: bold;
+    text-style: none;
 }
 
-.tool-subagents-anchor:hover {
+Button.tool-subagents-anchor:hover {
+    border: none;
     color: #ECE7FF;
     background: #2A2440;
+    text-style: none;
 }
 
 .message.tool-result {

@@ -15,7 +15,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.events import Click
 from textual.message import Message
-from textual.widgets import Collapsible, Static, TextArea
+from textual.widgets import Button, Collapsible, Static, TextArea
 
 from core.execution.streams.rubric import elapsed_ms, format_elapsed
 from ui.shared.terminal.spinners import SPINNER_FRAMES
@@ -165,8 +165,8 @@ class ToolArgumentTextArea(TextArea):
         )
 
 
-class SubagentHistoryAnchor(Static):
-    """Mouse-only link to persisted child inspection records."""
+class SubagentHistoryAnchor(Button):
+    """Compact mouse-only button for persisted child inspection records."""
 
     can_focus = False
 
@@ -176,19 +176,19 @@ class SubagentHistoryAnchor(Static):
             self.origin_event_id = origin_event_id
 
     def __init__(self) -> None:
-        super().__init__("", classes="tool-subagents-anchor")
+        super().__init__("", classes="tool-subagents-anchor", compact=True)
         self.origin_event_id = 0
-        self.label = ""
+        self.label_text = ""
         self.styles.display = "none"
 
     def show_count(self, origin_event_id: int, count: int, *, terminal: bool) -> None:
         self.origin_event_id = origin_event_id
         visible = terminal and origin_event_id > 0 and count > 0
-        self.label = f"Subagents · {count}" if visible else ""
-        self.update(self.label)
+        self.label_text = f"Subagents · {count}" if visible else ""
+        self.label = self.label_text
         self.styles.display = "block" if visible else "none"
 
-    def on_click(self, event: Click) -> None:
+    def on_button_pressed(self, event: Button.Pressed) -> None:
         if self.origin_event_id:
             event.stop()
             self.post_message(self.Requested(self.origin_event_id))
@@ -234,9 +234,9 @@ class ToolBubble(Vertical):
             if section.plain:
                 rendered.append("\n")
                 rendered.append_text(section)
-        if self.subagents_anchor.label:
+        if self.subagents_anchor.label_text:
             rendered.append("\n")
-            rendered.append(self.subagents_anchor.label)
+            rendered.append(self.subagents_anchor.label_text)
         return rendered
 
     def update_call(self, name: str, args: Any, *, draft: bool) -> None:

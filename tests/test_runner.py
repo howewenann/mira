@@ -2351,6 +2351,23 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             interrupts=[interrupt],
         )
         resumed = FakeStream(output={"messages": [OutputMessage("one")]})
+        resumed.tool_calls = AsyncItems(
+            [
+                DocumentedToolCall(
+                    "task",
+                    {"description": description},
+                    output_deltas=AsyncItems([]),
+                    output=Command(
+                        update={
+                            "messages": [
+                                ToolMessage(content="one", tool_call_id="task-1")
+                            ]
+                        }
+                    ),
+                    call_id="task-1",
+                )
+            ]
+        )
         resumed.subagents = AsyncItems(
             [
                 Subagent(
@@ -2378,6 +2395,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             ("subagent_finished", "general-purpose [one]", "one"),
             renderer.events,
         )
+        self.assertIn(("tool_result", "task", "one", "task-1"), renderer.events)
 
     async def test_run_turn_supports_output_interrupt_fallback(self) -> None:
         interrupt = {
@@ -3560,6 +3578,135 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         stream.messages.release.set()
         result = await turn
         self.assertEqual(result.final_text, "Done.")
+
+    async def test_live_task_result_arrives_before_following_message_stream(self) -> None:
+        task_output = Command(
+            update={
+                "messages": [
+                    ToolMessage(content="child output", tool_call_id="task-1")
+                ]
+            }
+        )
+        call = LiveToolCall("task", {"description": "inspect timing"}, task_output, "task-1")
+        stream = FakeStream(
+            output={
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "task",
+                                "args": {"description": "inspect timing"},
+                                "id": "task-1",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    ToolMessage(content="child output", tool_call_id="task-1"),
+                    AIMessage(content="Done."),
+                ]
+            },
+            tool_calls=[call],
+        )
+        stream.messages = BlockingItems()
+        renderer = RunTurnRenderer()
+        turn = asyncio.create_task(
+            runner.run_turn(FakeAgent([stream]), "delegate", renderer, "thread-1")
+        )
+        await asyncio.wait_for(
+            asyncio.gather(call.started.wait(), stream.messages.started.wait()),
+            timeout=1,
+        )
+
+        call.release.set()
+        for _ in range(20):
+            if ("tool_result", "task", "child output", "task-1") in renderer.events:
+                break
+            await asyncio.sleep(0)
+
+        self.assertIn(("tool_result", "task", "child output", "task-1"), renderer.events)
+        self.assertFalse(turn.done())
+        stream.messages.release.set()
+        result = await turn
+        self.assertEqual(result.final_text, "Done.")
+        self.assertEqual(
+            renderer.events.count(("tool_result", "task", "child output", "task-1")),
+            1,
+        )
+
+    async def test_parallel_tasks_watch_native_success_and_error_completions(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        error = ToolMessage(
+            content="task failed",
+            tool_call_id="task-2",
+            status="error",
+        )
+        calls = AsyncItems(
+            [
+                DocumentedToolCall(
+                    "task",
+                    {"description": "first"},
+                    output_deltas=AsyncItems([]),
+                    output=Command(
+                        update={
+                            "messages": [
+                                ToolMessage(content="first output", tool_call_id="task-1")
+                            ]
+                        }
+                    ),
+                    call_id="task-1",
+                ),
+                DocumentedToolCall(
+                    "task",
+                    {"description": "second"},
+                    output_deltas=AsyncItems([]),
+                    output=Command(update={"messages": [error]}),
+                    call_id="task-2",
+                ),
+                DocumentedToolCall(
+                    "task",
+                    {"description": "idless"},
+                    output_deltas=AsyncItems([]),
+                    output=Command(
+                        update={
+                            "messages": [
+                                ToolMessage(content="idless output", tool_call_id="")
+                            ]
+                        }
+                    ),
+                ),
+            ]
+        )
+
+        await consume_tool_calls(calls, renderer, result)
+
+        self.assertEqual(result.tool_calls, ["task", "task", "task"])
+        self.assertCountEqual(
+            result.tool_results,
+            ["first output", "task failed", "idless output"],
+        )
+        self.assertCountEqual(
+            [event for event in renderer.events if event[0] in {"tool_result", "tool_error"}],
+            [
+                ("tool_result", "task", "first output", "task-1"),
+                ("tool_error", "task", "task failed", "task-2"),
+                ("tool_result", "task", "idless output", ""),
+            ],
+        )
+
+    async def test_cancelling_task_tool_stream_cleans_up_completion_watcher(self) -> None:
+        renderer = RecordingRenderer()
+        call = LiveToolCall("task", {"description": "never"}, "never", "task-never")
+        stream = OpenToolCalls(call)
+        consuming = asyncio.create_task(consume_tool_calls(stream, renderer))
+        await asyncio.wait_for(call.started.wait(), timeout=1)
+
+        consuming.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await consuming
+
+        self.assertTrue(call.cancelled)
 
     async def test_task_tool_calls_emit_immediately_without_waiting_for_output(self) -> None:
         renderer = RecordingRenderer()
