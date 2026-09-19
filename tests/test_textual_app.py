@@ -323,6 +323,18 @@ def renderable_plain(widget: Any) -> str:
     return output.getvalue()
 
 
+def compositor_plain(app: App[Any]) -> str:
+    """Return the text Textual actually painted to the current screen."""
+    return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+
+def compositor_widget_lines(app: App[Any], widget: Any) -> list[str]:
+    """Return the painted screen lines occupied by one widget."""
+    region = widget.region
+    strips = app.screen._compositor.render_strips()
+    return [strip.text[region.x : region.right] for strip in strips[region.y : region.bottom]]
+
+
 def visual_plain(value: Any) -> str:
     """Return plain text from a native widget cell or option prompt."""
     return str(getattr(value, "plain", value))
@@ -515,6 +527,48 @@ def fill_scrollable_chat(chat: ChatLog) -> None:
     """Add enough transcript history for Pilot scrolling tests."""
     for index in range(12):
         chat.system_message(f"history {index}\nsecond line", kind="info")
+
+
+def mcp_activity_snapshot(
+    batch_id: str,
+    *,
+    kind: str = "startup",
+    finished: bool = False,
+    successful: bool = False,
+    rows: list[dict[str, Any]] | None = None,
+    usable_count: int | None = None,
+    configured_count: int | None = None,
+) -> dict[str, Any]:
+    """Build the presentation-safe manager payload used by activity tests."""
+    servers = rows or []
+    disabled = sum(row.get("stage") == "disabled" for row in servers)
+    usable = sum(row.get("status") in {"Available", "Partially available"} for row in servers)
+    return {
+        "batch_id": batch_id,
+        "kind": kind,
+        "started_at": time.monotonic() - 1.2,
+        "finished": finished,
+        "successful": successful,
+        "active_server": next(
+            (str(row.get("name") or "") for row in servers if row.get("stage") == "active"),
+            "",
+        ),
+        "servers": tuple(servers),
+        "counts": {
+            "ready": sum(row.get("status") == "Available" for row in servers),
+            "partial": sum(row.get("status") == "Partially available" for row in servers),
+            "failed": sum(row.get("status") == "Failed" for row in servers),
+            "approval": sum(row.get("status") == "Approval required" for row in servers),
+            "disabled": disabled,
+            "waiting": sum(row.get("stage") == "waiting" for row in servers),
+            "servers": len(servers) - disabled,
+            "usable": usable if usable_count is None else usable_count,
+            "configured": len(servers) if configured_count is None else configured_count,
+            "tools": sum(int(row.get("tool_count") or 0) for row in servers),
+            "prompts": sum(int(row.get("prompt_count") or 0) for row in servers),
+            "resources": sum(int(row.get("resource_count") or 0) for row in servers),
+        },
+    }
 
 
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
@@ -4341,6 +4395,452 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await pilot.pause()
             self.assertTrue(app.ready)
+
+    async def test_fast_mcp_batch_never_mounts_activity_cell(self) -> None:
+        app = make_app()
+        app._mcp_reveal_delay_seconds = 0.05
+        async with app.run_test(size=(100, 30)) as pilot:
+            start = mcp_activity_snapshot(
+                "fast",
+                rows=[
+                    {
+                        "name": "fetch",
+                        "stage": "active",
+                        "status": "Starting",
+                        "error": "",
+                        "latest_stderr_line": "",
+                        "tool_count": 0,
+                    }
+                ],
+            )
+            app.mcp_activity("initializing", start)
+            app.mcp_activity(
+                "initialized",
+                mcp_activity_snapshot(
+                    "fast",
+                    finished=True,
+                    successful=True,
+                    rows=[{**start["servers"][0], "stage": "complete", "status": "Available"}],
+                ),
+            )
+            await pilot.pause(0.08)
+            self.assertEqual(list(app.query_one(ChatLog).query(".mcp-activity")), [])
+
+    async def test_slow_grouped_mcp_batch_updates_and_collapses_in_place(self) -> None:
+        app = make_app()
+        app._mcp_reveal_delay_seconds = 0.05
+        async with app.run_test(size=(100, 32)) as pilot:
+            events_before = deepcopy(app.session.get("events"))
+            rows = [
+                {
+                    "name": "memory",
+                    "stage": "complete",
+                    "status": "Available",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 8,
+                    "prompt_count": 1,
+                    "resource_count": 2,
+                },
+                {
+                    "name": "fetch",
+                    "stage": "active",
+                    "status": "Starting",
+                    "error": "",
+                    "latest_stderr_line": "Downloading cryptography",
+                    "tool_count": 0,
+                },
+                {
+                    "name": "filesystem",
+                    "stage": "waiting",
+                    "status": "Disabled",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 0,
+                },
+                {
+                    "name": "github",
+                    "stage": "disabled",
+                    "status": "Disabled",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 0,
+                },
+            ]
+            app.mcp_activity("initializing", mcp_activity_snapshot("slow", rows=rows))
+            await pilot.pause(0.08)
+            cells = list(app.query_one(ChatLog).query(".mcp-activity"))
+            self.assertEqual(len(cells), 1)
+            cell = cells[0]
+            rendered = compositor_plain(app)
+            self.assertIn("Downloading cryptography", rendered)
+            self.assertIn("filesystem    Waiting", rendered)
+            self.assertIn("github    Disabled", rendered)
+            self.assertGreater(cell.region.height, 2)
+            self.assertLessEqual(cell.region.height, 12)
+            painted_lines = compositor_widget_lines(app, cell)
+            row_indexes = [
+                next(index for index, line in enumerate(painted_lines) if name in line)
+                for name in ("memory", "fetch", "filesystem", "github")
+            ]
+            self.assertEqual(row_indexes, list(range(row_indexes[0], row_indexes[0] + 4)))
+
+            progress_rows = [dict(row) for row in rows]
+            progress_rows[1]["latest_stderr_line"] = "Downloaded cryptography"
+            app.mcp_activity(
+                "initializing",
+                mcp_activity_snapshot("slow", rows=progress_rows),
+            )
+            await pilot.pause()
+            self.assertIs(list(app.query_one(ChatLog).query(".mcp-activity"))[0], cell)
+            self.assertIn("Downloaded cryptography", compositor_plain(app))
+
+            completed_rows = [
+                {**row, "stage": "complete", "status": "Available"}
+                for row in rows[:3]
+            ] + [rows[3]]
+            app.mcp_activity(
+                "initialized",
+                mcp_activity_snapshot(
+                    "slow",
+                    finished=True,
+                    successful=True,
+                    rows=completed_rows,
+                ),
+            )
+            await pilot.pause()
+            self.assertIs(list(app.query_one(ChatLog).query(".mcp-activity"))[0], cell)
+            self.assertIn(
+                "MCP 3/4 available · 8 tools · 1 prompt · 2 resources",
+                cell.content.plain,
+            )
+            painted = compositor_plain(app)
+            self.assertIn("MCP 3/4 available", painted)
+            self.assertIn("resources", painted)
+            self.assertLessEqual(cell.region.height, 4)
+            self.assertEqual(app.session.get("events"), events_before)
+
+    async def test_startup_and_reload_match_status_button_counts_and_keep_disabled_rows(self) -> None:
+        from tests.test_mcp import PanelManager
+
+        manager = PanelManager()
+        template = vars(manager.servers["one"])
+
+        def state(name: str, status: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                **{
+                    **template,
+                    "name": name,
+                    "status": status,
+                    "tools": [],
+                    "tool_metadata": [],
+                    "prompts": [],
+                    "resources": [],
+                }
+            )
+
+        manager.servers = {
+            "learn": state("learn", "Available"),
+            "search": state("search", "Partially available"),
+            "docs": state("docs", "Disabled"),
+            "github": state("github", "Disabled"),
+            "example": state("example", "Disabled"),
+        }
+        app = make_app(mcp_manager=manager)
+        app._mcp_reveal_delay_seconds = 0.01
+        rows = [
+            {
+                "name": "learn",
+                "stage": "complete",
+                "status": "Available",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 0,
+            },
+            {
+                "name": "search",
+                "stage": "complete",
+                "status": "Partially available",
+                "error": "prompt discovery unavailable",
+                "latest_stderr_line": "",
+                "tool_count": 0,
+            },
+            {
+                "name": "docs",
+                "stage": "active",
+                "status": "Starting",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 0,
+            },
+            *[
+                {
+                    "name": name,
+                    "stage": "disabled",
+                    "status": "Disabled",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 0,
+                }
+                for name in ("github", "example")
+            ],
+        ]
+
+        async with app.run_test(size=(110, 35)) as pilot:
+            button = app.query_one("#mcp-status-button", Button)
+            self.assertIn("MCP 2/5", button.label.plain)
+
+            app.mcp_activity("initializing", mcp_activity_snapshot("counts-startup", rows=rows))
+            await pilot.pause(0.03)
+            startup = list(app.query_one(ChatLog).query(".mcp-activity"))[-1]
+            self.assertIn("2 / 5 available", startup.content.plain)
+            self.assertNotIn("ready", startup.content.plain.splitlines()[0].lower())
+            self.assertIn("github    Disabled", startup.content.plain)
+            self.assertIn("example    Disabled", startup.content.plain)
+            self.assertIn("2 / 5 available", compositor_plain(app))
+
+            app.mcp_activity(
+                "initializing",
+                mcp_activity_snapshot("counts-reload", kind="reload", rows=rows),
+            )
+            await pilot.pause(0.03)
+            reload_cell = list(app.query_one(ChatLog).query(".mcp-activity"))[-1]
+            self.assertIn("MCP RELOAD", reload_cell.content.plain)
+            self.assertIn("2 / 5 available", reload_cell.content.plain)
+            self.assertIn("github    Disabled", reload_cell.content.plain)
+            self.assertIn("example    Disabled", reload_cell.content.plain)
+
+    async def test_global_success_and_restart_success_use_their_own_capability_scope(self) -> None:
+        app = make_app()
+        app._mcp_reveal_delay_seconds = 0.01
+        startup_rows = [
+            {
+                "name": "fetch",
+                "stage": "complete",
+                "status": "Available",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 1,
+                "prompt_count": 0,
+                "resource_count": 0,
+            },
+            {
+                "name": "disabled",
+                "stage": "disabled",
+                "status": "Disabled",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 0,
+                "prompt_count": 0,
+                "resource_count": 0,
+            },
+        ]
+        reload_rows = [
+            {
+                "name": "learn",
+                "stage": "complete",
+                "status": "Available",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 1,
+                "prompt_count": 1,
+                "resource_count": 2,
+            },
+            {
+                "name": "search",
+                "stage": "complete",
+                "status": "Available",
+                "error": "",
+                "latest_stderr_line": "",
+                "tool_count": 5,
+                "prompt_count": 2,
+                "resource_count": 2,
+            },
+            *[
+                {
+                    "name": name,
+                    "stage": "disabled",
+                    "status": "Disabled",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 0,
+                    "prompt_count": 0,
+                    "resource_count": 0,
+                }
+                for name in ("disabled-a", "disabled-b", "disabled-c")
+            ],
+        ]
+        restart_row = {
+            "name": "fetch",
+            "stage": "complete",
+            "status": "Available",
+            "error": "",
+            "latest_stderr_line": "",
+            "tool_count": 2,
+            "prompt_count": 0,
+            "resource_count": 1,
+        }
+
+        async with app.run_test(size=(110, 35)) as pilot:
+            for batch_id, kind, rows in (
+                ("startup-success", "startup", startup_rows),
+                ("reload-success", "reload", reload_rows),
+            ):
+                active = [{**rows[0], "stage": "active", "status": "Starting"}, *rows[1:]]
+                app.mcp_activity(
+                    "initializing",
+                    mcp_activity_snapshot(batch_id, kind=kind, rows=active),
+                )
+                await pilot.pause(0.03)
+                app.mcp_activity(
+                    "initialized",
+                    mcp_activity_snapshot(
+                        batch_id,
+                        kind=kind,
+                        finished=True,
+                        successful=True,
+                        rows=rows,
+                    ),
+                )
+                await pilot.pause()
+
+            cells = list(app.query_one(ChatLog).query(".mcp-activity"))
+            self.assertIn(
+                "MCP 1/2 available · 1 tool · 0 prompts · 0 resources",
+                cells[-2].content.plain,
+            )
+            self.assertIn(
+                "MCP 2/5 available · 6 tools · 3 prompts · 4 resources",
+                cells[-1].content.plain,
+            )
+
+            active_restart = {**restart_row, "stage": "active", "status": "Restarting"}
+            app.mcp_activity(
+                "initializing",
+                mcp_activity_snapshot("restart-success", kind="restart", rows=[active_restart]),
+            )
+            await pilot.pause(0.03)
+            restart_snapshot = mcp_activity_snapshot(
+                "restart-success",
+                kind="restart",
+                finished=True,
+                successful=True,
+                rows=[restart_row],
+                usable_count=2,
+                configured_count=5,
+            )
+            restart_snapshot["counts"].update({"tools": 99, "prompts": 99, "resources": 99})
+            app.mcp_activity("initialized", restart_snapshot)
+            await pilot.pause()
+            restart_cell = list(app.query_one(ChatLog).query(".mcp-activity"))[-1]
+            self.assertIn("✓ fetch · Ready", restart_cell.content.plain)
+            self.assertIn("2 tools · 0 prompts · 1 resource", restart_cell.content.plain)
+            self.assertNotIn("1 server", restart_cell.content.plain)
+            self.assertNotIn("99", restart_cell.content.plain)
+            self.assertIn("✓ fetch · Ready", compositor_plain(app))
+
+    async def test_failed_reload_activity_stays_at_current_chat_position(self) -> None:
+        app = make_app()
+        app._mcp_reveal_delay_seconds = 0.02
+        async with app.run_test(size=(100, 30)) as pilot:
+            chat = app.query_one(ChatLog)
+            chat.system_message("before reload", kind="info")
+            rows = [
+                {
+                    "name": "fetch",
+                    "stage": "active",
+                    "status": "Restarting",
+                    "error": "",
+                    "latest_stderr_line": "",
+                    "tool_count": 0,
+                }
+            ]
+            app.mcp_activity(
+                "initializing",
+                mcp_activity_snapshot("reload", kind="reload", rows=rows),
+            )
+            await pilot.pause(0.04)
+            cell = list(chat.query(".mcp-activity"))[0]
+            self.assertIs(chat.children[-1], cell)
+            self.assertIn("Restarting…", cell.content.plain)
+
+            failed = [{**rows[0], "stage": "complete", "status": "Failed", "error": "ModuleNotFoundError: foo"}]
+            app.mcp_activity(
+                "initialized",
+                mcp_activity_snapshot("reload", kind="reload", finished=True, rows=failed),
+            )
+            await pilot.pause()
+            rendered = compositor_plain(app)
+            self.assertIn("1 problem", rendered)
+            self.assertIn("ModuleNotFoundError: foo", rendered)
+
+    async def test_large_mcp_batch_keeps_the_complete_configured_snapshot(self) -> None:
+        app = make_app()
+        app._mcp_reveal_delay_seconds = 0.01
+        rows = [
+            {
+                "name": f"server-{index}",
+                "stage": "active" if index == 0 else "disabled" if index % 2 else "waiting",
+                "status": "Starting" if index == 0 else "Disabled",
+                "error": "",
+                "latest_stderr_line": "" if index == 0 else "unused historical stderr",
+                "tool_count": 0,
+            }
+            for index in range(12)
+        ]
+        async with app.run_test(size=(100, 35)) as pilot:
+            app.mcp_activity("initializing", mcp_activity_snapshot("large", rows=rows))
+            await pilot.pause(0.03)
+            cell = list(app.query_one(ChatLog).query(".mcp-activity"))[0]
+            for index in range(12):
+                self.assertIn(f"server-{index}", cell.content.plain)
+            self.assertNotIn("\n… ", cell.content.plain)
+            self.assertNotIn("unused historical stderr", cell.content.plain)
+            chat = app.query_one(ChatLog)
+            chat.scroll_to(y=chat.max_scroll_y, animate=False, force=True, immediate=True)
+            await pilot.pause()
+            self.assertIn("server-11    Disabled", compositor_plain(app))
+
+    async def test_initial_mcp_activity_is_preserved_between_splash_and_history(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            chat = app.query_one(ChatLog)
+            chat.clear_log()
+            chat.startup_loading(workspace=".")
+            chat.show_mcp_activity(
+                mcp_activity_snapshot(
+                    "initial",
+                    rows=[
+                        {
+                            "name": "fetch",
+                            "stage": "active",
+                            "status": "Starting",
+                            "error": "",
+                            "latest_stderr_line": "Installing packages",
+                            "tool_count": 0,
+                        }
+                    ],
+                )
+            )
+            await pilot.pause()
+            chat.clear_log(preserve_startup_activity=True)
+            chat.startup(model_name="test", session_id="session", workspace=".")
+            chat.restore_session(
+                {
+                    "events": [
+                        {
+                            "id": 1,
+                            "type": "user",
+                            "text": "persisted message",
+                            "created_at": "2026-01-01T00:00:00+00:00",
+                        }
+                    ]
+                }
+            )
+            children = list(chat.children)
+            self.assertTrue(children[0].has_class("startup"))
+            self.assertTrue(children[1].has_class("mcp-activity"))
+            self.assertTrue(children[2].has_class("user"))
 
     async def test_alt_q_cancels_running_turn(self) -> None:
         """Alt+Q should confirm before cancelling a running turn."""

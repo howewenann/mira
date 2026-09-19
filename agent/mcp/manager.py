@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -37,7 +39,21 @@ from core.diagnostics.logging import get_diagnostics_logger
 
 ApprovalHandler = Callable[[MCPServerState, str], Awaitable[str]]
 ChangeHandler = Callable[[], Awaitable[None]]
+ActivityHandler = Callable[[str, dict[str, Any]], None]
 _ATTACHMENT_PATTERN = re.compile(r'(?<![\w@])@(?:"([^"\r\n]+)"|([^\s@]+))')
+_MAX_STARTUP_ERROR = 800
+
+
+@dataclass(slots=True)
+class _LifecycleBatch:
+    batch_id: str
+    kind: str
+    started_at: float
+    server_names: tuple[str, ...]
+    enabled: set[str]
+    active_server: str = ""
+    completed: set[str] = field(default_factory=set)
+    finished: bool = False
 
 
 class MCPManager:
@@ -56,6 +72,9 @@ class MCPManager:
         self._resource_locks: dict[str, asyncio.Lock] = {}
         self._approval_handler: ApprovalHandler | None = None
         self._change_handler: ChangeHandler | None = None
+        self._activity_handler: ActivityHandler | None = None
+        self._activity_batch: _LifecycleBatch | None = None
+        self._batch_sequence = 0
         self._operation_lock = asyncio.Lock()
         self._runtimes: dict[str, MCPServerRuntime] = {}
         self.read_tool = self._build_read_tool()
@@ -79,19 +98,48 @@ class MCPManager:
     def set_change_handler(self, handler: ChangeHandler | None) -> None:
         self._change_handler = handler
 
+    def set_activity_handler(self, handler: ActivityHandler | None) -> None:
+        """Install the runtime-only projection for MCP lifecycle batches."""
+        self._activity_handler = handler
+
     async def initialize(self, approval_handler: ApprovalHandler | None = None) -> None:
         """Start every independently valid, enabled, and approved server once."""
         self._approval_handler = approval_handler or self._approval_handler
         settings = load_settings(self.workspace)
+        batch = self._begin_batch("startup", settings)
+        try:
+            await self._initialize_servers(settings, batch)
+        except BaseException:
+            self._finish_batch(batch, failed=True)
+            raise
+        self._finish_batch(batch)
+
+    async def _initialize_servers(
+        self,
+        settings: dict[str, Any],
+        batch: _LifecycleBatch,
+    ) -> None:
+        """Run the existing sequential startup loop within one UI batch."""
         for state in self.servers.values():
             if state.status == "Failed" and not state.config.get("transport"):
+                batch.completed.add(state.name)
+                self._emit_batch("initializing", batch)
                 continue
             if state.error and state.status == "Failed":
+                batch.completed.add(state.name)
+                self._emit_batch("initializing", batch)
                 continue
             if not mcp_server_enabled(settings, state.name):
                 state.status = "Disabled"
+                batch.completed.add(state.name)
+                self._emit_batch("initializing", batch)
                 continue
+            batch.active_server = state.name
+            self._emit_batch("initializing", batch)
             await self._start_server(state, restarting=False)
+            batch.completed.add(state.name)
+            batch.active_server = ""
+            self._emit_batch("initializing", batch)
 
     async def reload(self) -> None:
         """Cleanly replace configuration, runtimes, and capability caches."""
@@ -99,18 +147,27 @@ class MCPManager:
 
     async def _reload(self) -> None:
         async with self._operation_lock:
-            await self._shutdown_unlocked()
-            self.configuration = load_mcp_configuration(self.workspace)
-            self.servers = self.configuration.servers
-            self.prompt_registry.reload_local()
-            self.prompt_registry.mcp = {}
-            self.resource_registry = {}
-            self._tool_owners = {}
-            self._ambiguous_tools = set()
-            self._prompt_locks = {}
-            self._resource_locks = {}
-            self._runtimes = {}
-            await self.initialize(self._approval_handler)
+            settings = load_settings(self.workspace)
+            batch = self._begin_batch("reload", settings)
+            try:
+                await self._shutdown_unlocked()
+                self.configuration = load_mcp_configuration(self.workspace)
+                self.servers = self.configuration.servers
+                self.prompt_registry.reload_local()
+                self.prompt_registry.mcp = {}
+                self.resource_registry = {}
+                self._tool_owners = {}
+                self._ambiguous_tools = set()
+                self._prompt_locks = {}
+                self._resource_locks = {}
+                self._runtimes = {}
+                settings = load_settings(self.workspace)
+                self._reset_batch_servers(batch, settings)
+                await self._initialize_servers(settings, batch)
+            except BaseException:
+                self._finish_batch(batch, failed=True)
+                raise
+            self._finish_batch(batch)
 
     async def shutdown(self) -> None:
         await _complete_lifecycle(self._shutdown(), name="mcp-shutdown")
@@ -167,9 +224,19 @@ class MCPManager:
             await self._notify_changed()
             return False
         request_approval_again = state.status == "Approval required"
+        batch = self._begin_batch("restart", load_settings(self.workspace), (server_name,))
         async with self._operation_lock:
-            await self._stop_server(state, final_status="Restarting")
-            await self._start_server(state, restarting=True, force_approval=request_approval_again)
+            try:
+                batch.active_server = server_name
+                self._emit_batch("initializing", batch)
+                await self._stop_server(state, final_status="Restarting")
+                await self._start_server(state, restarting=True, force_approval=request_approval_again)
+                batch.completed.add(server_name)
+                batch.active_server = ""
+            except BaseException:
+                self._finish_batch(batch, failed=True)
+                raise
+            self._finish_batch(batch)
         await self._notify_changed()
         return state.usable
 
@@ -199,6 +266,10 @@ class MCPManager:
             return
         state.status = "Restarting" if restarting else "Starting"
         state.error = ""
+        state.latest_stderr_line = ""
+        state.stderr_tail = ""
+        state.startup_started_at = monotonic()
+        self._emit_active_batch()
         settings = load_settings(self.workspace)
         if not await self._approved(state, settings, force=force_approval):
             state.status = "Approval required"
@@ -209,11 +280,13 @@ class MCPManager:
             await self._discover_server_prompts(state)
             await self._discover_server_resources(state)
             state.status = "Partially available" if state.error else "Available"
+            self._emit_active_batch()
         except BaseException as error:
             await self._stop_runtime(runtime, state.name)
             state.session = None
             state.status = "Failed"
-            state.error = _concise_error(error)
+            state.error = _startup_error(error, state.stderr_tail)
+            self._emit_active_batch()
             get_diagnostics_logger().error(
                 "MCP server %s failed to start: %s",
                 state.name,
@@ -498,7 +571,7 @@ class MCPManager:
             get_diagnostics_logger().exception("MCP session cleanup failed for %s", server_name)
 
     def _new_integration(self, state: MCPServerState) -> MiraMCPIntegration:
-        return MiraMCPIntegration(state)
+        return MiraMCPIntegration(state, self._stderr_changed)
 
     def _server(self, name: str) -> MCPServerState:
         if name not in self.servers:
@@ -508,6 +581,138 @@ class MCPManager:
     async def _notify_changed(self) -> None:
         if self._change_handler is not None:
             await self._change_handler()
+
+    def _stderr_changed(self, state: MCPServerState) -> None:
+        batch = self._activity_batch
+        if batch is not None and not batch.finished and batch.active_server == state.name:
+            self._emit_batch("initializing", batch)
+
+    def _begin_batch(
+        self,
+        kind: str,
+        settings: dict[str, Any],
+        server_names: tuple[str, ...] | None = None,
+    ) -> _LifecycleBatch:
+        self._batch_sequence += 1
+        names = server_names or tuple(self.servers)
+        batch = _LifecycleBatch(
+            batch_id=f"mcp-{self._batch_sequence}",
+            kind=kind,
+            started_at=monotonic(),
+            server_names=tuple(names),
+            enabled={
+                name
+                for name in names
+                if name in self.servers and mcp_server_enabled(settings, name)
+            },
+        )
+        self._activity_batch = batch
+        self._emit_batch("initializing", batch)
+        return batch
+
+    def _reset_batch_servers(self, batch: _LifecycleBatch, settings: dict[str, Any]) -> None:
+        batch.server_names = tuple(self.servers)
+        batch.enabled = {
+            name for name in batch.server_names if mcp_server_enabled(settings, name)
+        }
+        batch.active_server = ""
+        batch.completed.clear()
+        self._emit_batch("initializing", batch)
+
+    def _finish_batch(self, batch: _LifecycleBatch, *, failed: bool = False) -> None:
+        if batch.finished:
+            return
+        batch.active_server = ""
+        batch.finished = True
+        self._emit_batch("error" if failed else "initialized", batch)
+        if self._activity_batch is batch:
+            self._activity_batch = None
+
+    def _emit_active_batch(self) -> None:
+        batch = self._activity_batch
+        if batch is not None and not batch.finished:
+            self._emit_batch("initializing", batch)
+
+    def _emit_batch(self, phase: str, batch: _LifecycleBatch) -> None:
+        if self._activity_handler is None:
+            return
+        try:
+            self._activity_handler(phase, self._batch_snapshot(batch))
+        except Exception:
+            get_diagnostics_logger().exception("MCP activity projection failed")
+
+    def _batch_snapshot(self, batch: _LifecycleBatch) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        for name in batch.server_names:
+            state = self.servers.get(name)
+            enabled = name in batch.enabled
+            if not enabled:
+                stage = "disabled"
+            elif name == batch.active_server:
+                stage = "active"
+            elif state is not None and state.status == "Failed" and state.error:
+                stage = "complete"
+            elif name in batch.completed or batch.finished:
+                stage = "complete"
+            else:
+                stage = "waiting"
+            rows.append(
+                {
+                    "name": name,
+                    "stage": stage,
+                    "status": state.status if state is not None else "Disabled",
+                    "error": state.error if state is not None else "",
+                    "latest_stderr_line": state.latest_stderr_line if state is not None else "",
+                    "started_at": state.startup_started_at if state is not None else None,
+                    "tool_count": len(state.tools) if state is not None else 0,
+                    "prompt_count": len(state.prompts or ()) if state is not None else 0,
+                    "resource_count": len(state.resources or ()) if state is not None else 0,
+                }
+            )
+        ready = sum(
+            row["stage"] == "complete" and row["status"] == "Available" for row in rows
+        )
+        partial = sum(
+            row["stage"] == "complete" and row["status"] == "Partially available"
+            for row in rows
+        )
+        failed = sum(
+            row["stage"] == "complete" and row["status"] == "Failed" for row in rows
+        )
+        approval = sum(
+            row["stage"] == "complete" and row["status"] == "Approval required"
+            for row in rows
+        )
+        disabled = sum(row["stage"] == "disabled" for row in rows)
+        waiting = sum(row["stage"] == "waiting" for row in rows)
+        tools = sum(len(state.tools) for state in self.servers.values())
+        prompts = sum(len(state.prompts or ()) for state in self.servers.values())
+        resources = sum(len(state.resources or ()) for state in self.servers.values())
+        attempted = len(rows) - disabled
+        successful = bool(batch.finished and attempted and ready == attempted)
+        return {
+            "batch_id": batch.batch_id,
+            "kind": batch.kind,
+            "started_at": batch.started_at,
+            "finished": batch.finished,
+            "successful": successful,
+            "active_server": batch.active_server,
+            "servers": tuple(rows),
+            "counts": {
+                "ready": ready,
+                "partial": partial,
+                "failed": failed,
+                "approval": approval,
+                "disabled": disabled,
+                "waiting": waiting,
+                "servers": attempted,
+                "usable": self.usable_count,
+                "configured": self.configured_count,
+                "tools": tools,
+                "prompts": prompts,
+                "resources": resources,
+            },
+        }
 
 
 def _attached_pairs(messages: list[Any]) -> set[tuple[str, str]]:
@@ -536,6 +741,28 @@ def _join_error(current: str, addition: str) -> str:
 
 def _concise_error(error: BaseException) -> str:
     return sanitized_error(error)
+
+
+def _startup_error(error: BaseException, stderr_tail: str) -> str:
+    transport = sanitized_error(error)
+    if not _vague_transport_error(transport):
+        return transport
+    stderr_lines = [line.strip() for line in stderr_tail.splitlines() if line.strip()]
+    if not stderr_lines:
+        return transport
+    cause = stderr_lines[-1]
+    if cause.casefold() in transport.casefold() or transport.casefold() in cause.casefold():
+        return cause[:_MAX_STARTUP_ERROR]
+    return f"{cause} (transport: {transport})"[:_MAX_STARTUP_ERROR]
+
+
+def _vague_transport_error(value: str) -> bool:
+    normalized = " ".join(value.casefold().split())
+    return normalized in {
+        "mcperror: connection closed",
+        "runtimeerror: client failed to connect: connection closed",
+        "connectionerror: connection closed",
+    } or normalized.endswith(": connection closed")
 
 
 async def _complete_lifecycle(awaitable: Awaitable[Any], *, name: str) -> Any:

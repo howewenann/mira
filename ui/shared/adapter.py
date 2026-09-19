@@ -16,6 +16,7 @@ from mira.api import (
     FrontendRequest,
     InformationEvent,
     MCPApprovalRequest,
+    MCPEvent,
     MCPElicitationRequest,
     MessageEvent,
     RubricEvent,
@@ -69,6 +70,8 @@ class RendererAdapter:
             self._call("artifact_state_changed", event)
         elif isinstance(event, RuntimeEvent):
             self._runtime(event)
+        elif isinstance(event, MCPEvent):
+            self._call("mcp_activity", event.phase, event.detail)
 
     async def request(self, request: FrontendRequest) -> Any:
         """Use the renderer's existing in-process interaction UI."""

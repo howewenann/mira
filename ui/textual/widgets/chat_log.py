@@ -38,6 +38,7 @@ from ui.shared.terminal.colors import (
 )
 from ui.textual.splash import loading_splash_text, splash_text
 from ui.textual.widgets.rubric_bubble import RubricBubble
+from ui.textual.widgets.mcp_activity import MCPActivityCell
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -75,6 +76,7 @@ class ChatLog(VerticalScroll):
         self._startup_workspace = ""
         self._startup_spinner_index = 0
         self._startup_loading = False
+        self._mcp_activity_widgets: dict[str, MCPActivityCell] = {}
         self._subagent_labels: dict[int, str] = {}
         self._subagent_blocks: dict[str, dict[str, str]] = {}
         self._subagent_widgets: dict[str, Static] = {}
@@ -196,6 +198,25 @@ class ChatLog(VerticalScroll):
             return
         self._startup_state = state
         self.startup_loading(workspace=self._startup_workspace, state=state)
+
+    def show_mcp_activity(self, snapshot: dict[str, Any]) -> None:
+        """Mount or update one runtime-only MCP lifecycle batch."""
+        batch_id = str(snapshot.get("batch_id") or "")
+        if not batch_id:
+            return
+        cell = self._mcp_activity_widgets.get(batch_id)
+        if cell is None:
+            cell = MCPActivityCell(snapshot)
+            self._mcp_activity_widgets[batch_id] = cell
+            self.mount(cell)
+        else:
+            cell.update_snapshot(snapshot)
+        self._scroll_to_end()
+
+    def tick_mcp_activity(self) -> None:
+        """Advance active MCP spinners and elapsed startup clocks."""
+        for cell in self._mcp_activity_widgets.values():
+            cell.tick()
 
     def user_message(self, text: str, *, planning: bool = False) -> None:
         """Append a submitted user message."""
@@ -1193,18 +1214,29 @@ class ChatLog(VerticalScroll):
                 text.append(line, style=RUBRIC_BODY_COLOR)
         return text
 
-    def clear_log(self) -> None:
+    def clear_log(self, *, preserve_startup_activity: bool = False) -> None:
         """Remove all chat messages."""
+        preserved_startup = self._startup_block if preserve_startup_activity else None
+        preserved_mcp = (
+            {
+                key: cell
+                for key, cell in self._mcp_activity_widgets.items()
+                if cell.snapshot.get("kind") == "startup"
+            }
+            if preserve_startup_activity
+            else {}
+        )
         self.finish_main()
         self._waiting_block = None
         self._waiting_elapsed = False
         self._waiting_started_at = 0.0
         self._reset_delegation_group()
-        self._startup_block = None
+        self._startup_block = preserved_startup
         self._startup_state = "starting"
         self._startup_workspace = ""
         self._startup_spinner_index = 0
         self._startup_loading = False
+        self._mcp_activity_widgets = preserved_mcp
         self._subagent_labels = {}
         self._subagent_blocks = {}
         self._subagent_widgets = {}
@@ -1221,8 +1253,14 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_id = {}
         self._pending_tool_results_by_name = defaultdict(deque)
         self._subagent_aliases = {}
+        preserved_widgets = {
+            widget
+            for widget in (preserved_startup, *preserved_mcp.values())
+            if widget is not None
+        }
         for child in list(self.children):
-            child.remove()
+            if child not in preserved_widgets:
+                child.remove()
 
     def show_waiting(self, label: str = "working...", *, elapsed: bool | None = None) -> None:
         """Show the transient thinking status while MIRA is idle."""

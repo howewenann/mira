@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from fastmcp import Client
@@ -16,6 +15,7 @@ with suppress_langchain_beta_warning():
 
 from agent.mcp.auth import create_http_oauth
 from agent.mcp.models import MCPServerState
+from agent.mcp.stderr import MCPStderrCapture, MCPStderrSnapshot
 from core.diagnostics.logging import get_diagnostics_logger
 
 _MAX_PAGES = 1000
@@ -24,18 +24,28 @@ _MAX_PAGES = 1000
 class MiraMCPIntegration:
     """Connect one configured server through ``MCPAdapter`` and FastMCP."""
 
-    def __init__(self, state: MCPServerState) -> None:
+    def __init__(
+        self,
+        state: MCPServerState,
+        stderr_handler: Callable[[MCPServerState], None] | None = None,
+    ) -> None:
         config = state.connection_config
         self._state = state
+        self._stderr_handler = stderr_handler
+        self._stderr_capture: MCPStderrCapture | None = None
         if state.transport == "stdio":
+            self._stderr_capture = MCPStderrCapture(
+                self._stderr_updated,
+                secret_values=_configured_secret_values(state),
+            )
             transport = StdioTransport(
                 command=str(config["command"]),
                 args=list(config.get("args") or []),
                 env=dict(config.get("env") or {}),
                 keep_alive=False,
-                # FastMCP's public transport option is the modern equivalent of
-                # the former MCP SDK ``stdio_client(..., errlog=None)`` override.
-                log_file=Path(os.devnull),
+                # FastMCP passes this TextIO sink directly to the MCP SDK's
+                # subprocess stderr handle. The capture drains it continuously.
+                log_file=self._stderr_capture.sink,
             )
         else:
             transport = StreamableHttpTransport(
@@ -77,13 +87,35 @@ class MiraMCPIntegration:
             self.adapter = MCPAdapter(
                 Client(self._transport, auth=oauth, **self._client_options)
             )
-        await self.adapter.__aenter__()
+        if self._stderr_capture is not None:
+            self._stderr_capture.start()
+        try:
+            await self.adapter.__aenter__()
+        except BaseException:
+            if self._stderr_capture is not None:
+                await self._stderr_capture.aclose()
+            raise
         return self
 
     async def __aexit__(self, *args: Any) -> None:
         if self.adapter is None:  # pragma: no cover - enter constructs HTTP adapter
             return
-        await self.adapter.__aexit__(*args)
+        try:
+            await self.adapter.__aexit__(*args)
+        finally:
+            if self._stderr_capture is not None:
+                await self._stderr_capture.aclose()
+
+    def __del__(self) -> None:
+        capture = getattr(self, "_stderr_capture", None)
+        if capture is not None and not capture.started:
+            capture.close_unstarted()
+
+    def _stderr_updated(self, snapshot: MCPStderrSnapshot) -> None:
+        self._state.latest_stderr_line = snapshot.latest_line
+        self._state.stderr_tail = snapshot.tail
+        if self._stderr_handler is not None:
+            self._stderr_handler(self._state)
 
     def get_server_capabilities(self) -> Any:
         return self.client.server_capabilities
@@ -124,6 +156,32 @@ class MiraMCPIntegration:
 
     async def read_resource(self, uri: str) -> list[Any]:
         return list(await self.client.read_resource(uri))
+
+
+def _configured_secret_values(state: MCPServerState) -> set[str]:
+    """Return resolved values MIRA already treats as private configuration."""
+    values = {
+        str(value)
+        for value in (state.connection_config.get("env") or {}).values()
+        if value
+    }
+
+    def collect(source: Any, resolved: Any) -> None:
+        if isinstance(source, str) and isinstance(resolved, str):
+            if "${" in source and source != resolved:
+                values.add(resolved)
+            return
+        if isinstance(source, list) and isinstance(resolved, list):
+            for source_item, resolved_item in zip(source, resolved):
+                collect(source_item, resolved_item)
+            return
+        if isinstance(source, dict) and isinstance(resolved, dict):
+            for key, source_item in source.items():
+                if key in resolved:
+                    collect(source_item, resolved[key])
+
+    collect(state.config, state.connection_config)
+    return values
 
 
 __all__ = ["MiraMCPIntegration"]

@@ -90,6 +90,9 @@ class MCPServerState:
     prompt_error: str = ""
     resource_error: str = ""
     session: Any = None
+    startup_started_at: float | None = None
+    latest_stderr_line: str = ""
+    stderr_tail: str = ""
 
     @property
     def usable(self) -> bool:

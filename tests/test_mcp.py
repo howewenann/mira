@@ -47,10 +47,11 @@ from agent.mcp.configuration import (
     mcp_path,
 )
 from agent.mcp.errors import sanitized_error
-from agent.mcp.manager import MCPManager
+from agent.mcp.manager import MCPManager, _startup_error
 from agent.mcp.integration import MCPAdapter, MiraMCPIntegration
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry, mustache_variables
+from agent.mcp.stderr import MCPStderrCapture
 from agent.resources.project_setup import ensure_project_examples
 from config.settings import (
     ToolPolicy,
@@ -76,6 +77,7 @@ from ui.textual.widgets.mcp_panel import (
     capability_summary,
     controls_for,
     mcp_summary_symbol,
+    server_detail_sections,
     status_badge,
     status_class,
 )
@@ -420,6 +422,99 @@ class MCPErrorRenderingTests(unittest.TestCase):
             "RuntimeError: Token exchange failed: invalid client",
         )
 
+    def test_vague_startup_error_prefers_distinct_child_cause(self) -> None:
+        rendered = _startup_error(
+            RuntimeError("Connection closed"),
+            "Traceback (most recent call last):\nModuleNotFoundError: No module named 'foo'",
+        )
+        self.assertEqual(
+            rendered,
+            "ModuleNotFoundError: No module named 'foo' "
+            "(transport: RuntimeError: Connection closed)",
+        )
+        self.assertEqual(
+            _startup_error(RuntimeError("Connection closed"), "RuntimeError: Connection closed"),
+            "RuntimeError: Connection closed",
+        )
+
+    def test_actionable_startup_error_is_not_replaced_by_stderr(self) -> None:
+        rendered = _startup_error(
+            RuntimeError("Client failed to connect: [WinError 2] file not found"),
+            "incidental launcher output",
+        )
+        self.assertEqual(
+            rendered,
+            "RuntimeError: Client failed to connect: [WinError 2] file not found",
+        )
+
+
+class MCPStderrCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_incremental_ansi_cr_utf8_and_secret_normalization(self) -> None:
+        snapshots = []
+        changed = asyncio.Event()
+
+        def update(snapshot) -> None:
+            snapshots.append(snapshot)
+            changed.set()
+
+        capture = MCPStderrCapture(update, secret_values={"top-secret"})
+        capture.start()
+        os.write(capture.sink.fileno(), b"\x1b[")
+        os.write(capture.sink.fileno(), b"33mDownloading 1%\x1b[0m\rDown")
+        await asyncio.wait_for(changed.wait(), 1)
+        changed.clear()
+        encoded = "loading café top-secret\n".encode("utf-8")
+        split = encoded.index(b"\xc3") + 1
+        os.write(capture.sink.fileno(), encoded[:split])
+        os.write(capture.sink.fileno(), encoded[split:])
+        await asyncio.wait_for(changed.wait(), 1)
+        snapshot = await capture.aclose()
+
+        self.assertTrue(snapshots)
+        self.assertEqual(snapshot.latest_line, "Downloading café [redacted]")
+        self.assertEqual(snapshot.tail, "Downloading café [redacted]")
+        self.assertNotIn("1%", snapshot.tail)
+        self.assertNotIn("\x1b", snapshot.tail)
+        self.assertTrue(capture.closed)
+        self.assertFalse(capture.reader_alive)
+
+    async def test_tail_and_individual_lines_remain_bounded(self) -> None:
+        long_line = MCPStderrCapture(lambda _snapshot: None, tail_bytes=1024, line_chars=80)
+        long_line.start()
+        os.write(long_line.sink.fileno(), (("prefix-" + ("x" * 300) + "-suffix") + "\n").encode())
+        long_snapshot = await long_line.aclose()
+        self.assertIn("line truncated", long_snapshot.tail)
+        self.assertTrue(long_snapshot.tail.startswith("prefix-"))
+        self.assertTrue(long_snapshot.tail.endswith("-suffix"))
+
+        capture = MCPStderrCapture(lambda _snapshot: None, tail_bytes=96, line_chars=80)
+        capture.start()
+        os.write(capture.sink.fileno(), (("x" * 300) + "\n").encode())
+        for index in range(30):
+            os.write(capture.sink.fileno(), f"line-{index:02d}\n".encode())
+        snapshot = await capture.aclose()
+
+        self.assertLessEqual(len(snapshot.tail.encode("utf-8")), 96)
+        self.assertIn("line-29", snapshot.tail)
+        self.assertNotIn("line-00", snapshot.tail)
+
+    async def test_partial_line_is_observable_before_process_exit(self) -> None:
+        observed = asyncio.Event()
+        latest = ""
+
+        def update(snapshot) -> None:
+            nonlocal latest
+            latest = snapshot.latest_line
+            if latest == "still starting":
+                observed.set()
+
+        capture = MCPStderrCapture(update)
+        capture.start()
+        os.write(capture.sink.fileno(), b"still starting")
+        await asyncio.wait_for(observed.wait(), 1)
+        self.assertEqual(latest, "still starting")
+        await capture.aclose()
+
 
 class MCPSettingsTests(unittest.TestCase):
     def test_defaults_and_policy_round_trip(self) -> None:
@@ -694,7 +789,13 @@ class MCPNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             server_path = root / "stdio_server.py"
             server_path.write_text(
-                """from fastmcp import FastMCP
+                """import sys
+import time
+from fastmcp import FastMCP
+
+sys.stderr.write("\\x1b[33mDownloading package\\x1b[0m\\rDownloaded package\\n")
+sys.stderr.flush()
+time.sleep(0.35)
 
 server = FastMCP(\"stdio test\")
 
@@ -716,10 +817,19 @@ if __name__ == \"__main__\":
             async def approve(_state: object, _preview: str) -> str:
                 return "allow"
 
-            await manager.initialize(approve)
+            initialization = asyncio.create_task(manager.initialize(approve))
+            for _ in range(100):
+                if manager.servers["local"].latest_stderr_line == "Downloaded package":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(manager.servers["local"].latest_stderr_line, "Downloaded package")
+            self.assertFalse(initialization.done())
+            await initialization
+            active_capture = None
             try:
                 state = manager.servers["local"]
                 self.assertEqual(state.status, "Available")
+                self.assertIn("Downloaded package", state.stderr_tail)
                 self.assertEqual([tool.name for tool in state.tools], ["mcp__local__ping"])
                 result = await state.tools[0].ainvoke({"value": "ready"})
                 self.assertEqual(
@@ -730,8 +840,76 @@ if __name__ == \"__main__\":
                     ),
                     "pong: ready",
                 )
+                first_capture = state.session._stderr_capture
+                self.assertFalse(first_capture.closed)
+                self.assertTrue(await manager.restart_server("local"))
+                self.assertTrue(first_capture.closed)
+                self.assertFalse(first_capture.reader_alive)
+                active_capture = state.session._stderr_capture
+                self.assertIsNot(active_capture, first_capture)
+                self.assertFalse(active_capture.closed)
             finally:
                 await manager.shutdown()
+            self.assertIsNotNone(active_capture)
+            self.assertTrue(active_capture.closed)
+            self.assertFalse(active_capture.reader_alive)
+
+    async def test_stdio_import_failure_surfaces_captured_root_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server_path = root / "broken_server.py"
+            server_path.write_text(
+                "raise ModuleNotFoundError(\"No module named 'mira_missing_dependency'\")\n",
+                encoding="utf-8",
+            )
+            write_config(root, {"broken": {"command": sys.executable, "args": [str(server_path)]}})
+            manager = MCPManager(root)
+
+            async def approve(_state: object, _preview: str) -> str:
+                return "allow"
+
+            await manager.initialize(approve)
+            state = manager.servers["broken"]
+            self.assertEqual(state.status, "Failed")
+            self.assertIn("ModuleNotFoundError", state.error)
+            self.assertIn("mira_missing_dependency", state.error)
+            self.assertIn("transport:", state.error)
+            self.assertIn("Traceback", state.stderr_tail)
+            await manager.shutdown()
+
+    async def test_invalid_executable_preserves_transport_error_without_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(root, {"missing": {"command": "mira-definitely-not-an-executable", "args": []}})
+            manager = MCPManager(root)
+
+            async def approve(_state: object, _preview: str) -> str:
+                return "allow"
+
+            await manager.initialize(approve)
+            state = manager.servers["missing"]
+            self.assertEqual(state.status, "Failed")
+            self.assertEqual(state.stderr_tail, "")
+            self.assertTrue("WinError 2" in state.error or "failed to connect" in state.error.lower())
+            await manager.shutdown()
+
+    async def test_explicit_stdio_startup_raise_surfaces_child_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            server_path = root / "raised_server.py"
+            server_path.write_text("raise RuntimeError('explicit startup failure')\n", encoding="utf-8")
+            write_config(root, {"raised": {"command": sys.executable, "args": [str(server_path)]}})
+            manager = MCPManager(root)
+
+            async def approve(_state: object, _preview: str) -> str:
+                return "allow"
+
+            await manager.initialize(approve)
+            state = manager.servers["raised"]
+            self.assertEqual(state.status, "Failed")
+            self.assertIn("RuntimeError: explicit startup failure", state.error)
+            self.assertIn("transport:", state.error)
+            await manager.shutdown()
             self.assertEqual(state.status, "Disabled")
 
     async def test_tools_execute_and_elicitation_interrupts_resume_or_decline(self) -> None:
@@ -974,7 +1152,7 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.initialize(allow)
         return manager
 
-    async def test_all_stdio_connections_disable_sdk_stderr_logging(self) -> None:
+    async def test_all_stdio_connections_use_mira_owned_stderr_capture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_config(
@@ -986,15 +1164,17 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             manager = MCPManager(root)
-            transports = [
-                manager._new_integration(state).client.transport
+            integrations = [
+                manager._new_integration(state)
                 for state in manager.servers.values()
                 if state.transport == "stdio"
             ]
+            transports = [integration.client.transport for integration in integrations]
 
         self.assertEqual([item.command for item in transports], ["first", "second"])
         self.assertTrue(all(isinstance(item, StdioTransport) for item in transports))
-        self.assertTrue(all(item.log_file == Path(os.devnull) for item in transports))
+        self.assertTrue(all(item.log_file != Path(os.devnull) for item in transports))
+        self.assertTrue(all(hasattr(item.log_file, "fileno") for item in transports))
 
     async def test_persistent_runtime_eager_caches_and_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1056,6 +1236,89 @@ class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state.status, "Available")
             self.assertEqual(len(state.prompts or []), 1)
             self.assertEqual(len(state.resources or []), 2)
+            await manager.shutdown()
+
+    async def test_lifecycle_batches_project_sequential_waiting_disabled_and_restarts(self) -> None:
+        class GatedTools(FakeSession):
+            def __init__(self) -> None:
+                super().__init__(["search"])
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def list_tools(self, cursor=None):
+                self.started.set()
+                await self.release.wait()
+                return await super().list_tools(cursor)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_config(
+                root,
+                {
+                    "first": {"command": "first", "args": []},
+                    "second": {"command": "second", "args": []},
+                    "disabled": {"command": "disabled", "args": []},
+                },
+            )
+            settings = set_mcp_server_enabled(load_settings(root), "disabled", False)
+            self.assertTrue(save_settings(root, settings))
+            first = GatedTools()
+            manager = MCPManager(root)
+            manager.client = FakeClient(
+                {"first": first, "second": FakeSession(["keep"]), "disabled": FakeSession()}
+            )
+            manager._new_integration = lambda state: manager.client.integration(state.name)
+            events: list[tuple[str, dict]] = []
+            manager.set_activity_handler(lambda phase, detail: events.append((phase, detail)))
+
+            async def allow(_state, _preview):
+                return "allow"
+
+            initialization = asyncio.create_task(manager.initialize(allow))
+            await first.started.wait()
+            active = events[-1][1]
+            rows = {row["name"]: row for row in active["servers"]}
+            self.assertEqual(active["kind"], "startup")
+            self.assertEqual(rows["first"]["stage"], "active")
+            self.assertEqual(rows["second"]["stage"], "waiting")
+            self.assertEqual(rows["disabled"]["stage"], "disabled")
+
+            first.release.set()
+            await initialization
+            completed = events[-1]
+            self.assertEqual(completed[0], "initialized")
+            self.assertTrue(completed[1]["successful"])
+            self.assertEqual(completed[1]["counts"]["ready"], 2)
+            self.assertEqual(completed[1]["counts"]["disabled"], 1)
+            self.assertEqual(completed[1]["counts"]["usable"], manager.usable_count)
+            self.assertEqual(completed[1]["counts"]["configured"], manager.configured_count)
+            self.assertEqual(completed[1]["counts"]["tools"], 2)
+            self.assertEqual(completed[1]["counts"]["prompts"], 2)
+            self.assertEqual(completed[1]["counts"]["resources"], 4)
+
+            events.clear()
+            self.assertTrue(await manager.restart_server("first"))
+            self.assertEqual(events[0][1]["kind"], "restart")
+            self.assertEqual(events[-1][0], "initialized")
+            self.assertEqual(len(events[-1][1]["servers"]), 1)
+            restarted = events[-1][1]["servers"][0]
+            self.assertEqual(restarted["name"], "first")
+            self.assertEqual(restarted["tool_count"], 1)
+            self.assertEqual(restarted["prompt_count"], 1)
+            self.assertEqual(restarted["resource_count"], 2)
+
+            events.clear()
+            await manager.reload()
+            self.assertEqual(events[0][1]["kind"], "reload")
+            self.assertEqual(events[-1][0], "initialized")
+            reloaded = events[-1][1]
+            self.assertEqual([row["name"] for row in reloaded["servers"]], ["first", "second", "disabled"])
+            self.assertEqual(reloaded["servers"][-1]["stage"], "disabled")
+            self.assertEqual(reloaded["counts"]["usable"], 2)
+            self.assertEqual(reloaded["counts"]["configured"], 3)
+            self.assertEqual(reloaded["counts"]["tools"], 2)
+            self.assertEqual(reloaded["counts"]["prompts"], 2)
+            self.assertEqual(reloaded["counts"]["resources"], 4)
             await manager.shutdown()
 
     async def test_unadvertised_capabilities_are_empty_without_degrading_health(self) -> None:
@@ -1439,6 +1702,15 @@ class PanelApp(App[None]):
 
 
 class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
+    def test_recent_stderr_is_bounded_inside_expanded_detail_sections(self) -> None:
+        state = PanelManager().servers["one"]
+        state.stderr_tail = "old\n" + ("diagnostic\n" * 1200)
+        sections = dict(server_detail_sections(state))
+
+        self.assertIn("Recent stderr", sections)
+        self.assertTrue(sections["Recent stderr"].startswith("… older stderr omitted …"))
+        self.assertLess(len(sections["Recent stderr"]), 8300)
+
     async def test_generated_empty_configuration_exposes_no_mcp_status_or_issues(self) -> None:
         from tests.test_textual_app import make_app
 

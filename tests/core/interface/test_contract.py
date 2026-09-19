@@ -28,6 +28,7 @@ from core.interface import (
     ToolEvent,
 )
 from session.dashboard import normalize_dashboard
+from ui.shared.adapter import RendererAdapter
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -236,6 +237,20 @@ class FrontendContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(artifact_event.decision, {"action": "implement"})
         self.assertEqual(rubric_event.run_id, "rubric-1")
         self.assertEqual((mcp_event.phase, mcp_event.server), ("initialized", "docs"))
+
+    async def test_mcp_batch_event_projects_to_renderer_without_becoming_a_message(self) -> None:
+        class Renderer:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            def mcp_activity(self, phase: str, detail: object) -> None:
+                self.calls.append((phase, detail))
+
+        renderer = Renderer()
+        detail = {"batch_id": "mcp-1", "kind": "startup", "servers": ()}
+        RendererAdapter(renderer).emit(MCPEvent(phase="initializing", detail=detail))
+
+        self.assertEqual(renderer.calls, [("initializing", detail)])
 
     async def test_native_hitl_decisions_round_trip_without_new_interrupt_model(self) -> None:
         interrupt = {

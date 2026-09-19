@@ -224,6 +224,10 @@ class MiraApp(App[None]):
         self.history_collapsed = False
         self.mcp_manager: Any | None = None
         self._mcp_spinner = 0
+        self._mcp_activity_snapshots: dict[str, dict[str, Any]] = {}
+        self._mcp_activity_revealed: set[str] = set()
+        self._mcp_activity_tasks: dict[str, asyncio.Task[None]] = {}
+        self._mcp_reveal_delay_seconds = 0.75
         self._reload_in_progress = False
         self.tool_failures: list[Any] = []
         self.issues: list[Any] = []
@@ -338,6 +342,9 @@ class MiraApp(App[None]):
         self.mcp_manager = state.get("mcp_manager") or self.mcp_manager
         if self.mcp_manager is not None:
             self.mcp_manager.set_change_handler(self._mcp_registry_changed)
+            set_activity_handler = getattr(self.mcp_manager, "set_activity_handler", None)
+            if callable(set_activity_handler) and self.application is None:
+                set_activity_handler(self.mcp_activity)
         self.tool_failures = list(state.get("tool_failures") or getattr(self.agent, "mira_tool_failures", []))
         self.issues = list(state.get("issues") or [])
         self.agent_unavailable_message = str(
@@ -397,7 +404,7 @@ class MiraApp(App[None]):
         chat = self.query_one(ChatLog)
         self._restore_chat_viewport()
         self.query_one(SubagentsPanel).reset()
-        chat.clear_log()
+        chat.clear_log(preserve_startup_activity=True)
         chat.startup(
             model_name=self.model_name,
             session_id=self.session["id"],
@@ -3350,6 +3357,48 @@ class MiraApp(App[None]):
         except NoMatches:
             return
 
+    def mcp_activity(self, phase: str, detail: Any) -> None:
+        """Project one manager-owned MCP lifecycle batch into the chat."""
+        del phase
+        if not isinstance(detail, dict):
+            return
+        batch_id = str(detail.get("batch_id") or "")
+        if not batch_id:
+            return
+        snapshot = dict(detail)
+        self._mcp_activity_snapshots[batch_id] = snapshot
+        if batch_id in self._mcp_activity_revealed:
+            if self.is_mounted:
+                self.query_one(ChatLog).show_mcp_activity(snapshot)
+            if snapshot.get("finished"):
+                self._mcp_activity_revealed.discard(batch_id)
+                self._mcp_activity_snapshots.pop(batch_id, None)
+            return
+        if snapshot.get("finished"):
+            task = self._mcp_activity_tasks.pop(batch_id, None)
+            if task is not None:
+                task.cancel()
+            self._mcp_activity_snapshots.pop(batch_id, None)
+            return
+        if batch_id not in self._mcp_activity_tasks:
+            self._mcp_activity_tasks[batch_id] = asyncio.create_task(
+                self._reveal_mcp_activity(batch_id),
+                name=f"mcp-activity-{batch_id}",
+            )
+
+    async def _reveal_mcp_activity(self, batch_id: str) -> None:
+        try:
+            await asyncio.sleep(self._mcp_reveal_delay_seconds)
+            snapshot = self._mcp_activity_snapshots.get(batch_id)
+            if snapshot is None or snapshot.get("finished") or not self.is_mounted:
+                return
+            self._mcp_activity_revealed.add(batch_id)
+            self.query_one(ChatLog).show_mcp_activity(snapshot)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._mcp_activity_tasks.pop(batch_id, None)
+
     def _set_status(self, *, state: str) -> None:
         """Update the status bar if it has been mounted."""
         if state not in OPERATIONAL_STATES:
@@ -3879,6 +3928,9 @@ class MiraApp(App[None]):
 
     async def on_unmount(self) -> None:
         """Close every process-owned runtime when the Textual app exits."""
+        for task in list(self._mcp_activity_tasks.values()):
+            task.cancel()
+        self._mcp_activity_tasks = {}
         try:
             if self.application is not None:
                 await self.application.shutdown(persist_sessions=False)
@@ -3950,6 +4002,7 @@ class MiraApp(App[None]):
             return
         chat.tick_waiting()
         chat.tick_startup()
+        chat.tick_mcp_activity()
         chat.tick_subagents()
         chat.tick_compaction()
         chat.tick_rubrics()

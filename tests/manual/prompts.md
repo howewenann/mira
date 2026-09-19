@@ -1492,6 +1492,26 @@ Observed 2026-08-04 against LM Studio in a disposable workspace:
   criteria and its explanation retained model tool-syntax fragments. MIRA did
   not reinterpret that provider output or add a custom rubric parser.
 
+## MCP Stdio Startup Activity And Diagnostics
+
+Use a disposable workspace with two stdio servers: one launcher with a cold
+cache that emits download progress, and one silent launcher or fixture.
+
+1. Launch the TUI. Expected: startup begins immediately. If MCP startup lasts
+   longer than roughly 750 ms, one grouped MCP cell appears below the MIRA
+   welcome bubble. The current server shows real stderr or elapsed `Starting…`
+   text, later enabled servers show Waiting, and no launcher-specific percentage
+   is invented. A faster warm start does not flash the cell.
+2. Let both servers connect. Expected: the existing cell collapses to one MCP
+   ready summary and does not appear in a resumed session after restarting MIRA.
+3. Run `/reload-runtime`, then restart one server from the MCP panel. Expected:
+   each action creates one new activity cell at the current chat position and
+   updates it in place; individual stderr lines do not create chat bubbles.
+4. Start a Python fixture that imports a missing module before its MCP handshake.
+   Expected: the failed activity row and server card show the missing-module
+   cause rather than only `Connection closed`. Expanded MCP details show recent
+   sanitized stderr, while configured secret values remain redacted.
+
 ## Standards-Compliant MCP OAuth
 
 Use a disposable workspace and configure the official example without an

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 import httpx2 as httpx
 
@@ -30,10 +30,17 @@ def sanitized_error(error: BaseException) -> str:
         if detail and detail not in details:
             details.append(detail)
     text = "; ".join(details) or _error_detail(error)
-    text = _BEARER_SECRET.sub(r"\1[redacted]", text)
-    text = _NAMED_SECRET.sub(r"\1\2[redacted]", text)
-    text = _URL_SECRET.sub(r"\1[redacted]", text)
-    return text[:_MAX_ERROR_DETAIL]
+    return sanitized_text(text)[:_MAX_ERROR_DETAIL]
+
+
+def sanitized_text(text: str, *, secret_values: Iterable[str] = ()) -> str:
+    """Redact common credentials and exact MCP configuration secrets."""
+    rendered = _BEARER_SECRET.sub(r"\1[redacted]", str(text))
+    rendered = _NAMED_SECRET.sub(r"\1\2[redacted]", rendered)
+    rendered = _URL_SECRET.sub(r"\1[redacted]", rendered)
+    for secret in sorted({str(value) for value in secret_values if len(str(value)) >= 4}, key=len, reverse=True):
+        rendered = rendered.replace(secret, "[redacted]")
+    return rendered
 
 
 def _leaf_errors(error: BaseException) -> Iterator[BaseException]:
@@ -99,4 +106,4 @@ def _authentication_failure_detail(response: httpx.Response) -> str:
     return code or description
 
 
-__all__ = ["sanitized_error"]
+__all__ = ["sanitized_error", "sanitized_text"]

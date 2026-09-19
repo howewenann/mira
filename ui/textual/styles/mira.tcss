@@ -1124,6 +1124,12 @@ Button.prompt-panel-button:focus {
     border: solid #5BB8B1;
 }
 
+.message.mcp-activity {
+    border: solid #4f7894;
+    color: #e8edef;
+    height: auto;
+}
+
 .message.assistant {
     height: auto;
 }

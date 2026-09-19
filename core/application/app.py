@@ -95,6 +95,13 @@ class MiraApplication:
         checkpointer = make_checkpointer()
         mcp_manager = MCPManager(workspace)
         emitter = FrontendEmitter(frontend)
+        mcp_manager.set_activity_handler(
+            lambda phase, detail: emitter.mcp(
+                phase,
+                server=str(detail.get("active_server") or ""),
+                detail=detail,
+            )
+        )
 
         async def approve_mcp(state: Any, preview: str) -> Any:
             return await frontend.request(MCPApprovalRequest(state, preview))

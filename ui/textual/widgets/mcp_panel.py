@@ -196,7 +196,11 @@ class MCPPanelScreen(ModalScreen[None]):
                 state.status,
                 bool(state.transient),
                 capability_counts(state),
-                tuple(server_detail_sections(state)),
+                tuple(
+                    section
+                    for section in server_detail_sections(state)
+                    if section[0] != "Recent stderr" or state.status == "Failed"
+                ),
             )
             for state in self.manager.servers.values()
         )
@@ -281,11 +285,18 @@ def server_detail_sections(state: Any) -> list[tuple[str, str]]:
     tools = [f"  {item.get('original_name') or item.get('name')}" for item in state.tool_metadata]
     prompts = [f"  {item.command}    {item.description}" for item in (state.prompts or [])]
     resources = [f"  {item.uri}    {item.description or item.name}" for item in (state.resources or [])]
-    return [
+    sections = [
         ("Tools", "\n".join(tools) if tools else "  No tools"),
         ("Prompts", _discovery_content(prompts, state.prompts, "prompts")),
         ("Fixed resources", _discovery_content(resources, state.resources, "resources")),
     ]
+    stderr_tail = str(getattr(state, "stderr_tail", "") or "")
+    if stderr_tail:
+        limit = 8 * 1024
+        if len(stderr_tail) > limit:
+            stderr_tail = "… older stderr omitted …\n" + stderr_tail[-limit:]
+        sections.append(("Recent stderr", stderr_tail))
+    return sections
 
 
 def server_diagnostics(state: Any) -> tuple[str, ...]:
