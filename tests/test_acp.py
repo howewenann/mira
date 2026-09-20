@@ -483,7 +483,7 @@ class ACPFrontendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plans[0].entries[0].status, "in_progress")
 
     async def test_approval_flushes_and_preserves_native_tool_call_ids(self) -> None:
-        self.connection.permission_choices = ["approve", "reject"]
+        self.connection.permission_choices = ["allow_once", "reject_once"]
         self.frontend.emit(
             ToolEvent(
                 session_id="hitl",
@@ -506,7 +506,11 @@ class ACPFrontendTests(unittest.IsolatedAsyncioTestCase):
         with self.frontend.bind("hitl"):
             decisions = await self.frontend.request(request)
 
-        self.assertEqual(decisions, [{"type": "approve"}, {"type": "reject"}])
+        self.assertEqual(decisions, [{"type": "allow_once"}, {"type": "reject_once"}])
+        self.assertEqual(
+            [option.name for option in self.connection.permissions[0]["options"]],
+            ["Allow once", "Always allow", "Reject"],
+        )
         self.assertEqual(self.connection.permissions[0]["tool_call"].tool_call_id, "native-7")
         self.assertEqual(self.connection.permissions[1]["tool_call"].tool_call_id, "exec-2")
         self.assertEqual(self.connection.activity[0][0], "update")

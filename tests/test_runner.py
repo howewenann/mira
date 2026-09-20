@@ -698,6 +698,100 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
 
+    async def test_always_allow_translates_and_skips_same_tool_for_rest_of_turn(self) -> None:
+        first = {
+            "action_requests": [{"name": "write_file", "args": {"file_path": "one.txt"}}]
+        }
+        second = {
+            "action_requests": [
+                {"name": "write_file", "args": {"file_path": "two.txt"}},
+                {"name": "execute", "args": {"command": "pytest"}},
+            ],
+            "review_configs": [
+                {"action_name": "write_file", "allowed_decisions": ["approve", "reject"]},
+                {"action_name": "execute", "allowed_decisions": ["approve", "reject"]},
+            ],
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[first]),
+                FakeStream(output={"messages": []}, interrupts=[second]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+
+        class QueueRenderer(RunTurnRenderer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.responses = [
+                    [{"type": "allow_always"}],
+                    [{"type": "reject_once"}],
+                ]
+
+            async def ask_approvals(self, interrupts: list[Any]) -> list[dict[str, Any]]:
+                self.approvals.append(interrupts)
+                return self.responses.pop(0)
+
+        renderer = QueueRenderer()
+        persisted: list[str] = []
+        allowed: set[str] = set()
+        await runner.run_turn(
+            agent,
+            "write twice then execute",
+            renderer,
+            "thread-1",
+            always_allowed_tools=allowed,
+            persist_always_allow=lambda _agent, action: persisted.append(action["name"]),
+        )
+
+        self.assertEqual(persisted, ["write_file"])
+        self.assertEqual(allowed, {"write_file"})
+        self.assertEqual(renderer.approvals[1][0]["action_requests"], [second["action_requests"][1]])
+        self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
+        self.assertEqual(
+            agent.payloads[2].resume,
+            {"decisions": [{"type": "approve"}, {"type": "reject"}]},
+        )
+
+    async def test_mira_decisions_translate_to_native_langgraph_vocabulary(self) -> None:
+        action = {"name": "write_file", "args": {}}
+        expected = {
+            "allow_once": "approve",
+            "allow_always": "approve",
+            "reject_once": "reject",
+        }
+        for mira_decision, native_decision in expected.items():
+            with self.subTest(decision=mira_decision):
+                renderer = RunTurnRenderer(decisions=[{"type": mira_decision}])
+                persisted: list[str] = []
+                decisions = await runner.resolve_approval_decisions(
+                    renderer,
+                    [{"action_requests": [action]}],
+                    object(),
+                    set(),
+                    lambda _agent, value: persisted.append(value["name"]),
+                )
+                self.assertEqual(decisions, [{"type": native_decision}])
+                self.assertNotEqual(decisions[0]["type"], "allow_always")
+                self.assertEqual(persisted, ["write_file"] if mira_decision == "allow_always" else [])
+
+    async def test_always_allow_persistence_failure_does_not_resume_or_bypass(self) -> None:
+        allowed: set[str] = set()
+
+        def fail(_agent: Any, _action: dict[str, Any]) -> None:
+            raise RuntimeError("settings save failed")
+
+        with self.assertRaisesRegex(RuntimeError, "settings save failed"):
+            await runner.resolve_approval_decisions(
+                RunTurnRenderer(decisions=[{"type": "allow_always"}]),
+                [{"action_requests": [{"name": "write_file", "args": {}}]}],
+                object(),
+                allowed,
+                fail,
+            )
+
+        self.assertEqual(allowed, set())
+
     async def test_run_turn_partitions_multiple_interrupt_decisions_by_native_id(self) -> None:
         first = Interrupt(
             value={

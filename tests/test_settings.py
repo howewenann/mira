@@ -6,8 +6,12 @@ from copy import deepcopy
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from config import settings
+from core.application import MiraApplication
+from core.interface import NullFrontend
 
 
 class SettingsTests(unittest.TestCase):
@@ -56,6 +60,52 @@ class SettingsTests(unittest.TestCase):
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
         )
 
+    def test_application_persists_local_and_mcp_always_allow_from_tool_metadata(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            application = MiraApplication(
+                frontend=NullFrontend(),
+                workspace=workspace,
+                config={"settings": settings.load_settings(workspace)},
+            )
+            local_agent = SimpleNamespace(
+                mira_tool_specs=[{"name": "custom_write", "source": "project"}]
+            )
+            mcp_agent = SimpleNamespace(
+                mira_tool_specs=[
+                    {
+                        "name": "generated_name_without_identity",
+                        "source": "mcp",
+                        "server": "docs",
+                        "original_name": "search",
+                    }
+                ]
+            )
+
+            application.persist_tool_always_allow(local_agent, {"name": "custom_write"})
+            application.persist_tool_always_allow(
+                mcp_agent, {"name": "generated_name_without_identity"}
+            )
+            loaded = settings.load_settings(workspace)
+
+        self.assertTrue(settings.tool_always_allow(loaded, "custom_write"))
+        self.assertTrue(settings.mcp_tool_policy(loaded, "docs", "search").always_allow)
+        self.assertEqual(application._policy_refresh_generation, 2)
+
+    def test_application_does_not_mark_policy_pending_when_persistence_fails(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            application = MiraApplication(
+                frontend=NullFrontend(),
+                workspace=workspace,
+                config={"settings": settings.load_settings(workspace)},
+            )
+            agent = SimpleNamespace(mira_tool_specs=[{"name": "write_file"}])
+            with patch("config.settings.save_settings", return_value=False):
+                with self.assertRaisesRegex(RuntimeError, "could not persist Always allow"):
+                    application.persist_tool_always_allow(agent, {"name": "write_file"})
+
+        self.assertEqual(application._policy_refresh_generation, 0)
     def test_read_only_builtin_access_persists_independently(self) -> None:
         """Safe reads should persist independent Plan, PTC, and Rubric access."""
         configured = settings.normalize_settings(
@@ -464,6 +514,51 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.tool_always_allow(loaded, "delete"))
         self.assertFalse(settings.tool_always_allow(loaded, "web_search"))
         self.assertFalse(settings.tool_enabled(loaded, "web_search"))
+
+class ApplicationPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_policy_refresh_coalesces_and_only_rebuilds_the_agent_pair(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            config = {"settings": settings.load_settings(workspace)}
+            mcp_manager = SimpleNamespace(reload=AsyncMock(), initialize=AsyncMock())
+            application = MiraApplication(
+                frontend=NullFrontend(),
+                workspace=workspace,
+                config=config,
+                context_limit_tokens=4096,
+                context_limit_source="test",
+                checkpointer=object(),
+                mcp_manager=mcp_manager,
+            )
+            source_agent = SimpleNamespace(
+                mira_tool_specs=[{"name": "write_file"}, {"name": "edit_file"}]
+            )
+            application.persist_tool_always_allow(source_agent, {"name": "write_file"})
+            application.persist_tool_always_allow(source_agent, {"name": "edit_file"})
+            resources = SimpleNamespace(
+                subagent_discovery=object(),
+                tool_failures=[],
+                metadata={"tools": []},
+                project_backend=object(),
+            )
+            rebuilt = SimpleNamespace(mira_tool_specs=[])
+            rebuilt_plan = SimpleNamespace(mira_tool_specs=[])
+            with (
+                patch("agent.resources.build_resources", side_effect=[resources, resources]) as build_resources,
+                patch("agent.resources.configure_subagents", return_value=resources),
+                patch("agent.factory.build_agent", return_value=rebuilt) as build_agent,
+                patch("agent.factory.build_plan_agent", return_value=rebuilt_plan) as build_plan_agent,
+            ):
+                await application.refresh_agents_for_policy()
+                await application.refresh_agents_for_policy()
+
+        self.assertIs(application.agent, rebuilt)
+        self.assertIs(application.plan_agent, rebuilt_plan)
+        self.assertEqual(build_resources.call_count, 2)
+        build_agent.assert_called_once()
+        build_plan_agent.assert_called_once()
+        mcp_manager.reload.assert_not_awaited()
+        mcp_manager.initialize.assert_not_awaited()
 
 
 if __name__ == "__main__":

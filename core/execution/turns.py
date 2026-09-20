@@ -23,7 +23,7 @@ from agent.planning.policy import (
 )
 from core.context.observation import context_usage_scope
 from core.interface import Frontend, FrontendEmitter
-from core.execution.runner import TurnResult, run_turn
+from core.execution.runner import TurnResult, run_turn, supported_kwargs
 from session.context import session_mcp_attachments, update_title, with_resume_context
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.goals import current_goal, finish_goal_attempt, goal_artifact_text
@@ -130,6 +130,7 @@ async def run_user_turn(
     attachments: list[dict[str, str]] | None = None,
     turn_runner: Any | None = None,
     rubric_override: str | None = None,
+    persist_always_allow: Any | None = None,
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
     emitter = FrontendEmitter(
@@ -201,6 +202,7 @@ async def run_user_turn(
 
     all_attachments = session_mcp_attachments(session)
     aggregate = TurnResult()
+    always_allowed_tools: set[str] = set()
     compact_targets: list[tuple[SessionRecorder, Any, str]] = []
 
     def invocation_messages(request_text: str, supplied: list[Any] | None = None) -> list[Any]:
@@ -247,7 +249,15 @@ async def run_user_turn(
                     thread_id=thread_id,
                 )
             ):
-                phase_result = await (turn_runner or run_turn)(
+                selected_runner = turn_runner or run_turn
+                policy_kwargs = supported_kwargs(
+                    selected_runner,
+                    {
+                        "always_allowed_tools": always_allowed_tools,
+                        "persist_always_allow": persist_always_allow,
+                    },
+                )
+                phase_result = await selected_runner(
                     agent=phase_agent,
                     text=request_text,
                     renderer=recording_emitter,
@@ -263,6 +273,7 @@ async def run_user_turn(
                     if stage is not None
                     else None,
                     messages=invocation_messages(request_text, supplied_messages),
+                    **policy_kwargs,
                 )
         except asyncio.CancelledError:
             recording_emitter.stop_active_tools("cancelled")

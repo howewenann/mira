@@ -9,6 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 from langchain_core.messages import AIMessage
 
@@ -292,6 +293,61 @@ class FrontendContractTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(request.interrupts[0], interrupt)
                 self.assertEqual(agent.payloads[1].resume, {"decisions": [decision]})
                 await application.shutdown()
+
+    async def test_session_attempts_pending_policy_refresh_at_complete_turn_boundary(self) -> None:
+        frontend = RecordingFrontend()
+        agent = FakeAgent([FakeStream(output={"messages": [AIMessage(content="done")]})])
+        application, session = application_for(frontend, agent)
+        application.refresh_agents_for_policy = AsyncMock()
+
+        await session.prompt("Finish")
+
+        application.refresh_agents_for_policy.assert_awaited_once()
+        self.assertEqual(session.runtime_state, "ready")
+
+    async def test_session_policy_refresh_does_not_mask_later_turn_error(self) -> None:
+        frontend = RecordingFrontend()
+        application, session = application_for(frontend, FakeAgent([]))
+        application.refresh_agents_for_policy = AsyncMock(
+            side_effect=RuntimeError("refresh failed")
+        )
+
+        with self.assertRaisesRegex(IndexError, "pop from empty list"):
+            await session.prompt("Fail later")
+
+        application.refresh_agents_for_policy.assert_awaited_once()
+        self.assertTrue(
+            any(
+                getattr(event, "text", "") == "tool policy refresh failed: refresh failed"
+                for event in frontend.events
+            )
+        )
+
+    async def test_cancelled_session_still_attempts_pending_policy_refresh(self) -> None:
+        class BlockingAgent(FakeAgent):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.started = asyncio.Event()
+
+            async def astream_events(self, *args: Any, **kwargs: Any) -> FakeStream:
+                del args, kwargs
+                self.started.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        frontend = RecordingFrontend()
+        agent = BlockingAgent()
+        application, session = application_for(frontend, agent)
+        application.refresh_agents_for_policy = AsyncMock()
+        task = asyncio.create_task(session.prompt("Wait"))
+        await agent.started.wait()
+
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        application.refresh_agents_for_policy.assert_awaited_once()
+        self.assertEqual(session.runtime_state, "ready")
 
     async def test_mcp_elicitation_uses_the_frontend_boundary_and_native_resume_shape(self) -> None:
         interrupt = {

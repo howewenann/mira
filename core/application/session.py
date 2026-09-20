@@ -56,6 +56,7 @@ class MiraSession:
         context_limit_source = str(
             kwargs.pop("context_limit_source", self.application.context_limit_source) or "unknown"
         )
+        turn_error: BaseException | None = None
         try:
             return await run_user_turn(
                 agent=self.application.agent,
@@ -68,15 +69,27 @@ class MiraSession:
                 model_name=model_name,
                 context_limit_tokens=context_limit_tokens,
                 context_limit_source=context_limit_source,
+                persist_always_allow=self.application.persist_tool_always_allow,
                 **kwargs,
             )
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as exc:
+            turn_error = exc
             self.pause_active_artifacts()
             raise
         finally:
-            self._active_task = None
-            self.runtime_state = "ready"
-            emitter.session_state("ready")
+            try:
+                await self.application.refresh_agents_for_policy()
+            except Exception as refresh_error:
+                if turn_error is not None:
+                    emitter.system_message(
+                        f"tool policy refresh failed: {refresh_error}", kind="error"
+                    )
+                else:
+                    raise
+            finally:
+                self._active_task = None
+                self.runtime_state = "ready"
+                emitter.session_state("ready")
 
     async def cancel(self) -> None:
         """Cancel the active MIRA operation for this session."""

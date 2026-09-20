@@ -11,6 +11,7 @@ from typing import Any, Literal, Mapping
 APPROVAL_CONSEQUENCE = "_mira_consequence"
 ArtifactReviewAction = Literal["implement", "close", "revise", "clear"]
 MCPApprovalDecision = Literal["allow", "deny", "always_allow"]
+ApprovalDecision = Literal["allow_once", "edit", "reject_once", "allow_always"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,12 +20,13 @@ class ApprovalRequest:
 
     Core sends this when one or more action requests require approval. The
     ``interrupts`` tuple preserves the native LangGraph values. Return one
-    decision dictionary per action request, in encounter order, using
-    ``{"type": "approve"}``, ``{"type": "reject"}`` (optionally with a
-    ``message``), or ``{"type": "edit", "edited_action": {"name": str,
-    "args": dict}}``. Core keeps this frontend contract flat. It uses the
-    ordinary decision payload for one interrupt and partitions decisions by
-    native interrupt ID only when LangGraph reports multiple pending interrupts.
+    MIRA decision dictionary per action request, in encounter order, using
+    ``allow_once``, ``edit``, ``reject_once``, or ``allow_always`` as its
+    ``type``. Edit also supplies ``edited_action``. Core keeps this frontend
+    contract flat and translates decisions to LangGraph's native vocabulary.
+    It uses the ordinary decision payload for one interrupt and partitions
+    decisions by native interrupt ID only when LangGraph reports multiple
+    pending interrupts.
     """
 
     interrupts: tuple[Any, ...]
@@ -112,6 +114,7 @@ FrontendRequest = (
 
 __all__ = [
     "APPROVAL_CONSEQUENCE",
+    "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",
     "ArtifactReviewAction",

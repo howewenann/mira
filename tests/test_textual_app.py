@@ -3831,7 +3831,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             "review_configs": [
                 {
                     "action_name": "execute",
-                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                    "allowed_decisions": ["reject", "edit", "approve", "respond"],
                 }
             ],
         }
@@ -3840,9 +3840,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with patch("builtins.input", side_effect=["s", "r"]) as input_mock, redirect_stdout(output):
             decisions = await renderer.ask_approvals([interrupt])
 
-        self.assertEqual(decisions, [{"type": "reject"}])
+        self.assertEqual(decisions, [{"type": "reject_once"}])
         prompts = "\n".join(str(call.args[0]) for call in input_mock.call_args_list)
-        self.assertIn("a=Approve (a), e=Edit (e), r=Reject (r)", prompts)
+        self.assertIn(
+            "a=Allow once (a), e=Edit (e), r=Reject (r), l=Always allow (l)",
+            prompts,
+        )
         self.assertNotIn("Respond", prompts)
 
     async def test_tool_call_streaming_activity_suppresses_working(self) -> None:
@@ -6428,7 +6431,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             focused.focus()
             decisions = await resolve(asyncio.create_task(app.ask_approvals([approval])), "a")
-            self.assertEqual(decisions, [{"type": "approve"}])
+            self.assertEqual(decisions, [{"type": "allow_once"}])
 
             focused.focus()
             mcp = await resolve(
@@ -6542,14 +6545,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 panel = app.query_one(PromptPanel)
-                await wait_until(lambda: len(list(panel.query(Button))) == 3)
+                await wait_until(lambda: len(list(panel.query(Button))) == 4)
                 await wait_until(
-                    lambda: len(list(panel.query(Button))) == 3 and list(panel.query(Button))[0].has_focus
+                    lambda: len(list(panel.query(Button))) == 4 and list(panel.query(Button))[0].has_focus
                 )
-                await wait_until(lambda: not panel._reflow_running and len(panel._button_positions) == 3)
+                await wait_until(lambda: not panel._reflow_running and len(panel._button_positions) == 4)
                 buttons = list(panel.query(Button))
                 self.assertTrue(panel.display)
-                self.assertEqual(len(buttons), 3)
+                self.assertEqual(len(buttons), 4)
                 self.assertTrue(buttons[0].has_focus)
                 self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
                 self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
@@ -6584,7 +6587,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 decisions = await asyncio.wait_for(task, timeout=2)
                 await pilot.pause()
 
-                self.assertEqual(decisions, [{"type": "reject"}])
+                self.assertEqual(decisions, [{"type": "reject_once"}])
                 self.assertFalse(panel.display)
 
     async def test_approval_prompt_filters_respond_decision(self) -> None:
@@ -6610,12 +6613,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             task = asyncio.create_task(app.ask_approvals([interrupt]))
             panel = app.query_one(PromptPanel)
-            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 3)
+            await wait_until(lambda: panel.active and not panel._reflow_running and len(panel.query(Button)) == 4)
 
             buttons = list(panel.query(Button))
             self.assertEqual(
                 [button.label.plain for button in buttons],
-                ["Approve (a)", "Edit (e)", "Reject (r)"],
+                ["Allow once (a)", "Edit (e)", "Reject (r)", "Always allow (l)"],
             )
             self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
             self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
@@ -6625,7 +6628,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(
                 await asyncio.wait_for(task, timeout=2),
-                [{"type": "reject"}],
+                [{"type": "reject_once"}],
             )
 
     def test_action_choices_filters_respond_decision(self) -> None:
@@ -6642,7 +6645,47 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         choices = action_choices(interrupt, interrupt["action_requests"][0], 0)
 
-        self.assertEqual(choices, [("a", "Approve (a)"), ("e", "Edit (e)"), ("r", "Reject (r)")])
+        self.assertEqual(
+            choices,
+            [
+                ("a", "Allow once (a)"),
+                ("e", "Edit (e)"),
+                ("r", "Reject (r)"),
+                ("l", "Always allow (l)"),
+            ],
+        )
+
+    async def test_mcp_server_trust_uses_uniform_mira_labels_and_shortcuts(self) -> None:
+        app = make_app()
+        app._prompt_choice = AsyncMock(return_value="r")
+
+        answer = await app._approve_mcp_server(SimpleNamespace(name="docs"), "Connect docs")
+
+        self.assertEqual(answer, "deny")
+        self.assertEqual(
+            app._prompt_choice.await_args.args[2],
+            [
+                ("a", "Allow once (a)"),
+                ("r", "Reject (r)"),
+                ("l", "Always allow (l)"),
+            ],
+        )
+
+    async def test_terminal_mcp_server_trust_uses_uniform_mira_labels_and_shortcuts(self) -> None:
+        renderer = Renderer()
+        renderer._choice = AsyncMock(return_value="r")
+
+        answer = await renderer.approve_mcp_server(SimpleNamespace(name="docs"), "Connect docs")
+
+        self.assertEqual(answer, "deny")
+        self.assertEqual(
+            renderer._choice.await_args.args[1],
+            [
+                ("a", "Allow once (a)"),
+                ("r", "Reject (r)"),
+                ("l", "Always allow (l)"),
+            ],
+        )
 
     async def test_prompt_box_uses_up_down_history_from_workspace_file(self) -> None:
         """The main prompt should navigate workspace history with Up and Down."""

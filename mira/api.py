@@ -15,6 +15,7 @@ from core.interface.events import (
 )
 from core.interface.protocol import Frontend
 from core.interface.requests import (
+    ApprovalDecision,
     ApprovalRequest,
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
@@ -26,6 +27,7 @@ from core.interface.requests import (
 from core.interface.snapshot import SessionSnapshot
 
 __all__ = [
+    "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",
     "ArtifactEvent",

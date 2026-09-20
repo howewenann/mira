@@ -221,9 +221,11 @@ class Renderer:
                 if answer == "e":
                     decisions.append(await self._edit_decision(action))
                 elif answer == "r":
-                    decisions.append({"type": "reject"})
+                    decisions.append({"type": "reject_once"})
+                elif answer == "l":
+                    decisions.append({"type": "allow_always"})
                 else:
-                    decisions.append({"type": "approve"})
+                    decisions.append({"type": "allow_once"})
         return decisions
 
     async def approve_mcp_server(self, state: Any, preview: str) -> str:
@@ -231,7 +233,7 @@ class Renderer:
         self.transcript.block("approval", f"MCP server: {state.name}\n{preview}")
         answer = await self._choice(
             "Allow this MCP server?",
-            [("a", "Allow"), ("d", "Deny"), ("l", "Always allow")],
+            [("a", "Allow once (a)"), ("r", "Reject (r)"), ("l", "Always allow (l)")],
         )
         return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
 
@@ -357,7 +359,7 @@ class Renderer:
     async def _edit_decision(self, action: Any) -> dict[str, Any]:
         """Ask for edited JSON args."""
         if not isinstance(action, dict):
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         original = json.dumps(action.get("args", {}), indent=2)
         edited = await self._input(f"Edited args JSON [{original}]: ")
@@ -365,11 +367,11 @@ class Renderer:
             args = json.loads(edited or original)
         except json.JSONDecodeError:
             self.transcript.line("invalid JSON; rejecting action")
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         if not isinstance(args, dict):
             self.transcript.line("edited args must be a JSON object; rejecting action")
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         return {
             "type": "edit",

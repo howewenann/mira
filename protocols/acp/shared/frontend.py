@@ -147,12 +147,12 @@ class ACPFrontend:
                 ),
                 options=[
                     PermissionOption(option_id="allow", name="Allow once", kind="allow_once"),
+                    PermissionOption(option_id="deny", name="Reject", kind="reject_once"),
                     PermissionOption(
                         option_id="always_allow",
                         name="Always allow",
                         kind="allow_always",
                     ),
-                    PermissionOption(option_id="deny", name="Deny", kind="reject_once"),
                 ],
             )
             return selected if selected in {"allow", "always_allow"} else "deny"
@@ -284,11 +284,18 @@ class ACPFrontend:
                         raw_input=action.get("args", {}),
                     ),
                     options=[
-                        PermissionOption(option_id="approve", name="Approve", kind="allow_once"),
-                        PermissionOption(option_id="reject", name="Reject", kind="reject_once"),
+                        PermissionOption(option_id="allow_once", name="Allow once", kind="allow_once"),
+                        PermissionOption(
+                            option_id="allow_always",
+                            name="Always allow",
+                            kind="allow_always",
+                        ),
+                        PermissionOption(option_id="reject_once", name="Reject", kind="reject_once"),
                     ],
                 )
-                decisions.append({"type": "approve" if selected == "approve" else "reject"})
+                decisions.append(
+                    {"type": selected if selected in {"allow_once", "allow_always"} else "reject_once"}
+                )
         return decisions
 
     async def _ask_user(

@@ -17,6 +17,7 @@ from core.interface.emitter import FrontendEmitter
 from core.interface.protocol import Frontend, NullFrontend
 from core.interface.requests import (
     APPROVAL_CONSEQUENCE,
+    ApprovalDecision,
     ApprovalRequest,
     ArtifactDisplayRequest,
     ArtifactReviewRequest,
@@ -29,6 +30,7 @@ from core.interface.snapshot import SessionSnapshot
 
 __all__ = [
     "APPROVAL_CONSEQUENCE",
+    "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",
     "ArtifactEvent",

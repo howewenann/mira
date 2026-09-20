@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,9 @@ class MiraApplication:
             setattr(self, key, value)
         self._sessions: dict[str, MiraSession] = {}
         self._closed = False
+        self._policy_refresh_generation = 0
+        self._policy_refreshed_generation = 0
+        self._agent_refresh_lock = asyncio.Lock()
 
     @classmethod
     async def start(
@@ -78,7 +82,6 @@ class MiraApplication:
         config: dict[str, Any] | None = None,
     ) -> "MiraApplication":
         """Build MIRA's native agents/resources without constructing a UI."""
-        from agent.factory import build_agent, build_plan_agent
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.mcp import MCPManager
         from agent.resources import build_resources, configure_subagents
@@ -146,31 +149,15 @@ class MiraApplication:
         plan_agent = None
         if not blocking:
             action_resources = configure_subagents(resources, config)
-            plan_resources = build_resources(
-                workspace,
-                create_examples=False,
-                settings=config.get("settings"),
-                enable_execute=False,
-                config=config,
-                subagent_discovery=resources.subagent_discovery,
-            )
             inspect_model = get_llm(config, metadata=ModelMetadata())
             metadata = await infer_model_metadata(config, model=inspect_model)
-            agent = build_agent(
+            agent, plan_agent = build_agent_pair(
                 config=config,
                 workspace=workspace,
                 checkpointer=checkpointer,
                 metadata=metadata,
                 mcp_manager=mcp_manager,
-                resources=action_resources,
-            )
-            plan_agent = build_plan_agent(
-                config=config,
-                workspace=workspace,
-                checkpointer=checkpointer,
-                metadata=metadata,
-                mcp_manager=mcp_manager,
-                resources=plan_resources,
+                action_resources=action_resources,
             )
         from core.diagnostics.issues import unique_issues
 
@@ -231,6 +218,78 @@ class MiraApplication:
         """Return whether an explicit durable session already exists."""
         return bool(session_id) and self.store.path(session_id).is_file()
 
+    def persist_tool_always_allow(self, agent: Any, action: dict[str, Any]) -> None:
+        """Persist one interrupted tool's existing MIRA always-allow policy."""
+        from config.settings import (
+            load_settings,
+            save_settings,
+            set_mcp_tool_policy_value,
+            set_tool_always_allow,
+        )
+
+        name = str(action.get("name") or "")
+        metadata = next(
+            (
+                item
+                for item in (getattr(agent, "mira_tool_specs", None) or ())
+                if isinstance(item, dict) and item.get("name") == name
+            ),
+            {},
+        )
+        settings = load_settings(self.workspace)
+        if not name:
+            raise RuntimeError("cannot persist Always allow for an unnamed tool")
+        if metadata.get("source") == "mcp":
+            server = str(metadata.get("server") or "")
+            original_name = str(metadata.get("original_name") or "")
+            if not server or not original_name:
+                raise RuntimeError(f"cannot persist Always allow for MCP tool {name}: missing identity metadata")
+            updated = set_mcp_tool_policy_value(
+                settings, server, original_name, "always_allow", True
+            )
+        else:
+            updated = set_tool_always_allow(settings, name, True)
+        if not save_settings(self.workspace, updated):
+            raise RuntimeError(f"could not persist Always allow for {name}")
+        self.config["settings"] = updated
+        self._policy_refresh_generation += 1
+
+    async def refresh_agents_for_policy(self) -> None:
+        """Install one narrow Act/Plan rebuild after completed policy-changing turns."""
+        async with self._agent_refresh_lock:
+            generation = self._policy_refresh_generation
+            if generation <= self._policy_refreshed_generation:
+                return
+            from agent.resources import build_resources, configure_subagents
+            from config.metadata import ModelMetadata
+
+            metadata = ModelMetadata(
+                context_tokens=int(self.context_limit_tokens or 0),
+                context_source=str(self.context_limit_source or "unknown"),
+            )
+            resources = build_resources(
+                self.workspace,
+                settings=self.config.get("settings"),
+                config=None,
+            )
+            action_resources = configure_subagents(resources, self.config)
+            agent, plan_agent = build_agent_pair(
+                config=self.config,
+                workspace=self.workspace,
+                checkpointer=self.checkpointer,
+                metadata=metadata,
+                mcp_manager=self.mcp_manager,
+                action_resources=action_resources,
+            )
+            self.agent, self.plan_agent = agent, plan_agent
+            self.tool_failures = resources.tool_failures
+            self.resource_metadata = resources.metadata
+            self.project_backend = resources.project_backend
+            for session in self._sessions.values():
+                refresh_agent_specs(session.mode, agent, plan_agent)
+                session.mode["resources"] = resources.metadata
+            self._policy_refreshed_generation = generation
+
     async def shutdown(self, *, persist_sessions: bool = True) -> None:
         """Close sessions and shared external resources."""
         if self._closed:
@@ -242,6 +301,40 @@ class MiraApplication:
         if mcp_manager is not None:
             await mcp_manager.shutdown()
         self._closed = True
+
+
+def build_agent_pair(
+    *,
+    config: dict[str, Any],
+    workspace: Path,
+    checkpointer: Any,
+    metadata: Any,
+    mcp_manager: Any,
+    action_resources: Any,
+) -> tuple[Any, Any]:
+    """Build the shared Act/Plan pair without touching live MCP connections."""
+    from agent.factory import build_agent, build_plan_agent
+    from agent.resources import build_resources
+
+    plan_resources = build_resources(
+        workspace,
+        create_examples=False,
+        settings=config.get("settings"),
+        enable_execute=False,
+        config=config,
+        subagent_discovery=action_resources.subagent_discovery,
+    )
+    common = {
+        "config": config,
+        "workspace": workspace,
+        "checkpointer": checkpointer,
+        "metadata": metadata,
+        "mcp_manager": mcp_manager,
+    }
+    return (
+        build_agent(resources=action_resources, **common),
+        build_plan_agent(resources=plan_resources, **common),
+    )
 
 
 def initial_mode(

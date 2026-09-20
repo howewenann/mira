@@ -647,6 +647,8 @@ async def run_turn(
     planning_state: dict[str, str] | None = None,
     planning_context: Any | None = None,
     messages: list[Any] | None = None,
+    always_allowed_tools: set[str] | None = None,
+    persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -680,6 +682,7 @@ async def run_turn(
         event_renderer,
     )
     eval_renderer = EvalSubagentRenderer(event_renderer, inspection)
+    always_allowed_tools = always_allowed_tools if always_allowed_tools is not None else set()
 
     while True:
         inspection.begin_pass()
@@ -934,7 +937,13 @@ async def run_turn(
             payload = Command(resume=answer)
         else:
             annotate_filesystem_approvals(interrupts, getattr(agent, "mira_backend", None))
-            decisions = await renderer.ask_approvals(interrupts)
+            decisions = await resolve_approval_decisions(
+                renderer,
+                interrupts,
+                agent,
+                always_allowed_tools,
+                persist_always_allow,
+            )
             render_edited_tool_calls(
                 decisions,
                 approval_bindings,
@@ -943,6 +952,57 @@ async def run_turn(
                 inspection,
             )
             payload = Command(resume=approval_resume_value(interrupts, decisions))
+
+
+async def resolve_approval_decisions(
+    renderer: Any,
+    interrupts: list[Any],
+    agent: Any,
+    always_allowed_tools: set[str],
+    persist_always_allow: Callable[[Any, dict[str, Any]], None] | None,
+) -> list[dict[str, Any]]:
+    """Collect MIRA decisions and translate them to native LangGraph values."""
+    actions = [
+        action
+        for interrupt in interrupts
+        for action in interrupt_value(interrupt).get("action_requests", [])
+    ]
+    pending = [
+        index
+        for index, action in enumerate(actions)
+        if str(action.get("name") or "") not in always_allowed_tools
+    ]
+    decisions: list[dict[str, Any] | None] = [
+        {"type": "approve"} if index not in pending else None
+        for index in range(len(actions))
+    ]
+
+    if pending:
+        prompt_interrupts = interrupts
+        if len(pending) != len(actions):
+            prompt_interrupts = [{"action_requests": [actions[index] for index in pending]}]
+        selected = await renderer.ask_approvals(prompt_interrupts)
+        if len(selected) != len(pending):
+            raise RuntimeError("approval decisions do not match the pending interrupt actions")
+        for index, decision in zip(pending, selected, strict=True):
+            kind = str(decision.get("type") or "")
+            if kind == "allow_always":
+                if persist_always_allow is None:
+                    raise RuntimeError("Always allow is unavailable without MIRA settings persistence")
+                persist_always_allow(agent, actions[index])
+                always_allowed_tools.add(str(actions[index].get("name") or ""))
+                decisions[index] = {"type": "approve"}
+            elif kind in {"allow_once", "approve"}:
+                decisions[index] = {"type": "approve"}
+            elif kind in {"reject_once", "reject"}:
+                native = dict(decision)
+                native["type"] = "reject"
+                decisions[index] = native
+            elif kind == "edit":
+                decisions[index] = dict(decision)
+            else:
+                raise RuntimeError(f"unsupported MIRA approval decision: {kind or '<empty>'}")
+    return [decision for decision in decisions if decision is not None]
 
 
 def approval_resume_value(

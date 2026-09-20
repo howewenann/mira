@@ -13,10 +13,12 @@ ACTION_PREVIEW_KEY_WIDTH = 10
 DEFAULT_APPROVAL_DECISIONS = ["approve", "edit", "reject"]
 from core.interface.requests import APPROVAL_CONSEQUENCE
 DECISION_LABELS = {
-    "approve": ("a", "Approve (a)"),
+    "allow_once": ("a", "Allow once (a)"),
     "edit": ("e", "Edit (e)"),
-    "reject": ("r", "Reject (r)"),
+    "reject_once": ("r", "Reject (r)"),
+    "allow_always": ("l", "Always allow (l)"),
 }
+NATIVE_DECISIONS = {"approve": "allow_once", "edit": "edit", "reject": "reject_once"}
 
 
 def ask_user_request(interrupt: Any) -> dict[str, Any]:
@@ -145,7 +147,7 @@ def action_choices(interrupt: Any, action: Any, index: int) -> list[tuple[str, s
         label = DECISION_LABELS.get(decision)
         if label is not None:
             choices.append(label)
-    return choices or [DECISION_LABELS["approve"], DECISION_LABELS["reject"]]
+    return choices or [DECISION_LABELS["allow_once"], DECISION_LABELS["reject_once"]]
 
 
 def allowed_decisions(interrupt: Any, action: Any, index: int) -> list[str]:
@@ -155,12 +157,14 @@ def allowed_decisions(interrupt: Any, action: Any, index: int) -> list[str]:
     if not isinstance(raw_decisions, list):
         raw_decisions = DEFAULT_APPROVAL_DECISIONS
 
-    allowed = []
+    available = set()
     for decision in raw_decisions:
-        text = str(decision)
-        if text in DECISION_LABELS and text not in allowed:
-            allowed.append(text)
-    return allowed
+        text = NATIVE_DECISIONS.get(str(decision), str(decision))
+        if text in DECISION_LABELS:
+            available.add(text)
+    if "allow_once" in available:
+        available.add("allow_always")
+    return [decision for decision in DECISION_LABELS if decision in available]
 
 
 def review_config(interrupt: Any, action: Any, index: int) -> dict[str, Any]:

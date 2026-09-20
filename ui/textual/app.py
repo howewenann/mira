@@ -3053,9 +3053,11 @@ class MiraApp(App[None]):
                             continue
                         decisions.append(decision)
                     elif answer == "r":
-                        decisions.append({"type": "reject"})
+                        decisions.append({"type": "reject_once"})
+                    elif answer == "l":
+                        decisions.append({"type": "allow_always"})
                     else:
-                        decisions.append({"type": "approve"})
+                        decisions.append({"type": "allow_once"})
                     break
         return decisions
 
@@ -3140,7 +3142,7 @@ class MiraApp(App[None]):
     async def edit_decision(self, action: Any) -> dict[str, Any] | None:
         """Prompt for edited JSON args and return a LangGraph decision."""
         if not isinstance(action, dict):
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         edited_text = await self._prompt_json("Edited Args", json.dumps(action.get("args", {}), indent=2))
         if edited_text is None:
@@ -3150,11 +3152,11 @@ class MiraApp(App[None]):
             edited_args = json.loads(edited_text)
         except json.JSONDecodeError:
             self.system_message("invalid JSON; rejecting action", kind="warning")
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         if not isinstance(edited_args, dict):
             self.system_message("edited args must be a JSON object; rejecting action", kind="warning")
-            return {"type": "reject"}
+            return {"type": "reject_once"}
 
         return {
             "type": "edit",
@@ -3922,7 +3924,7 @@ class MiraApp(App[None]):
         answer = await self._prompt_choice(
             f"Allow MCP Server: {state.name}",
             preview,
-            [("a", "Allow (a)"), ("d", "Deny (d)"), ("l", "Always allow (l)")],
+            [("a", "Allow once (a)"), ("r", "Reject (r)"), ("l", "Always allow (l)")],
         )
         return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
 
