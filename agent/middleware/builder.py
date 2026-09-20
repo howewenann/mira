@@ -22,7 +22,7 @@ from agent.middleware.execute_tool_description_rewrite import (
 )
 from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware.file_references import FileReferenceMiddleware
-from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
+from agent.middleware.model_compatibility import ModelCompatibilityMiddleware
 from config.settings import (
     READ_ONLY_BUILTIN_TOOLS,
     dynamic_subagents_enabled,
@@ -59,7 +59,7 @@ def build_agent_middleware(
         *([TodoListMiddleware()] if planning_todos_enabled(settings) else []),
         summarization_middleware,
         FileReferenceMiddleware(),
-        ModelResponseNormalizationMiddleware(Path(workspace)),
+        ModelCompatibilityMiddleware(Path(workspace)),
         ProviderContextOverflowMiddleware(),
         CodeInterpreterMiddleware(
             memory_limit=QUICKJS_MEMORY_LIMIT,

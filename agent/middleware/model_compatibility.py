@@ -1,16 +1,16 @@
-"""Known provider and filesystem-tool response normalizations."""
+"""Known request and response representation compatibility repairs."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from langchain.agents.middleware.types import AgentMiddleware, ModelResponse
-from langchain_core.messages import AIMessage
+from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, convert_to_openai_image_block
 
 
-class ModelResponseNormalizationMiddleware(AgentMiddleware[Any, Any, Any]):
-    """Correct known model-response incompatibilities before MIRA uses them."""
+class ModelCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Correct known representation incompatibilities at the model boundary."""
 
     MODEL_PROVIDER = "anyllm"
     FILE_PATH_TOOLS = {"read_file", "write_file", "edit_file"}
@@ -18,15 +18,41 @@ class ModelResponseNormalizationMiddleware(AgentMiddleware[Any, Any, Any]):
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
 
-    def wrap_model_call(self, request: Any, handler: Any) -> ModelResponse[Any]:
-        response = handler(request)
+    def wrap_model_call(self, request: ModelRequest[Any], handler: Any) -> ModelResponse[Any]:
+        response = handler(self._normalize_request(request))
         self._normalize_response(response)
         return response
 
-    async def awrap_model_call(self, request: Any, handler: Any) -> ModelResponse[Any]:
-        response = await handler(request)
+    async def awrap_model_call(self, request: ModelRequest[Any], handler: Any) -> ModelResponse[Any]:
+        response = await handler(self._normalize_request(request))
         self._normalize_response(response)
         return response
+
+    def _normalize_request(self, request: ModelRequest[Any]) -> ModelRequest[Any]:
+        changed = False
+        normalized_messages = []
+        for message in request.messages:
+            normalized_content, content_changed = self._normalize_image_blocks(message.content)
+            normalized_messages.append(
+                message.model_copy(update={"content": normalized_content})
+                if content_changed
+                else message
+            )
+            changed = changed or content_changed
+        return request.override(messages=normalized_messages) if changed else request
+
+    def _normalize_image_blocks(self, content: Any) -> tuple[Any, bool]:
+        if not isinstance(content, list):
+            return content, False
+        changed = False
+        normalized_blocks = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "image":
+                normalized_blocks.append(convert_to_openai_image_block(block))
+                changed = True
+            else:
+                normalized_blocks.append(block)
+        return normalized_blocks, changed
 
     def _normalize_response(self, response: ModelResponse[Any]) -> None:
         for message in response.result:
@@ -103,4 +129,4 @@ class ModelResponseNormalizationMiddleware(AgentMiddleware[Any, Any, Any]):
         return f"/{relative.as_posix()}"
 
 
-__all__ = ["ModelResponseNormalizationMiddleware"]
+__all__ = ["ModelCompatibilityMiddleware"]

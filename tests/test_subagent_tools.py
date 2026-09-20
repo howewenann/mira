@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from deepagents.backends import StateBackend
 from langchain_core.tools import tool
 
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
+from agent.middleware import ModelCompatibilityMiddleware
 from agent import factory
 from agent.resources import ResourceBundle
 from agent.subagents.discovery import (
@@ -117,6 +119,64 @@ def factory_patches(agent: Any) -> tuple[Any, ...]:
 
 class SubagentToolAllowlistTests(unittest.TestCase):
     builtins = {"ls", "read_file", "write_file", "edit_file", "glob", "grep"}
+
+    def test_model_compatibility_decorates_only_raw_subagents_once(self) -> None:
+        existing = ModelCompatibilityMiddleware(Path("."))
+        general = raw("general-purpose")
+        researcher = raw("researcher", middleware=[existing])
+        compiled = {"name": "compiled", "description": "compiled", "runnable": object()}
+        remote = {"name": "remote", "description": "remote", "graph_id": "graph"}
+
+        prepared = factory.subagents_with_model_compatibility(
+            [general, researcher, compiled, remote],
+            Path("."),
+        )
+
+        self.assertNotIn("middleware", general)
+        self.assertIsNot(prepared[0], general)
+        self.assertEqual(
+            sum(isinstance(item, ModelCompatibilityMiddleware) for item in prepared[0]["middleware"]),
+            1,
+        )
+        self.assertEqual(
+            sum(isinstance(item, ModelCompatibilityMiddleware) for item in prepared[1]["middleware"]),
+            1,
+        )
+        self.assertIs(prepared[1]["middleware"][0], existing)
+        self.assertIs(prepared[2], compiled)
+        self.assertIs(prepared[3], remote)
+
+    def test_dynamic_compilation_retains_raw_subagent_compatibility(self) -> None:
+        prepared = factory.subagents_with_model_compatibility(
+            [raw("general-purpose"), raw("researcher")],
+            Path("."),
+        )
+
+        with (
+            patch("agent.subagents.compilation.resolve_subagent_model", side_effect=lambda value: value),
+            patch("agent.subagents.compilation.create_summarization_middleware", return_value="summary"),
+            patch("agent.subagents.compilation.create_sub_agent", side_effect=lambda spec: spec) as create,
+        ):
+            compile_dynamic_subagents(
+                prepared,
+                model="parent-model",
+                tools=[],
+                backend=StateBackend(),
+                skills=[],
+                permissions=[],
+                interrupt_on=None,
+            )
+
+        self.assertEqual(len(create.call_args_list), 2)
+        for call in create.call_args_list:
+            materialized = call.args[0]
+            self.assertEqual(
+                sum(
+                    isinstance(item, ModelCompatibilityMiddleware)
+                    for item in materialized["middleware"]
+                ),
+                1,
+            )
 
     def test_omitted_tools_preserves_inheritance_without_filtering(self) -> None:
         spec = raw("researcher")

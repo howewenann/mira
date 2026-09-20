@@ -22,6 +22,7 @@ PROFILE_FIELDS = {
     "temperature",
     "max_tokens",
     "top_p",
+    "image_inputs",
     "model_kwargs",
 }
 RESERVED_MODEL_KWARGS = {
@@ -41,6 +42,7 @@ RESERVED_MODEL_KWARGS = {
     "temperature",
     "max_tokens",
     "top_p",
+    "image_inputs",
     "model_kwargs",
     "messages",
     "tools",
@@ -205,6 +207,8 @@ def _validate_profile(
         value = values.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
             raise ValueError(f"{key} must be a number")
+    if "image_inputs" in values and not isinstance(values["image_inputs"], bool):
+        raise ValueError("image_inputs must be a boolean")
     max_tokens = values.get("max_tokens")
     if max_tokens is not None and (
         isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0

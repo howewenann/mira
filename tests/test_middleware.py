@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware.summarization import SummarizationMiddleware
-from langchain.agents.middleware.types import ModelResponse
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.middleware import (
@@ -17,7 +17,7 @@ from agent.middleware import (
     CorrectionMiddleware,
     ExecuteToolDescriptionRewriteMiddleware,
     MIRA_EXECUTE_TOOL_DESCRIPTION,
-    ModelResponseNormalizationMiddleware,
+    ModelCompatibilityMiddleware,
     PlanningStageEnforcementMiddleware,
 )
 from agent.planning.response_status import (
@@ -609,7 +609,7 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(update["_correction_retries"], {})
         self.assertNotIn("messages", update)
 
-    def test_model_response_normalizer_adds_missing_anyllm_provider(self) -> None:
+    def test_model_compatibility_adds_missing_anyllm_provider(self) -> None:
         """ChatAnyLLM messages should gain the provider identity DeepAgents expects."""
         message = AIMessage(
             content="done",
@@ -617,23 +617,25 @@ class MiddlewareTests(unittest.TestCase):
             usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
         )
         response = ModelResponse(result=[message])
-        middleware = ModelResponseNormalizationMiddleware(Path("."))
+        middleware = ModelCompatibilityMiddleware(Path("."))
 
-        normalized = middleware.wrap_model_call(None, lambda _request: response)
+        request = ModelRequest(model=AnyLLMMetadataModel(), messages=[])
+        normalized = middleware.wrap_model_call(request, lambda _request: response)
 
         self.assertIs(normalized, response)
         self.assertEqual(message.response_metadata["model_provider"], "anyllm")
         self.assertEqual(message.response_metadata["model_name"], "local-model")
         self.assertEqual(message.usage_metadata["total_tokens"], 120)
 
-    def test_model_response_normalizer_preserves_existing_provider_and_non_ai_messages(self) -> None:
+    def test_model_compatibility_preserves_existing_provider_and_non_ai_messages(self) -> None:
         """Provider-owned metadata and non-AI messages must remain unchanged."""
         message = AIMessage(content="done", response_metadata={"model_provider": "openai"})
         human = HumanMessage(content="hello")
         response = ModelResponse(result=[human, message])
-        middleware = ModelResponseNormalizationMiddleware(Path("."))
+        middleware = ModelCompatibilityMiddleware(Path("."))
 
-        middleware.wrap_model_call(None, lambda _request: response)
+        request = ModelRequest(model=AnyLLMMetadataModel(), messages=[])
+        middleware.wrap_model_call(request, lambda _request: response)
 
         self.assertEqual(message.response_metadata["model_provider"], "openai")
         self.assertEqual(human.response_metadata, {})
@@ -645,8 +647,8 @@ class MiddlewareTests(unittest.TestCase):
             usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
         )
         response = ModelResponse(result=[message])
-        ModelResponseNormalizationMiddleware(Path(".")).wrap_model_call(
-            None,
+        ModelCompatibilityMiddleware(Path(".")).wrap_model_call(
+            ModelRequest(model=AnyLLMMetadataModel(), messages=[]),
             lambda _request: response,
         )
         summarization = SummarizationMiddleware(
@@ -667,16 +669,17 @@ class MiddlewareTests(unittest.TestCase):
 class AsyncMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     """Asynchronous custom middleware behavior."""
 
-    async def test_model_response_normalizer_handles_async_calls(self) -> None:
+    async def test_model_compatibility_handles_async_calls(self) -> None:
         """Async model responses should receive the same metadata correction."""
         message = AIMessage(content="done")
         response = ModelResponse(result=[message])
-        middleware = ModelResponseNormalizationMiddleware(Path("."))
+        middleware = ModelCompatibilityMiddleware(Path("."))
 
         async def handler(_request: Any) -> ModelResponse[Any]:
             return response
 
-        normalized = await middleware.awrap_model_call(None, handler)
+        request = ModelRequest(model=AnyLLMMetadataModel(), messages=[])
+        normalized = await middleware.awrap_model_call(request, handler)
 
         self.assertIs(normalized, response)
         self.assertEqual(message.response_metadata["model_provider"], "anyllm")

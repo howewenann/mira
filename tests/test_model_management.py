@@ -7,12 +7,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent.llm import get_llm, get_model_name
+from deepagents.backends import StateBackend
+
+from agent.llm import get_llm, get_model_name, get_profile_model
 from agent.mcp.prompts import PromptRegistry
 from agent.resources.project_setup import ensure_project_examples
 from agent.subagents.discovery import discover_subagents, effective_subagent_specs
+from agent.subagents.compilation import compile_dynamic_subagents
 from config.interpolation import EnvironmentInterpolationError, resolve_environment
 from config.llm import load_model_registry
+from config.metadata import ModelMetadata
 from config.settings import (
     load_settings,
     set_model_assignment,
@@ -32,6 +36,7 @@ class ModelManagementTests(unittest.TestCase):
             self.assertIn("models:", registry_text)
             self.assertIn("example-cloud", registry_text)
             self.assertIn("example-endpoint", registry_text)
+            self.assertEqual(registry_text.count("#   image_inputs: false"), 2)
             self.assertEqual(load_model_registry(workspace).profiles, {})
             self.assertTrue((workspace / ".mira" / "prompts").is_dir())
 
@@ -78,6 +83,56 @@ class ModelManagementTests(unittest.TestCase):
             self.assertFalse(registry.profiles)
             self.assertIn("runtime-owned", registry.issues[0].details)
 
+    def test_registry_validates_image_inputs_as_a_boolean(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            mira = workspace / ".mira"
+            mira.mkdir()
+            (mira / "models.yml").write_text(
+                """models:
+  omitted:
+    provider: openai
+    model: text-model
+  disabled:
+    provider: openai
+    model: text-model
+    image_inputs: false
+  enabled:
+    provider: openai
+    model: vision-model
+    image_inputs: true
+  string-value:
+    provider: openai
+    model: invalid
+    image_inputs: "true"
+  integer-value:
+    provider: openai
+    model: invalid
+    image_inputs: 1
+  null-value:
+    provider: openai
+    model: invalid
+    image_inputs: null
+  nested-value:
+    provider: openai
+    model: invalid
+    model_kwargs:
+      image_inputs: true
+""",
+                encoding="utf-8",
+            )
+
+            registry = load_model_registry(workspace)
+
+            self.assertEqual(list(registry.profiles), ["omitted", "disabled", "enabled"])
+            self.assertNotIn("image_inputs", registry.profiles["omitted"].values)
+            self.assertIs(registry.profiles["disabled"].values["image_inputs"], False)
+            self.assertIs(registry.profiles["enabled"].values["image_inputs"], True)
+            self.assertEqual(
+                registry.invalid_names,
+                ("string-value", "integer-value", "null-value", "nested-value"),
+            )
+
     def test_interpolation_is_recursive_and_rejects_legacy_forms(self) -> None:
         value = {"a": ["Bearer ${TOKEN}", {"b": "${TOKEN}"}]}
         self.assertEqual(
@@ -109,7 +164,71 @@ class ModelManagementTests(unittest.TestCase):
                 api_base="http://localhost:1234/v1",
                 stream_options={"include_usage": True},
             )
+            self.assertIs(model.profile["image_inputs"], False)
+            self.assertEqual(model.profile["max_input_tokens"], 32768)
             self.assertEqual(get_model_name(config), "[local] lmstudio:demo")
+
+    def test_image_capability_is_profile_metadata_not_constructor_input(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            mira = workspace / ".mira"
+            mira.mkdir()
+            (mira / "models.yml").write_text(
+                """models:
+  disabled:
+    provider: anthropic
+    model: text-model
+    image_inputs: false
+  enabled:
+    provider: openai
+    model: vision-model
+    image_inputs: true
+""",
+                encoding="utf-8",
+            )
+            registry = load_model_registry(workspace)
+            config = {"model_registry": registry}
+
+            disabled = Mock(profile={"existing": "kept"})
+            enabled = Mock(profile={"existing": "kept"})
+            with patch("agent.llm.ChatAnyLLM", side_effect=[disabled, enabled]) as constructor:
+                self.assertIs(
+                    get_profile_model(
+                        config,
+                        "disabled",
+                        metadata=ModelMetadata(context_tokens=4096),
+                    ),
+                    disabled,
+                )
+                self.assertIs(
+                    get_profile_model(
+                        config,
+                        "enabled",
+                        metadata=ModelMetadata(context_tokens=8192),
+                    ),
+                    enabled,
+                )
+
+            self.assertEqual(
+                constructor.call_args_list[0].kwargs,
+                {"provider": "anthropic", "model": "text-model"},
+            )
+            self.assertEqual(
+                constructor.call_args_list[1].kwargs,
+                {
+                    "provider": "openai",
+                    "model": "vision-model",
+                    "stream_options": {"include_usage": True},
+                },
+            )
+            self.assertEqual(
+                disabled.profile,
+                {"existing": "kept", "max_input_tokens": 4096, "image_inputs": False},
+            )
+            self.assertEqual(
+                enabled.profile,
+                {"existing": "kept", "max_input_tokens": 8192, "image_inputs": True},
+            )
 
     def test_openai_profiles_request_stream_usage(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -161,6 +280,68 @@ class ModelManagementTests(unittest.TestCase):
             self.assertEqual(original["mode"], "fork")
             self.assertNotIn("model", original)
             self.assertNotIn("model", source.read_text(encoding="utf-8"))
+
+    def test_subagents_inherit_main_or_use_their_assigned_image_capability(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            mira = workspace / ".mira"
+            subagents_root = mira / "subagents"
+            subagents_root.mkdir(parents=True)
+            (mira / "models.yml").write_text(
+                """models:
+  main-text:
+    provider: openai
+    model: text-model
+    api_key: test-key
+    image_inputs: false
+  helper-vision:
+    provider: openai
+    model: vision-model
+    api_key: test-key
+    image_inputs: true
+""",
+                encoding="utf-8",
+            )
+            (subagents_root / "helper.py").write_text(
+                'SUBAGENTS = [{"name": "helper", "description": "Looks at images", '
+                '"system_prompt": "Inspect carefully."}]\n',
+                encoding="utf-8",
+            )
+            settings = set_model_assignment(load_settings(workspace), "main", "main-text")
+            settings = set_subagent_enabled(settings, "helper", True)
+            settings = set_subagent_model_assignment(settings, "helper", "helper-vision")
+            config = {
+                "settings": settings,
+                "model_registry": load_model_registry(workspace),
+            }
+            main_model = get_llm(config)
+            effective = effective_subagent_specs(discover_subagents(workspace), config)
+
+            with (
+                patch(
+                    "agent.subagents.compilation.create_summarization_middleware",
+                    return_value="summary",
+                ),
+                patch(
+                    "agent.subagents.compilation.create_sub_agent",
+                    side_effect=lambda spec: spec,
+                ),
+            ):
+                compiled = compile_dynamic_subagents(
+                    effective,
+                    model=main_model,
+                    tools=[],
+                    backend=StateBackend(),
+                    skills=[],
+                    permissions=[],
+                    interrupt_on=None,
+                )
+
+            general = next(item["runnable"] for item in compiled if item["name"] == "general-purpose")
+            helper = next(item["runnable"] for item in compiled if item["name"] == "helper")
+            self.assertIs(general["model"], main_model)
+            self.assertIs(general["model"].profile["image_inputs"], False)
+            self.assertIs(helper["model"].profile["image_inputs"], True)
 
     def test_recursive_prompt_collisions_are_excluded(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

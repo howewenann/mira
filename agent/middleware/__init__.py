@@ -15,7 +15,7 @@ from agent.middleware.execute_tool_description_rewrite import (
     execute_tool_with_mira_description,
 )
 from agent.middleware.file_references import FileReferenceMiddleware, file_reference_guidance
-from agent.middleware.model_response_normalization import ModelResponseNormalizationMiddleware
+from agent.middleware.model_compatibility import ModelCompatibilityMiddleware
 from agent.middleware.model_tool_visibility import ModelToolVisibilityMiddleware
 from agent.middleware.project_tool_errors import ProjectToolErrorMiddleware
 from agent.middleware.builder import (
@@ -44,7 +44,7 @@ __all__ = [
     "ExecuteToolDescriptionRewriteMiddleware",
     "FileReferenceMiddleware",
     "MIRA_EXECUTE_TOOL_DESCRIPTION",
-    "ModelResponseNormalizationMiddleware",
+    "ModelCompatibilityMiddleware",
     "ProjectToolErrorMiddleware",
     "ModelToolVisibilityMiddleware",
     "PlanningStageEnforcementMiddleware",

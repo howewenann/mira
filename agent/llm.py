@@ -79,6 +79,7 @@ def _create_profile_model(
     metadata: ModelMetadata | None,
 ) -> ChatAnyLLM:
     values = dict(profile.values)
+    image_inputs = values.pop("image_inputs", False)
     model_kwargs = dict(values.pop("model_kwargs", {}) or {})
     if profile.provider.lower() in STREAM_USAGE_PROVIDERS:
         values["stream_options"] = {"include_usage": True}
@@ -92,7 +93,12 @@ def _create_profile_model(
         values["model_kwargs"] = model_kwargs
     model = ChatAnyLLM(**values)
     selected_metadata = metadata or ModelMetadata(context_tokens=context_limit_tokens(config))
-    return apply_model_metadata(model, selected_metadata)
+    model = apply_model_metadata(model, selected_metadata)
+    model_profile = getattr(model, "profile", None)
+    model_profile = dict(model_profile) if isinstance(model_profile, dict) else {}
+    model_profile["image_inputs"] = image_inputs
+    model.profile = model_profile
+    return model
 
 
 def get_model_name(config: dict[str, Any]) -> str:

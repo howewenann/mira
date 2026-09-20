@@ -13,6 +13,7 @@ from langchain.agents.middleware.types import AgentMiddleware
 from agent.llm import get_llm, get_rubric_model_name
 from agent.middleware import (
     CorrectionMiddleware,
+    ModelCompatibilityMiddleware,
     ModelToolVisibilityMiddleware,
     PlanningStageEnforcementMiddleware,
     ProjectToolErrorMiddleware,
@@ -272,6 +273,7 @@ def _build_agent(
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
     subagents = subagents_with_project_tool_errors(subagents, project_tool_names)
+    subagents = subagents_with_model_compatibility(subagents, Path(workspace))
     settings = (config or {}).get("settings")
     with middleware_span_policy(middleware_span_mode(settings)):
         if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
@@ -367,6 +369,25 @@ def subagents_with_project_tool_errors(
         middleware = list(spec.get("middleware") or [])
         if not any(isinstance(item, ProjectToolErrorMiddleware) for item in middleware):
             middleware.append(ProjectToolErrorMiddleware(project_tool_names))
+        copied["middleware"] = middleware
+        prepared.append(copied)
+    return prepared
+
+
+def subagents_with_model_compatibility(
+    subagents: list[Any],
+    workspace: Path,
+) -> list[Any]:
+    """Add model-boundary compatibility to MIRA-owned raw subagents."""
+    prepared: list[Any] = []
+    for spec in subagents:
+        if not isinstance(spec, dict) or "graph_id" in spec or "runnable" in spec:
+            prepared.append(spec)
+            continue
+        copied = dict(spec)
+        middleware = list(spec.get("middleware") or [])
+        if not any(isinstance(item, ModelCompatibilityMiddleware) for item in middleware):
+            middleware.append(ModelCompatibilityMiddleware(workspace))
         copied["middleware"] = middleware
         prepared.append(copied)
     return prepared

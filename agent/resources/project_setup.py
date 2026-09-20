@@ -207,7 +207,7 @@ MODEL_REGISTRY_TEMPLATE = '''# MIRA model profiles
 # Add any number of named model profiles below.
 #
 # Required: provider, model
-# Optional: api_key, api_base, temperature, max_tokens, top_p, model_kwargs
+# Optional: api_key, api_base, temperature, max_tokens, top_p, image_inputs, model_kwargs
 #
 # Provider-specific arguments belong under model_kwargs.
 
@@ -216,6 +216,7 @@ models:
   # example-cloud:
   #   provider: <provider>          # Required. AnyLLM provider name.
   #   model: <model-id>             # Required. Exact model ID/name.
+  #   image_inputs: false           # Optional. Enable only for a vision-capable model/endpoint.
   #   api_key: ${API_KEY}           # Optional. Literal or environment reference.
   #   temperature: 0.2              # Optional. Sampling temperature.
   #   max_tokens: 4096              # Optional. Maximum generated output.
@@ -226,6 +227,7 @@ models:
   # example-endpoint:
   #   provider: <provider>          # Required. AnyLLM provider name.
   #   model: <model-id>             # Required. Exact model ID/name.
+  #   image_inputs: false           # Optional. Enable only for a vision-capable model/endpoint.
   #   api_base: http://localhost:1234/v1  # Optional. Compatible endpoint URL.
   #   api_key: <api-key>             # Optional. Literal or ${NAME} reference.
 '''

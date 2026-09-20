@@ -770,7 +770,7 @@ The middleware package mirrors these ownership boundaries:
 `builder.py` returns the ordered `AgentMiddlewareBundle`; `correction.py`
 implements generic correction; `planning_stage_enforcement.py` enforces formal
 stages; and `execute_tool_description_rewrite.py`,
-`model_tool_visibility.py`, and `model_response_normalization.py` each name the
+`model_tool_visibility.py`, and `model_compatibility.py` each name the
 behavior they own. Correction events are durable transcript events and are
 projected as correction context, not user context, when a saved session is
 resumed. Accepted response statuses need no special projection because they are

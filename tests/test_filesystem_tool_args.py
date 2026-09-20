@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemPermission, create_deep_agent
-from langchain.agents.middleware.types import ModelResponse
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
 from agent.factory import _write_interrupts
-from agent.middleware import ModelResponseNormalizationMiddleware
+from agent.middleware import ModelCompatibilityMiddleware
 from agent.resources import build_resources
 from core.execution.runner import run_turn
 from session.checkpoint import make_checkpointer
@@ -68,8 +68,12 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
             )
 
             response = ModelResponse(result=[message])
-            normalized = ModelResponseNormalizationMiddleware(workspace).wrap_model_call(
-                None,
+            request = ModelRequest(
+                model=BindableFakeMessagesListChatModel(responses=[]),
+                messages=[],
+            )
+            normalized = ModelCompatibilityMiddleware(workspace).wrap_model_call(
+                request,
                 lambda _request: response,
             )
 
@@ -117,7 +121,7 @@ class FilesystemToolArgTests(unittest.IsolatedAsyncioTestCase):
             agent = create_deep_agent(
                 model=model,
                 backend=resources.backend,
-                middleware=[ModelResponseNormalizationMiddleware(workspace)],
+                middleware=[ModelCompatibilityMiddleware(workspace)],
                 tools=resources.tools,
                 skills=resources.skills,
                 memory=resources.memory,
