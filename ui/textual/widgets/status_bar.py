@@ -112,7 +112,13 @@ class StatusBar(Horizontal):
 class TelemetryBar(Horizontal):
     """Bottom model shortcut and compact session telemetry."""
 
+    def __init__(self, *, show_add_file: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.show_add_file = show_add_file
+
     def compose(self) -> ComposeResult:
+        if self.show_add_file:
+            yield Button("Add file", id="add-file-button")
         yield Button("model: unset", id="model-settings-button")
         yield Static(id="telemetry-values")
 

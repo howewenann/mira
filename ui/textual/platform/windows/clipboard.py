@@ -5,9 +5,67 @@ from __future__ import annotations
 import ctypes
 import time
 from ctypes import wintypes
+from pathlib import Path
 
+CF_HDROP = 15
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+
+
+def get_windows_clipboard_files() -> list[Path]:
+    """Return every path in the clipboard's ``CF_HDROP`` payload."""
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    except (AttributeError, OSError):
+        return []
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = [wintypes.UINT]
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = [wintypes.UINT]
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    shell32.DragQueryFileW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.UINT,
+        wintypes.LPWSTR,
+        wintypes.UINT,
+    ]
+    shell32.DragQueryFileW.restype = wintypes.UINT
+
+    try:
+        opened = bool(user32.OpenClipboard(None))
+    except Exception:
+        return []
+    if not opened:
+        return []
+
+    try:
+        if not user32.IsClipboardFormatAvailable(CF_HDROP):
+            return []
+        handle = user32.GetClipboardData(CF_HDROP)
+        if not handle:
+            return []
+        count = shell32.DragQueryFileW(handle, 0xFFFFFFFF, None, 0)
+        paths: list[Path] = []
+        for index in range(count):
+            length = shell32.DragQueryFileW(handle, index, None, 0)
+            if not length:
+                continue
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            if shell32.DragQueryFileW(handle, index, buffer, length + 1):
+                paths.append(Path(buffer.value))
+        return paths
+    except Exception:
+        return []
+    finally:
+        try:
+            user32.CloseClipboard()
+        except Exception:
+            pass
 
 
 def set_windows_clipboard(text: str, *, attempts: int = 5, retry_delay: float = 0.01) -> None:

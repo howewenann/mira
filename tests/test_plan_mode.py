@@ -1324,7 +1324,14 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_destructive_clear_commands_are_textual_only_in_repl_handler(self) -> None:
         """Durable clear commands should not run without Textual confirmation support."""
-        for command in ("/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"):
+        for command in (
+            "/clear-chat",
+            "/clear-all-chats",
+            "/clear-uploads",
+            "/clear-all-uploads",
+            "/clear-errors",
+            "/clear-prompts",
+        ):
             renderer = RecordingRenderer()
 
             handled = await repl.handle_command(command, renderer, {}, "model", {"planning": False})

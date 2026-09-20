@@ -60,6 +60,8 @@ COMMAND_HELP_SECTIONS = (
             ("/clear", "clear the chat display"),
             ("/clear-chat", "clear the current saved chat transcript in the TUI"),
             ("/clear-all-chats", "delete all saved chats and compaction archives in the TUI"),
+            ("/clear-uploads", "delete uploaded files for the current chat in the TUI"),
+            ("/clear-all-uploads", "delete all uploaded files for this workspace in the TUI"),
             ("/clear-errors", "delete saved error reports in the TUI"),
             ("/clear-prompts", "clear prompt input history in the TUI"),
         ),

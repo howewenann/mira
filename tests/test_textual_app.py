@@ -22,7 +22,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.color import Color
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import MouseMove
+from textual.events import MouseMove, Paste
 from textual.selection import SELECT_ALL
 from textual.widgets import (
     Button,
@@ -217,12 +217,16 @@ class PromptBoxTestApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         self.submissions: list[str] = []
+        self.local_files: list[Path] = []
 
     def compose(self) -> ComposeResult:
         yield PromptBox()
 
     def on_prompt_box_submitted(self, message: PromptBox.Submitted) -> None:
         self.submissions.append(message.value)
+
+    def on_prompt_box_local_files_pasted(self, message: PromptBox.LocalFilesPasted) -> None:
+        self.local_files.extend(message.paths)
 
 
 class FakeAutocompleteBackend:
@@ -729,6 +733,174 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prompt.value, "first\nsec\nond")
             self.assertEqual(prompt.cursor_location, (2, 0))
             self.assertEqual(app.submissions, [])
+
+    async def test_empty_windows_paste_routes_every_clipboard_file(self) -> None:
+        app = PromptBoxTestApp()
+        paths = [Path(r"C:\files\one.txt"), Path(r"C:\files\annual report.pdf")]
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "win32"),
+                patch(
+                    "ui.textual.widgets.prompt_box.get_windows_clipboard_files",
+                    return_value=paths,
+                ) as clipboard_files,
+            ):
+                await prompt._on_paste(Paste(""))
+                await pilot.pause()
+
+            self.assertEqual(app.local_files, paths)
+            clipboard_files.assert_called_once_with()
+            self.assertEqual(prompt.value, "")
+
+    async def test_nonempty_paste_never_consults_windows_file_clipboard(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "win32"),
+                patch("ui.textual.widgets.prompt_box.get_windows_clipboard_files") as clipboard_files,
+            ):
+                await prompt._on_paste(Paste("hello world"))
+                await pilot.pause()
+
+            self.assertEqual(prompt.value, "hello world")
+            clipboard_files.assert_not_called()
+            self.assertEqual(app.local_files, [])
+
+    async def test_non_windows_empty_paste_keeps_default_behavior(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "linux"),
+                patch("ui.textual.widgets.prompt_box.get_windows_clipboard_files") as clipboard_files,
+            ):
+                await prompt._on_paste(Paste(""))
+                await pilot.pause()
+
+            clipboard_files.assert_not_called()
+            self.assertEqual(prompt.value, "")
+            self.assertEqual(app.local_files, [])
+
+    async def test_file_references_insert_at_cursor_with_clean_boundaries(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "Compare now"
+            prompt.cursor_location = (0, 7)
+            prompt.insert_file_references(["@/first.txt", '@"/annual report.pdf"'])
+            await pilot.pause()
+
+            self.assertEqual(
+                prompt.value,
+                'Compare @/first.txt @"/annual report.pdf" now',
+            )
+            self.assertEqual(app.submissions, [])
+
+    async def test_add_file_multiselect_uses_common_ingestion_and_restores_focus(self) -> None:
+        backend = object()
+        app = make_app(project_backend=backend)
+        app.local_file_uploads_enabled = True
+        selected = [Path(r"C:\files\report.pdf"), Path(r"C:\files\annual report.pdf")]
+        references = [
+            "@/.mira/_uploads/thread-1/a/report.pdf",
+            '@"/.mira/_uploads/thread-1/b/annual report.pdf"',
+        ]
+
+        with (
+            patch("ui.textual.app.choose_local_files", return_value=selected) as picker,
+            patch(
+                "ui.textual.app.ingest_local_files",
+                AsyncMock(return_value=(references, [])),
+            ) as ingest,
+        ):
+            async with app.run_test(size=(110, 30)) as pilot:
+                prompt = app.query_one(PromptBox)
+                prompt.value = "Compare"
+                await pilot.click("#add-file-button")
+                await wait_until(lambda: ingest.await_count == 1)
+                await wait_until(lambda: not app._file_ingestion_active)
+
+                picker.assert_called_once_with(app.workspace)
+                self.assertEqual(ingest.await_args.args, (selected, backend, "thread-1"))
+                self.assertEqual(
+                    prompt.value,
+                    'Compare @/.mira/_uploads/thread-1/a/report.pdf @"/.mira/_uploads/thread-1/b/annual report.pdf"',
+                )
+                self.assertTrue(prompt.has_focus)
+                self.assertEqual(app.session.get("events", []), [])
+                self.assertEqual(app._last_file_picker_directory, selected[0].parent)
+
+    async def test_add_file_cancel_is_a_focused_no_op(self) -> None:
+        app = make_app(project_backend=object())
+        app.local_file_uploads_enabled = True
+
+        with (
+            patch("ui.textual.app.choose_local_files", return_value=[]),
+            patch("ui.textual.app.ingest_local_files", AsyncMock()) as ingest,
+        ):
+            async with app.run_test(size=(100, 25)) as pilot:
+                prompt = app.query_one(PromptBox)
+                prompt.value = "draft"
+                await pilot.click("#add-file-button")
+                await wait_until(lambda: not app._file_ingestion_active)
+
+                ingest.assert_not_awaited()
+                self.assertEqual(prompt.value, "draft")
+                self.assertTrue(prompt.has_focus)
+
+    async def test_add_file_button_disables_with_runtime_mutations(self) -> None:
+        app = make_app(project_backend=object())
+        app.local_file_uploads_enabled = True
+
+        async with app.run_test(size=(100, 25)) as pilot:
+            button = app.query_one("#add-file-button", Button)
+            self.assertFalse(button.disabled)
+
+            app.busy = True
+            await pilot.pause()
+
+            self.assertTrue(button.disabled)
+
+    async def test_rebuilt_project_backend_updates_uploads_and_autocomplete_together(self) -> None:
+        old_backend = object()
+        new_backend = object()
+        app = make_app(project_backend=old_backend)
+
+        async with app.run_test(size=(100, 25)) as pilot:
+            await pilot.pause()
+            app._set_project_backend(new_backend)
+
+            self.assertIs(app.project_backend, new_backend)
+            self.assertIs(app.application.project_backend, new_backend)
+            self.assertIs(app.query_one(AutocompleteInput).project_backend, new_backend)
+
+    async def test_partial_file_upload_inserts_success_and_reports_failures(self) -> None:
+        app = make_app(project_backend=object())
+        app.local_file_uploads_enabled = True
+        reference = "@/.mira/_uploads/thread-1/id/good.txt"
+
+        with patch(
+            "ui.textual.app.ingest_local_files",
+            AsyncMock(return_value=([reference], ["blocked.txt: permission_denied"])),
+        ):
+            async with app.run_test(size=(100, 25)) as pilot:
+                prompt = app.query_one(PromptBox)
+                app._file_ingestion_active = True
+                await app._ingest_local_files_and_restore_focus([Path("good.txt"), Path("blocked.txt")])
+                await pilot.pause()
+
+                output = "\n".join(
+                    renderable_plain(item) for item in app.query_one("#chat-log").children
+                )
+                self.assertEqual(prompt.value, reference)
+                self.assertIn("Could not add blocked.txt: permission_denied", output)
+                self.assertTrue(prompt.has_focus)
 
     async def test_dragging_prompt_border_up_increases_height(self) -> None:
         app = make_app()
@@ -6840,6 +7012,47 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(store.saves), 1)
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertIn("cleared 3 saved chat sessions and 2 compaction files", rendered)
+
+    async def test_clear_uploads_commands_confirm_current_then_all_backend_paths(self) -> None:
+        backend = SimpleNamespace(
+            adelete=AsyncMock(return_value=SimpleNamespace(path="deleted", error=None))
+        )
+        app = make_app(project_backend=backend)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "_prompt_choice", return_value="o"):
+                self.assertTrue(await app._handle_history_command("/clear-uploads"))
+                self.assertTrue(await app._handle_history_command("/clear-all-uploads"))
+            await pilot.pause()
+
+            self.assertEqual(
+                [call.args for call in backend.adelete.await_args_list],
+                [("/.mira/_uploads/thread-1",), ("/.mira/_uploads",)],
+            )
+            rendered = "\n".join(
+                renderable_plain(block) for block in app.query_one(ChatLog).children
+            )
+            self.assertIn("current chat uploads cleared", rendered)
+            self.assertIn("all uploads cleared", rendered)
+
+    async def test_clear_uploads_cancel_keeps_backend_untouched(self) -> None:
+        backend = SimpleNamespace(adelete=AsyncMock())
+        app = make_app(project_backend=backend)
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            with patch.object(app, "_prompt_choice", return_value="c"):
+                self.assertTrue(await app._handle_history_command("/clear-uploads"))
+                self.assertTrue(await app._handle_history_command("/clear-all-uploads"))
+            await pilot.pause()
+
+            backend.adelete.assert_not_awaited()
+            rendered = "\n".join(
+                renderable_plain(block) for block in app.query_one(ChatLog).children
+            )
+            self.assertIn("clear uploads cancelled", rendered)
+            self.assertIn("clear all uploads cancelled", rendered)
 
     async def test_clear_all_chats_confirmation_accepts_ok_shortcut(self) -> None:
         """The all-chat confirmation should work from the ok/cancel choice box."""

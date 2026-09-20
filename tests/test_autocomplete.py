@@ -59,6 +59,18 @@ class AutocompleteModelTests(unittest.TestCase):
         self.assertTrue(all(item.kind == "native_command" for item in items))
         self.assertTrue(all(_completion_row(item).plain.startswith("CMND  ") for item in items))
 
+    def test_upload_clear_commands_are_discoverable_native_commands(self) -> None:
+        items = command_items("uploads")
+
+        self.assertEqual(
+            [item.display for item in items],
+            ["/clear-all-uploads", "/clear-uploads"],
+        )
+        self.assertEqual(
+            [item.insertion for item in items],
+            ["/clear-all-uploads", "/clear-uploads"],
+        )
+
     def test_native_and_prompt_commands_keep_explicit_kinds_and_full_usage(self) -> None:
         async def resolve(_values: dict[str, str]) -> list[Any]:
             return []

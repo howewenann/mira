@@ -156,7 +156,14 @@ async def handle_command(
         clear(renderer)
         return True
 
-    if text in {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}:
+    if text in {
+        "/clear-chat",
+        "/clear-all-chats",
+        "/clear-uploads",
+        "/clear-all-uploads",
+        "/clear-errors",
+        "/clear-prompts",
+    }:
         write_line(renderer, f"{text} is available in the Textual app with confirmation", kind="warning")
         return True
 

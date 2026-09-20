@@ -114,11 +114,20 @@ from ui.textual.widgets.session_history import (
     session_display_title,
 )
 from ui.textual.platform.windows.clipboard import set_windows_clipboard
+from ui.textual.platform.windows.file_picker import choose_local_files
 from ui.textual.platform.windows.input import driver_class_for_platform
 from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_platform
+from ui.textual.file_uploads import clear_local_uploads, ingest_local_files
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
-DESTRUCTIVE_HISTORY_COMMANDS = {"/clear-chat", "/clear-all-chats", "/clear-errors", "/clear-prompts"}
+DESTRUCTIVE_HISTORY_COMMANDS = {
+    "/clear-chat",
+    "/clear-all-chats",
+    "/clear-uploads",
+    "/clear-all-uploads",
+    "/clear-errors",
+    "/clear-prompts",
+}
 BUSY_MUTATING_COMMANDS = {
     "/act",
     "/clear",
@@ -194,9 +203,13 @@ class MiraApp(App[None]):
         self.tool_output_chars = int(tool_output_chars)
         self.history_path = self.workspace / ".mira" / "history.txt"
         self.persist_prompt_history = prebuilt is None
+        self.local_file_uploads_enabled = sys.platform == "win32"
+        self._last_file_picker_directory = self.workspace
+        self._file_ingestion_active = False
 
         self.agent: Any = None
         self.plan_agent: Any = None
+        self.project_backend: Any = None
         self.store: Any = None
         self.application: MiraApplication | None = None
         self.core_session: MiraSession | None = None
@@ -272,7 +285,10 @@ class MiraApp(App[None]):
                     subagent_provider=self._active_autocomplete_subagents,
                     skill_registry_provider=self._skill_registry,
                 )
-                yield TelemetryBar(id="telemetry-row")
+                yield TelemetryBar(
+                    show_add_file=self.local_file_uploads_enabled,
+                    id="telemetry-row",
+                )
 
     def on_mount(self) -> None:
         """Start app initialization."""
@@ -330,6 +346,9 @@ class MiraApp(App[None]):
         """Install bootstrapped agents and session state into the app."""
         self.agent = state["agent"]
         self.plan_agent = state["plan_agent"]
+        self.project_backend = (
+            getattr(self.agent, "mira_project_backend", None) or state.get("project_backend")
+        )
         self.config = state["config"]
         self.store = state["store"]
         self.session = state["session"]
@@ -375,7 +394,7 @@ class MiraApp(App[None]):
                 tool_failures=self.tool_failures,
                 issues=self.issues,
                 resource_metadata=state.get("resource_metadata") or {},
-                project_backend=state.get("project_backend"),
+                project_backend=self.project_backend,
                 agent_unavailable_message=self.agent_unavailable_message,
             )
         if self.core_session is None:
@@ -390,9 +409,7 @@ class MiraApp(App[None]):
         prompt.disabled = False
         prompt.set_history(read_prompt_history(self.history_path))
         autocomplete = self.query_one(AutocompleteInput)
-        autocomplete.set_project_backend(
-            getattr(self.agent, "mira_project_backend", None) or state.get("project_backend")
-        )
+        autocomplete.set_project_backend(self.project_backend)
         autocomplete.set_mcp_manager(self.mcp_manager)
         ensure_dashboard(
             self.session,
@@ -1886,6 +1903,37 @@ class MiraApp(App[None]):
             )
             return True
 
+        if text == "/clear-uploads":
+            answer = await self._prompt_choice(
+                "Clear Current Uploads?",
+                "Delete uploaded files for this chat? Uploads from other chats will be kept.\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear uploads cancelled", kind="muted")
+                return True
+            await clear_local_uploads(
+                self.project_backend,
+                str(self.session.get("id") or ""),
+            )
+            self.system_message("current chat uploads cleared", kind="info")
+            return True
+
+        if text == "/clear-all-uploads":
+            answer = await self._prompt_choice(
+                "Clear All Uploads?",
+                "Delete all uploaded files under .mira/_uploads for this workspace?\n\n"
+                + DESTRUCTIVE_CONFIRM_HINT,
+                DESTRUCTIVE_CONFIRM_CHOICES,
+            )
+            if answer != "o":
+                self.system_message("clear all uploads cancelled", kind="muted")
+                return True
+            await clear_local_uploads(self.project_backend)
+            self.system_message("all uploads cleared", kind="info")
+            return True
+
         if text == "/clear-errors":
             answer = await self._prompt_choice(
                 "Clear Error Reports?",
@@ -2091,7 +2139,7 @@ class MiraApp(App[None]):
         self.agent = agent
         self.plan_agent = plan_agent
         self.agent_unavailable_message = model_unavailable_message(config) if agent is None else ""
-        self.query_one(AutocompleteInput).set_project_backend(
+        self._set_project_backend(
             getattr(agent, "mira_project_backend", None) or resources.project_backend
         )
         self.tool_failures = resources.tool_failures
@@ -3447,6 +3495,15 @@ class MiraApp(App[None]):
             except NoMatches:
                 pass
         try:
+            self.query_one("#add-file-button", Button).disabled = bool(
+                locked
+                or not self.ready
+                or self.project_backend is None
+                or self._file_ingestion_active
+            )
+        except NoMatches:
+            pass
+        try:
             self.query_one(SessionHistory).disabled = locked
         except NoMatches:
             pass
@@ -3521,6 +3578,80 @@ class MiraApp(App[None]):
         """Open the shared Settings panel directly on Models."""
         event.stop()
         self.run_worker(self._run_settings_command("models"), name="models-button", exclusive=False)
+
+    @on(Button.Pressed, "#add-file-button")
+    def press_add_file(self, event: Button.Pressed) -> None:
+        """Open the native multi-file picker without blocking Textual."""
+        event.stop()
+        if self._file_ingestion_active or not self.ready or self.project_backend is None:
+            return
+        self._file_ingestion_active = True
+        self._sync_interactivity()
+        self.run_worker(
+            self._choose_and_ingest_local_files(),
+            name="add-local-files",
+            exclusive=False,
+        )
+
+    @on(PromptBox.LocalFilesPasted)
+    def ingest_pasted_local_files(self, event: PromptBox.LocalFilesPasted) -> None:
+        """Route Explorer clipboard files through the shared ingestion path."""
+        event.stop()
+        if self._file_ingestion_active or not self.ready or self.project_backend is None:
+            return
+        self._file_ingestion_active = True
+        self._sync_interactivity()
+        self.run_worker(
+            self._ingest_local_files_and_restore_focus(event.paths),
+            name="paste-local-files",
+            exclusive=False,
+        )
+
+    async def _choose_and_ingest_local_files(self) -> None:
+        """Choose local files, remember the directory, and upload the selection."""
+        try:
+            paths = await asyncio.to_thread(
+                choose_local_files,
+                self._last_file_picker_directory,
+            )
+            if not paths:
+                return
+            self._last_file_picker_directory = paths[0].parent
+            await self._ingest_local_file_paths(paths)
+        except Exception as exc:
+            self.system_message(f"could not add files: {exc}", kind="warning")
+        finally:
+            self._finish_file_ingestion()
+
+    async def _ingest_local_files_and_restore_focus(self, paths: list[Path]) -> None:
+        """Upload an already selected set of paths and restore composer focus."""
+        try:
+            await self._ingest_local_file_paths(paths)
+        except Exception as exc:
+            self.system_message(f"could not add files: {exc}", kind="warning")
+        finally:
+            self._finish_file_ingestion()
+
+    async def _ingest_local_file_paths(self, paths: list[Path]) -> None:
+        """Upload local files through the current project backend and insert refs."""
+        references, failures = await ingest_local_files(
+            paths,
+            self.project_backend,
+            str(self.session.get("id") or ""),
+        )
+        if references:
+            self.query_one(PromptBox).insert_file_references(references)
+        if failures:
+            self.system_message(
+                "Could not add " + "; ".join(failures),
+                kind="warning",
+            )
+
+    def _finish_file_ingestion(self) -> None:
+        """Restore local-file controls and prompt focus after one ingestion."""
+        self._file_ingestion_active = False
+        self._sync_interactivity()
+        self.action_focus_prompt()
 
     def open_mcp_panel(self) -> None:
         """Shared button and slash-command pathway for the MCP panel."""
@@ -3855,7 +3986,7 @@ class MiraApp(App[None]):
         )
         self.mode.update(mode_updates)
         self._sync_core_application()
-        self.query_one(AutocompleteInput).set_project_backend(resources.project_backend)
+        self._set_project_backend(resources.project_backend)
         self._sync_issues()
 
     def _build_agent_pair(
@@ -3954,7 +4085,16 @@ class MiraApp(App[None]):
         self.application.context_limit_tokens = self.context_limit_tokens
         self.application.context_limit_source = self.context_limit_source
         self.application.mcp_manager = self.mcp_manager
+        self.application.project_backend = self.project_backend
         self.application.agent_unavailable_message = self.agent_unavailable_message
+
+    def _set_project_backend(self, backend: Any) -> None:
+        """Install one resolved project backend for uploads and autocomplete."""
+        self.project_backend = backend
+        if self.application is not None:
+            self.application.project_backend = backend
+        if self.is_mounted:
+            self.query_one(AutocompleteInput).set_project_backend(backend)
 
     def _agent_mode_updates(
         self,

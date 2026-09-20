@@ -520,6 +520,25 @@ ContextReportScreen {
     color: #b8c1c7;
 }
 
+#add-file-button {
+    width: auto;
+    min-width: 10;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin-right: 1;
+    content-align: left middle;
+    background: #6FAEAA;
+    color: #0C0F10;
+    text-style: bold;
+}
+
+#add-file-button:focus {
+    background: #8BC8C3;
+    color: #0C0F10;
+    text-style: bold;
+}
+
 #model-settings-button {
     width: auto;
     max-width: 60%;

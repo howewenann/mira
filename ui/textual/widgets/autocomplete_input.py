@@ -17,6 +17,7 @@ from textual.events import Key, MouseDown, MouseMove, MouseUp, Resize
 from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from agent.middleware.file_references import file_reference_token
 from ui.textual.commands.help import command_help_entries, command_insertion
 from ui.textual.widgets.prompt_box import PromptBox
 
@@ -549,7 +550,7 @@ def file_items(paths: list[str], query: str) -> list[CompletionItem]:
         CompletionItem(
             kind="file",
             display=path,
-            insertion=f'@"{path}"' if " " in path else f"@{path}",
+            insertion=file_reference_token(path),
             description="local file",
         )
         for path in matches
@@ -575,7 +576,7 @@ def attachment_items(
         CompletionItem(
             kind="file",
             display=path,
-            insertion=f'@"{path}"' if " " in path else f"@{path}",
+            insertion=file_reference_token(path),
             description="local file",
         )
         for path in local_matches

@@ -1417,6 +1417,31 @@ seconds, then create both a Plan and a Goal.
   processing and disappear when the existing final Plan or Goal UI takes over.
 - Resume the session and confirm completed tool durations remain visible.
 
+## Windows Local File Uploads
+
+Run MIRA in a disposable workspace on Windows using its normal
+`MiraWindowsDriver`.
+
+1. Click `Add file`, select multiple mixed file types (including a filename with
+   spaces), and confirm the prompt receives one quoted or unquoted `@/.mira/_uploads/...`
+   reference per file without submitting. Confirm the picker reopens in the last
+   selected directory and prompt focus returns after selection and cancellation.
+2. In Explorer, copy multiple files with Ctrl+C, focus MIRA, and press Ctrl+V.
+   Confirm every file is uploaded and referenced. Then copy and paste ordinary
+   non-empty text and confirm it remains ordinary text even if files were copied
+   previously.
+3. Submit a prompt that mentions an uploaded file and confirm normal filesystem
+   tools can inspect it. Confirm the uploaded bytes were not placed directly in
+   the user or system message and that Shift+Enter still inserts one newline.
+4. Run `/clear-uploads`, confirm it, and verify only the current chat's upload
+   directory is removed. Upload files in two chats, run `/clear-all-uploads`,
+   confirm it, and verify the workspace's complete `.mira/_uploads` tree is removed.
+
+Expected: uploads live below `/.mira/_uploads/<session>/<uuid>/<original-name>`,
+same-named files keep their names under different UUID directories, partial
+failures warn without removing successful references, and no `/reload` is needed
+for later `@` autocomplete discovery.
+
 ## Rubric Model Profiles And Live Progress
 
 Use a disposable Git-protected workspace and enable rubric grading. Keep the

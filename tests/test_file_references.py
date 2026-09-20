@@ -8,7 +8,11 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agent.middleware.file_references import FileReferenceMiddleware, local_file_references
+from agent.middleware.file_references import (
+    FileReferenceMiddleware,
+    file_reference_token,
+    local_file_references,
+)
 
 
 class FakeModelRequest:
@@ -24,6 +28,16 @@ class FakeModelRequest:
 
 
 class FileReferenceParserTests(unittest.TestCase):
+    def test_reference_tokens_quote_whitespace_only_when_needed(self) -> None:
+        self.assertEqual(
+            file_reference_token("/.mira/_uploads/thread/id/report.pdf"),
+            "@/.mira/_uploads/thread/id/report.pdf",
+        )
+        self.assertEqual(
+            file_reference_token("/.mira/_uploads/thread/id/annual report.pdf"),
+            '@"/.mira/_uploads/thread/id/annual report.pdf"',
+        )
+
     def test_quoted_multiple_duplicate_and_normalized_paths(self) -> None:
         self.assertEqual(
             local_file_references(

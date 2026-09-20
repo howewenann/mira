@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from copy import deepcopy
@@ -129,7 +130,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
         button_widths: list[int] = []
 
         for width in (80, 110, 140):
-            app = make_app(model_name=long_identity)
+            app = make_app(model_name=long_identity, project_backend=object())
             async with app.run_test(size=(width, 20)) as pilot:
                 await pilot.pause()
                 row = app.query_one("#telemetry-row")
@@ -145,6 +146,18 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(button.region.width, int(row.region.width * 0.6) + 1)
                 self.assertGreater(telemetry.region.width, 0)
                 self.assertEqual(button.region.right, telemetry.region.x)
+                if sys.platform == "win32":
+                    add_file = app.query_one("#add-file-button", Button)
+                    self.assertEqual(str(add_file.label), "Add file")
+                    self.assertEqual(add_file.region.right + 1, button.region.x)
+                    self.assertEqual(add_file.styles.background, Color.parse("#6FAEAA"))
+                    self.assertEqual(add_file.styles.color, Color.parse("#0C0F10"))
+                    if width == 110:
+                        add_file.focus()
+                        await pilot.pause()
+                        self.assertEqual(add_file.styles.background, Color.parse("#8BC8C3"))
+                else:
+                    self.assertEqual(len(app.query("#add-file-button")), 0)
 
                 if width == 110:
                     button.focus()

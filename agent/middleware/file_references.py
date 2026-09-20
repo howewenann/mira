@@ -37,6 +37,12 @@ def normalize_virtual_file_path(path: str) -> str:
     return f"/{value}" if value else ""
 
 
+def file_reference_token(path: str) -> str:
+    """Render one path using MIRA's normal visible ``@`` reference syntax."""
+    value = str(path)
+    return f'@"{value}"' if any(character.isspace() for character in value) else f"@{value}"
+
+
 def _trim_plain_reference(value: str) -> str:
     return value.rstrip(_TRAILING_PUNCTUATION)
 
@@ -136,6 +142,7 @@ def _mcp_attachments(messages: list[Any]) -> list[dict[str, str]]:
 
 __all__ = [
     "FileReferenceMiddleware",
+    "file_reference_token",
     "file_reference_guidance",
     "local_file_references",
     "mcp_resource_guidance",

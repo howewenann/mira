@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
+from pathlib import Path
+
+from textual import events
 from textual.message import Message
 from textual.events import Key
 from textual.widgets import TextArea
+
+from ui.textual.platform.windows.clipboard import get_windows_clipboard_files
 
 
 class PromptBox(TextArea):
@@ -15,6 +22,14 @@ class PromptBox(TextArea):
             super().__init__()
             self.prompt = prompt
             self.value = value
+
+    class LocalFilesPasted(Message):
+        """Explorer files received through an empty Windows paste event."""
+
+        def __init__(self, prompt: "PromptBox", paths: list[Path]) -> None:
+            super().__init__()
+            self.prompt = prompt
+            self.paths = paths
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__("", placeholder="prompt", show_line_numbers=False, id="prompt", **kwargs)
@@ -90,6 +105,40 @@ class PromptBox(TextArea):
             event.stop()
             self._next_history()
 
+    async def _on_paste(self, event: events.Paste) -> None:
+        """Promote empty Windows CF_HDROP pastes without affecting text paste."""
+        if event.text or sys.platform != "win32" or self.disabled or self.read_only:
+            await super()._on_paste(event)
+            return
+
+        paths = await asyncio.to_thread(get_windows_clipboard_files)
+        if not paths:
+            await super()._on_paste(event)
+            return
+
+        event.stop()
+        event.prevent_default()
+        self.post_message(self.LocalFilesPasted(self, paths))
+
+    def insert_file_references(self, references: list[str]) -> None:
+        """Insert normal file references at the selection with clean boundaries."""
+        if not references:
+            return
+        start, end = sorted((self.selection.start, self.selection.end))
+        start_offset = _offset_from_location(self.value, start)
+        end_offset = _offset_from_location(self.value, end)
+        before = self.value[:start_offset]
+        after = self.value[end_offset:]
+        prefix = " " if before and not before[-1].isspace() else ""
+        suffix = " " if after and not after[0].isspace() else ""
+        result = self.replace(
+            f"{prefix}{' '.join(references)}{suffix}",
+            start,
+            end,
+            maintain_selection_offset=False,
+        )
+        self.move_cursor(result.end_location)
+
     def _previous_history(self) -> None:
         """Move to the previous prompt history entry."""
         if not self._history:
@@ -132,3 +181,10 @@ class PromptBox(TextArea):
         callback = getattr(self.parent, "prompt_disabled_changed", None)
         if callable(callback):
             callback(disabled)
+
+
+def _offset_from_location(text: str, location: tuple[int, int]) -> int:
+    """Translate a TextArea row/column location into a string offset."""
+    row, column = location
+    lines = text.splitlines(keepends=True)
+    return sum(len(line) for line in lines[:row]) + column

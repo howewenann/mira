@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from textual._xterm_parser import XTermParser
 
@@ -14,6 +16,21 @@ from ui.textual.platform.windows.input import (
     driver_class_for_platform,
     normalize_windows_key_record,
 )
+from ui.textual.platform.windows import clipboard as native_clipboard
+
+
+class FakeNativeFunction:
+    """Callable ctypes stand-in that accepts signature attributes."""
+
+    def __init__(self, callback: object) -> None:
+        self.callback = callback
+        self.argtypes: object = None
+        self.restype: object = None
+        self.calls: list[tuple[object, ...]] = []
+
+    def __call__(self, *args: object) -> object:
+        self.calls.append(args)
+        return self.callback(*args)  # type: ignore[operator]
 
 
 def normalize(
@@ -101,6 +118,65 @@ class WindowsInputTests(unittest.TestCase):
     def test_non_windows_uses_textual_default_driver(self) -> None:
         self.assertIsNone(driver_class_for_platform("linux"))
         self.assertIsNone(driver_class_for_platform("darwin"))
+
+    def test_clipboard_reader_returns_all_hdrop_files_and_closes_clipboard(self) -> None:
+        values = [r"C:\files\one.txt", r"C:\files\annual report.pdf"]
+        open_clipboard = FakeNativeFunction(lambda _owner: True)
+        close_clipboard = FakeNativeFunction(lambda: True)
+        available = FakeNativeFunction(lambda _format: True)
+        get_data = FakeNativeFunction(lambda _format: 1234567890123)
+
+        def drag_query(_handle: object, index: int, buffer: object, _size: int) -> int:
+            if index == 0xFFFFFFFF:
+                return len(values)
+            value = values[index]
+            if buffer is None:
+                return len(value)
+            buffer.value = value
+            return len(value)
+
+        query_files = FakeNativeFunction(drag_query)
+        user32 = SimpleNamespace(
+            OpenClipboard=open_clipboard,
+            CloseClipboard=close_clipboard,
+            IsClipboardFormatAvailable=available,
+            GetClipboardData=get_data,
+        )
+        shell32 = SimpleNamespace(DragQueryFileW=query_files)
+
+        with patch.object(
+            native_clipboard.ctypes,
+            "WinDLL",
+            side_effect=[user32, shell32],
+            create=True,
+        ):
+            paths = native_clipboard.get_windows_clipboard_files()
+
+        self.assertEqual([str(path) for path in paths], values)
+        self.assertEqual(len(close_clipboard.calls), 1)
+        self.assertIs(get_data.restype, native_clipboard.wintypes.HANDLE)
+        self.assertEqual(query_files.restype, native_clipboard.wintypes.UINT)
+
+    def test_clipboard_reader_fails_gracefully_when_clipboard_cannot_open(self) -> None:
+        open_clipboard = FakeNativeFunction(lambda _owner: False)
+        close_clipboard = FakeNativeFunction(lambda: True)
+        user32 = SimpleNamespace(
+            OpenClipboard=open_clipboard,
+            CloseClipboard=close_clipboard,
+            IsClipboardFormatAvailable=FakeNativeFunction(lambda _format: True),
+            GetClipboardData=FakeNativeFunction(lambda _format: 1),
+        )
+        shell32 = SimpleNamespace(DragQueryFileW=FakeNativeFunction(lambda *_args: 0))
+
+        with patch.object(
+            native_clipboard.ctypes,
+            "WinDLL",
+            side_effect=[user32, shell32],
+            create=True,
+        ):
+            self.assertEqual(native_clipboard.get_windows_clipboard_files(), [])
+
+        self.assertEqual(close_clipboard.calls, [])
 
     @unittest.skipUnless(sys.platform == "win32", "MIRA's Windows driver imports only on Windows")
     def test_windows_selects_mira_driver(self) -> None:
