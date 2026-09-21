@@ -1293,7 +1293,7 @@ Button.plan-action:focus {
 .rubric-tool-count,
 .rubric-grader-model,
 .rubric-result,
-.rubric-phase-actions {
+.rubric-inspect-actions {
     width: 1fr;
     height: auto;
     padding: 0;
@@ -1308,9 +1308,12 @@ Button.plan-action:focus {
     text-overflow: ellipsis;
 }
 
-.rubric-phase-actions {
+.rubric-inspect-actions {
+    width: 1fr;
     height: 1;
     min-height: 1;
+    margin-top: 1;
+    align-horizontal: left;
 }
 
 .rubric-grader-model,
@@ -1320,27 +1323,41 @@ Button.plan-action:focus {
 
 Button.rubric-inspect {
     display: none;
-    min-width: 9;
-    width: auto;
+    width: 12;
+    min-width: 12;
+    max-width: 12;
     height: 1;
     min-height: 1;
-    padding: 0;
+    padding: 0 1;
     margin: 0;
     border: none;
-    background: transparent;
-    color: #C58FD6;
-    content-align: right middle;
-    text-align: right;
+    background: #24192A;
+    color: #D9B4E4;
+    content-align: center middle;
+    text-align: center;
+    text-style: none;
 }
 
 Button.rubric-inspect:hover {
+    border: none;
     background: #2A1F30;
     color: #F1DCF5;
+    text-style: none;
+}
+
+Button.rubric-inspect.-active {
+    border: none;
+    background: #3A2842;
+    color: #FFFFFF;
+    text-style: none;
+    tint: transparent;
 }
 
 Button.rubric-inspect:focus {
-    background: transparent;
-    color: #C58FD6;
+    border: none;
+    background: #24192A;
+    color: #D9B4E4;
+    text-style: none;
 }
 
 .goal-body {

@@ -51,7 +51,7 @@ class RubricInspectionTests(unittest.TestCase):
         inspection = renderer.live_inspections.get("rubric:run-1:0:verifier")
         assert inspection is not None
         self.assertEqual(renderer.created_before_lifecycle, [True])
-        self.assertEqual(inspection.inspection_type, "verifier")
+        self.assertEqual(inspection.inspection_type, "Rubrics")
         self.assertEqual(inspection.events[0].text, "exact verifier input")
         self.assertNotIn("inspection_events", renderer.lifecycle[0])
 

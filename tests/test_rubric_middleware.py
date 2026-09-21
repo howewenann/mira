@@ -20,6 +20,8 @@ from deepagents.middleware import rubric as deepagents_rubric
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain.agents.structured_output import ProviderStrategy
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.callbacks.manager import CallbackManager
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
@@ -37,6 +39,7 @@ from agent.rubric.middleware import (
     VERIFICATION_EVIDENCE_MESSAGE,
     VERIFIER_SYSTEM_PROMPT,
     MiraRubricMiddleware,
+    _GraderInspectionCallback,
 )
 from core.execution.runner import run_turn
 
@@ -557,7 +560,6 @@ class RubricMiddlewareTests(unittest.TestCase):
             "_GraderPhaseMiddleware",
             "_rubric_verification_complete",
             "jump_to",
-            "task(",
         ):
             self.assertNotIn(abandoned_name, source)
 
@@ -927,6 +929,406 @@ class RubricMiddlewareTests(unittest.TestCase):
                 ("grader", "assistant", '{"result":"satisfied",'),
                 ("grader", "assistant", '"explanation":"raw"}'),
             ],
+        )
+
+    def test_grader_callback_normalizes_and_deduplicates_generation_chunks(self) -> None:
+        queued: list[tuple[str, str]] = []
+        emitted: list[dict[str, Any]] = []
+        observer = _GraderInspectionCallback(queued.append)
+        chunk = ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=[
+                    {"type": "reasoning", "reasoning": "checking evidence"},
+                    {"type": "text", "text": '{"result":"satisfied"}'},
+                ]
+            )
+        )
+        token = mira_rubric._RUBRIC_RUN.set(("parent", 0, emitted.append))
+        try:
+            observer.on_llm_new_token("", chunk=chunk)
+            observer.on_llm_new_token("", chunk=chunk)
+        finally:
+            mira_rubric._RUBRIC_RUN.reset(token)
+
+        self.assertEqual(
+            queued,
+            [
+                ("reasoning", "checking evidence"),
+                ("assistant", '{"result":"satisfied"}'),
+            ],
+        )
+        self.assertEqual(observer.observed_chunks, 1)
+        self.assertEqual(emitted, [])
+
+    def test_grader_observer_config_preserves_existing_callbacks(self) -> None:
+        middleware = MiraRubricMiddleware(model="fake-model")
+        existing = BaseCallbackHandler()
+        observer = _GraderInspectionCallback(lambda _delta: None)
+
+        without_callbacks = middleware._grader_observer_config({}, observer)
+        self.assertEqual(without_callbacks["callbacks"], [observer])
+
+        callback_list = [existing]
+        with_list = middleware._grader_observer_config(
+            {"callbacks": callback_list},
+            observer,
+        )
+        self.assertEqual(with_list["callbacks"], [existing, observer])
+        self.assertEqual(callback_list, [existing])
+
+        manager = CallbackManager([existing])
+        with_manager = middleware._grader_observer_config(
+            {"callbacks": manager},
+            observer,
+        )
+        self.assertIsNot(with_manager["callbacks"], manager)
+        self.assertEqual(manager.handlers, [existing])
+        self.assertEqual(with_manager["callbacks"].handlers, [existing, observer])
+
+    def test_grader_observer_is_attached_only_to_final_grader(self) -> None:
+        verifier_callbacks: Any = None
+        grader_callbacks: Any = None
+
+        class RecordingVerifier:
+            def stream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Iterator[tuple[str, Any]]:
+                nonlocal verifier_callbacks
+                verifier_callbacks = config.get("callbacks")
+                yield "values", {"messages": []}
+
+        class RecordingGrader:
+            def stream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Iterator[tuple[str, Any]]:
+                nonlocal grader_callbacks
+                grader_callbacks = config.get("callbacks")
+                yield "values", graded_result()
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+        events: list[dict[str, Any]] = []
+        state = {
+            "rubric": "criterion",
+            "messages": [],
+            "_current_grading_run_id": "scope-parent",
+            "_rubric_iterations": 0,
+        }
+        middleware._prepare_evaluation(state, SimpleNamespace(stream_writer=events.append))
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=RecordingVerifier()),
+            patch.object(middleware, "_ensure_final_grader", return_value=RecordingGrader()),
+        ):
+            middleware._invoke_grader(state, 0)
+
+        verifier_handlers = (
+            verifier_callbacks.handlers
+            if hasattr(verifier_callbacks, "handlers")
+            else verifier_callbacks or []
+        )
+        grader_handlers = (
+            grader_callbacks.handlers
+            if hasattr(grader_callbacks, "handlers")
+            else grader_callbacks or []
+        )
+        self.assertFalse(
+            any(isinstance(handler, _GraderInspectionCallback) for handler in verifier_handlers)
+        )
+        self.assertEqual(
+            sum(isinstance(handler, _GraderInspectionCallback) for handler in grader_handlers),
+            1,
+        )
+
+    def test_sync_grader_callback_is_authoritative_and_values_remain_truth(self) -> None:
+        authoritative = graded_result(
+            result="needs_revision",
+            criteria=[{"name": "criterion", "passed": False, "gap": "missing"}],
+        )
+        nested_events: list[dict[str, Any]] = []
+
+        class CallbackGrader:
+            def stream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Iterator[tuple[str, Any]]:
+                observer = config["callbacks"][-1]
+                chunk = ChatGenerationChunk(
+                    message=AIMessageChunk(content='{"result":"satisfied"}')
+                )
+                nested = mira_rubric._RUBRIC_RUN.set(("nested", 9, nested_events.append))
+                try:
+                    observer.on_llm_new_token("", chunk=chunk)
+                    observer.on_llm_new_token("", chunk=chunk)
+                    yield "messages", (chunk.message, {})
+                finally:
+                    mira_rubric._RUBRIC_RUN.reset(nested)
+                yield "values", authoritative
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+        events: list[dict[str, Any]] = []
+        token = mira_rubric._RUBRIC_RUN.set(("sync-parent", 0, events.append))
+        try:
+            result = middleware._stream_final_grader(
+                CallbackGrader(),
+                {"messages": []},
+                config={},
+                context=None,
+            )
+        finally:
+            mira_rubric._RUBRIC_RUN.reset(token)
+
+        self.assertIs(result, authoritative)
+        self.assertEqual(nested_events, [])
+        deltas = [event for event in events if event["type"] == "rubric_inspection_delta"]
+        self.assertEqual([event["text"] for event in deltas], ['{"result":"satisfied"}'])
+        self.assertEqual(deltas[0]["grading_run_id"], "sync-parent")
+
+    def test_direct_grader_stream_keeps_messages_mode_compatibility(self) -> None:
+        authoritative = graded_result()
+
+        class DirectGrader:
+            def stream(self, *_args: Any, **_kwargs: Any) -> Iterator[tuple[str, Any]]:
+                yield "messages", (AIMessageChunk(content="direct raw output"), {})
+                yield "values", authoritative
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+        with patch.object(middleware, "_emit_inspection_message") as emit:
+            token = mira_rubric._RUBRIC_RUN.set(None)
+            try:
+                result = middleware._stream_final_grader(
+                    DirectGrader(),
+                    {"messages": []},
+                    config={},
+                    context=None,
+                )
+            finally:
+                mira_rubric._RUBRIC_RUN.reset(token)
+
+        self.assertIs(result, authoritative)
+        emit.assert_called_once()
+
+    def test_direct_async_grader_stream_keeps_messages_mode_compatibility(self) -> None:
+        authoritative = graded_result()
+
+        class DirectAsyncGrader:
+            async def astream(self, *_args: Any, **_kwargs: Any) -> Any:
+                yield "messages", (AIMessageChunk(content="direct async output"), {})
+                yield "values", authoritative
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+
+        async def invoke() -> dict[str, Any]:
+            token = mira_rubric._RUBRIC_RUN.set(None)
+            try:
+                with patch.object(middleware, "_emit_inspection_message") as emit:
+                    result = await middleware._astream_final_grader(
+                        DirectAsyncGrader(),
+                        {"messages": []},
+                        config={},
+                        context=None,
+                    )
+                    emit.assert_called_once()
+                    return result
+            finally:
+                mira_rubric._RUBRIC_RUN.reset(token)
+
+        self.assertIs(asyncio.run(invoke()), authoritative)
+
+    def test_async_grader_relay_owns_parent_context_and_avoids_messages_duplicate(self) -> None:
+        authoritative = graded_result(
+            result="needs_revision",
+            criteria=[{"name": "criterion", "passed": False, "gap": "missing"}],
+        )
+        nested_events: list[dict[str, Any]] = []
+
+        class AsyncCallbackGrader:
+            async def astream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Any:
+                observer = config["callbacks"][-1]
+                chunk = ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=[
+                            {"type": "reasoning", "reasoning": "real thought"},
+                            {"type": "text", "text": '{"result":"raw"}'},
+                        ]
+                    )
+                )
+                nested = mira_rubric._RUBRIC_RUN.set(("nested", 9, nested_events.append))
+                try:
+                    observer.on_llm_new_token("", chunk=chunk)
+                    await asyncio.sleep(0)
+                finally:
+                    mira_rubric._RUBRIC_RUN.reset(nested)
+                yield "messages", (chunk.message, {})
+                yield "values", authoritative
+
+        async def invoke() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            events: list[dict[str, Any]] = []
+            token = mira_rubric._RUBRIC_RUN.set(("parent", 1, events.append))
+            try:
+                result = await MiraRubricMiddleware(
+                    model="fake-model"
+                )._astream_final_grader(
+                    AsyncCallbackGrader(),
+                    {"messages": []},
+                    config={},
+                    context=None,
+                )
+            finally:
+                mira_rubric._RUBRIC_RUN.reset(token)
+            return result, events
+
+        result, events = asyncio.run(invoke())
+        self.assertIs(result, authoritative)
+        self.assertEqual(nested_events, [])
+        deltas = [event for event in events if event["type"] == "rubric_inspection_delta"]
+        self.assertEqual(
+            [(event["kind"], event["text"]) for event in deltas],
+            [("reasoning", "real thought"), ("assistant", '{"result":"raw"}')],
+        )
+        self.assertTrue(all(event["grading_run_id"] == "parent" for event in deltas))
+
+    def test_async_grader_messages_fallback_drains_before_phase_end(self) -> None:
+        authoritative = graded_result()
+
+        class MessagesOnlyGrader:
+            async def astream(self, *_args: Any, **_kwargs: Any) -> Any:
+                yield "messages", (AIMessageChunk(content="fallback raw output"), {})
+                yield "values", authoritative
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = Mock()
+        verifier.ainvoke = AsyncMock(return_value={"messages": []})
+        grader = MessagesOnlyGrader()
+        events: list[dict[str, Any]] = []
+        state = {
+            "rubric": "criterion",
+            "messages": [],
+            "_current_grading_run_id": "fallback-parent",
+            "_rubric_iterations": 0,
+        }
+        middleware._prepare_evaluation(state, SimpleNamespace(stream_writer=events.append))
+
+        async def invoke() -> deepagents_rubric.GraderResponse:
+            with (
+                patch.object(middleware, "_ensure_verifier", return_value=verifier),
+                patch.object(middleware, "_ensure_final_grader", return_value=grader),
+            ):
+                return await middleware._ainvoke_grader(state, 0)
+
+        graded = asyncio.run(invoke())
+        self.assertEqual(graded.result, "satisfied")
+        types = [event["type"] for event in events]
+        delta_index = types.index("rubric_inspection_delta")
+        self.assertLess(delta_index, types.index("rubric_grading_end"))
+        self.assertEqual(events[delta_index]["text"], "fallback raw output")
+
+    def test_async_grader_cancellation_drains_and_finishes_relay(self) -> None:
+        created: list[asyncio.Task[Any]] = []
+
+        class CancellingGrader:
+            async def astream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Any:
+                observer = config["callbacks"][-1]
+                observer.on_llm_new_token(
+                    "",
+                    chunk=ChatGenerationChunk(
+                        message=AIMessageChunk(content="before cancellation")
+                    ),
+                )
+                raise asyncio.CancelledError
+                yield  # pragma: no cover
+
+        async def invoke() -> list[dict[str, Any]]:
+            middleware = MiraRubricMiddleware(model="fake-model")
+            events: list[dict[str, Any]] = []
+            token = mira_rubric._RUBRIC_RUN.set(("cancel-parent", 0, events.append))
+            original_create_task = asyncio.create_task
+
+            def tracked_create_task(coro: Any) -> asyncio.Task[Any]:
+                task = original_create_task(coro)
+                created.append(task)
+                return task
+
+            try:
+                with patch("agent.rubric.middleware.asyncio.create_task", tracked_create_task):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await middleware._astream_final_grader(
+                            CancellingGrader(),
+                            {"messages": []},
+                            config={},
+                            context=None,
+                        )
+            finally:
+                mira_rubric._RUBRIC_RUN.reset(token)
+            return events
+
+        events = asyncio.run(invoke())
+        self.assertEqual(
+            [event["text"] for event in events if event["type"] == "rubric_inspection_delta"],
+            ["before cancellation"],
+        )
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].done())
+
+    def test_async_grader_error_drains_relay_without_masking_exception(self) -> None:
+        class FailingGrader:
+            async def astream(
+                self,
+                _state: dict[str, Any],
+                *,
+                config: dict[str, Any],
+                **_kwargs: Any,
+            ) -> Any:
+                config["callbacks"][-1].on_llm_new_token(
+                    "",
+                    chunk=ChatGenerationChunk(
+                        message=AIMessageChunk(content="before error")
+                    ),
+                )
+                raise RuntimeError("grader failed")
+                yield  # pragma: no cover
+
+        async def invoke() -> list[dict[str, Any]]:
+            middleware = MiraRubricMiddleware(model="fake-model")
+            events: list[dict[str, Any]] = []
+            token = mira_rubric._RUBRIC_RUN.set(("error-parent", 0, events.append))
+            try:
+                with self.assertRaisesRegex(RuntimeError, "grader failed"):
+                    await middleware._astream_final_grader(
+                        FailingGrader(),
+                        {"messages": []},
+                        config={},
+                        context=None,
+                    )
+            finally:
+                mira_rubric._RUBRIC_RUN.reset(token)
+            return events
+
+        events = asyncio.run(invoke())
+        self.assertEqual(
+            [event["text"] for event in events if event["type"] == "rubric_inspection_delta"],
+            ["before error"],
         )
 
     def test_verifier_observer_preserves_ids_raw_results_and_tool_errors(self) -> None:

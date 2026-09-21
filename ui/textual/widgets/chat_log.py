@@ -1202,6 +1202,11 @@ class ChatLog(VerticalScroll):
             key[1],
             max(1, int(max_iterations or activity.get("max_iterations") or 1)),
             inspection_id=inspection_id,
+            grader_model=str(
+                (evaluation or {}).get("grader_model")
+                or activity.get("grader_model")
+                or ""
+            ),
         )
         self.mount(widget)
         self._rubric_verifier_widgets[key] = widget

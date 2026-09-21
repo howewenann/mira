@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Sequence
-from contextvars import ContextVar
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar, copy_context
 from typing import Any
 
 from deepagents.middleware import rubric as deepagents_rubric
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import ProviderStrategy
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables.config import ensure_config
 from langgraph.errors import GraphBubbleUp
 
 from agent.rubric.graphs import RUBRIC_VERIFIER_GRAPH
@@ -65,6 +67,46 @@ _RUBRIC_RUN: ContextVar[tuple[str, int, Any] | None] = ContextVar(
     "mira_rubric_run",
     default=None,
 )
+
+_GRADER_RELAY_DONE = object()
+
+
+class _GraderInspectionCallback(BaseCallbackHandler):
+    """Observe real grader generations without publishing from their context."""
+
+    run_inline = True
+
+    def __init__(self, enqueue: Callable[[tuple[str, str]], None]) -> None:
+        self._enqueue = enqueue
+        self._seen_chunks: dict[int, Any] = {}
+        self.observed_chunks = 0
+
+    def on_llm_new_token(
+        self,
+        token: str | list[str | dict[str, Any]],  # noqa: ARG002
+        *,
+        chunk: Any = None,
+        **_kwargs: Any,
+    ) -> None:
+        if chunk is None:
+            return
+        chunk_id = id(chunk)
+        if self._seen_chunks.get(chunk_id) is chunk:
+            return
+        self._seen_chunks[chunk_id] = chunk
+        self.observed_chunks += 1
+
+        message = getattr(chunk, "message", None)
+        if message is None:
+            return
+        try:
+            reasoning, text = streamed_message_deltas(message)
+            if reasoning:
+                self._enqueue(("reasoning", reasoning))
+            if text:
+                self._enqueue(("assistant", text))
+        except Exception:  # noqa: BLE001 -- inspection cannot affect grading
+            return
 
 
 def _emit_rubric_event(event_type: str, **values: Any) -> None:
@@ -261,25 +303,54 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
                 _emit_rubric_event("rubric_tool_call_delta", chunk=dict(tool_chunk))
 
     @staticmethod
-    def _emit_inspection_message(phase: str, value: Any) -> None:
-        """Forward normalized nested reasoning and text without changing it."""
+    def _inspection_message_deltas(value: Any) -> list[tuple[str, str]]:
+        """Normalize one nested messages-mode item into inspection deltas."""
         reasoning, text = streamed_message_deltas(value)
+        deltas: list[tuple[str, str]] = []
         if reasoning:
-            _emit_rubric_event(
-                "rubric_inspection_delta",
-                phase=phase,
-                kind="reasoning",
-                text=reasoning,
-                inspection_id=MiraRubricMiddleware._inspection_id(phase),
-            )
+            deltas.append(("reasoning", reasoning))
         if text:
-            _emit_rubric_event(
-                "rubric_inspection_delta",
-                phase=phase,
-                kind="assistant",
-                text=text,
-                inspection_id=MiraRubricMiddleware._inspection_id(phase),
-            )
+            deltas.append(("assistant", text))
+        return deltas
+
+    @classmethod
+    def _emit_inspection_message(cls, phase: str, value: Any) -> None:
+        """Forward normalized nested reasoning and text without changing it."""
+        for kind, text in cls._inspection_message_deltas(value):
+            cls._emit_inspection_delta(phase, kind, text)
+
+    @staticmethod
+    def _emit_inspection_delta(phase: str, kind: str, text: str) -> None:
+        _emit_rubric_event(
+            "rubric_inspection_delta",
+            phase=phase,
+            kind=kind,
+            text=text,
+            inspection_id=MiraRubricMiddleware._inspection_id(phase),
+        )
+
+    @staticmethod
+    def _grader_observer_config(
+        config: dict[str, Any],
+        observer: _GraderInspectionCallback,
+    ) -> dict[str, Any]:
+        """Copy runnable config and add one observer without mutating tracing."""
+        observed = ensure_config(config)
+        callbacks = observed.get("callbacks")
+        if callbacks is None:
+            observed["callbacks"] = [observer]
+        elif isinstance(callbacks, list):
+            observed["callbacks"] = [*callbacks, observer]
+        else:
+            manager = callbacks.copy()
+            manager.add_handler(observer, inherit=True)
+            observed["callbacks"] = manager
+        return observed
+
+    @staticmethod
+    def _has_live_rubric_writer() -> bool:
+        identity = _RUBRIC_RUN.get()
+        return identity is not None and callable(identity[2])
 
     @staticmethod
     def _inspection_id(phase: str) -> str:
@@ -386,17 +457,65 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         """Stream raw grader messages while retaining final structured values."""
         if not callable(getattr(type(grader), "stream", None)):
             return grader.invoke(state, config=config, context=context)
+        if not self._has_live_rubric_writer():
+            result: dict[str, Any] = {}
+            for mode, value in grader.stream(
+                state,
+                config=config,
+                context=context,
+                stream_mode=["messages", "values"],
+            ):
+                if mode == "messages":
+                    self._emit_inspection_message("grader", value)
+                elif mode == "values" and isinstance(value, dict):
+                    result = value
+            return result
+
+        callback_deltas: list[tuple[str, str]] = []
+        fallback_deltas: list[tuple[str, str]] = []
+        observer = _GraderInspectionCallback(callback_deltas.append)
+        observed_config = self._grader_observer_config(config, observer)
+        parent_context = copy_context()
         result: dict[str, Any] = {}
-        for mode, value in grader.stream(
-            state,
-            config=config,
-            context=context,
-            stream_mode=["messages", "values"],
-        ):
-            if mode == "messages":
-                self._emit_inspection_message("grader", value)
-            elif mode == "values" and isinstance(value, dict):
-                result = value
+        emitted = 0
+
+        def relay_buffer() -> None:
+            nonlocal emitted
+            while emitted < len(callback_deltas):
+                kind, text = callback_deltas[emitted]
+                emitted += 1
+                parent_context.run(
+                    self._emit_inspection_delta,
+                    "grader",
+                    kind,
+                    text,
+                )
+
+        try:
+            for mode, value in grader.stream(
+                state,
+                config=observed_config,
+                context=context,
+                stream_mode=["messages", "values"],
+            ):
+                relay_buffer()
+                if mode == "messages":
+                    try:
+                        fallback_deltas.extend(self._inspection_message_deltas(value))
+                    except Exception:  # noqa: BLE001 -- inspection cannot affect grading
+                        pass
+                elif mode == "values" and isinstance(value, dict):
+                    result = value
+        finally:
+            relay_buffer()
+            if observer.observed_chunks == 0:
+                for kind, text in fallback_deltas:
+                    parent_context.run(
+                        self._emit_inspection_delta,
+                        "grader",
+                        kind,
+                        text,
+                    )
         return result
 
     async def _astream_final_grader(
@@ -410,17 +529,63 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         """Async raw grader streaming with authoritative final values."""
         if not callable(getattr(type(grader), "astream", None)):
             return await grader.ainvoke(state, config=config, context=context)
+        if not self._has_live_rubric_writer():
+            result: dict[str, Any] = {}
+            async for mode, value in grader.astream(
+                state,
+                config=config,
+                context=context,
+                stream_mode=["messages", "values"],
+            ):
+                if mode == "messages":
+                    self._emit_inspection_message("grader", value)
+                elif mode == "values" and isinstance(value, dict):
+                    result = value
+            return result
+
+        queue: asyncio.Queue[object] = asyncio.Queue()
+        fallback_deltas: list[tuple[str, str]] = []
+        observer = _GraderInspectionCallback(queue.put_nowait)
+        observed_config = self._grader_observer_config(config, observer)
+
+        async def relay() -> None:
+            while True:
+                item = await queue.get()
+                if item is _GRADER_RELAY_DONE:
+                    return
+                try:
+                    if not isinstance(item, tuple) or len(item) != 2:
+                        continue
+                    kind, text = item
+                    self._emit_inspection_delta("grader", kind, text)
+                except Exception:  # noqa: BLE001 -- inspection cannot affect grading
+                    continue
+
+        relay_task = asyncio.create_task(relay())
         result: dict[str, Any] = {}
-        async for mode, value in grader.astream(
-            state,
-            config=config,
-            context=context,
-            stream_mode=["messages", "values"],
-        ):
-            if mode == "messages":
-                self._emit_inspection_message("grader", value)
-            elif mode == "values" and isinstance(value, dict):
-                result = value
+        try:
+            async for mode, value in grader.astream(
+                state,
+                config=observed_config,
+                context=context,
+                stream_mode=["messages", "values"],
+            ):
+                if mode == "messages":
+                    try:
+                        fallback_deltas.extend(self._inspection_message_deltas(value))
+                    except Exception:  # noqa: BLE001 -- inspection cannot affect grading
+                        pass
+                elif mode == "values" and isinstance(value, dict):
+                    result = value
+        finally:
+            if observer.observed_chunks == 0:
+                for delta in fallback_deltas:
+                    queue.put_nowait(delta)
+            queue.put_nowait(_GRADER_RELAY_DONE)
+            try:
+                await relay_task
+            except Exception:  # noqa: BLE001 -- inspection cannot affect grading
+                pass
         return result
 
     def _ensure_final_grader(self) -> Any:

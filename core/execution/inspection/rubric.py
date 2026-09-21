@@ -93,7 +93,7 @@ class RubricInspectionProjector:
             self.store.start(
                 inspection_id,
                 title,
-                inspection_type=phase,
+                inspection_type="Rubrics",
             )
             return inspection_id
 
@@ -103,12 +103,12 @@ class RubricInspectionProjector:
                 inspection_id,
                 title,
                 first_user.text if first_user is not None else "",
-                inspection_type=phase,
+                inspection_type="Rubrics",
             )
             remaining = input_events[1:] if first_user is not None else input_events
         else:
             current.status = "RUNNING"
-            self.store.start(inspection_id, title, inspection_type=phase)
+            self.store.start(inspection_id, title, inspection_type="Rubrics")
             remaining = input_events
         for item in remaining:
             self.store.append(inspection_id, item)

@@ -3074,7 +3074,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             projection.handle({"type": "rubric_grading_start", **identity})
             await pilot.pause()
             self.assertEqual(len(chat.children), initial_children + 2)
-            self.assertIn("verifier", renderable_plain(chat.children[-2]).lower())
+            verifier_text = renderable_plain(chat.children[-2])
+            self.assertIn("verifier", verifier_text.lower())
+            self.assertIn("Model: lmstudio:bonsai", verifier_text)
             self.assertIn("Model: lmstudio:bonsai", renderable_plain(chat.children[-1]))
 
             projection.handle({"type": "rubric_grading_end", **identity, "succeeded": True})
@@ -3465,6 +3467,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(inspector.inspection_id, verifier_id)
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertEqual(
+                renderable_plain(inspector.query_one("#inspector-title")),
+                "Inspector · Rubrics · Verifier · Pass 1",
+            )
             verifier_rendered = "\n".join(
                 renderable_plain(child) for child in inspector_log.children
             )
@@ -3526,6 +3532,77 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 renderable_plain(child) for child in inspector_log.children
             )
             self.assertIn("finished while closed", reopened)
+
+    async def test_rubric_inspect_footer_matches_copy_geometry_and_follows_content(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(120, 50)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            projection = RubricEventRenderer(app, 1, grader_model="lmstudio:bonsai")
+            identity = {"grading_run_id": "grade-footer", "iteration": 0}
+            verifier_id = "rubric:grade-footer:0:verifier"
+            grader_id = "rubric:grade-footer:0:grader"
+            for event in (
+                {"type": "rubric_evaluation_start", **identity},
+                {
+                    "type": "rubric_verification_start",
+                    **identity,
+                    "inspection_id": verifier_id,
+                },
+                {"type": "rubric_verification_end", **identity, "succeeded": True},
+                {
+                    "type": "rubric_grading_start",
+                    **identity,
+                    "inspection_id": grader_id,
+                },
+                {"type": "rubric_grading_end", **identity, "succeeded": True},
+                {
+                    "type": "rubric_evaluation_end",
+                    **identity,
+                    "result": "satisfied",
+                    "explanation": "All current evidence passed.",
+                    "criteria": [{"name": "Current", "passed": True, "gap": ""}],
+                },
+            ):
+                projection.handle(event)
+            chat.assistant_message("copy reference")
+            await pilot.pause()
+
+            verifier = app.query_one(RubricVerifierBubble)
+            grader = app.query_one(RubricGraderBubble)
+            copy = chat.query_one(".assistant-copy", Button)
+            for bubble, preceding in (
+                (verifier, verifier.tool_count),
+                (grader, grader.result),
+            ):
+                inspect = bubble.inspect
+                footer = bubble.query_one(".rubric-inspect-actions", Horizontal)
+                self.assertFalse(inspect.can_focus)
+                self.assertEqual(inspect.region.width, 12)
+                self.assertGreater(inspect.region.width, copy.region.width)
+                self.assertGreaterEqual(
+                    inspect.region.width,
+                    cell_len(inspect.label.plain) + 4,
+                )
+                self.assertEqual(inspect.region.height, copy.region.height)
+                self.assertEqual(inspect.styles.border, copy.styles.border)
+                self.assertEqual(inspect.region.x, bubble.content_region.x)
+                self.assertEqual(footer.region.y - preceding.region.bottom, 1)
+                self.assertEqual(inspect.styles.background, Color.parse("#24192A"))
+
+            self.assertIn("Model: lmstudio:bonsai", renderable_plain(verifier))
+            self.assertIn("Model: lmstudio:bonsai", renderable_plain(grader))
+            self.assertLess(
+                renderable_plain(grader).index("All current evidence passed."),
+                renderable_plain(grader).index("Inspect"),
+            )
+
+            await pilot.hover(verifier.inspect)
+            await pilot.pause()
+            self.assertEqual(verifier.inspect.styles.background, Color.parse("#2A1F30"))
+            verifier.inspect.add_class("-active")
+            await pilot.pause()
+            self.assertEqual(verifier.inspect.styles.background, Color.parse("#3A2842"))
 
     async def test_rubric_zero_tools_and_verifier_failure_have_distinct_lifecycles(self) -> None:
         app = make_app()

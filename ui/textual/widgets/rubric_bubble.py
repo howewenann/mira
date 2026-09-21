@@ -51,12 +51,19 @@ class _RubricPhaseBubble(Vertical):
         max_iterations: int,
         *,
         inspection_id: str = "",
+        grader_model: str = "",
     ) -> None:
         super().__init__(classes="message rubric rubric-phase")
         self.run_id = run_id
         self.pass_number = pass_number
         self.max_iterations = max_iterations
         self.inspection_id = inspection_id
+        self.grader_model = str(grader_model or "")
+        self.model = Static(
+            Text(f"Model: {self.grader_model}", style=RUBRIC_BODY_COLOR),
+            classes="rubric-grader-model",
+        )
+        self.model.styles.display = "block" if self.grader_model else "none"
         self.status = Static(classes="rubric-phase-status")
         self.inspect = RubricInspectButton(
             "Inspect",
@@ -158,20 +165,23 @@ class RubricVerifierBubble(_RubricPhaseBubble):
         self._idless_tools = 0
 
     def compose(self) -> ComposeResult:
+        yield self.model
         yield self.status
-        with Horizontal(classes="rubric-phase-actions"):
-            yield self.tool_count
+        yield self.tool_count
+        with Horizontal(classes="rubric-inspect-actions"):
             yield self.inspect
 
     @property
     def renderable(self) -> Text:
         value = Text(str(self.border_title))
+        if self.grader_model:
+            value.append(f"\nModel: {self.grader_model}")
         value.append("\n")
         if isinstance(self.status.content, Text):
             value.append_text(self.status.content)
         value.append(f"\n{self.tool_count.content}")
         if self.inspection_id:
-            value.append("\nInspect")
+            value.append("\n\nInspect")
         return value
 
     def tool_started(self, call_id: str = "") -> None:
@@ -206,23 +216,17 @@ class RubricGraderBubble(_RubricPhaseBubble):
         grader_model: str = "",
         **kwargs: Any,
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self.grader_model = str(grader_model or "")
+        super().__init__(*args, grader_model=grader_model, **kwargs)
         self.border_title = self._phase_border_title()
-        self.model = Static(
-            Text(f"Model: {self.grader_model}", style=RUBRIC_BODY_COLOR),
-            classes="rubric-grader-model",
-        )
         self.result = Static(classes="rubric-result")
-        self.model.styles.display = "block" if self.grader_model else "none"
         self.result.styles.display = "none"
 
     def compose(self) -> ComposeResult:
         yield self.model
-        with Horizontal(classes="rubric-phase-actions"):
-            yield self.status
-            yield self.inspect
+        yield self.status
         yield self.result
+        with Horizontal(classes="rubric-inspect-actions"):
+            yield self.inspect
 
     @property
     def renderable(self) -> Text:
@@ -232,11 +236,11 @@ class RubricGraderBubble(_RubricPhaseBubble):
         value.append("\n")
         if isinstance(self.status.content, Text):
             value.append_text(self.status.content)
-        if self.inspection_id:
-            value.append("\nInspect")
         if self.result.styles.display != "none" and isinstance(self.result.content, Text):
             value.append("\n")
             value.append_text(self.result.content)
+        if self.inspection_id:
+            value.append("\n\nInspect")
         return value
 
     def set_result(self, result: Text) -> None:
