@@ -104,6 +104,7 @@ from ui.textual.widgets import (
     MCPPanelScreen,
 )
 from ui.textual.widgets.subagent_panel import SubagentSelected
+from ui.textual.widgets.rubric_bubble import RubricInspectionSelected
 from ui.textual.widgets.tool_bubble import SubagentHistoryAnchor
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
@@ -2766,6 +2767,19 @@ class MiraApp(App[None]):
                 return
         elif not inspector.open(event.inspection_id):
             return
+        self._show_inspector(inspector)
+
+    @on(RubricInspectionSelected)
+    def open_rubric_inspector(self, event: RubricInspectionSelected) -> None:
+        """Open one process-local Verifier or Grader transcript."""
+        event.stop()
+        inspector = self.query_one(Inspector)
+        if not inspector.open(event.inspection_id):
+            return
+        self._show_inspector(inspector)
+
+    def _show_inspector(self, inspector: Inspector) -> None:
+        """Reuse the established viewport and focus transition for live inspection."""
         self.query_one("#chat-log", ChatLog).display = False
         inspector.display = True
         self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)

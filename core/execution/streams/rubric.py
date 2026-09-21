@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from core.execution.inspection.rubric import RubricInspectionProjector
 from core.execution.streams.output import call_renderer
 from core.execution.streams.tool_args import ToolCallDrafts
 
@@ -20,6 +21,7 @@ RUBRIC_GRADING_END = "rubric_grading_end"
 RUBRIC_TOOL_CALL_DELTA = "rubric_tool_call_delta"
 RUBRIC_TOOL_START = "rubric_tool_start"
 RUBRIC_TOOL_END = "rubric_tool_end"
+RUBRIC_INSPECTION_DELTA = "rubric_inspection_delta"
 RUBRIC_RESULTS = {
     "satisfied",
     "needs_revision",
@@ -44,6 +46,7 @@ class RubricEventRenderer:
         self.max_iterations = max(1, int(max_iterations or 1))
         self.grader_model = str(grader_model or "").strip()
         self.clock = clock
+        self.inspection = RubricInspectionProjector(renderer)
         self.evaluations: list[dict[str, Any]] = []
         self._latest: dict[str, dict[str, Any]] = {}
         self._started_at: dict[tuple[str, int], float] = {}
@@ -79,17 +82,21 @@ class RubricEventRenderer:
             key = rubric_event_key(event)
             self._verifier_started_at[key] = self.clock()
             self._verifier_status[key] = "running"
+            self._observe("start", event, "verifier")
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
                 normalized_lifecycle_event(event),
             )
             return True
+        if event_type == RUBRIC_INSPECTION_DELTA:
+            self._observe("append_delta", event)
+            return True
         if event_type == RUBRIC_TOOL_CALL_DELTA:
             key = rubric_event_key(event)
             drafts = self._tool_drafts.get(key)
             if drafts is None:
-                drafts = ToolCallDrafts(_RubricDraftRenderer(self.renderer, key))
+                drafts = ToolCallDrafts(_RubricDraftRenderer(self, key))
                 self._tool_drafts[key] = drafts
             drafts.push(event.get("chunk"))
             return True
@@ -106,6 +113,7 @@ class RubricEventRenderer:
                     by_id[call_id] = tool
             else:
                 existing.update(tool)
+            self._observe("tool_call", event)
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
@@ -129,6 +137,7 @@ class RubricEventRenderer:
                     "duration_ms": optional_duration_ms(event.get("duration_ms")),
                 }
             )
+            self._observe("tool_completion", event)
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
@@ -141,6 +150,7 @@ class RubricEventRenderer:
             started_at = self._verifier_started_at.pop(key, None)
             if started_at is not None:
                 self._verifier_duration_ms[key] = elapsed_ms(started_at, clock=self.clock)
+            self._observe("finish", event, "verifier")
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
@@ -154,6 +164,7 @@ class RubricEventRenderer:
             key = rubric_event_key(event)
             self._grader_started_at[key] = self.clock()
             self._grader_status[key] = "running"
+            self._observe("start", event, "grader")
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
@@ -166,6 +177,7 @@ class RubricEventRenderer:
             started_at = self._grader_started_at.pop(key, None)
             if started_at is not None:
                 self._grader_duration_ms[key] = elapsed_ms(started_at, clock=self.clock)
+            self._observe("finish", event, "grader")
             call_renderer(
                 self.renderer,
                 "rubric_lifecycle_event",
@@ -254,26 +266,36 @@ class RubricEventRenderer:
         self._tool_drafts.clear()
         call_renderer(self.renderer, "rubric_evaluations_cancelled")
 
+    def _observe(self, method: str, *args: Any) -> None:
+        """Isolate every Inspector projection from Rubric execution and rendering."""
+        try:
+            getattr(self.inspection, method)(*args)
+        except Exception:  # noqa: BLE001 -- inspection is strictly observational
+            return
+
 
 class _RubricDraftRenderer:
     """Scope normal `ToolCallDrafts` callbacks to one Rubric pass."""
 
-    def __init__(self, renderer: Any, key: tuple[str, int]) -> None:
-        self.renderer = renderer
+    def __init__(self, owner: RubricEventRenderer, key: tuple[str, int]) -> None:
+        self.owner = owner
+        self.renderer = owner.renderer
         self.key = key
 
     def tool_call_delta(self, name: str, args: Any, call_id: str = "") -> None:
+        event = {
+            "type": RUBRIC_TOOL_CALL_DELTA,
+            "grading_run_id": self.key[0],
+            "iteration": self.key[1],
+            "tool_call_id": call_id,
+            "tool_name": name,
+            "tool_args": args,
+        }
+        self.owner._observe("tool_call", event)
         call_renderer(
             self.renderer,
             "rubric_lifecycle_event",
-            {
-                "type": RUBRIC_TOOL_CALL_DELTA,
-                "grading_run_id": self.key[0],
-                "iteration": self.key[1],
-                "tool_call_id": call_id,
-                "tool_name": name,
-                "tool_args": args,
-            },
+            event,
         )
 
 
@@ -287,7 +309,11 @@ def rubric_event_key(event: dict[str, Any]) -> tuple[str, int]:
 
 def normalized_lifecycle_event(event: dict[str, Any]) -> dict[str, Any]:
     """Keep one lifecycle payload JSON-safe without truncating evidence."""
-    normalized = dict(event)
+    normalized = {
+        key: value
+        for key, value in event.items()
+        if key not in {"inspection_events", "inspection_title", "final_response"}
+    }
     normalized["grading_run_id"], normalized["iteration"] = rubric_event_key(event)
     if "tool_call_id" in normalized:
         normalized["tool_call_id"] = str(normalized.get("tool_call_id") or "")

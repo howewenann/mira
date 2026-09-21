@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
 import time
 from collections.abc import Sequence
@@ -14,6 +15,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphBubbleUp
 
 from agent.rubric.graphs import RUBRIC_VERIFIER_GRAPH
+from core.execution.inspection.rubric import (
+    inspection_event_values,
+    rubric_inspection_id,
+    rubric_inspection_title,
+)
+from core.execution.streams.messages import streamed_message_deltas
+from core.execution.streams.output import final_text
 
 VERIFIER_SYSTEM_PROMPT = """You are an evidence collector for Rubric evaluation.
 
@@ -253,6 +261,50 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
                 _emit_rubric_event("rubric_tool_call_delta", chunk=dict(tool_chunk))
 
     @staticmethod
+    def _emit_inspection_message(phase: str, value: Any) -> None:
+        """Forward normalized nested reasoning and text without changing it."""
+        reasoning, text = streamed_message_deltas(value)
+        if reasoning:
+            _emit_rubric_event(
+                "rubric_inspection_delta",
+                phase=phase,
+                kind="reasoning",
+                text=reasoning,
+                inspection_id=MiraRubricMiddleware._inspection_id(phase),
+            )
+        if text:
+            _emit_rubric_event(
+                "rubric_inspection_delta",
+                phase=phase,
+                kind="assistant",
+                text=text,
+                inspection_id=MiraRubricMiddleware._inspection_id(phase),
+            )
+
+    @staticmethod
+    def _inspection_id(phase: str) -> str:
+        identity = _RUBRIC_RUN.get()
+        if identity is None:
+            return ""
+        return rubric_inspection_id(identity[0], identity[1], phase)
+
+    @staticmethod
+    def _emit_phase_start(event_type: str, phase: str, nested_input: dict[str, Any]) -> None:
+        """Expose a phase only after its exact process-local inspection is describable."""
+        identity = _RUBRIC_RUN.get()
+        iteration = identity[1] if identity is not None else 0
+        try:
+            events = inspection_event_values(nested_input.get("messages"))
+        except Exception:  # noqa: BLE001 -- observation must never fail grading
+            events = []
+        _emit_rubric_event(
+            event_type,
+            inspection_id=MiraRubricMiddleware._inspection_id(phase),
+            inspection_title=rubric_inspection_title(iteration, phase),
+            inspection_events=events,
+        )
+
+    @staticmethod
     def _forward_verifier_custom(value: Any) -> None:
         """Lift nested tool lifecycle events into the outer Rubric stream."""
         if not isinstance(value, dict):
@@ -290,6 +342,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
             if mode == "custom":
                 self._forward_verifier_custom(value)
             elif mode == "messages":
+                self._emit_inspection_message("verifier", value)
                 self._emit_verifier_chunks(value)
             elif mode == "values" and isinstance(value, dict):
                 result = value
@@ -316,7 +369,56 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
             if mode == "custom":
                 self._forward_verifier_custom(value)
             elif mode == "messages":
+                self._emit_inspection_message("verifier", value)
                 self._emit_verifier_chunks(value)
+            elif mode == "values" and isinstance(value, dict):
+                result = value
+        return result
+
+    def _stream_final_grader(
+        self,
+        grader: Any,
+        state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        context: object | None,
+    ) -> dict[str, Any]:
+        """Stream raw grader messages while retaining final structured values."""
+        if not callable(getattr(type(grader), "stream", None)):
+            return grader.invoke(state, config=config, context=context)
+        result: dict[str, Any] = {}
+        for mode, value in grader.stream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["messages", "values"],
+        ):
+            if mode == "messages":
+                self._emit_inspection_message("grader", value)
+            elif mode == "values" and isinstance(value, dict):
+                result = value
+        return result
+
+    async def _astream_final_grader(
+        self,
+        grader: Any,
+        state: dict[str, Any],
+        *,
+        config: dict[str, Any],
+        context: object | None,
+    ) -> dict[str, Any]:
+        """Async raw grader streaming with authoritative final values."""
+        if not callable(getattr(type(grader), "astream", None)):
+            return await grader.ainvoke(state, config=config, context=context)
+        result: dict[str, Any] = {}
+        async for mode, value in grader.astream(
+            state,
+            config=config,
+            context=context,
+            stream_mode=["messages", "values"],
+        ):
+            if mode == "messages":
+                self._emit_inspection_message("grader", value)
             elif mode == "values" and isinstance(value, dict):
                 result = value
         return result
@@ -429,42 +531,73 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     ) -> deepagents_rubric.GraderResponse:
         """Run one isolated verifier pass, then one structured grader pass."""
         metadata = self._grader_trace_metadata()
-        _emit_rubric_event("rubric_verification_start")
+        verifier_input = self._verifier_input(state, iteration)
+        self._emit_phase_start(
+            "rubric_verification_start",
+            "verifier",
+            verifier_input,
+        )
         try:
             verifier_result = self._stream_verifier(
                 self._ensure_verifier(),
-                self._verifier_input(state, iteration),
+                verifier_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,
             )
             evidence = self._verification_evidence(verifier_result)
         except GraphBubbleUp:
             raise
-        except Exception:
-            _emit_rubric_event("rubric_verification_end", succeeded=False)
+        except Exception as exc:
+            _emit_rubric_event(
+                "rubric_verification_end",
+                succeeded=False,
+                error=str(exc),
+                inspection_id=self._inspection_id("verifier"),
+            )
             raise
-        _emit_rubric_event("rubric_verification_end", succeeded=True)
+        _emit_rubric_event(
+            "rubric_verification_end",
+            succeeded=True,
+            final_response=final_text(verifier_result),
+            inspection_id=self._inspection_id("verifier"),
+        )
 
         self._record_grader_trace_metadata(metadata)
-        _emit_rubric_event("rubric_grading_start")
+        grader_input = self._nested_grader_input(
+            state,
+            iteration,
+            correction,
+            evidence,
+        )
+        self._emit_phase_start("rubric_grading_start", "grader", grader_input)
         try:
-            result = self._ensure_final_grader().invoke(
-                self._nested_grader_input(state, iteration, correction, evidence),
+            result = self._stream_final_grader(
+                self._ensure_final_grader(),
+                grader_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,
             )
             graded = self._extract_graded(result)
         except GraphBubbleUp:
             raise
-        except Exception:
-            _emit_rubric_event("rubric_grading_end", succeeded=False)
+        except Exception as exc:
+            _emit_rubric_event(
+                "rubric_grading_end",
+                succeeded=False,
+                error=str(exc),
+                inspection_id=self._inspection_id("grader"),
+            )
             raise
         self._record_grader_trace_metadata(
             self._grader_trace_metadata(
                 effective_strategy=deepagents_rubric._strategy_from_result(result),
             )
         )
-        _emit_rubric_event("rubric_grading_end", succeeded=True)
+        _emit_rubric_event(
+            "rubric_grading_end",
+            succeeded=True,
+            inspection_id=self._inspection_id("grader"),
+        )
         return graded
 
     async def _ainvoke_grader(
@@ -477,40 +610,87 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
     ) -> deepagents_rubric.GraderResponse:
         """Async variant of `_invoke_grader`."""
         metadata = self._grader_trace_metadata()
-        _emit_rubric_event("rubric_verification_start")
+        verifier_input = self._verifier_input(state, iteration)
+        self._emit_phase_start(
+            "rubric_verification_start",
+            "verifier",
+            verifier_input,
+        )
         try:
             verifier_result = await self._astream_verifier(
                 self._ensure_verifier(),
-                self._verifier_input(state, iteration),
+                verifier_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,
             )
             evidence = self._verification_evidence(verifier_result)
+        except asyncio.CancelledError:
+            _emit_rubric_event(
+                "rubric_verification_end",
+                succeeded=False,
+                cancelled=True,
+                inspection_id=self._inspection_id("verifier"),
+            )
+            raise
         except GraphBubbleUp:
             raise
-        except Exception:
-            _emit_rubric_event("rubric_verification_end", succeeded=False)
+        except Exception as exc:
+            _emit_rubric_event(
+                "rubric_verification_end",
+                succeeded=False,
+                error=str(exc),
+                inspection_id=self._inspection_id("verifier"),
+            )
             raise
-        _emit_rubric_event("rubric_verification_end", succeeded=True)
+        _emit_rubric_event(
+            "rubric_verification_end",
+            succeeded=True,
+            final_response=final_text(verifier_result),
+            inspection_id=self._inspection_id("verifier"),
+        )
 
         self._record_grader_trace_metadata(metadata)
-        _emit_rubric_event("rubric_grading_start")
+        grader_input = self._nested_grader_input(
+            state,
+            iteration,
+            correction,
+            evidence,
+        )
+        self._emit_phase_start("rubric_grading_start", "grader", grader_input)
         try:
-            result = await self._ensure_final_grader().ainvoke(
-                self._nested_grader_input(state, iteration, correction, evidence),
+            result = await self._astream_final_grader(
+                self._ensure_final_grader(),
+                grader_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,
             )
             graded = self._extract_graded(result)
+        except asyncio.CancelledError:
+            _emit_rubric_event(
+                "rubric_grading_end",
+                succeeded=False,
+                cancelled=True,
+                inspection_id=self._inspection_id("grader"),
+            )
+            raise
         except GraphBubbleUp:
             raise
-        except Exception:
-            _emit_rubric_event("rubric_grading_end", succeeded=False)
+        except Exception as exc:
+            _emit_rubric_event(
+                "rubric_grading_end",
+                succeeded=False,
+                error=str(exc),
+                inspection_id=self._inspection_id("grader"),
+            )
             raise
         self._record_grader_trace_metadata(
             self._grader_trace_metadata(
                 effective_strategy=deepagents_rubric._strategy_from_result(result),
             )
         )
-        _emit_rubric_event("rubric_grading_end", succeeded=True)
+        _emit_rubric_event(
+            "rubric_grading_end",
+            succeeded=True,
+            inspection_id=self._inspection_id("grader"),
+        )
         return graded

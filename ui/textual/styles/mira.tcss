@@ -1289,14 +1289,11 @@ Button.plan-action:focus {
     color: #F1DCF5;
 }
 
-.rubric-header,
-.rubric-phase-heading,
+.rubric-phase-status,
+.rubric-tool-count,
+.rubric-grader-model,
 .rubric-result,
-.rubric-no-tools,
-.rubric-verifier-status,
-.rubric-grader-status,
-.rubric-tool-rows,
-.rubric-tool-row {
+.rubric-phase-actions {
     width: 1fr;
     height: auto;
     padding: 0;
@@ -1304,39 +1301,46 @@ Button.plan-action:focus {
     background: transparent;
 }
 
-.rubric-phase-heading {
-    margin-top: 1;
-}
-
-.rubric-tool-row {
-    border: none;
-}
-
-.rubric-tool-args > CollapsibleTitle {
+.rubric-phase-status,
+.rubric-tool-count {
+    height: 1;
     text-wrap: nowrap;
     text-overflow: ellipsis;
 }
 
-.rubric-tool-output,
-.rubric-tool-status,
-.rubric-verifier-status,
-.rubric-grader-status {
-    width: 1fr;
+.rubric-phase-actions {
     height: 1;
+    min-height: 1;
+}
+
+.rubric-grader-model,
+.rubric-result {
+    color: #F1DCF5;
+}
+
+Button.rubric-inspect {
+    display: none;
+    min-width: 9;
+    width: auto;
+    height: 1;
+    min-height: 1;
     padding: 0;
     margin: 0;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
+    border: none;
+    background: transparent;
+    color: #C58FD6;
+    content-align: right middle;
+    text-align: right;
 }
 
-.rubric-tool-output {
-    color: #B8C1C7;
+Button.rubric-inspect:hover {
+    background: #2A1F30;
+    color: #F1DCF5;
 }
 
-.rubric-tool-status,
-.rubric-verifier-status,
-.rubric-grader-status {
-    color: #98A5AC;
+Button.rubric-inspect:focus {
+    background: transparent;
+    color: #C58FD6;
 }
 
 .goal-body {

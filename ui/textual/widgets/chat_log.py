@@ -37,7 +37,7 @@ from ui.shared.terminal.colors import (
     RUBRIC_HEADER_COLOR,
 )
 from ui.textual.splash import loading_splash_text, splash_text
-from ui.textual.widgets.rubric_bubble import RubricBubble
+from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.mcp_activity import MCPActivityCell
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
 
@@ -85,7 +85,8 @@ class ChatLog(VerticalScroll):
         self._compaction_running = False
         self._plan_widgets: dict[str, PlanBubble] = {}
         self._goal_widgets: dict[str, GoalBubble] = {}
-        self._rubric_widgets: dict[tuple[str, int], RubricBubble] = {}
+        self._rubric_verifier_widgets: dict[tuple[str, int], RubricVerifierBubble] = {}
+        self._rubric_grader_widgets: dict[tuple[str, int], RubricGraderBubble] = {}
         self._rubric_evaluations: dict[tuple[str, int], dict[str, Any]] = {}
         self._rubric_activity: dict[tuple[str, int], dict[str, Any]] = {}
         self._fallback_suffixes = count(1)
@@ -1044,7 +1045,7 @@ class ChatLog(VerticalScroll):
         grader_model: str = "",
         phase: str = "verifying",
     ) -> None:
-        """Show one immediate, stable Rubric review bubble."""
+        """Record Rubric activity; the first phase event exposes its bubble."""
         self.finish_main()
         key = (run_id, pass_number)
         self._rubric_activity.setdefault(
@@ -1057,18 +1058,6 @@ class ChatLog(VerticalScroll):
                 "last_second": -1,
             },
         )
-        if key in self._rubric_widgets:
-            return
-        widget = RubricBubble(
-            run_id,
-            pass_number,
-            max_iterations,
-            grader_model=grader_model,
-        )
-        widget.border_title = escape("rubric review")
-        self.mount(widget)
-        self._rubric_widgets[key] = widget
-        self._scroll_to_end()
 
     def rubric_lifecycle_event(self, event: dict[str, Any]) -> None:
         """Project one nested verifier/grader event inside its Rubric bubble."""
@@ -1076,42 +1065,30 @@ class ChatLog(VerticalScroll):
             str(event.get("grading_run_id") or ""),
             int(event.get("iteration") or 0) + 1,
         )
-        widget = self._rubric_widgets.get(key)
-        if widget is None:
-            self.rubric_evaluation_started(key[0], key[1], 1)
-            widget = self._rubric_widgets[key]
         event_type = str(event.get("type") or "")
         if event_type == "rubric_verification_start":
-            widget.verifier_started()
-        elif event_type == "rubric_tool_call_delta":
-            widget.tool_delta(
-                str(event.get("tool_name") or "tool"),
-                event.get("tool_args", {}),
-                str(event.get("tool_call_id") or ""),
+            widget = self._ensure_verifier_bubble(
+                key,
+                inspection_id=str(event.get("inspection_id") or ""),
             )
+            widget.start(str(event.get("inspection_id") or ""))
         elif event_type == "rubric_tool_start":
-            widget.tool_call(
-                str(event.get("tool_name") or "tool"),
-                event.get("tool_args", {}),
-                str(event.get("tool_call_id") or ""),
-            )
-        elif event_type == "rubric_tool_end":
-            widget.tool_result(
-                str(event.get("tool_name") or "tool"),
-                str(event.get("output") or ""),
-                call_id=str(event.get("tool_call_id") or ""),
-                is_error=bool(event.get("is_error")),
-                duration_ms=event.get("duration_ms"),
+            self._ensure_verifier_bubble(key).tool_started(
+                str(event.get("tool_call_id") or "")
             )
         elif event_type == "rubric_verification_end":
-            widget.verifier_finished(
+            self._ensure_verifier_bubble(key).finish(
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
         elif event_type == "rubric_grading_start":
-            widget.grader_started()
+            widget = self._ensure_grader_bubble(
+                key,
+                inspection_id=str(event.get("inspection_id") or ""),
+            )
+            widget.start(str(event.get("inspection_id") or ""))
         elif event_type == "rubric_grading_end":
-            widget.grader_finished(
+            self._ensure_grader_bubble(key).finish(
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
@@ -1124,16 +1101,22 @@ class ChatLog(VerticalScroll):
             if elapsed == int(activity.get("last_second") or 0):
                 continue
             activity["last_second"] = elapsed
-            widget = self._rubric_widgets.get(key)
-            if widget is not None:
-                widget.tick()
+            verifier = self._rubric_verifier_widgets.get(key)
+            grader = self._rubric_grader_widgets.get(key)
+            if verifier is not None:
+                verifier.tick()
+            if grader is not None:
+                grader.tick()
 
     def rubric_evaluations_cancelled(self) -> None:
         """Stop any rubric animations left active by an interrupted invocation."""
         for key in list(self._rubric_activity):
-            widget = self._rubric_widgets.get(key)
-            if widget is not None:
-                widget.interrupt()
+            verifier = self._rubric_verifier_widgets.get(key)
+            grader = self._rubric_grader_widgets.get(key)
+            if verifier is not None:
+                verifier.interrupt()
+            if grader is not None:
+                grader.interrupt()
         self._rubric_activity.clear()
 
     def rubric_evaluation_finished(
@@ -1148,21 +1131,37 @@ class ChatLog(VerticalScroll):
         key = (str(evaluation.get("grading_run_id") or ""), pass_number)
         self._rubric_activity.pop(key, None)
         self._rubric_evaluations[key] = dict(evaluation)
-        widget = self._rubric_widgets.get(key)
         body = self._render_rubric(evaluation, max_iterations, include_heading=False)
-        if widget is None:
-            widget = RubricBubble(
-                key[0],
-                pass_number,
-                max_iterations,
-                grader_model=str(evaluation.get("grader_model") or ""),
+        verifier = self._ensure_verifier_bubble(
+            key,
+            evaluation=evaluation,
+            max_iterations=max_iterations,
+        )
+        tools = evaluation.get("verifier_tools")
+        verifier.set_tool_count(len(tools) if isinstance(tools, list) else 0)
+        verifier.finish(
+            succeeded=str(evaluation.get("verifier_status") or "complete") != "failed",
+            duration_ms=evaluation.get("verifier_duration_ms"),
+        )
+        grader = None
+        if (
+            str(evaluation.get("verifier_status") or "complete") != "failed"
+            or evaluation.get("grader_status")
+        ):
+            grader = self._ensure_grader_bubble(
+                key,
+                evaluation=evaluation,
+                max_iterations=max_iterations,
             )
-            widget.border_title = escape("rubric review")
-            self.mount(widget)
-            self._rubric_widgets[key] = widget
+            grader.finish(
+                succeeded=str(evaluation.get("grader_status") or "complete") != "failed",
+                duration_ms=evaluation.get("grader_duration_ms"),
+            )
+            grader.set_result(body)
         if timestamp := timestamp_text(created_at):
-            widget.border_subtitle = escape(timestamp)
-        widget.finish(evaluation, body)
+            verifier.border_subtitle = escape(timestamp)
+            if grader is not None:
+                grader.border_subtitle = escape(timestamp)
         self._scroll_to_end()
 
     def rubric_evaluation_status(
@@ -1178,13 +1177,64 @@ class ChatLog(VerticalScroll):
         if evaluation is None:
             return
         evaluation["result"] = status
-        widget = self._rubric_widgets.get(key)
+        widget = self._rubric_grader_widgets.get(key)
         if widget is not None:
-            widget.finish(
-                evaluation,
-                self._render_rubric(evaluation, max_iterations, include_heading=False),
+            widget.set_result(
+                self._render_rubric(evaluation, max_iterations, include_heading=False)
             )
             self._scroll_to_end()
+
+    def _ensure_verifier_bubble(
+        self,
+        key: tuple[str, int],
+        *,
+        inspection_id: str = "",
+        evaluation: dict[str, Any] | None = None,
+        max_iterations: int | None = None,
+    ) -> RubricVerifierBubble:
+        widget = self._rubric_verifier_widgets.get(key)
+        if widget is not None:
+            widget.set_inspection_id(inspection_id)
+            return widget
+        activity = self._rubric_activity.get(key, {})
+        widget = RubricVerifierBubble(
+            key[0],
+            key[1],
+            max(1, int(max_iterations or activity.get("max_iterations") or 1)),
+            inspection_id=inspection_id,
+        )
+        self.mount(widget)
+        self._rubric_verifier_widgets[key] = widget
+        return widget
+
+    def _ensure_grader_bubble(
+        self,
+        key: tuple[str, int],
+        *,
+        inspection_id: str = "",
+        evaluation: dict[str, Any] | None = None,
+        max_iterations: int | None = None,
+    ) -> RubricGraderBubble:
+        widget = self._rubric_grader_widgets.get(key)
+        if widget is not None:
+            widget.set_inspection_id(inspection_id)
+            return widget
+        activity = self._rubric_activity.get(key, {})
+        grader_model = str(
+            (evaluation or {}).get("grader_model")
+            or activity.get("grader_model")
+            or ""
+        )
+        widget = RubricGraderBubble(
+            key[0],
+            key[1],
+            max(1, int(max_iterations or activity.get("max_iterations") or 1)),
+            inspection_id=inspection_id,
+            grader_model=grader_model,
+        )
+        self.mount(widget)
+        self._rubric_grader_widgets[key] = widget
+        return widget
 
     def _render_rubric(
         self,
@@ -1245,7 +1295,8 @@ class ChatLog(VerticalScroll):
         self._compaction_running = False
         self._plan_widgets = {}
         self._goal_widgets = {}
-        self._rubric_widgets = {}
+        self._rubric_verifier_widgets = {}
+        self._rubric_grader_widgets = {}
         self._rubric_evaluations = {}
         self._rubric_activity = {}
         self._tool_blocks = {}

@@ -788,6 +788,147 @@ class RubricMiddlewareTests(unittest.TestCase):
         self.assertTrue(events[2]["succeeded"])
         self.assertTrue(events[4]["succeeded"])
 
+    def test_streamed_nested_phases_expose_live_content_but_grade_final_values(self) -> None:
+        tool_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"file_path": "/current"},
+                    "id": "read-current",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        tool_result = ToolMessage(
+            content="CURRENT",
+            name="read_file",
+            tool_call_id="read-current",
+        )
+
+        class StreamingVerifier:
+            received: dict[str, Any] | None = None
+            modes: list[str] | None = None
+
+            def stream(
+                self,
+                state: dict[str, Any],
+                *,
+                stream_mode: list[str],
+                **_kwargs: Any,
+            ) -> Iterator[tuple[str, Any]]:
+                self.received = state
+                self.modes = stream_mode
+                yield (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content=[{"type": "reasoning", "reasoning": "checking"}],
+                            tool_call_chunks=[
+                                {
+                                    "name": "read_file",
+                                    "args": '{"file_path":"/current"}',
+                                    "id": "read-current",
+                                    "index": 0,
+                                }
+                            ],
+                        ),
+                        {},
+                    ),
+                )
+                yield (
+                    "custom",
+                    {
+                        "type": "rubric_tool_start",
+                        "tool_call_id": "read-current",
+                        "tool_name": "read_file",
+                        "tool_args": {"file_path": "/current"},
+                    },
+                )
+                yield (
+                    "custom",
+                    {
+                        "type": "rubric_tool_end",
+                        "tool_call_id": "read-current",
+                        "tool_name": "read_file",
+                        "output": "CURRENT",
+                        "is_error": False,
+                    },
+                )
+                yield (
+                    "values",
+                    {"messages": [tool_call, tool_result, AIMessage(content="VERIFICATION_COMPLETE")]},
+                )
+
+        authoritative = graded_result(
+            result="needs_revision",
+            criteria=[{"name": "criterion", "passed": False, "gap": "missing"}],
+        )
+
+        class StreamingGrader:
+            received: dict[str, Any] | None = None
+            modes: list[str] | None = None
+
+            def stream(
+                self,
+                state: dict[str, Any],
+                *,
+                stream_mode: list[str],
+                **_kwargs: Any,
+            ) -> Iterator[tuple[str, Any]]:
+                self.received = state
+                self.modes = stream_mode
+                yield "messages", (AIMessageChunk(content='{"result":"satisfied",'), {})
+                yield "messages", (AIMessageChunk(content='"explanation":"raw"}'), {})
+                yield "values", authoritative
+
+        middleware = MiraRubricMiddleware(model="fake-model")
+        verifier = StreamingVerifier()
+        grader = StreamingGrader()
+        events: list[dict[str, Any]] = []
+        state = {
+            "rubric": "criterion",
+            "messages": [HumanMessage(content="original")],
+            "_current_grading_run_id": "grade-streamed",
+            "_rubric_iterations": 0,
+        }
+        middleware._prepare_evaluation(state, SimpleNamespace(stream_writer=events.append))
+
+        with (
+            patch.object(middleware, "_ensure_verifier", return_value=verifier),
+            patch.object(middleware, "_ensure_final_grader", return_value=grader),
+        ):
+            graded = middleware._invoke_grader(state, 0)
+
+        self.assertEqual(graded.result, "needs_revision")
+        self.assertEqual(verifier.modes, ["custom", "messages", "values"])
+        self.assertEqual(grader.modes, ["messages", "values"])
+        assert verifier.received is not None and grader.received is not None
+        verification_start = next(
+            event for event in events if event["type"] == "rubric_verification_start"
+        )
+        grading_start = next(
+            event for event in events if event["type"] == "rubric_grading_start"
+        )
+        self.assertEqual(
+            verification_start["inspection_events"][0]["text"],
+            verifier.received["messages"][0].content,
+        )
+        self.assertEqual(
+            [event["kind"] for event in grading_start["inspection_events"]],
+            ["user", "user", "tool_call", "tool_result"],
+        )
+        self.assertIs(grader.received["messages"][-1], tool_result)
+        deltas = [event for event in events if event["type"] == "rubric_inspection_delta"]
+        self.assertEqual(
+            [(event["phase"], event["kind"], event["text"]) for event in deltas],
+            [
+                ("verifier", "reasoning", "checking"),
+                ("grader", "assistant", '{"result":"satisfied",'),
+                ("grader", "assistant", '"explanation":"raw"}'),
+            ],
+        )
+
     def test_verifier_observer_preserves_ids_raw_results_and_tool_errors(self) -> None:
         middleware = MiraRubricMiddleware(model="fake-model")
         events: list[dict[str, Any]] = []

@@ -113,7 +113,14 @@ class RubricEventTests(unittest.TestCase):
         start = {"grading_run_id": "grade-live", "iteration": 0}
 
         rubric.handle({"type": "rubric_evaluation_start", **start})
-        rubric.handle({"type": "rubric_verification_start", **start})
+        rubric.handle(
+            {
+                "type": "rubric_verification_start",
+                **start,
+                "inspection_id": "rubric:grade-live:0:verifier",
+                "inspection_events": [{"kind": "user", "text": "exact input"}],
+            }
+        )
         rubric.handle(
             {
                 "type": "rubric_tool_call_delta",
@@ -194,6 +201,8 @@ class RubricEventTests(unittest.TestCase):
 
         lifecycle = [event[1] for event in renderer.events if event[0] == "lifecycle"]
         self.assertEqual(lifecycle[0]["type"], "rubric_verification_start")
+        self.assertEqual(lifecycle[0]["inspection_id"], "rubric:grade-live:0:verifier")
+        self.assertNotIn("inspection_events", lifecycle[0])
         deltas = [event for event in lifecycle if event["type"] == "rubric_tool_call_delta"]
         self.assertEqual(len(deltas), 2)
         self.assertEqual(deltas[-1]["tool_call_id"], "read-1")

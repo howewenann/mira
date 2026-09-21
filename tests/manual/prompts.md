@@ -1460,36 +1460,39 @@ criterion names.
    repeat the Goal. Expected: the action agent remains Gemma, the progress block
    identifies `[profile] lmstudio:prism-ml/bonsai-27b`, and grading completes through the
    same DeepAgents middleware.
-3. Inspect the live and completed bubble. Expected: one non-collapsible
-   `Rubric review · pass N of M` bubble first shows `Verifier` with a live
-   `Verifying · MM:SS elapsed` spinner; each verifier
-   tool appears live as one borderless row with streamed arguments, Running,
-   one width-aware output/error preview line, and Completed/Failed duration.
-   Expanding its first line exposes the full read-only arguments. Repeated calls
-   to the same tool remain separate. A failed tool does not mark the verifier
-   failed. When verification ends, `Verifier · Complete` remains visible (or
-   `No tools called.` appears), then `Grader` shows `Evaluating evidence`.
-   Completion retains `Verifier · Complete`, `Grader · Complete`, `N of N
-   criteria satisfied`, every native model-generated criterion name marked `✓`
-   or `✗`, each failed criterion's exact gap, and the final explanation/verdict.
-   Names may differ from the Goal Success Criteria because the grader authors
-   them. Verifier tools never appear as separate root tool bubbles.
-4. Resize the terminal while a verifier result with a long or multiline output
-   is visible. Expected: the preview stays one visual line and adapts its
-   ellipsis to available width. Reload the session and inspect the trace.
-   Expected: complete verifier arguments/raw output and the same phase identity,
-   duration, criteria, gaps, and verdict reappear; preview truncation never
-   changes grader evidence or durable data. No animation ticks are saved.
-5. Redirect a one-shot rubric run to a file. Expected: one start block and one
+3. Inspect the live phase bubbles. Expected: Verifier and Grader are separate,
+   compact bubbles for the same pass. Verifier shows lifecycle, elapsed/final
+   duration, an authoritative tool count, and a mouse-only `Inspect` action.
+   Grader shows lifecycle, selected model, result, and its own `Inspect` action.
+   Verifier tools never appear as separate root tool bubbles.
+4. Open Verifier Inspect while it is running. Expected: the generic Inspector
+   replaces the chat viewport with the exact verifier input first, followed by
+   live reasoning, assistant text, and deduplicated authoritative tool
+   calls/results. Close it, let more work arrive, and reopen it; all captured
+   content replays and continues live. Escape, close, focus restoration, and
+   viewport behavior match Subagent inspection.
+5. Keep the Verifier Inspector open until Grader starts. Expected: the selected
+   inspection does not switch automatically. Close it and open Grader Inspect.
+   Watch the provider's raw structured JSON arrive unchanged, including partial
+   JSON. The human-friendly result appears only after the authoritative final
+   structured response. Close and reopen to confirm replay.
+6. Force a first-pass `needs_revision`, then let the corrected work pass on the
+   second iteration. Expected: two independent Verifier/Grader bubble pairs and
+   four independent inspections with pass-stable content; same-iteration
+   retries or HITL continuation do not duplicate inputs or tool lifecycles.
+   Completed bubbles restored after restarting have no Inspect action because
+   Phase 1 stores no inspection transcript.
+7. Redirect a one-shot rubric run to a file. Expected: one start block and one
    completion block with no per-second output. Repeat in an interactive terminal;
    the elapsed line updates in place.
-6. Stop or provoke a safe provider failure during grading. Expected: no spinner
+8. Stop or provoke a safe provider failure during grading. Expected: no spinner
    continues after interruption, and native grader errors/revision/max-iteration
-   behavior remains visible and unchanged.
-7. Configure a complete cross-provider rubric profile (provider, model, key, and
+   behavior remains visible and unchanged. Pending Inspector activity is closed
+   without changing the original execution exception.
+9. Configure a complete cross-provider rubric profile (provider, model, key, and
    any endpoint/parameters it needs), then repeat. Expected: no main-provider
    credential, endpoint, sampling value, or JSON kwarg leaks into the grader.
-8. In a disposable workspace, create `rubric_probe.txt` containing exactly
+10. In a disposable workspace, create `rubric_probe.txt` containing exactly
    `MIRA_RUBRIC_PROBE_7F3A`, then run:
 
    `/goal Diagnostic test. Do not modify, read, list, grep, or otherwise inspect rubric_probe.txt. Its state is intentionally acceptance-checker-only evidence. Create only rubric_done.txt containing exactly DONE. The no-inspection instruction is diagnostic mechanics and must not become a Success Criterion. Success Criteria must describe the required final state: rubric_done.txt exists and contains exactly DONE; rubric_probe.txt exists and contains exactly MIRA_RUBRIC_PROBE_7F3A.`

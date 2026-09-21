@@ -152,7 +152,7 @@ from ui.textual.widgets.session_history import (
     session_label,
     session_records,
 )
-from ui.textual.widgets.rubric_bubble import RubricBubble, RubricToolRow
+from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
 
 
@@ -3063,41 +3063,46 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(goal_blocks[0].query(".goal-action")), 4)
 
             initial_children = len(chat.children)
-            app.rubric_evaluation_started(
-                "grade-1",
-                1,
-                3,
-                grader_model="lmstudio:bonsai",
-            )
+            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai")
+            identity = {"grading_run_id": "grade-1", "iteration": 0}
+            projection.handle({"type": "rubric_evaluation_start", **identity})
             await pilot.pause()
-            self.assertEqual(len(chat.children), initial_children + 1)
-            activity_text = renderable_plain(chat.children[-1])
-            self.assertIn("Model: lmstudio:bonsai", activity_text)
-            self.assertIn("Verifier", activity_text)
-            app.rubric_evaluation_finished(
+            self.assertEqual(len(chat.children), initial_children)
+
+            projection.handle({"type": "rubric_verification_start", **identity})
+            projection.handle({"type": "rubric_verification_end", **identity, "succeeded": True})
+            projection.handle({"type": "rubric_grading_start", **identity})
+            await pilot.pause()
+            self.assertEqual(len(chat.children), initial_children + 2)
+            self.assertIn("verifier", renderable_plain(chat.children[-2]).lower())
+            self.assertIn("Model: lmstudio:bonsai", renderable_plain(chat.children[-1]))
+
+            projection.handle({"type": "rubric_grading_end", **identity, "succeeded": True})
+            projection.handle(
                 {
+                    "type": "rubric_evaluation_end",
                     "grading_run_id": "grade-1",
                     "iteration": 0,
                     "result": "needs_revision",
-                    "grader_model": "lmstudio:bonsai",
-                    "duration_ms": 5_000,
                     "explanation": "A test is missing.",
                     "criteria": [
                         {"name": "Ranked", "passed": True, "gap": ""},
                         {"name": "Tested", "passed": False, "gap": "No focused test."},
                     ],
-                },
-                3,
+                }
             )
             await pilot.pause()
 
-            self.assertEqual(len(chat.children), initial_children + 1)
+            self.assertEqual(len(chat.children), initial_children + 2)
             rubric_text = renderable_plain(chat.children[-1])
-            self.assertIn("pass 1 of 3", rubric_text)
+            self.assertIn("pass 1/3", rubric_text)
             self.assertIn("1 of 2 criteria satisfied", rubric_text)
             self.assertIn("✓ Ranked", rubric_text)
             self.assertIn("✗ Tested", rubric_text)
             self.assertIn("No focused test.", rubric_text)
+            inspect_buttons = list(chat.query(".rubric-inspect"))
+            self.assertEqual(len(inspect_buttons), 2)
+            self.assertTrue(all(button.styles.display == "none" for button in inspect_buttons))
 
     async def test_completed_rubric_rearms_working_indicator_during_next_model_pause(self) -> None:
         """A silent model continuation after grading should remain visibly active."""
@@ -3285,6 +3290,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     3,
                     grader_model="lmstudio:bonsai",
                 )
+                app.rubric_lifecycle_event(
+                    {
+                        "type": "rubric_verification_start",
+                        "grading_run_id": "grade-clock",
+                        "iteration": 0,
+                        "inspection_id": "rubric:grade-clock:0:verifier",
+                    }
+                )
             await pilot.pause()
 
             initial = renderable_plain(chat.children[-1])
@@ -3301,10 +3314,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             app.rubric_evaluations_cancelled()
             await pilot.pause()
-            self.assertIn("Review interrupted.", renderable_plain(chat.children[-1]))
+            self.assertIn("Interrupted", renderable_plain(chat.children[-1]))
             self.assertEqual(chat._rubric_activity, {})
 
-    async def test_rubric_verifier_tools_stream_promote_and_finish_in_one_bubble(self) -> None:
+    async def test_rubric_verifier_tools_count_and_grader_finish_in_separate_bubbles(self) -> None:
         app = make_app()
         async with app.run_test(size=(110, 38)) as pilot:
             await pilot.pause()
@@ -3326,11 +3339,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.pause()
 
-            bubble = app.query_one(RubricBubble)
-            rows = list(bubble.query(RubricToolRow))
-            self.assertEqual(len(rows), 1)
-            draft_row = rows[0]
-            self.assertIn("draft:", renderable_plain(draft_row))
+            verifier = app.query_one(RubricVerifierBubble)
+            self.assertIn("0 tools called", renderable_plain(verifier))
 
             projection.handle(
                 {
@@ -3354,10 +3364,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await pilot.pause()
-            rows = list(bubble.query(RubricToolRow))
-            self.assertEqual(rows, [draft_row])
-            self.assertIn('call: {"file_path": "/foo"}', renderable_plain(draft_row))
-            self.assertIn("Running", renderable_plain(draft_row))
+            self.assertIn("1 tool called", renderable_plain(verifier))
 
             raw_output = "first line\n" + "result " * 300
             projection.handle(
@@ -3395,24 +3402,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             projection.handle({"type": "rubric_grading_start", **identity})
             await pilot.pause()
 
-            rows = list(bubble.query(RubricToolRow))
-            self.assertEqual(len(rows), 2)
-            self.assertIn("Completed in 00:01", renderable_plain(rows[0]))
-            self.assertIn("File not found", renderable_plain(rows[1]))
-            self.assertIn("Failed after 00:00", renderable_plain(rows[1]))
-            live = renderable_plain(bubble)
-            self.assertIn("Verifier · Complete", live)
-            self.assertIn("Grader", live)
-            self.assertIn("Evaluating evidence", live)
+            grader = app.query_one(RubricGraderBubble)
+            self.assertIn("2 tools called", renderable_plain(verifier))
+            self.assertIn("Complete", renderable_plain(verifier))
+            self.assertIn("Evaluating evidence", renderable_plain(grader))
             self.assertEqual(len(list(app.query(ToolBubble))), 0)
-
-            wide_preview = rows[0].output.render().plain
-            await pilot.resize_terminal(58, 30)
-            await pilot.pause()
-            narrow_preview = rows[0].output.render().plain
-            self.assertLess(len(narrow_preview), len(wide_preview))
-            self.assertTrue(narrow_preview.endswith("…"))
-            self.assertEqual(rows[0].output.raw_output, raw_output)
 
             projection.handle({"type": "rubric_grading_end", **identity, "succeeded": True})
             projection.handle(
@@ -3426,14 +3420,112 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             await pilot.pause()
 
-            completed = renderable_plain(bubble)
-            self.assertIn("Rubric review · pass 1 of 3", completed)
-            self.assertIn("Verifier · Complete", completed)
-            self.assertIn("Grader · Complete", completed)
+            completed = renderable_plain(grader)
+            self.assertIn("grader · pass 1/3", completed.lower())
+            self.assertIn("Complete", completed)
             self.assertIn("1 of 1 criteria satisfied", completed)
             self.assertIn("✓ Current", completed)
             self.assertIn("Satisfied: Current state verified.", completed)
             self.assertEqual(projection.evaluations[0]["verifier_tools"][0]["output"], raw_output)
+
+    async def test_rubric_phase_inspectors_replay_and_never_switch_automatically(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(110, 38)) as pilot:
+            await pilot.pause()
+            projection = RubricEventRenderer(app, 2)
+            identity = {"grading_run_id": "grade-inspect", "iteration": 0}
+            verifier_id = "rubric:grade-inspect:0:verifier"
+            grader_id = "rubric:grade-inspect:0:grader"
+            projection.handle({"type": "rubric_evaluation_start", **identity})
+            projection.handle(
+                {
+                    "type": "rubric_verification_start",
+                    **identity,
+                    "inspection_id": verifier_id,
+                    "inspection_events": [{"kind": "user", "text": "verify exact input"}],
+                }
+            )
+            projection.handle(
+                {
+                    "type": "rubric_inspection_delta",
+                    **identity,
+                    "phase": "verifier",
+                    "kind": "reasoning",
+                    "text": "live verifier thought",
+                }
+            )
+            await pilot.pause()
+
+            verifier = app.query_one(RubricVerifierBubble)
+            self.assertFalse(verifier.inspect.can_focus)
+            await pilot.click(verifier.inspect)
+            await pilot.pause()
+            inspector = app.query_one(Inspector)
+            inspector_log = inspector.query_one("#inspector-log", ChatLog)
+            self.assertEqual(inspector.inspection_id, verifier_id)
+            self.assertTrue(inspector_log.has_focus)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            verifier_rendered = "\n".join(
+                renderable_plain(child) for child in inspector_log.children
+            )
+            self.assertIn("verify exact input", verifier_rendered)
+            self.assertIn("live verifier thought", verifier_rendered)
+
+            projection.handle({"type": "rubric_verification_end", **identity, "succeeded": True})
+            projection.handle(
+                {
+                    "type": "rubric_grading_start",
+                    **identity,
+                    "inspection_id": grader_id,
+                    "inspection_events": [{"kind": "user", "text": "grade exact input"}],
+                }
+            )
+            projection.handle(
+                {
+                    "type": "rubric_inspection_delta",
+                    **identity,
+                    "phase": "grader",
+                    "kind": "assistant",
+                    "text": '{"result":"needs_revision"}',
+                }
+            )
+            await pilot.pause()
+            self.assertEqual(inspector.inspection_id, verifier_id)
+            self.assertNotIn(
+                "needs_revision",
+                "\n".join(renderable_plain(child) for child in inspector_log.children),
+            )
+
+            await pilot.press("escape")
+            await pilot.pause()
+            grader = app.query_one(RubricGraderBubble)
+            self.assertFalse(grader.inspect.can_focus)
+            await pilot.click(grader.inspect)
+            await pilot.pause()
+            self.assertEqual(inspector.inspection_id, grader_id)
+            grader_rendered = "\n".join(
+                renderable_plain(child) for child in inspector_log.children
+            )
+            self.assertIn("grade exact input", grader_rendered)
+            self.assertIn('{"result":"needs_revision"}', grader_rendered)
+
+            await pilot.click("#inspector-close")
+            projection.handle(
+                {
+                    "type": "rubric_inspection_delta",
+                    **identity,
+                    "phase": "grader",
+                    "kind": "assistant",
+                    "text": "\nfinished while closed",
+                }
+            )
+            await pilot.pause()
+            await pilot.click(grader.inspect)
+            await pilot.pause()
+            reopened = "\n".join(
+                renderable_plain(child) for child in inspector_log.children
+            )
+            self.assertIn("finished while closed", reopened)
 
     async def test_rubric_zero_tools_and_verifier_failure_have_distinct_lifecycles(self) -> None:
         app = make_app()
@@ -3472,12 +3564,29 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 projection.handle(event)
             await pilot.pause()
 
-            bubbles = list(app.query(RubricBubble))
-            self.assertEqual(len(bubbles), 2)
-            self.assertIn("No tools called.", renderable_plain(bubbles[0]))
-            self.assertIn("Grader · Complete", renderable_plain(bubbles[0]))
-            self.assertIn("Verifier · Failed", renderable_plain(bubbles[1]))
-            self.assertNotIn("Grader · Complete", renderable_plain(bubbles[1]))
+            verifiers = list(app.query(RubricVerifierBubble))
+            graders = list(app.query(RubricGraderBubble))
+            self.assertEqual(len(verifiers), 2)
+            self.assertEqual(len(graders), 1)
+            self.assertIn("0 tools called", renderable_plain(verifiers[0]))
+            self.assertIn("Complete", renderable_plain(graders[0]))
+            self.assertIn("Failed", renderable_plain(verifiers[1]))
+
+            second = {"grading_run_id": "grade-zero", "iteration": 1}
+            for event in (
+                {"type": "rubric_evaluation_start", **second},
+                {"type": "rubric_verification_start", **second},
+                {"type": "rubric_verification_end", **second, "succeeded": True},
+                {"type": "rubric_grading_start", **second},
+            ):
+                projection.handle(event)
+            await pilot.pause()
+            self.assertEqual(len(list(app.query(RubricVerifierBubble))), 3)
+            self.assertEqual(len(list(app.query(RubricGraderBubble))), 2)
+            self.assertIn(
+                "pass 2/2",
+                renderable_plain(list(app.query(RubricGraderBubble))[-1]),
+            )
 
     async def test_goal_command_uses_transient_staging_without_switching_mode(self) -> None:
         app = make_app()

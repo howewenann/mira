@@ -301,6 +301,21 @@ def normalized_content_blocks(message: Any, fallback_text: str) -> tuple[Any, ..
     return ({"type": "text", "text": fallback_text},)
 
 
+def streamed_message_deltas(value: Any) -> tuple[str, str]:
+    """Return normalized reasoning and visible text from a messages-mode item."""
+    message = value[0] if isinstance(value, tuple) and value else value
+    reasoning: list[str] = []
+    for block in normalized_content_blocks(message, ""):
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("type") or "").lower() not in {"reasoning", "thinking"}:
+            continue
+        text = str(block.get("reasoning") or block.get("text") or "")
+        if text:
+            reasoning.append(text)
+    return "".join(reasoning), visible_message_text(message)
+
+
 async def _consume_compaction_message(message: Any, renderer: Any) -> None:
     """Drain a live compaction message without recording reasoning or text."""
     call_renderer(renderer, "compaction_started")
