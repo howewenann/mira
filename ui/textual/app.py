@@ -20,7 +20,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.reactive import reactive
-from textual.widgets import Button, ListView, Static
+from textual.widgets import Button, ContentSwitcher, ListView, Static
 
 from agent.middleware.compaction import compact_after_turn
 from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
@@ -273,7 +273,7 @@ class MiraApp(App[None]):
                     yield Button("Artifact", id="artifact-status-button")
                     yield Button("MCP 0/0", id="mcp-status-button")
                     yield Button("Issues 0", id="issues-button")
-                with Vertical(id="transcript-viewport"):
+                with ContentSwitcher(initial="chat-log", id="transcript-viewport"):
                     yield ChatLog(
                         tool_output_chars=self.tool_output_chars,
                         subagent_runs_provider=self._current_subagent_runs,
@@ -2795,8 +2795,7 @@ class MiraApp(App[None]):
 
     def _show_inspector(self, inspector: Inspector) -> None:
         """Reuse the established viewport and focus transition for live inspection."""
-        self.query_one("#chat-log", ChatLog).display = False
-        inspector.display = True
+        self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
         self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
 
     @on(SubagentHistoryAnchor.Requested)
@@ -2832,13 +2831,12 @@ class MiraApp(App[None]):
     def _restore_chat_viewport(self) -> None:
         try:
             inspector = self.query_one(Inspector)
-            chat = self.query_one("#chat-log", ChatLog)
+            switcher = self.query_one("#transcript-viewport", ContentSwitcher)
         except NoMatches:
             return
 
         inspector.stop_inspection()
-        inspector.display = False
-        chat.display = True
+        switcher.current = "chat-log"
 
     def on_key(self, event: Key) -> None:
         """Apply Escape to the currently focused transcript or prompt."""
@@ -2847,9 +2845,10 @@ class MiraApp(App[None]):
         try:
             inspector = self.query_one(Inspector)
             prompt = self.query_one(PromptBox)
+            switcher = self.query_one("#transcript-viewport", ContentSwitcher)
         except NoMatches:
             return
-        if inspector.display and inspector.has_focus_within:
+        if switcher.current == "inspector" and inspector.has_focus_within:
             event.stop()
             event.prevent_default()
             self._restore_chat_viewport()

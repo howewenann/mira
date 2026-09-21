@@ -121,6 +121,7 @@ Screen {
 }
 
 .session-text-column,
+.session-content-switcher,
 .session-label,
 .session-rename-editor {
     width: 27;
@@ -697,7 +698,6 @@ MCPPanelScreen {
 }
 
 #inspector {
-    display: none;
     width: 1fr;
     height: 1fr;
     padding: 0;
@@ -1154,6 +1154,10 @@ Button.prompt-panel-button:focus {
 }
 
 .assistant-body {
+    height: auto;
+}
+
+.assistant-body-switcher {
     height: auto;
 }
 

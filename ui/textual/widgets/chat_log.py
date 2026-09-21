@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Click, DescendantFocus, Key, Resize
 from textual.geometry import Size
-from textual.widgets import Button, Markdown, Static
+from textual.widgets import Button, ContentSwitcher, Markdown, Static
 
 from core.execution.inspection.rubric import rubric_inspection_id
 from core.execution.streams.output import normalize_response_delta
@@ -2004,9 +2004,11 @@ class AssistantBubble(Vertical):
         super().__init__(classes="message assistant")
         self.text = text
         self.border_title = "mira"
-        self._body = Static(Text(text), classes="assistant-body")
-        self._markdown_body = Markdown(text, classes="assistant-body")
-        self._markdown_body.display = False
+        self._body = Static(Text(text), id="assistant-text", classes="assistant-body")
+        self._markdown_body = Markdown(text, id="assistant-markdown", classes="assistant-body")
+        self._body_switcher = ContentSwitcher(
+            initial="assistant-text", classes="assistant-body-switcher"
+        )
         self._copy_button = Button(
             "Copy",
             classes="assistant-copy",
@@ -2017,7 +2019,6 @@ class AssistantBubble(Vertical):
             classes="assistant-display",
             compact=True,
         )
-        self._markdown = False
         self._display_anchor_y: int | None = None
         self._feedback_version = 0
 
@@ -2027,8 +2028,9 @@ class AssistantBubble(Vertical):
         return Text(self.text)
 
     def compose(self) -> Any:
-        yield self._body
-        yield self._markdown_body
+        with self._body_switcher:
+            yield self._body
+            yield self._markdown_body
         with Horizontal(classes="assistant-actions"):
             yield self._copy_button
             yield self._display_button
@@ -2036,7 +2038,7 @@ class AssistantBubble(Vertical):
     def update(self, renderable: Text) -> None:
         """Update streamed assistant text without replacing the footer."""
         self.text = renderable.plain
-        if self._markdown:
+        if self._body_switcher.current == "assistant-markdown":
             self._markdown_body.update(self.text)
         else:
             self._body.update(renderable)
@@ -2057,15 +2059,15 @@ class AssistantBubble(Vertical):
             if chat_log is not None and not chat_log.follow_tail
             else None
         )
-        self._markdown = not self._markdown
-        if self._markdown:
+        if self._body_switcher.current == "assistant-text":
             self._markdown_body.update(self.text)
+            self._body_switcher.current = "assistant-markdown"
+            self._display_button.label = "Text"
         else:
             self._body.update(Text(self.text))
-        self._body.display = not self._markdown
-        self._markdown_body.display = self._markdown
-        self._display_button.label = "Text" if self._markdown else "Markdown"
-        if not self._markdown and self._display_anchor_y is not None:
+            self._body_switcher.current = "assistant-text"
+            self._display_button.label = "Markdown"
+        if self._body_switcher.current == "assistant-text" and self._display_anchor_y is not None:
             self.call_after_refresh(self._finish_display_transition_after_refresh)
 
     def on_markdown_table_of_contents_updated(
@@ -2075,7 +2077,7 @@ class AssistantBubble(Vertical):
         """Release the temporary display anchor after native Markdown layout."""
         if (
             event.markdown is self._markdown_body
-            and self._markdown
+            and self._body_switcher.current == "assistant-markdown"
             and self._display_anchor_y is not None
         ):
             self.call_after_refresh(self._finish_display_transition_after_refresh)

@@ -13,7 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.events import Click, Key
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, ListItem, ListView, OptionList, Static
+from textual.widgets import Button, ContentSwitcher, Input, ListItem, ListView, OptionList, Static
 from textual.widgets.option_list import Option
 
 SESSION_ROW_PREVIEW_WIDTH = 27
@@ -86,24 +86,25 @@ class SessionItem(ListItem):
     def compose(self) -> ComposeResult:
         with Horizontal(classes="session-row-layout"):
             with Vertical(classes="session-text-column"):
-                yield Static(
-                    session_label(
-                        self.record,
-                        width=SESSION_ROW_PREVIEW_WIDTH,
-                        pad_preview=True,
-                    ),
-                    classes="session-label",
-                )
-                with Vertical(classes="session-rename-editor") as editor:
-                    editor.display = False
-                    yield Input(classes="session-rename-input")
-                    yield Static("", classes="session-rename-spacer")
+                with ContentSwitcher(initial="session-preview", classes="session-content-switcher"):
                     yield Static(
-                        timestamp_text(
-                            self.record.get("updated_at") or self.record.get("created_at")
+                        session_label(
+                            self.record,
+                            width=SESSION_ROW_PREVIEW_WIDTH,
+                            pad_preview=True,
                         ),
-                        classes="session-rename-timestamp",
+                        id="session-preview",
+                        classes="session-label",
                     )
+                    with Vertical(id="session-rename", classes="session-rename-editor"):
+                        yield Input(classes="session-rename-input")
+                        yield Static("", classes="session-rename-spacer")
+                        yield Static(
+                            timestamp_text(
+                                self.record.get("updated_at") or self.record.get("created_at")
+                            ),
+                            classes="session-rename-timestamp",
+                        )
             with Vertical(classes="session-actions"):
                 pin_button = SessionActionButton(
                     "[!]",
@@ -147,16 +148,14 @@ class SessionItem(ListItem):
 
     def begin_rename(self) -> None:
         """Swap the preview for an inline editor in this row."""
-        self.query_one(".session-label", Static).display = False
-        self.query_one(".session-rename-editor").display = True
+        self.query_one(".session-content-switcher", ContentSwitcher).current = "session-rename"
         editor = self.query_one(".session-rename-input", Input)
         editor.value = session_display_title(self.record)
         self.call_after_refresh(editor.focus)
 
     def cancel_rename(self) -> None:
         """Restore the normal preview without changing persisted metadata."""
-        self.query_one(".session-rename-editor").display = False
-        self.query_one(".session-label", Static).display = True
+        self.query_one(".session-content-switcher", ContentSwitcher).current = "session-preview"
         self.focus()
 
 

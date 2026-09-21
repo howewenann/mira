@@ -2128,11 +2128,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     row for row in app.query(SessionItem) if row.session_id == "other"
                 )
                 label = item.query_one(".session-label", Static)
+                content_switcher = item.query_one(
+                    ".session-content-switcher",
+                    ContentSwitcher,
+                )
                 actions = item.query_one(".session-actions")
                 pin = item.query_one(".session-pin-action", Button)
                 menu = item.query_one(".session-menu-action", Button)
 
                 self.assertEqual(item.region.height, 4)
+                self.assertEqual(content_switcher.region.width, SESSION_ROW_PREVIEW_WIDTH)
+                self.assertEqual(content_switcher.region.height, 3)
                 self.assertEqual(label.region.width, SESSION_ROW_PREVIEW_WIDTH)
                 self.assertEqual(actions.region.width, 3)
                 self.assertEqual(actions.region.x - label.region.right, 4)
@@ -2237,6 +2243,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 24)) as pilot:
                 await pilot.pause()
                 app._load_session = AsyncMock()  # type: ignore[method-assign]
+                item = next(row for row in app.query(SessionItem) if row.session_id == "other")
+                switcher = item.query_one(".session-content-switcher", ContentSwitcher)
+                self.assertEqual(switcher.current, "session-preview")
                 await pilot.click(".session-menu-action")
                 await wait_until(lambda: isinstance(app.screen, SessionActionMenuScreen))
                 self.assertEqual(
@@ -2249,6 +2258,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     and app.query(".session-rename-input").first(Input).has_focus
                 )
                 editor = app.query(".session-rename-input").first(Input)
+                self.assertEqual(switcher.current, "session-rename")
                 self.assertEqual(editor.value, "automatic fallback title")
                 editor.value = "  My custom chat  "
                 await pilot.press("enter")
@@ -2258,6 +2268,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(saved["custom_title"], "My custom chat")
                 self.assertEqual(saved["updated_at"], original_updated_at)
                 item = next(row for row in app.query(SessionItem) if row.session_id == "other")
+                self.assertEqual(
+                    item.query_one(".session-content-switcher", ContentSwitcher).current,
+                    "session-preview",
+                )
                 self.assertIn("My custom chat", renderable_plain(item.query_one(".session-label")))
                 app._load_session.assert_not_awaited()
 
@@ -2273,6 +2287,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 saved = store.read(store.path("other"))
                 self.assertEqual(saved["custom_title"], "")
                 item = next(row for row in app.query(SessionItem) if row.session_id == "other")
+                self.assertEqual(
+                    item.query_one(".session-content-switcher", ContentSwitcher).current,
+                    "session-preview",
+                )
                 self.assertIn(
                     "automatic fallback title",
                     renderable_plain(item.query_one(".session-label")),
@@ -2290,14 +2308,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 24)) as pilot:
                 await pilot.pause()
                 item = app.query_one(SessionItem)
+                switcher = item.query_one(".session-content-switcher", ContentSwitcher)
+                self.assertEqual(switcher.current, "session-preview")
                 item.begin_rename()
                 await wait_until(lambda: item.query_one(Input).has_focus)
+                self.assertEqual(switcher.current, "session-rename")
                 item.query_one(Input).value = "Discard this title"
                 await pilot.press("escape")
                 await pilot.pause()
 
-                self.assertFalse(item.query_one(".session-rename-editor").display)
-                self.assertTrue(item.query_one(".session-label").display)
+                self.assertEqual(switcher.current, "session-preview")
                 self.assertEqual(
                     store.read(store.path("current"))["custom_title"],
                     "Keep this title",
@@ -3459,11 +3479,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             verifier = app.query_one(RubricVerifierBubble)
+            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+            self.assertEqual(switcher.current, "chat-log")
             self.assertFalse(verifier.inspect.can_focus)
             await pilot.click(verifier.inspect)
             await pilot.pause()
             inspector = app.query_one(Inspector)
             inspector_log = inspector.query_one("#inspector-log", ChatLog)
+            self.assertEqual(switcher.current, "inspector")
             self.assertEqual(inspector.inspection_id, verifier_id)
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
@@ -3496,6 +3519,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await pilot.pause()
+            self.assertEqual(switcher.current, "inspector")
             self.assertEqual(inspector.inspection_id, verifier_id)
             self.assertNotIn(
                 "needs_revision",
@@ -3504,10 +3528,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("escape")
             await pilot.pause()
+            self.assertEqual(switcher.current, "chat-log")
             grader = app.query_one(RubricGraderBubble)
             self.assertFalse(grader.inspect.can_focus)
             await pilot.click(grader.inspect)
             await pilot.pause()
+            self.assertEqual(switcher.current, "inspector")
             self.assertEqual(inspector.inspection_id, grader_id)
             grader_rendered = "\n".join(
                 renderable_plain(child) for child in inspector_log.children
@@ -3516,6 +3542,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('{"result":"needs_revision"}', grader_rendered)
 
             await pilot.click("#inspector-close")
+            await pilot.pause()
+            self.assertEqual(switcher.current, "chat-log")
             projection.handle(
                 {
                     "type": "rubric_inspection_delta",
@@ -3528,6 +3556,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.click(grader.inspect)
             await pilot.pause()
+            self.assertEqual(switcher.current, "inspector")
             reopened = "\n".join(
                 renderable_plain(child) for child in inspector_log.children
             )
@@ -3601,7 +3630,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 verifier = app.query_one(RubricVerifierBubble)
                 grader = app.query_one(RubricGraderBubble)
                 inspector = app.query_one(Inspector)
-                self.assertFalse(inspector.display)
+                switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+                self.assertEqual(switcher.current, "chat-log")
                 self.assertEqual(verifier.inspection_id, "rubric:grade-history:0:verifier")
                 self.assertEqual(grader.inspection_id, "rubric:grade-history:0:grader")
                 self.assertEqual(app.query_one(SubagentsPanel)._records, {})
@@ -3609,6 +3639,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.click(verifier.inspect)
                 await pilot.pause()
+                await wait_until(lambda: switcher.current == "inspector")
+                self.assertEqual(switcher.current, "inspector")
                 inspector_log = inspector.query_one("#inspector-log", ChatLog)
                 rendered = "\n".join(
                     renderable_plain(child) for child in inspector_log.children
@@ -3625,8 +3657,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.press("escape")
                 await pilot.pause()
+                self.assertEqual(switcher.current, "chat-log")
                 await pilot.click(grader.inspect)
                 await pilot.pause()
+                await wait_until(lambda: switcher.current == "inspector")
+                self.assertEqual(switcher.current, "inspector")
                 rendered = "\n".join(
                     renderable_plain(child) for child in inspector_log.children
                 )
@@ -3636,6 +3671,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.press("escape")
                 await pilot.pause()
+                self.assertEqual(switcher.current, "chat-log")
                 changed = store.read(store.path("rubric-history"))
                 changed["runs"] = []
                 store.save_metadata(changed)
@@ -3644,7 +3680,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.click(verifier.inspect)
                 await pilot.pause()
                 chat = app.query_one("#chat-log", ChatLog)
-                self.assertFalse(inspector.display)
+                self.assertEqual(switcher.current, "chat-log")
                 self.assertIn(
                     "Rubric history unavailable",
                     "\n".join(renderable_plain(child) for child in chat.children),
@@ -3753,7 +3789,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(grader.inspection_id, "")
             self.assertEqual(verifier.inspect.styles.display, "none")
             self.assertEqual(grader.inspect.styles.display, "none")
-            self.assertFalse(app.query_one(Inspector).display)
+            self.assertEqual(
+                app.query_one("#transcript-viewport", ContentSwitcher).current,
+                "chat-log",
+            )
 
     async def test_rubric_inspect_footer_matches_copy_geometry_and_follows_content(self) -> None:
         app = make_app()
@@ -5550,6 +5589,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
             copy.assert_called_once_with("clicked assistant text")
+
+    async def test_assistant_display_switches_between_text_and_markdown(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            chat.assistant_message("## Render this response")
+            await pilot.pause()
+            bubble = chat.query_one(".message.assistant")
+            switcher = bubble.query_one(".assistant-body-switcher", ContentSwitcher)
+            button = bubble.query_one(".assistant-display", Button)
+
+            self.assertEqual(switcher.current, "assistant-text")
+            self.assertEqual(button.label.plain, "Markdown")
+
+            button.press()
+            await pilot.pause()
+            self.assertEqual(switcher.current, "assistant-markdown")
+            self.assertEqual(button.label.plain, "Text")
+
+            button.press()
+            await pilot.pause()
+            self.assertEqual(switcher.current, "assistant-text")
+            self.assertEqual(button.label.plain, "Markdown")
 
     async def test_assistant_copy_button_copies_text_and_restarts_feedback(self) -> None:
         app = make_app()
@@ -12291,6 +12355,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             panel = app.query_one(SubagentsPanel)
             table = panel.query_one("#subagents-tasks", DataTable)
+            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
             record = next(iter(panel._records.values()))
             hover = table.get_component_styles("datatable--hover")
             cursor = table.get_component_styles("datatable--cursor")
@@ -12298,6 +12363,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cursor.background, Color.parse("transparent"))
             self.assertFalse(table.can_focus)
             self.assertFalse(table.show_cursor)
+            self.assertEqual(switcher.current, "chat-log")
 
             await pilot.hover("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
@@ -12313,8 +12379,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             inspector = app.query_one(Inspector)
             inspector_header = inspector.query_one("#inspector-header", Horizontal)
             inspector_log = inspector.query_one("#inspector-log", ChatLog)
-            self.assertTrue(inspector.display)
-            self.assertFalse(app.query_one("#chat-log", ChatLog).display)
+            self.assertEqual(switcher.current, "inspector")
             self.assertTrue(panel.display)
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(app.query_one(PromptBox).has_focus)
@@ -12331,13 +12396,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("escape")
             await pilot.pause()
-            self.assertFalse(inspector.display)
-            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+            self.assertEqual(switcher.current, "chat-log")
             self.assertTrue(app.query_one(PromptBox).has_focus)
 
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
-            self.assertTrue(inspector.display)
+            await wait_until(
+                lambda: switcher.current == "inspector" and inspector_log.has_focus
+            )
+            self.assertEqual(switcher.current, "inspector")
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
 
@@ -12367,16 +12434,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.click("#inspector-close")
             await pilot.pause()
-            self.assertFalse(inspector.display)
+            self.assertEqual(switcher.current, "chat-log")
             self.assertFalse(table.show_cursor)
-            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
             self.assertTrue(app.query_one(PromptBox).has_focus)
 
             app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
             reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
-            self.assertTrue(inspector.display)
+            self.assertEqual(switcher.current, "inspector")
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
             self.assertIn(full_task, reopened)
@@ -12418,7 +12484,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await pilot.pause()
             self.assertEqual(prompt.value, "")
-            self.assertTrue(inspector.display)
+            self.assertEqual(switcher.current, "inspector")
 
             prompt.value = "preserve this draft"
             await pilot.click("#inspector-title")
@@ -12428,8 +12494,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("escape")
             await pilot.pause()
-            self.assertFalse(inspector.display)
-            self.assertTrue(app.query_one("#chat-log", ChatLog).display)
+            self.assertEqual(switcher.current, "chat-log")
             self.assertEqual(prompt.value, "preserve this draft")
             self.assertTrue(prompt.has_focus)
 
@@ -12646,7 +12711,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 inspector = app.query_one(Inspector)
                 inspector_log = inspector.query_one("#inspector-log", ChatLog)
                 rendered = "\n".join(renderable_plain(child) for child in inspector_log.children)
-                self.assertTrue(inspector.display)
+                self.assertEqual(
+                    app.query_one("#transcript-viewport", ContentSwitcher).current,
+                    "inspector",
+                )
                 self.assertIn("first evaluation task", rendered)
                 self.assertIn("reasoning for eval-run-one", rendered)
                 self.assertIn("tool result for eval-run-one", rendered)
