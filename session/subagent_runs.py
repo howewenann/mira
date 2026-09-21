@@ -110,6 +110,17 @@ def run_for_id(value: Any, run_id: str) -> dict[str, Any] | None:
     return next((run for run in normalize_runs(value) if run["id"] == run_id), None)
 
 
+def run_for_inspection_id(value: Any, inspection_id: str) -> dict[str, Any] | None:
+    return next(
+        (
+            run
+            for run in normalize_runs(value)
+            if run["inspection_id"] == inspection_id
+        ),
+        None,
+    )
+
+
 def run_count(value: Any, origin_event_id: int | None) -> int:
     if not origin_event_id:
         return 0
@@ -280,6 +291,7 @@ __all__ = [
     "clear_runs",
     "run_count",
     "run_for_id",
+    "run_for_inspection_id",
     "runs_for_origin",
     "upsert_run",
 ]

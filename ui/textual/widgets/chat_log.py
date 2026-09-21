@@ -19,6 +19,7 @@ from textual.events import Click, DescendantFocus, Key, Resize
 from textual.geometry import Size
 from textual.widgets import Button, Markdown, Static
 
+from core.execution.inspection.rubric import rubric_inspection_id
 from core.execution.streams.output import normalize_response_delta
 from core.execution.streams.rubric import (
     elapsed_ms,
@@ -28,7 +29,7 @@ from core.execution.streams.rubric import (
 )
 from core.execution.streams.corrections import correction_text, correction_title
 from session.context import normalize_events
-from session.subagent_runs import run_count
+from session.subagent_runs import run_count, run_for_inspection_id
 from session.goals import GOAL_STATUSES
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
@@ -1132,8 +1133,13 @@ class ChatLog(VerticalScroll):
         self._rubric_activity.pop(key, None)
         self._rubric_evaluations[key] = dict(evaluation)
         body = self._render_rubric(evaluation, max_iterations, include_heading=False)
+        verifier_inspection_id = self._persisted_rubric_inspection_id(
+            evaluation,
+            "verifier",
+        )
         verifier = self._ensure_verifier_bubble(
             key,
+            inspection_id=verifier_inspection_id,
             evaluation=evaluation,
             max_iterations=max_iterations,
         )
@@ -1148,8 +1154,13 @@ class ChatLog(VerticalScroll):
             str(evaluation.get("verifier_status") or "complete") != "failed"
             or evaluation.get("grader_status")
         ):
+            grader_inspection_id = self._persisted_rubric_inspection_id(
+                evaluation,
+                "grader",
+            )
             grader = self._ensure_grader_bubble(
                 key,
+                inspection_id=grader_inspection_id,
                 evaluation=evaluation,
                 max_iterations=max_iterations,
             )
@@ -1163,6 +1174,28 @@ class ChatLog(VerticalScroll):
             if grader is not None:
                 grader.border_subtitle = escape(timestamp)
         self._scroll_to_end()
+
+    def _persisted_rubric_inspection_id(
+        self,
+        evaluation: dict[str, Any],
+        phase: str,
+    ) -> str:
+        """Expose historical Inspect only when its durable transcript exists."""
+        if self.subagent_runs_provider is None:
+            return ""
+        inspection_id = rubric_inspection_id(
+            str(evaluation.get("grading_run_id") or ""),
+            int(evaluation.get("iteration") or 0),
+            phase,
+        )
+        try:
+            run = run_for_inspection_id(
+                self.subagent_runs_provider(),
+                inspection_id,
+            )
+        except Exception:
+            return ""
+        return inspection_id if run is not None else ""
 
     def rubric_evaluation_status(
         self,

@@ -1770,3 +1770,25 @@ fully closing MIRA.
    clicking its link/row after restart. Expected: every click rereads disk, valid
    edits appear on the next click, and missing/corrupt records produce a contained
    visible error without changing live inspection or session state.
+
+## Retrospective Rubric Inspection (Phase 2)
+
+Use a disposable workspace with Rubric evaluation enabled and a configured local
+model.
+
+1. Run one evaluation that uses verifier tools and reaches the final grader.
+   Open both Inspect buttons while the turn is live. Expected: Verifier shows its
+   exact input, reasoning, tool calls/results, and evidence response; Grader shows
+   its exact input, verifier evidence, reasoning, and raw assistant JSON.
+2. Fully exit MIRA, resume the saved session in a fresh process, and confirm the
+   restored Verifier and Grader bubbles still show Inspect. Open both. Expected:
+   the existing read-only Inspector reproduces the live transcripts and retains
+   `Inspector · Rubrics · Verifier · Pass 1` or the matching Grader title.
+3. Confirm restored Rubric runs do not add Subagents rows, counts, or task/eval
+   history anchors. Open a session created before this feature and confirm its
+   Rubric bubbles render normally without Inspect buttons.
+4. Interrupt a Rubric verifier for HITL, resume it in the same process, and finish
+   the evaluation. Expected: one inspection per deterministic phase ID is retained.
+   Then terminate a process during a running verifier tool and reload the session;
+   the historical inspection is CANCELLED, its pending tool is closed, and no
+   unrelated root tool event is marked interrupted.

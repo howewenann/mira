@@ -139,6 +139,26 @@ class PersistentSubagentRuns:
         self._terminal("", kwargs.get("row_id", ""), result, kwargs.get("duration_ms"), status=status)
         return outcome
 
+    def rubric_lifecycle_event(self, event: dict[str, Any]) -> Any:
+        """Persist an already-projected Rubric phase without changing it."""
+        callback = getattr(self.renderer, "rubric_lifecycle_event", None)
+        outcome = callback(event) if callable(callback) else None
+        try:
+            event_type = str(event.get("type") or "")
+            inspection_id = str(event.get("inspection_id") or "")
+            if event_type in {"rubric_verification_start", "rubric_grading_start"}:
+                self._attach(inspection_id, requires_origin=False)
+            elif event_type in {"rubric_verification_end", "rubric_grading_end"}:
+                self._terminal(
+                    inspection_id,
+                    "",
+                    "",
+                    event.get("duration_ms"),
+                )
+        except Exception as exc:  # persistence must never affect Rubric execution
+            get_diagnostics_logger().warning("rubric run projection failed: %s", exc)
+        return outcome
+
     def flush(self) -> None:
         if self._flush_handle is not None:
             self._flush_handle.cancel()
@@ -159,10 +179,20 @@ class PersistentSubagentRuns:
                 self.inspections.unsubscribe(inspection_id, self._inspection_updated)
         self._subscriptions.clear()
 
-    def _attach(self, inspection_id: str, **metadata: Any) -> None:
+    def _attach(
+        self,
+        inspection_id: str,
+        *,
+        requires_origin: bool = True,
+        **metadata: Any,
+    ) -> None:
         if not inspection_id or self.inspections is None:
             return
-        self._metadata[inspection_id] = {**self._metadata.get(inspection_id, {}), **metadata}
+        self._metadata[inspection_id] = {
+            **self._metadata.get(inspection_id, {}),
+            **metadata,
+            "requires_origin": requires_origin,
+        }
         if inspection_id not in self._subscriptions:
             self.inspections.subscribe(inspection_id, self._inspection_updated)
             self._subscriptions.add(inspection_id)
@@ -205,18 +235,23 @@ class PersistentSubagentRuns:
             metadata = self._metadata.get(inspection_id)
             if inspection is None or metadata is None:
                 return
-            origin_event_id = self._origin_event_id(
-                str(metadata.get("origin_tool") or ""),
-                str(metadata.get("origin_call_id") or ""),
-                str(metadata.get("task") or ""),
-                str(metadata.get("row_id") or ""),
-                inspection_id,
+            requires_origin = metadata.get("requires_origin") is not False
+            origin_event_id = (
+                self._origin_event_id(
+                    str(metadata.get("origin_tool") or ""),
+                    str(metadata.get("origin_call_id") or ""),
+                    str(metadata.get("task") or ""),
+                    str(metadata.get("row_id") or ""),
+                    inspection_id,
+                )
+                if requires_origin
+                else None
             )
             now = _now_iso()
             events = [_event_dict(event) for event in inspection.events]
             status = str(metadata.get("status") or inspection.status or "RUNNING")
             output = str(metadata.get("output") or _final_output(events))
-            if status != "RUNNING" and origin_event_id is None:
+            if status != "RUNNING" and requires_origin and origin_event_id is None:
                 # A child stream may finish before its owning top-level call is
                 # delivered. Keep the last RUNNING snapshot durable and let the
                 # later call backfill ownership and the terminal state together.

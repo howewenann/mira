@@ -70,7 +70,12 @@ from session.plans import (
     plan_artifact_text,
 )
 from session.recorder import update_goal_event_status, update_plan_event_status
-from session.subagent_runs import clear_runs, run_for_id, runs_for_origin
+from session.subagent_runs import (
+    clear_runs,
+    run_for_id,
+    run_for_inspection_id,
+    runs_for_origin,
+)
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -2771,11 +2776,21 @@ class MiraApp(App[None]):
 
     @on(RubricInspectionSelected)
     def open_rubric_inspector(self, event: RubricInspectionSelected) -> None:
-        """Open one process-local Verifier or Grader transcript."""
+        """Prefer one live Rubric transcript, then its durable snapshot."""
         event.stop()
         inspector = self.query_one(Inspector)
         if not inspector.open(event.inspection_id):
-            return
+            try:
+                saved = self._read_current_session()
+                run = run_for_inspection_id(
+                    saved.get("runs"),
+                    event.inspection_id,
+                )
+                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
+                    raise ValueError("the selected Rubric inspection is no longer available")
+            except Exception as exc:
+                self.system_message(f"Rubric history unavailable: {exc}", kind="error")
+                return
         self._show_inspector(inspector)
 
     def _show_inspector(self, inspector: Inspector) -> None:

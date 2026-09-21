@@ -3533,6 +3533,228 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIn("finished while closed", reopened)
 
+    async def test_restored_rubric_inspections_use_persisted_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "sessions")
+            session = store.new("rubric-history", workspace)
+            timestamp = "2026-01-01T00:00:00+00:00"
+            evaluation = {
+                "grading_run_id": "grade-history",
+                "iteration": 0,
+                "result": "satisfied",
+                "explanation": "Historical evidence passed.",
+                "criteria": [{"name": "History", "passed": True, "gap": ""}],
+                "verifier_status": "complete",
+                "grader_status": "complete",
+                "verifier_tools": [],
+                "grader_model": "lmstudio:bonsai",
+            }
+            session["events"] = [
+                {
+                    "id": 1,
+                    "type": "rubric",
+                    "evaluation": evaluation,
+                    "max_iterations": 3,
+                    "created_at": timestamp,
+                }
+            ]
+            session["runs"] = [
+                {
+                    "id": "verifier-run",
+                    "inspection_id": "rubric:grade-history:0:verifier",
+                    "origin_event_id": None,
+                    "inspection_type": "Rubrics",
+                    "display_name": "Verifier · Pass 1",
+                    "status": "DONE",
+                    "started_at": timestamp,
+                    "updated_at": timestamp,
+                    "finished_at": timestamp,
+                    "events": [
+                        {"kind": "user", "text": "persisted verifier input"},
+                        {"kind": "reasoning", "text": "persisted verifier reasoning"},
+                        {"kind": "assistant", "text": "persisted evidence"},
+                    ],
+                },
+                {
+                    "id": "grader-run",
+                    "inspection_id": "rubric:grade-history:0:grader",
+                    "origin_event_id": None,
+                    "inspection_type": "Rubrics",
+                    "display_name": "Grader · Pass 1",
+                    "status": "DONE",
+                    "started_at": timestamp,
+                    "updated_at": timestamp,
+                    "finished_at": timestamp,
+                    "events": [
+                        {"kind": "user", "text": "persisted grader input"},
+                        {"kind": "assistant", "text": '{"result":"satisfied"}'},
+                    ],
+                },
+            ]
+            store.save(session)
+            reopened = store.load("rubric-history", resume=False, workspace=workspace)
+            app = make_app(workspace=workspace, session=reopened, store=store)
+
+            async with app.run_test(size=(120, 44)) as pilot:
+                await pilot.pause()
+                verifier = app.query_one(RubricVerifierBubble)
+                grader = app.query_one(RubricGraderBubble)
+                inspector = app.query_one(Inspector)
+                self.assertFalse(inspector.display)
+                self.assertEqual(verifier.inspection_id, "rubric:grade-history:0:verifier")
+                self.assertEqual(grader.inspection_id, "rubric:grade-history:0:grader")
+                self.assertEqual(app.query_one(SubagentsPanel)._records, {})
+                self.assertEqual(len(list(app.query(ToolBubble))), 0)
+
+                await pilot.click(verifier.inspect)
+                await pilot.pause()
+                inspector_log = inspector.query_one("#inspector-log", ChatLog)
+                rendered = "\n".join(
+                    renderable_plain(child) for child in inspector_log.children
+                )
+                self.assertEqual(inspector.inspection_id, "verifier-run")
+                self.assertEqual(
+                    renderable_plain(inspector.query_one("#inspector-title")),
+                    "Inspector · Rubrics · Verifier · Pass 1",
+                )
+                self.assertIn("persisted verifier input", rendered)
+                self.assertIn("persisted verifier reasoning", rendered)
+                self.assertTrue(inspector_log.has_focus)
+                self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+
+                await pilot.press("escape")
+                await pilot.pause()
+                await pilot.click(grader.inspect)
+                await pilot.pause()
+                rendered = "\n".join(
+                    renderable_plain(child) for child in inspector_log.children
+                )
+                self.assertEqual(inspector.inspection_id, "grader-run")
+                self.assertIn("persisted grader input", rendered)
+                self.assertIn('{"result":"satisfied"}', rendered)
+
+                await pilot.press("escape")
+                await pilot.pause()
+                changed = store.read(store.path("rubric-history"))
+                changed["runs"] = []
+                store.save_metadata(changed)
+                verifier.inspect.scroll_visible()
+                await pilot.pause()
+                await pilot.click(verifier.inspect)
+                await pilot.pause()
+                chat = app.query_one("#chat-log", ChatLog)
+                self.assertFalse(inspector.display)
+                self.assertIn(
+                    "Rubric history unavailable",
+                    "\n".join(renderable_plain(child) for child in chat.children),
+                )
+
+    async def test_rubric_inspection_prefers_live_store_over_persisted_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "sessions")
+            session = store.new("rubric-live-first", workspace)
+            timestamp = "2026-01-01T00:00:00+00:00"
+            session["events"] = [
+                {
+                    "id": 1,
+                    "type": "rubric",
+                    "evaluation": {
+                        "grading_run_id": "grade-live-first",
+                        "iteration": 0,
+                        "result": "satisfied",
+                        "explanation": "Done.",
+                        "criteria": [],
+                        "verifier_status": "complete",
+                    },
+                    "max_iterations": 1,
+                    "created_at": timestamp,
+                }
+            ]
+            inspection_id = "rubric:grade-live-first:0:verifier"
+            session["runs"] = [
+                {
+                    "id": "stale-run",
+                    "inspection_id": inspection_id,
+                    "inspection_type": "Rubrics",
+                    "display_name": "Verifier · Pass 1",
+                    "status": "DONE",
+                    "started_at": timestamp,
+                    "updated_at": timestamp,
+                    "events": [{"kind": "user", "text": "stale persisted input"}],
+                }
+            ]
+            store.save(session)
+            reopened = store.load("rubric-live-first", resume=False, workspace=workspace)
+            app = make_app(workspace=workspace, session=reopened, store=store)
+
+            async with app.run_test(size=(110, 38)) as pilot:
+                await pilot.pause()
+                app.live_inspections.start(
+                    inspection_id,
+                    "Verifier · Pass 1",
+                    "fresh live input",
+                    inspection_type="Rubrics",
+                )
+                app.live_inspections.append(
+                    inspection_id,
+                    InspectionEvent("reasoning", text="fresh live reasoning"),
+                )
+                verifier = app.query_one(RubricVerifierBubble)
+                self.assertEqual(verifier.inspection_id, inspection_id)
+                self.assertEqual(verifier.inspect.styles.display, "block")
+                verifier.inspect.scroll_visible()
+                await pilot.pause()
+                await pilot.click(verifier.inspect)
+                await pilot.pause()
+
+                inspector = app.query_one(Inspector)
+                rendered = "\n".join(
+                    renderable_plain(child)
+                    for child in inspector.query_one("#inspector-log", ChatLog).children
+                )
+                self.assertEqual(inspector.inspection_id, inspection_id)
+                self.assertIn("fresh live input", rendered)
+                self.assertIn("fresh live reasoning", rendered)
+                self.assertNotIn("stale persisted input", rendered)
+
+    async def test_old_rubric_session_without_runs_has_no_inspect_buttons(self) -> None:
+        session = {
+            "id": "old-rubric",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "turns": 1,
+            "dashboard": {},
+            "events": [
+                {
+                    "id": 1,
+                    "type": "rubric",
+                    "evaluation": {
+                        "grading_run_id": "grade-old",
+                        "iteration": 0,
+                        "result": "satisfied",
+                        "explanation": "Old result.",
+                        "criteria": [],
+                        "verifier_status": "complete",
+                        "grader_status": "complete",
+                    },
+                    "max_iterations": 1,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                }
+            ],
+        }
+        app = make_app(session=session)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await pilot.pause()
+            verifier = app.query_one(RubricVerifierBubble)
+            grader = app.query_one(RubricGraderBubble)
+            self.assertEqual(verifier.inspection_id, "")
+            self.assertEqual(grader.inspection_id, "")
+            self.assertEqual(verifier.inspect.styles.display, "none")
+            self.assertEqual(grader.inspect.styles.display, "none")
+            self.assertFalse(app.query_one(Inspector).display)
+
     async def test_rubric_inspect_footer_matches_copy_geometry_and_follows_content(self) -> None:
         app = make_app()
         async with app.run_test(size=(120, 50)) as pilot:
