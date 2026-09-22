@@ -256,6 +256,18 @@ class RendererAdapter:
                 event.name,
                 event.step,
             )
+        elif event.phase == "task_waiting":
+            self._call("workflow_task_waiting", event.task_id, event.name, event.step)
+        elif event.phase == "task_resume":
+            self._call("workflow_task_resumed", event.task_id, event.name, event.step)
+        elif event.phase == "task_inspection":
+            self._call(
+                "workflow_task_inspection",
+                event.task_id,
+                event.name,
+                event.step,
+                event.inspection_id,
+            )
         elif event.phase == "task_finish":
             self._call(
                 "workflow_task_finished",

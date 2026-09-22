@@ -236,13 +236,20 @@ class SubagentInspectionCoordinator:
         subagent: Any,
         title: str,
         task: str,
+        *,
+        inspection_type: str = "subagent",
     ) -> tuple[str, str, bool]:
         """Start or recover one standalone task child across HITL passes."""
         row_id = native_inspection_hint(subagent)
         if not row_id:
             inspection_id = self.store.allocate_id() if self.store is not None else ""
             if inspection_id and self.store is not None:
-                self.store.start(inspection_id, title, task)
+                self.store.start(
+                    inspection_id,
+                    title,
+                    task,
+                    inspection_type=inspection_type,
+                )
             return inspection_id, "", True
 
         self._standalone_task_rows.add(row_id)
@@ -262,7 +269,12 @@ class SubagentInspectionCoordinator:
             self._standalone_inspection_by_row[row_id] = inspection_id
         exact_task = task or self._standalone_tasks_by_call_id.get(row_id, "")
         if inspection_id and self.store is not None:
-            self.store.start(inspection_id, title, exact_task)
+            self.store.start(
+                inspection_id,
+                title,
+                exact_task,
+                inspection_type=inspection_type,
+            )
 
         first_start = row_id not in self._standalone_started_rows
         self._standalone_started_rows.add(row_id)

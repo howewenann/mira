@@ -11,6 +11,9 @@ from core.interface.events.base import EventIdentity
 WorkflowPhase = Literal[
     "run_start",
     "task_start",
+    "task_waiting",
+    "task_resume",
+    "task_inspection",
     "task_finish",
     "run_finish",
     "run_cancel",
@@ -28,6 +31,7 @@ class WorkflowEvent(EventIdentity):
     step: int = 0
     status: str = ""
     error: str = ""
+    inspection_id: str = ""
 
 
 __all__ = ["WorkflowEvent", "WorkflowPhase"]

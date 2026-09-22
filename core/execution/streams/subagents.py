@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
@@ -205,6 +206,85 @@ async def consume_subagent(
         row_id=row_id,
         inspection_id=inspection_id,
     )
+
+
+async def consume_workflow_inspections(
+    subagents: Any,
+    inspection: SubagentInspectionCoordinator,
+    bind_inspection: Callable[[str, str], object],
+    *,
+    title: str = "",
+) -> None:
+    """Observe Workflow children without projecting extra panel rows."""
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        async for subagent in subagents:
+            tasks.append(
+                asyncio.create_task(
+                    _consume_workflow_inspection(
+                        subagent,
+                        inspection,
+                        bind_inspection,
+                        title=title,
+                    )
+                )
+            )
+            await asyncio.sleep(0)
+        if tasks:
+            await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        await cancel_subagent_tasks(tasks)
+        raise
+    except Exception as exc:
+        await cancel_subagent_tasks(tasks)
+        inspection.cancel_standalone(str(exc))
+
+
+async def _consume_workflow_inspection(
+    subagent: Any,
+    inspection: SubagentInspectionCoordinator,
+    bind_inspection: Callable[[str, str], object],
+    *,
+    title: str = "",
+) -> None:
+    """Capture one native Workflow child using standalone inspection identity."""
+    store = inspection.store
+    inspection_title = str(
+        title
+        or getattr(subagent, "graph_name", "")
+        or getattr(subagent, "name", "")
+        or "agent"
+    )
+    task_input = str(getattr(subagent, "task_input", "") or "")
+    inspection_id, row_id, _first_start = inspection.standalone_started(
+        subagent,
+        inspection_title,
+        task_input,
+        inspection_type="workflow",
+    )
+    if row_id and inspection_id:
+        bind_inspection(row_id, inspection_id)
+
+    capture = SubagentInspectionCapture(store, inspection_id)
+    try:
+        _, result = await asyncio.gather(
+            capture_child_streams(
+                subagent,
+                capture,
+                tool_renderer=capture,
+                result=inspection.result,
+            ),
+            subagent_result(subagent),
+        )
+    except asyncio.CancelledError:
+        capture.fail("", status="CANCELLED")
+        raise
+    except Exception as exc:
+        message = f"error: {exc}"
+        capture.fail(message, final_response=message)
+        return
+    if str(getattr(subagent, "status", "") or "") != "interrupted":
+        capture.ensure_final_response(str(result))
 
 
 async def consume_eval_inspection(

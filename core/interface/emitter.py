@@ -254,6 +254,67 @@ class FrontendEmitter:
             )
         )
 
+    def workflow_task_waiting(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="task_waiting",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                name=name,
+                step=step,
+                status="WAITING",
+                **self._identity(),
+            )
+        )
+
+    def workflow_task_resumed(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="task_resume",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                name=name,
+                step=step,
+                status="RUNNING",
+                **self._identity(),
+            )
+        )
+
+    def workflow_task_inspection(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        inspection_id: str,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="task_inspection",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                name=name,
+                step=step,
+                inspection_id=inspection_id,
+                **self._identity(),
+            )
+        )
+
     def workflow_task_finished(
         self,
         task_id: str,

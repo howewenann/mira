@@ -15,6 +15,8 @@ class WorkflowTask:
     task_id: str
     name: str
     step: int
+    status: str = "RUNNING"
+    inspection_id: str = ""
 
 
 class WorkflowCoordinator:
@@ -58,7 +60,29 @@ class WorkflowCoordinator:
             if "input" in event:
                 self._task_started(task_id, str(event.get("name") or "node"))
             else:
-                self._task_finished(task_id, event.get("error"))
+                self._task_finished(
+                    task_id,
+                    event.get("error"),
+                    event.get("interrupts"),
+                )
+
+    def bind_inspection(self, task_id: str, inspection_id: str) -> bool:
+        """Bind a discovered live inspection to an existing Workflow task."""
+        task = self._tasks.get(str(task_id or ""))
+        value = str(inspection_id or "")
+        if task is None or not value:
+            return False
+        if task.inspection_id == value:
+            return True
+        task.inspection_id = value
+        self.emitter.workflow_task_inspection(
+            task.task_id,
+            task.name,
+            task.step,
+            value,
+            workflow_id=self.workflow_id,
+        )
+        return True
 
     def finish(self) -> None:
         """Finish the run while preserving completed rows in the frontend."""
@@ -83,25 +107,41 @@ class WorkflowCoordinator:
                 self._current_step = self._next_step
             task = WorkflowTask(task_id, name, self._current_step)
             self._tasks[task_id] = task
+            phase = "start"
+        elif task.status == "WAITING":
+            phase = "resume"
+        else:
+            phase = "start"
+        task.status = "RUNNING"
         self._active.add(task_id)
-        self.emitter.workflow_task_started(
-            task.task_id,
-            task.name,
-            task.step,
-            workflow_id=self.workflow_id,
+        callback = (
+            self.emitter.workflow_task_resumed
+            if phase == "resume"
+            else self.emitter.workflow_task_started
         )
+        callback(task.task_id, task.name, task.step, workflow_id=self.workflow_id)
 
-    def _task_finished(self, task_id: str, error: Any) -> None:
+    def _task_finished(self, task_id: str, error: Any, interrupts: Any = None) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
         self._active.discard(task_id)
+        if interrupts:
+            task.status = "WAITING"
+            self.emitter.workflow_task_waiting(
+                task.task_id,
+                task.name,
+                task.step,
+                workflow_id=self.workflow_id,
+            )
+            return
         error_text = str(error or "")
+        task.status = "ERROR" if error_text else "DONE"
         self.emitter.workflow_task_finished(
             task.task_id,
             task.name,
             task.step,
-            status="ERROR" if error_text else "DONE",
+            status=task.status,
             error=error_text,
             workflow_id=self.workflow_id,
         )

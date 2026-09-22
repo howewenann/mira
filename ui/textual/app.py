@@ -10,9 +10,11 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.exceptions import ContextOverflowError
 from langgraph.stream.transformers import TasksTransformer
+from langgraph.types import Command
 from textual import on
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -57,7 +59,11 @@ from core.application import available_tools, initial_mode, refresh_agent_specs,
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from core.execution.workflows import WorkflowCoordinator
 from core.execution.inspection.live import LiveInspectionStore
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.inspection.persistence import inspection_from_run
+from core.execution.streams.output import capture_output, collect_interrupts
+from core.execution.streams.subagents import consume_workflow_inspections
+from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
@@ -128,6 +134,7 @@ from ui.textual.platform.windows.input import driver_class_for_platform
 from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_platform
 from ui.textual.file_uploads import clear_local_uploads, ingest_local_files
 from ui.textual.workflow_demo import build_workflow_demo
+from ui.textual.workflow_demo_phase2 import build_workflow_demo_phase2
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 DESTRUCTIVE_HISTORY_COMMANDS = {
@@ -513,6 +520,17 @@ class MiraApp(App[None]):
                 exclusive=True,
             )
             return
+        if text == "/workflow-demo-phase2":
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            prompt.disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_workflow_demo_phase2(),
+                name="workflow-demo-phase2",
+                exclusive=True,
+            )
+            return
 
         if text in DESTRUCTIVE_HISTORY_COMMANDS:
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
@@ -840,6 +858,113 @@ class MiraApp(App[None]):
             error_path = self._write_error_report(exc, source="tui.workflow-demo")
             self.system_message(
                 f"workflow demo error: {exc}\nerror report: {error_path}",
+                kind="error",
+            )
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _run_workflow_demo_phase2(self) -> None:
+        """Run the hidden native agent/HITL demo through existing UI paths."""
+        emitter = FrontendEmitter(
+            self.application.frontend,
+            session_id=str(self.session.get("id") or ""),
+        )
+        coordinator = WorkflowCoordinator(emitter, workflow_id="workflow-demo-phase2")
+        inspection = SubagentInspectionCoordinator(self.live_inspections)
+        coordinator.start()
+        try:
+            agent = self.application.workflows.agent(
+                name="workflow-demo-agent",
+                tools=[],
+                system_prompt=(
+                    "Reply in one short sentence confirming that the Workflow demo agent ran."
+                ),
+            )
+            graph = build_workflow_demo_phase2(agent)
+            payload: Any = {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Confirm that the Workflow Phase 2 demo is running.",
+                    }
+                ]
+            }
+            config = {
+                "configurable": {
+                    "thread_id": f"workflow-demo-phase2:{uuid4()}",
+                }
+            }
+
+            while True:
+                inspection.begin_pass()
+                run = await graph.astream_events(
+                    payload,
+                    config=config,
+                    version="v3",
+                    transformers=[TasksTransformer],
+                )
+                tasks = run.extensions.get("tasks")
+                if tasks is None:
+                    raise RuntimeError(
+                        "Workflow Phase 2 demo did not expose the native task projection."
+                    )
+                output: dict[str, Any] = {}
+                async with run:
+                    await asyncio.gather(
+                        coordinator.consume(tasks),
+                        consume_live_tool_errors(
+                            run,
+                            emitter,
+                            subagent_capture=inspection,
+                        ),
+                        consume_workflow_inspections(
+                            run.subgraphs,
+                            inspection,
+                            coordinator.bind_inspection,
+                            title="workflow-demo-agent",
+                        ),
+                        capture_output(run.output(), output),
+                    )
+
+                interrupts = await collect_interrupts(run, output.get("value"))
+                if not interrupts:
+                    break
+                ask_user_interrupt = next(
+                    (
+                        item
+                        for item in interrupts
+                        if ask_user_request(item).get("type") == "ask_user"
+                    ),
+                    None,
+                )
+                if ask_user_interrupt is None:
+                    raise RuntimeError(
+                        "Workflow Phase 2 demo received an unsupported interrupt."
+                    )
+                answer = await emitter.ask_user(ask_user_interrupt)
+                payload = Command(resume=answer)
+
+            coordinator.finish()
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            inspection.cancel_standalone()
+            coordinator.cancel()
+            self._set_status(state="ready")
+            raise
+        except Exception as exc:
+            inspection.cancel_standalone(str(exc))
+            coordinator.cancel(str(exc))
+            error_path = self._write_error_report(
+                exc,
+                source="tui.workflow-demo-phase2",
+            )
+            self.system_message(
+                f"workflow Phase 2 demo error: {exc}\nerror report: {error_path}",
                 kind="error",
             )
             self._set_status(state="error")
@@ -2821,6 +2946,27 @@ class MiraApp(App[None]):
     def workflow_task_started(self, task_id: str, name: str, step: int) -> None:
         """Render one native root task in its inferred workflow step."""
         self.query_one(SubagentsPanel).start_workflow_task(task_id, name, step)
+
+    def workflow_task_waiting(self, task_id: str, _name: str, _step: int) -> None:
+        """Keep one interrupted Workflow task active on its existing row."""
+        self.query_one(SubagentsPanel).wait_workflow_task(task_id)
+
+    def workflow_task_resumed(self, task_id: str, name: str, step: int) -> None:
+        """Return one waiting Workflow task to RUNNING without replacing it."""
+        self.query_one(SubagentsPanel).resume_workflow_task(task_id, name, step)
+
+    def workflow_task_inspection(
+        self,
+        task_id: str,
+        _name: str,
+        _step: int,
+        inspection_id: str,
+    ) -> None:
+        """Attach a process-local Inspector transcript to a Workflow row."""
+        self.query_one(SubagentsPanel).bind_workflow_inspection(
+            task_id,
+            inspection_id,
+        )
 
     def workflow_task_finished(
         self,

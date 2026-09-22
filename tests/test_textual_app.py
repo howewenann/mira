@@ -15,6 +15,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, MessagesState, StateGraph
 from pyfiglet import Figlet
 from rich.cells import cell_len
 from rich.console import Console
@@ -10622,8 +10624,87 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(panel._records), 6)
                 self.assertTrue(first_keys.isdisjoint(panel._records))
 
-    async def test_workflow_rows_do_not_open_inspector_and_subagents_restore_mode(self) -> None:
-        """Workflow mode should be non-interactive and yield cleanly to subagents."""
+    async def test_workflow_phase2_demo_uses_inspector_and_existing_hitl_ui(self) -> None:
+        """The hidden Phase 2 command should use the real panel and prompt flow."""
+        app = make_app()
+
+        async def respond(_state: MessagesState) -> dict[str, Any]:
+            return {"messages": [AIMessage(content="Workflow demo agent complete.")]}
+
+        agent_builder = StateGraph(MessagesState)
+        agent_builder.add_node("respond", respond)
+        agent_builder.add_edge(START, "respond")
+        agent_builder.add_edge("respond", END)
+        fake_agent = agent_builder.compile(name="workflow-demo-agent")
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            chat = app.query_one(ChatLog)
+            initial_chat_children = len(chat.children)
+
+            with patch(
+                "agent.workflows.api.MiraWorkflowAPI.agent",
+                return_value=fake_agent,
+            ) as build_agent:
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, "/workflow-demo-phase2")
+                )
+                await wait_until(lambda: app.query_one(PromptPanel).active)
+                await pilot.pause()
+
+                panel = app.query_one(SubagentsPanel)
+                agent_record = next(
+                    record for record in panel._records.values() if record.name == "agent"
+                )
+                approval_record = next(
+                    record
+                    for record in panel._records.values()
+                    if record.name == "approval"
+                )
+                self.assertEqual(len(panel._records), 2)
+                self.assertEqual(agent_record.status, "DONE")
+                self.assertTrue(agent_record.inspection_id)
+                self.assertEqual(approval_record.status, "WAITING")
+                self.assertFalse(approval_record.inspection_id)
+                approval_key = approval_record.key
+
+                await pilot.press("1")
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+            build_agent.assert_called_once_with(
+                name="workflow-demo-agent",
+                tools=[],
+                system_prompt=(
+                    "Reply in one short sentence confirming that the Workflow demo agent ran."
+                ),
+            )
+            self.assertIs(panel._records[approval_key], approval_record)
+            self.assertEqual(approval_record.status, "DONE")
+            self.assertEqual(len(panel._records), 2)
+            self.assertEqual(len(chat.children), initial_chat_children)
+
+            panel.post_message(SubagentRunTable.RowClicked(agent_record.key))
+            await pilot.pause()
+            inspector = app.query_one(Inspector)
+            self.assertEqual(
+                inspector.inspection_id,
+                agent_record.inspection_id,
+            )
+            self.assertEqual(
+                renderable_plain(inspector.query_one("#inspector-title")),
+                "Inspector · workflow · workflow-demo-agent",
+            )
+            inspector.post_message(Inspector.Closed())
+            await pilot.pause()
+            self.assertEqual(
+                app.query_one("#transcript-viewport", ContentSwitcher).current,
+                "chat-log",
+            )
+
+    async def test_workflow_rows_open_only_bound_inspections_and_restore_mode(self) -> None:
+        """Only agent-backed Workflow rows should open the existing Inspector."""
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
@@ -10637,6 +10718,30 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             panel = app.query_one(SubagentsPanel)
             switcher = app.query_one("#transcript-viewport", ContentSwitcher)
             panel.post_message(SubagentRunTable.RowClicked("task-1"))
+            await pilot.pause()
+            self.assertEqual(switcher.current, "chat-log")
+
+            inspection_id = app.live_inspections.allocate_id("task-1")
+            app.live_inspections.start(
+                inspection_id,
+                "workflow-demo-agent",
+                "Run the demo.",
+                inspection_type="workflow",
+            )
+            app.workflow_task_inspection(
+                "task-1",
+                "prepare",
+                1,
+                inspection_id,
+            )
+            panel.post_message(SubagentRunTable.RowClicked("task-1"))
+            await pilot.pause()
+            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(
+                renderable_plain(app.query_one("#inspector-title")),
+                "Inspector · workflow · workflow-demo-agent",
+            )
+            app.query_one(Inspector).post_message(Inspector.Closed())
             await pilot.pause()
             self.assertEqual(switcher.current, "chat-log")
 
@@ -10663,10 +10768,104 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 "TASK",
             )
 
+    async def test_workflow_waiting_resumes_and_finishes_same_timed_row(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.workflow_started("hitl")
+            app.workflow_task_started("approval-1", "approval", 2)
+            panel = app.query_one(SubagentsPanel)
+            record = panel._records["approval-1"]
+            record.started = 10.0
+
+            with patch(
+                "ui.textual.widgets.subagent_panel.time.monotonic",
+                return_value=15.0,
+            ):
+                app.workflow_task_waiting("approval-1", "approval", 2)
+                panel.tick()
+                self.assertEqual(record.elapsed_seconds(), 5.0)
+            await pilot.pause()
+
+            self.assertIs(panel._records["approval-1"], record)
+            self.assertEqual(record.status, "WAITING")
+            self.assertTrue(panel.has_running_subagents())
+            self.assertFalse(panel.query_one("#subagents-panel-close", Button).display)
+            self.assertIn(
+                "WAITING",
+                data_table_plain(panel.query_one("#subagents-tasks", DataTable)),
+            )
+
+            with patch(
+                "ui.textual.widgets.subagent_panel.time.monotonic",
+                return_value=20.0,
+            ):
+                app.workflow_task_resumed("approval-1", "approval", 2)
+            self.assertIs(panel._records["approval-1"], record)
+            self.assertEqual(record.status, "RUNNING")
+            self.assertEqual(record.started, 10.0)
+
+            with patch(
+                "ui.textual.widgets.subagent_panel.time.monotonic",
+                return_value=25.0,
+            ):
+                app.workflow_task_finished("approval-1", "approval", 2)
+            await pilot.pause()
+
+            self.assertIs(panel._records["approval-1"], record)
+            self.assertEqual(record.status, "DONE")
+            self.assertEqual(record.elapsed_seconds(), 15.0)
+            self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
+
+    async def test_same_name_workflow_rows_select_their_own_inspections(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.workflow_started("parallel")
+            for index in range(3):
+                task_id = f"worker-{index}"
+                inspection_id = app.live_inspections.allocate_id(task_id)
+                app.live_inspections.start(
+                    inspection_id,
+                    "agent",
+                    f"request {index}",
+                    inspection_type="workflow",
+                )
+                app.workflow_task_started(task_id, "agent", 1)
+                app.workflow_task_inspection(
+                    task_id,
+                    "agent",
+                    1,
+                    inspection_id,
+                )
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            panel.post_message(SubagentRunTable.RowClicked("worker-1"))
+            await pilot.pause()
+
+            inspector = app.query_one(Inspector)
+            self.assertEqual(
+                inspector.inspection_id,
+                panel._records["worker-1"].inspection_id,
+            )
+            self.assertNotEqual(
+                inspector.inspection_id,
+                panel._records["worker-0"].inspection_id,
+            )
+            self.assertNotEqual(
+                inspector.inspection_id,
+                panel._records["worker-2"].inspection_id,
+            )
+
     def test_workflow_demo_command_stays_hidden(self) -> None:
         """The internal demo command must not become a discoverable public command."""
         self.assertNotIn("/workflow-demo", dict(command_help_entries()))
         self.assertEqual(native_command_items("workflow-demo"), [])
+        self.assertNotIn("/workflow-demo-phase2", dict(command_help_entries()))
+        self.assertEqual(native_command_items("workflow-demo-phase2"), [])
 
     async def test_subagent_panel_uses_native_collapsible_without_ctrl_g(self) -> None:
         """The panel should use Textual's native collapsible interaction."""
@@ -10866,7 +11065,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_subagent_task_status_colour_does_not_tint_task_text(self) -> None:
         """Status colour should stay on the icon and word; task prose inherits MIRA white."""
         panel = SubagentsPanel()
-        for value, colour in (("RUNNING", "yellow"), ("DONE", "green"), ("ERROR", "red"), ("CANCELLED", "yellow")):
+        for value, colour in (
+            ("RUNNING", "yellow"),
+            ("WAITING", "cyan"),
+            ("DONE", "green"),
+            ("ERROR", "red"),
+            ("CANCELLED", "yellow"),
+        ):
             with self.subTest(status=value):
                 record = SubagentRecord(
                     key="one",
@@ -10884,7 +11089,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         span
                         for span in task.spans
                         if span.start <= hint_start < span.end
-                        and any(status_colour in str(span.style) for status_colour in ("yellow", "green", "red"))
+                        and any(
+                            status_colour in str(span.style)
+                            for status_colour in ("yellow", "cyan", "green", "red")
+                        )
                     ]
                 )
 

@@ -23,6 +23,7 @@ from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 
 STATUS_RUNNING = "RUNNING"
+STATUS_WAITING = "WAITING"
 STATUS_DONE = "DONE"
 STATUS_CANCELLED = "CANCELLED"
 STATUS_ERROR = "ERROR"
@@ -313,6 +314,32 @@ class SubagentsPanel(Vertical):
             record.output = ""
         self._show()
 
+    def wait_workflow_task(self, task_id: str) -> None:
+        """Mark one Workflow row waiting without freezing its wall clock."""
+        if self._mode != PANEL_WORKFLOW:
+            return
+        record = self._records.get(str(task_id or ""))
+        if record is None:
+            return
+        record.status = STATUS_WAITING
+        record.finished_at = None
+        record.duration_ms = None
+        self._refresh()
+
+    def resume_workflow_task(self, task_id: str, name: str, step: int) -> None:
+        """Resume a waiting Workflow task on its existing row."""
+        self.start_workflow_task(task_id, name, step)
+
+    def bind_workflow_inspection(self, task_id: str, inspection_id: str) -> None:
+        """Attach a live Inspector identity without creating a Workflow row."""
+        if self._mode != PANEL_WORKFLOW:
+            return
+        record = self._records.get(str(task_id or ""))
+        if record is None or not inspection_id:
+            return
+        record.inspection_id = str(inspection_id)
+        self._refresh()
+
     def finish_workflow_task(
         self,
         task_id: str,
@@ -348,7 +375,7 @@ class SubagentsPanel(Vertical):
         status = STATUS_ERROR if error else STATUS_CANCELLED
         finished_at = time.monotonic()
         for record in self._records.values():
-            if record.status != STATUS_RUNNING:
+            if record.status not in {STATUS_RUNNING, STATUS_WAITING}:
                 continue
             record.status = status
             record.output = sanitize(error, max_chars=MAX_OUTPUT_CHARS)
@@ -481,7 +508,8 @@ class SubagentsPanel(Vertical):
         """Advance the spinner on running rows."""
         if not self.has_running_subagents():
             return
-        self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
+        if self._has_actively_running_records():
+            self._spinner_index = (self._spinner_index + 1) % len(SPINNER_FRAMES)
         if not self.is_mounted:
             return
         self.query_one("#subagents-collapsible", Collapsible).title = self._render_header()
@@ -522,8 +550,6 @@ class SubagentsPanel(Vertical):
     def select_subagent(self, event: SubagentRunTable.RowClicked) -> None:
         """Emit selection only; viewport ownership stays with the app."""
         event.stop()
-        if self._mode == PANEL_WORKFLOW:
-            return
         record = self._records.get(event.row_key)
         if record is not None and record.inspection_id:
             self.post_message(SubagentSelected(record.inspection_id))
@@ -531,6 +557,12 @@ class SubagentsPanel(Vertical):
             self.post_message(SubagentSelected(run_id=record.run_id))
 
     def has_running_subagents(self) -> bool:
+        return any(
+            record.status in {STATUS_RUNNING, STATUS_WAITING}
+            for record in self._records.values()
+        )
+
+    def _has_actively_running_records(self) -> bool:
         return any(record.status == STATUS_RUNNING for record in self._records.values())
 
     def _group_key_for_eval(self, eval_id: str) -> str:
@@ -665,7 +697,7 @@ class SubagentsPanel(Vertical):
     def _render_header(self) -> Text:
         done, total, failed, cancelled = self._counts(self._records.values())
         text = Text()
-        if self.has_running_subagents():
+        if self._has_actively_running_records():
             text.append(f"{SPINNER_FRAMES[self._spinner_index]} ", style="bold yellow")
         if self._mode == PANEL_WORKFLOW:
             title = "workflow"
@@ -700,7 +732,10 @@ class SubagentsPanel(Vertical):
     def _refresh_running_groups(self) -> None:
         """Update only group prompts whose status icon or clock is live."""
         for group_key in self._display_group_keys():
-            if any(record.status == STATUS_RUNNING for record in self._records_for_group_key(group_key)):
+            if any(
+                record.status in {STATUS_RUNNING, STATUS_WAITING}
+                for record in self._records_for_group_key(group_key)
+            ):
                 self._refresh_group_prompt(group_key)
 
     def _refresh_group_prompt(self, group_key: str) -> None:
@@ -753,7 +788,10 @@ class SubagentsPanel(Vertical):
             return
         task_width = table.ordered_columns[0].width
         for record in self._displayed_records():
-            if record.status != STATUS_RUNNING or record.key not in table.rows:
+            if (
+                record.status not in {STATUS_RUNNING, STATUS_WAITING}
+                or record.key not in table.rows
+            ):
                 continue
             task, _, elapsed = self._row_cells(record, task_width)
             table.update_cell(record.key, "task", task)
@@ -821,7 +859,11 @@ class SubagentsPanel(Vertical):
     def _counts(self, records: Any) -> tuple[int, int, int, int]:
         items = list(records)
         total = len(items)
-        done = sum(1 for record in items if record.status != STATUS_RUNNING)
+        done = sum(
+            1
+            for record in items
+            if record.status not in {STATUS_RUNNING, STATUS_WAITING}
+        )
         failed = sum(1 for record in items if record.status == STATUS_ERROR)
         cancelled = sum(1 for record in items if record.status == STATUS_CANCELLED)
         return done, total, failed, cancelled
@@ -843,6 +885,8 @@ class SubagentsPanel(Vertical):
 def status_icon(status: str, spinner_index: int) -> tuple[str, str]:
     if status == STATUS_RUNNING:
         return SPINNER_FRAMES[spinner_index], "bold yellow"
+    if status == STATUS_WAITING:
+        return "!", "bold cyan"
     if status == STATUS_DONE:
         return "v", "bold green"
     if status == STATUS_CANCELLED:
@@ -867,7 +911,7 @@ def group_elapsed_seconds(records: Any) -> float:
     if not items:
         return 0.0
     started = min(record.started for record in items)
-    if any(record.status == STATUS_RUNNING for record in items):
+    if any(record.status in {STATUS_RUNNING, STATUS_WAITING} for record in items):
         finished = time.monotonic()
     else:
         finished = max(record.finished_at if record.finished_at is not None else record.started for record in items)

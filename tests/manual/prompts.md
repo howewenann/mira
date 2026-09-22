@@ -1728,6 +1728,29 @@ deterministic internal demo.
 5. Open `/help` and type `/workflow` into autocomplete. Expected: the internal
    demo command is absent from both surfaces.
 
+## Workflow Inspector and HITL Demo (Phase 2)
+
+Use a normal Textual MIRA session with a configured model.
+
+1. Enter the hidden command `/workflow-demo-phase2`. Expected: the existing
+   Workflow panel appears with an `agent` row in Step 1. No internal model or
+   tool nodes appear as additional Workflow rows.
+2. Click `agent`. Expected: the existing Inspector opens as
+   `Inspector · workflow · workflow-demo-agent` and shows the real agent's
+   request and assistant activity. Close Inspector and confirm the normal chat
+   viewport returns without a synthetic final assistant message.
+3. Watch the deterministic `approval` row in Step 2. Expected: the same row
+   changes from RUNNING to WAITING, its elapsed wall clock continues, it does
+   not show a running spinner, and the panel cannot be closed.
+4. Answer the existing MIRA ask-user prompt. Expected: the same `approval` row
+   changes from WAITING to RUNNING to DONE without changing Step, task identity,
+   or visible row. No duplicate approval row appears, and completed rows remain
+   visible.
+5. Run `/workflow-demo` again. Expected: the unchanged Phase 1 sequence remains
+   `prepare`, three concurrent Step 2 `worker` rows, and two later `review`
+   rows in Steps 3 and 4. Confirm both hidden demo commands remain absent from
+   help and autocomplete.
+
 ## Live Subagent Inspection (Phase 1)
 
 Use a disposable workspace with a configured model and enabled subagents.
