@@ -1711,14 +1711,16 @@ deterministic internal demo.
 1. Enter the hidden command `/workflow-demo`. Expected: the existing bottom
    panel opens as `workflow`, its left heading is `STEPS`, and its right heading
    is `NODE`.
-2. Watch the run complete. Expected: `prepare` runs in Step 1;
-   `inspect_code` and `inspect_tests` run concurrently in Step 2; and
-   `summarize` runs in Step 3. Status icons and elapsed clocks animate through
-   the existing panel timer without transcript bubbles or Inspector changes.
-3. After completion, select each Step with the mouse. Expected: all four rows
-   are DONE with frozen durations, the title reports `4/4 done` and `3 steps`,
-   the panel remains expanded, and its close button is available. Clicking a
-   node row does not open Inspector.
+2. Watch the run complete. Expected: `prepare` runs in Step 1; three separate
+   `worker` rows run concurrently in Step 2 and finish in a different order;
+   and `review` runs in Step 3, then loops once as a new `review` row in Step 4.
+   Status icons and elapsed clocks animate through the existing panel timer
+   without transcript bubbles or Inspector changes.
+3. After completion, select each Step with the mouse. Expected: all six rows
+   are DONE with frozen durations, the three same-name Step 2 workers remain
+   separate, the two same-name reviews appear in their respective later Steps,
+   the title reports `6/6 done` and `4 steps`, the panel remains expanded, and
+   its close button is available. Clicking a node row does not open Inspector.
 4. Run `/workflow-demo` again. Expected: the preceding Workflow rows are
    replaced rather than accumulated. Then start an ordinary subagent turn;
    expected: the same panel switches back to its unchanged Subagents mode and

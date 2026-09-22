@@ -10569,14 +10569,28 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(panel.display)
                 self.assertIn("workflow", subagent_title_plain(panel))
-                self.assertIn("4/4 done", subagent_title_plain(panel))
-                self.assertIn("3 steps", subagent_title_plain(panel))
+                self.assertIn("6/6 done", subagent_title_plain(panel))
+                self.assertIn("4 steps", subagent_title_plain(panel))
                 self.assertIn("Step 1", option_list_plain(groups))
                 self.assertIn("Step 2", option_list_plain(groups))
                 self.assertIn("Step 3", option_list_plain(groups))
-                self.assertEqual(len(first_keys), 4)
+                self.assertIn("Step 4", option_list_plain(groups))
+                self.assertEqual(len(first_keys), 6)
                 self.assertTrue(
                     all(record.status == "DONE" for record in panel._records.values())
+                )
+                workers = [
+                    record for record in panel._records.values() if record.name == "worker"
+                ]
+                reviews = [
+                    record for record in panel._records.values() if record.name == "review"
+                ]
+                self.assertEqual(len(workers), 3)
+                self.assertEqual({record.group_key for record in workers}, {"workflow-step-2"})
+                self.assertEqual(len(reviews), 2)
+                self.assertEqual(
+                    {record.group_key for record in reviews},
+                    {"workflow-step-3", "workflow-step-4"},
                 )
                 frozen = [record.elapsed_seconds() for record in panel._records.values()]
                 await asyncio.sleep(0.02)
@@ -10598,15 +10612,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 groups.action_select()
                 await pilot.pause()
                 parallel = data_table_plain(table)
-                self.assertIn("inspect_code", parallel)
-                self.assertIn("inspect_tests", parallel)
-                self.assertEqual(parallel.count("DONE"), 2)
+                self.assertEqual(parallel.count("worker"), 3)
+                self.assertEqual(parallel.count("DONE"), 3)
 
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/workflow-demo"))
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
-                self.assertEqual(len(panel._records), 4)
+                self.assertEqual(len(panel._records), 6)
                 self.assertTrue(first_keys.isdisjoint(panel._records))
 
     async def test_workflow_rows_do_not_open_inspector_and_subagents_restore_mode(self) -> None:

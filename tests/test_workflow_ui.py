@@ -34,7 +34,7 @@ class AsyncItems:
 
 
 class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_native_projection_groups_three_step_parallel_demo(self) -> None:
+    async def test_native_projection_groups_same_node_fanout_and_loop_demo(self) -> None:
         frontend = RecordingFrontend()
         coordinator = WorkflowCoordinator(
             FrontendEmitter(frontend),
@@ -60,16 +60,27 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [(event.name, event.step) for event in starts],
             [
                 ("prepare", 1),
-                ("inspect_code", 2),
-                ("inspect_tests", 2),
-                ("summarize", 3),
+                ("worker", 2),
+                ("worker", 2),
+                ("worker", 2),
+                ("review", 3),
+                ("review", 4),
             ],
         )
-        self.assertEqual(len({event.task_id for event in starts}), 4)
-        self.assertEqual([event.status for event in finishes], ["DONE"] * 4)
+        self.assertEqual(len({event.task_id for event in starts}), 6)
+        self.assertEqual(
+            len({event.task_id for event in starts if event.name == "worker"}),
+            3,
+        )
+        self.assertEqual(
+            len({event.task_id for event in starts if event.name == "review"}),
+            2,
+        )
+        self.assertEqual([event.status for event in finishes], ["DONE"] * 6)
         self.assertEqual(events[0].phase, "run_start")
         self.assertEqual(events[-1].phase, "run_finish")
-        self.assertEqual(output["events"][-1], "summarized")
+        self.assertEqual(output["review_count"], 2)
+        self.assertEqual(output["events"][-2:], ["review 1 complete", "review 2 complete"])
 
     async def test_repeated_names_use_task_ids_and_errors_are_terminal(self) -> None:
         frontend = RecordingFrontend()
