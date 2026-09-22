@@ -17,4 +17,6 @@ Read the examples in this order:
 3. `tools_and_agents.py` - deterministic nodes using runtime capabilities.
 
 Each example starts a headless `MiraApplication`. Configure the workspace's
-models and subagents before running it with `python <example>.py`.
+models and subagents before running it with `python <example>.py`. The examples
+use native LangGraph `stream_mode="updates"` to print each completed node output
+without enabling token-level streaming.

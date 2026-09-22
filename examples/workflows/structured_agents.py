@@ -23,9 +23,16 @@ class State(TypedDict):
 
 
 def workflow(mira):
+    # `name=` creates a workflow-local specialization of the default
+    # `general-purpose` base.
+    #
+    # To specialize another configured MIRA subagent instead, pass its
+    # configured name as the first argument, for example:
+    #
+    #     mira.agent("my-researcher", name="researcher", ...)
     scanner = mira.agent(name="scanner", tools=["ls", "glob"])
-    researcher = mira.agent("researcher", response_format=Findings)
-    text_researcher = mira.agent("researcher", response_format=None)
+    researcher = mira.agent(name="researcher", response_format=Findings)
+    text_researcher = mira.agent(name="text-researcher", response_format=None)
 
     async def scan(state: State) -> State:
         result = await scanner.ainvoke(
@@ -60,11 +67,28 @@ async def main() -> None:
     application = await MiraApplication.start(workspace=".")
     try:
         mira = application.workflows
-        result = await workflow(mira).ainvoke(
+        graph = workflow(mira)
+
+        # Native LangGraph `updates` streaming yields completed node/state
+        # updates. For typed LangChain/DeepAgents V3 events from an individual
+        # agent, use `agent.astream_events(..., version="v3")` and consume
+        # projections such as `run.messages`, `run.tool_calls`, or
+        # `run.subagents`.
+        async for update in graph.astream(
             {"topic": "MIRA execution context"},
             context=mira.context,
-        )
-        print(result["findings"])
+            stream_mode="updates",
+        ):
+            for node_name, values in update.items():
+                if node_name == "__interrupt__":
+                    print("[interrupt] The workflow paused for tool approval.")
+                    continue
+                if "scan" in values:
+                    print(f"[{node_name}] {values['scan']}")
+                if "findings" in values:
+                    print(f"[{node_name}] {values['findings']}")
+                if "plain" in values:
+                    print(f"[{node_name}] {values['plain']}")
     finally:
         await application.shutdown()
 
