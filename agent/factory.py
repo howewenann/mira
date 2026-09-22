@@ -10,6 +10,13 @@ from deepagents.middleware import FilesystemMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 
+from agent.execution import (
+    ExecutableRegistryError,
+    ExecutionContextMiddleware,
+    MiraContext,
+    create_mira_context,
+    executable_tool_registry,
+)
 from agent.llm import get_llm, get_rubric_model_name
 from agent.middleware import (
     CorrectionMiddleware,
@@ -39,6 +46,7 @@ from agent.subagents.compilation import compile_dynamic_subagents
 from agent.subagents.discovery import resolve_subagent_tool_allowlists
 from agent.tools.specs import backend_supports_delete, collect_tool_specs, tool_name
 from agent.tools.skill_validation import VALIDATE_SKILL_TOOL
+from agent.workflows.agents import WorkflowAgentRegistry
 from config.metadata import ModelMetadata
 from config.settings import (
     EXECUTE_TOOL,
@@ -274,6 +282,8 @@ def _build_agent(
     ]
     subagents = subagents_with_project_tool_errors(subagents, project_tool_names)
     subagents = subagents_with_model_compatibility(subagents, Path(workspace))
+    subagents = subagents_with_execution_context(subagents)
+    workflow_subagents = tuple(subagents)
     settings = (config or {}).get("settings")
     with middleware_span_policy(middleware_span_mode(settings)):
         if dynamic_subagents_enabled(settings) and not dynamic_subagent_response_schema_enabled(settings):
@@ -299,7 +309,7 @@ def _build_agent(
                 [*local_metadata, *mcp_metadata],
                 excluded_tools,
             ),
-            extra_middleware=extra_middleware,
+            extra_middleware=[ExecutionContextMiddleware(), *extra_middleware],
         )
 
         agent = create_deep_agent(
@@ -314,7 +324,41 @@ def _build_agent(
             system_prompt=system_prompt,
             interrupt_on=resolved_interrupt_on,
             checkpointer=checkpointer,
-            context_schema=PlanningToolContext if planning else None,
+            context_schema=PlanningToolContext if planning else MiraContext,
+        )
+    try:
+        executable_tools = executable_tool_registry(agent, excluded=excluded_tools)
+    except ExecutableRegistryError:
+        # Construction tests use deliberately tiny stand-ins. A real compiled
+        # LangGraph surface must retain the supported ToolNode shape.
+        if type(agent).__module__.startswith("langgraph"):
+            raise
+    else:
+        subagent_names = tuple(
+            name
+            for spec in subagents
+            if (name := _subagent_name(spec))
+        ) if "task" in executable_tools else ()
+        _attach_execution_context(agent, executable_tools, subagent_names)
+        _attach_workflow_agents(
+            agent,
+            WorkflowAgentRegistry(
+                specs=workflow_subagents,
+                model=model,
+                tools=tuple(tools),
+                builtin_tool_names=frozenset(builtin_tool_names),
+                discovery=resources.subagent_discovery,
+                excluded_tool_names=frozenset(excluded_tools),
+                backend=backend,
+                skills=tuple(resources.skills),
+                permissions=tuple(permissions),
+                interrupt_on=(
+                    resolved_interrupt_on
+                    if isinstance(resolved_interrupt_on, dict)
+                    else None
+                ),
+                enable_todos=planning_todos_enabled(settings),
+            ),
         )
     _attach_tool_specs(
         agent,
@@ -345,10 +389,7 @@ def _build_agent(
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))
     if planning:
-        _attach_planning_context(
-            agent,
-            PlanningToolContext(SuccessCriteriaService(config, metadata=metadata)),
-        )
+        _attach_planning_context(agent, SuccessCriteriaService(config, metadata=metadata))
     return agent
 
 
@@ -391,6 +432,28 @@ def subagents_with_model_compatibility(
         copied["middleware"] = middleware
         prepared.append(copied)
     return prepared
+
+
+def subagents_with_execution_context(subagents: list[Any]) -> list[Any]:
+    """Give raw subagents typed context and nested-runtime binding."""
+    prepared: list[Any] = []
+    for spec in subagents:
+        if not isinstance(spec, dict) or "graph_id" in spec or "runnable" in spec:
+            prepared.append(spec)
+            continue
+        copied = dict(spec)
+        middleware = list(spec.get("middleware") or [])
+        if not any(isinstance(item, ExecutionContextMiddleware) for item in middleware):
+            middleware.append(ExecutionContextMiddleware())
+        copied["middleware"] = middleware
+        prepared.append(copied)
+    return prepared
+
+
+def _subagent_name(spec: Any) -> str:
+    if isinstance(spec, dict):
+        return str(spec.get("name") or "")
+    return str(getattr(spec, "name", "") or "")
 
 
 def _register_summarization_exclusion(config: dict[str, Any] | None, model: Any | None = None) -> None:
@@ -756,9 +819,40 @@ def _attach_rubric_model_name(agent: Any, model_name: str) -> None:
         return
 
 
-def _attach_planning_context(agent: Any, context: PlanningToolContext) -> None:
+def _attach_execution_context(
+    agent: Any,
+    tools: Any,
+    subagent_names: tuple[str, ...],
+) -> None:
+    """Attach a factory for fresh capability-bearing graph contexts."""
+    try:
+        agent.mira_context_factory = lambda: create_mira_context(tools, subagent_names)
+    except AttributeError:
+        return
+
+
+def _attach_workflow_agents(agent: Any, registry: WorkflowAgentRegistry) -> None:
+    """Attach effective definitions used by the application workflow facade."""
+    try:
+        agent.mira_workflow_agents = registry
+    except AttributeError:
+        return
+
+
+def _attach_planning_context(agent: Any, service: SuccessCriteriaService) -> None:
     """Attach the per-agent dependencies passed to formal planning tools."""
     try:
-        agent.mira_planning_context = context
+        base_factory = agent.mira_context_factory
+
+        def planning_context() -> PlanningToolContext:
+            base = base_factory()
+            return PlanningToolContext(
+                success_criteria=service,
+                tools=base.tools,
+                agents=base.agents,
+            )
+
+        agent.mira_context_factory = planning_context
+        agent.mira_planning_context = planning_context()
     except AttributeError:
         return

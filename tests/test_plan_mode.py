@@ -1388,6 +1388,39 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
 
+    async def test_run_user_turn_constructs_one_context_for_the_phase(self) -> None:
+        renderer = RecordingRenderer()
+        session = {"id": "thread-1", "workspace": ".", "turns": 0}
+        mode = initial_mode("action-agent", "plan-agent")
+        context = object()
+        factory_calls = 0
+        observed: list[Any] = []
+
+        def context_factory() -> Any:
+            nonlocal factory_calls
+            factory_calls += 1
+            return context
+
+        action_agent = SimpleNamespace(mira_context_factory=context_factory)
+
+        async def fake_run_turn(**kwargs: Any) -> runner.TurnResult:
+            observed.append(kwargs["planning_context"])
+            return runner.TurnResult()
+
+        with patch("tests.support.turns.run_turn", fake_run_turn):
+            await run_user_turn(
+                agent=action_agent,
+                plan_agent="plan-agent",
+                renderer=renderer,
+                store=FakeStore(),
+                session=session,
+                mode=mode,
+                text="inspect context",
+            )
+
+        self.assertEqual(factory_calls, 1)
+        self.assertEqual(observed, [context])
+
     async def test_run_user_turn_distinguishes_omitted_cleared_and_supplied_rubric(self) -> None:
         renderer = RecordingRenderer()
         session = {"id": "thread-1", "workspace": ".", "turns": 0}

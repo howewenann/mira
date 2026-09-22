@@ -87,6 +87,47 @@ and Rubric access remain independent policies.
 replacement. Recursive `delete` is action-only and follows the configured
 approval policy.
 
+## LangGraph workflows and execution context
+
+A running application exposes `application.workflows`, a small build-time
+facade. `mira.agent(...)` creates an independent workflow-local specialization
+of an existing configured MIRA subagent; it does not mutate the reusable base.
+The default base is `general-purpose`. Tool replacements use MIRA's existing
+resolver, `tools=None` inherits, and `tools=[]` selects no tools. The model is
+always inherited from the selected base. Configure a separate MIRA subagent and
+select it by name when a workflow needs a different model.
+
+Workflows remain ordinary LangGraph graphs:
+
+```python
+from langgraph.graph import StateGraph
+from mira import MiraContext
+
+mira = application.workflows
+graph = StateGraph(State, context_schema=MiraContext)
+graph.add_node("researcher", mira.agent("researcher"))
+workflow = graph.compile()
+result = await workflow.ainvoke(input, context=mira.context)
+# The synchronous API is native too:
+result = workflow.invoke(input, context=mira.context)
+```
+
+Nodes use `Runtime[MiraContext]`; ordinary LangChain `@tool` functions use
+their injected `ToolRuntime`. Both can access `runtime.context.tools["..."]`
+and `runtime.context.agents["..."]`. This is a capability-bearing API for
+trusted in-process Python. Direct calls through `context.tools` bypass a second
+HITL prompt because they implement the already-invoked trusted operation, but
+disabled tools, backend/filesystem rules, unavailable MCP capabilities, and
+other hard MIRA restrictions still apply. Delegated agents retain native
+DeepAgents task execution. Intermediate Python values pass directly between
+capabilities without entering the parent model's messages; MIRA's trace export
+policy also redacts these marked nested-call payloads.
+
+MIRA does not provide a workflow DSL or automatic state mapping. User code
+continues to own state, reducers, edges, branches, loops, parallelism, `Send()`,
+and adapters for domain-shaped state. Runnable examples are under
+`.mira/examples/workflows/`.
+
 ## Plans, Goals, and sessions
 
 Plan mode is a continuous read-only conversation that can present one durable

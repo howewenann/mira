@@ -43,7 +43,7 @@ def compile_dynamic_subagents(
         specs.insert(0, general_purpose)
 
     return [
-        _compile_raw_subagent(
+        compile_raw_subagent(
             spec,
             model=model,
             tools=tools,
@@ -66,7 +66,7 @@ def _is_raw_synchronous(spec: dict[str, Any]) -> bool:
     return _is_synchronous(spec) and "runnable" not in spec
 
 
-def _compile_raw_subagent(
+def compile_raw_subagent(
     spec: dict[str, Any],
     *,
     model: Any,
@@ -112,3 +112,6 @@ def resolve_subagent_model(model: Any) -> Any:
     if isinstance(model, BaseChatModel):
         return model
     return init_chat_model(model)
+
+
+__all__ = ["compile_dynamic_subagents", "compile_raw_subagent", "resolve_subagent_model"]

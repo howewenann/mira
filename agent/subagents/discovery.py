@@ -226,7 +226,11 @@ def resolve_subagent_tool_allowlists(
 
         copied = dict(spec)
         copied["tools"] = resolved_tools
-        middleware = list(spec.get("middleware") or [])
+        middleware = [
+            item
+            for item in (spec.get("middleware") or [])
+            if not isinstance(item, ModelToolVisibilityMiddleware)
+        ]
         middleware.append(ModelToolVisibilityMiddleware(allowed_tools=tuple(resolved_names)))
         copied["middleware"] = middleware
         resolved_subagents.append(copied)

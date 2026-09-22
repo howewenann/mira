@@ -31,6 +31,8 @@ from opentelemetry.sdk.trace import SpanProcessor
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.util.types import AttributeValue
 
+from agent.execution.tools import RUNTIME_PAYLOAD_TAG
+
 _ROLE_BY_MESSAGE_TYPE = {
     "ai": "assistant",
     "aimessage": "assistant",
@@ -63,14 +65,44 @@ class LangSmithOpenInferenceProcessor(SpanProcessor):
             enriched = _openinference_attributes(span.name, attributes, kind)
             _remove_misleading_genai_attributes(attributes, kind)
             attributes.update(enriched)
-        elif not self._profile_attributes:
+        elif (
+            not self._profile_attributes
+            and RUNTIME_PAYLOAD_TAG
+            not in _tags(attributes.get("langsmith.span.tags"))
+        ):
             return
         attributes.update(self._profile_attributes)
+        _redact_execution_context_payload(attributes)
 
         # OTel SDK 1.37+ freezes the live span's BoundedAttributes before
         # processor callbacks. OpenInference's own conversion processors use
         # this replacement so later processors receive the enriched view.
         span._attributes = attributes
+
+
+def _redact_execution_context_payload(attributes: dict[str, Any]) -> None:
+    """Keep trusted nested-call values out of external trace payload fields."""
+    if RUNTIME_PAYLOAD_TAG not in _tags(attributes.get("langsmith.span.tags")):
+        return
+    kind = str(
+        attributes.get("langsmith.span.kind")
+        or attributes.get(SpanAttributes.OPENINFERENCE_SPAN_KIND)
+        or ""
+    ).casefold()
+    if kind != "tool":
+        return
+    for key in (
+        "gen_ai.prompt",
+        "gen_ai.completion",
+        SpanAttributes.INPUT_VALUE,
+        SpanAttributes.OUTPUT_VALUE,
+    ):
+        if key not in attributes:
+            continue
+        value = str(attributes[key])
+        attributes[key] = (
+            f"<MIRA execution-context payload redacted; exported_chars={len(value)}>"
+        )
 
 
 def _normalize_langgraph_interrupt(span: Any, attributes: dict[str, Any]) -> None:

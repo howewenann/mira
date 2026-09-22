@@ -204,6 +204,7 @@ async def run_user_turn(
     aggregate = TurnResult()
     always_allowed_tools: set[str] = set()
     compact_targets: list[tuple[SessionRecorder, Any, str]] = []
+    execution_contexts: dict[int, Any] = {}
 
     def invocation_messages(request_text: str, supplied: list[Any] | None = None) -> list[Any]:
         messages = list(supplied) if supplied is not None else [HumanMessage(content=request_text)]
@@ -257,6 +258,13 @@ async def run_user_turn(
                         "persist_always_allow": persist_always_allow,
                     },
                 )
+                context_factory = getattr(phase_agent, "mira_context_factory", None)
+                execution_context = None
+                if callable(context_factory):
+                    agent_key = id(phase_agent)
+                    if agent_key not in execution_contexts:
+                        execution_contexts[agent_key] = context_factory()
+                    execution_context = execution_contexts[agent_key]
                 phase_result = await selected_runner(
                     agent=phase_agent,
                     text=request_text,
@@ -269,9 +277,7 @@ async def run_user_turn(
                     and stage is None,
                     planning_stage=stage,
                     planning_state=state,
-                    planning_context=getattr(phase_agent, "mira_planning_context", None)
-                    if stage is not None
-                    else None,
+                    planning_context=execution_context,
                     messages=invocation_messages(request_text, supplied_messages),
                     **policy_kwargs,
                 )

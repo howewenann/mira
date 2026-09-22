@@ -622,9 +622,11 @@ class FakeAgent:
     def __init__(self, streams: list[FakeStream]) -> None:
         self.streams = list(streams)
         self.payloads: list[Any] = []
+        self.invocation_kwargs: list[dict[str, Any]] = []
 
     async def astream_events(self, payload: Any, config: dict[str, Any], version: str, **kwargs: Any) -> FakeStream:
         self.payloads.append(payload)
+        self.invocation_kwargs.append(kwargs)
         return self.streams.pop(0)
 
 
@@ -697,6 +699,32 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.payloads[0], {"messages": [{"role": "user", "content": "write file"}]})
         self.assertEqual(agent.payloads[1].resume, {"decisions": [{"type": "approve"}]})
         self.assertEqual(result.final_text, "")
+
+    async def test_run_turn_reuses_execution_context_across_hitl_resume(self) -> None:
+        interrupt = {
+            "action_requests": [
+                {"name": "write_file", "args": {"file_path": "/test.txt"}}
+            ]
+        }
+        agent = FakeAgent(
+            [
+                FakeStream(output={"messages": []}, interrupts=[interrupt]),
+                FakeStream(output={"messages": []}),
+            ]
+        )
+        context = object()
+
+        await runner.run_turn(
+            agent,
+            "write file",
+            RunTurnRenderer(decisions=[{"type": "approve"}]),
+            "thread-1",
+            planning_context=context,
+        )
+
+        self.assertEqual(len(agent.invocation_kwargs), 2)
+        self.assertIs(agent.invocation_kwargs[0]["context"], context)
+        self.assertIs(agent.invocation_kwargs[1]["context"], context)
 
     async def test_always_allow_translates_and_skips_same_tool_for_rest_of_turn(self) -> None:
         first = {

@@ -22,7 +22,7 @@ from agent.planning.policy import (
 )
 from agent.tools.specs import mira_environment_label
 from config.settings import rubric_enabled, rubric_max_iterations
-from core.interface import Frontend, FrontendEmitter, MCPApprovalRequest
+from core.interface import Frontend, FrontendEmitter, MCPApprovalRequest, NullFrontend
 from core.execution.turns import plan_thread_id
 from session.context import mark_resume_context_pending
 from session.dashboard import ensure_dashboard
@@ -72,13 +72,16 @@ class MiraApplication:
         self._policy_refresh_generation = 0
         self._policy_refreshed_generation = 0
         self._agent_refresh_lock = asyncio.Lock()
+        from agent.workflows import MiraWorkflowAPI
+
+        self.workflows = MiraWorkflowAPI(lambda: self.agent)
 
     @classmethod
     async def start(
         cls,
         *,
         workspace: Path | str,
-        frontend: Frontend,
+        frontend: Frontend | None = None,
         config: dict[str, Any] | None = None,
     ) -> "MiraApplication":
         """Build MIRA's native agents/resources without constructing a UI."""
@@ -92,6 +95,7 @@ class MiraApplication:
         from session.store import SessionStore
 
         workspace = Path(workspace).expanduser().resolve()
+        frontend = frontend if frontend is not None else NullFrontend()
         if config is None:
             config = load_effective_config(workspace, LaunchOptions())
         store = SessionStore(Path(config["session_dir"]))

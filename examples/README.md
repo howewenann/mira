@@ -17,6 +17,11 @@ Start and own MIRA through ACP stdio
 Connect to an already-running MIRA ACP HTTP server
   acp/http/minimal_client.py
   acp/http/full_client.py
+
+Build native LangGraph workflows with MIRA capabilities
+  workflows/minimal.py
+  workflows/structured_agents.py
+  workflows/tools_and_agents.py
 ```
 
 Minimal examples teach the complete basic lifecycle. Full examples add

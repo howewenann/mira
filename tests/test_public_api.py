@@ -41,8 +41,16 @@ from core.interface.snapshot import SessionSnapshot as CoreSessionSnapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 
-MIRA_EXPORTS = {"MiraApplication", "MiraSession"}
+MIRA_EXPORTS = {
+    "INHERIT",
+    "Inherit",
+    "MiraApplication",
+    "MiraContext",
+    "MiraSession",
+    "MiraWorkflowAPI",
+}
 API_EXPORTS = {
+    "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",
     "ArtifactEvent",
