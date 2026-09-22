@@ -132,6 +132,7 @@ from ui.textual.widgets.autocomplete_input import (
     MAX_VISIBLE_COMPLETIONS,
     MIN_PROMPT_HEIGHT,
     file_items,
+    native_command_items,
 )
 from ui.textual.widgets.settings_panel import SettingsHeaderRow
 from ui.textual.widgets.status_bar import STATUS_STARTING_COLOR
@@ -140,10 +141,12 @@ from ui.textual.widgets.subagent_panel import (
     STATUS_COL,
     TIME_COL,
     SubagentRecord,
+    SubagentRunTable,
     append_task_cell,
     group_status_icon,
     truncate_cells,
 )
+from ui.textual.workflow_demo import build_workflow_demo
 from ui.textual.widgets.session_history import (
     SESSION_ROW_PREVIEW_WIDTH,
     SessionActionMenuScreen,
@@ -10542,6 +10545,115 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("inspect pyp", rendered)
             self.assertNotIn("MODEL", rendered)
             self.assertFalse(panel.query_one("#subagents-groups-column").display)
+
+    async def test_workflow_demo_uses_real_event_path_and_leaves_completed_rows(self) -> None:
+        """The hidden demo should drive the native coordinator into the shared panel."""
+        app = make_app()
+
+        with patch(
+            "ui.textual.app.build_workflow_demo",
+            return_value=build_workflow_demo(delay_scale=0),
+        ):
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/workflow-demo"))
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                panel = app.query_one(SubagentsPanel)
+                groups = panel.query_one("#subagents-groups", OptionList)
+                table = panel.query_one("#subagents-tasks", DataTable)
+                first_keys = set(panel._records)
+
+                self.assertTrue(panel.display)
+                self.assertIn("workflow", subagent_title_plain(panel))
+                self.assertIn("4/4 done", subagent_title_plain(panel))
+                self.assertIn("3 steps", subagent_title_plain(panel))
+                self.assertIn("Step 1", option_list_plain(groups))
+                self.assertIn("Step 2", option_list_plain(groups))
+                self.assertIn("Step 3", option_list_plain(groups))
+                self.assertEqual(len(first_keys), 4)
+                self.assertTrue(
+                    all(record.status == "DONE" for record in panel._records.values())
+                )
+                frozen = [record.elapsed_seconds() for record in panel._records.values()]
+                await asyncio.sleep(0.02)
+                self.assertEqual(
+                    frozen,
+                    [record.elapsed_seconds() for record in panel._records.values()],
+                )
+                self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
+                self.assertEqual(
+                    str(panel.query_one("#subagents-groups-label", Static).render()),
+                    "STEPS",
+                )
+                self.assertEqual(
+                    str(panel.query_one("#subagents-task-heading", Static).render()),
+                    "NODE",
+                )
+
+                groups.highlighted = 1
+                groups.action_select()
+                await pilot.pause()
+                parallel = data_table_plain(table)
+                self.assertIn("inspect_code", parallel)
+                self.assertIn("inspect_tests", parallel)
+                self.assertEqual(parallel.count("DONE"), 2)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/workflow-demo"))
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                self.assertEqual(len(panel._records), 4)
+                self.assertTrue(first_keys.isdisjoint(panel._records))
+
+    async def test_workflow_rows_do_not_open_inspector_and_subagents_restore_mode(self) -> None:
+        """Workflow mode should be non-interactive and yield cleanly to subagents."""
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.workflow_started("demo")
+            app.workflow_task_started("task-1", "prepare", 1)
+            app.workflow_task_finished("task-1", "prepare", 1)
+            app.workflow_finished("demo")
+            await pilot.pause()
+
+            panel = app.query_one(SubagentsPanel)
+            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+            panel.post_message(SubagentRunTable.RowClicked("task-1"))
+            await pilot.pause()
+            self.assertEqual(switcher.current, "chat-log")
+
+            app.workflow_started("cancel-demo")
+            app.workflow_task_started("task-cancel", "slow_node", 1)
+            app.workflow_cancelled("cancel-demo")
+            await pilot.pause()
+            self.assertEqual(panel._records["task-cancel"].status, "CANCELLED")
+            self.assertIsNotNone(panel._records["task-cancel"].duration_ms)
+            self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
+
+            app.subagent_started("general-purpose [new]", "inspect README", row_id="subagent-1")
+            await pilot.pause()
+
+            self.assertEqual(list(panel._records), ["subagent-1"])
+            self.assertIn("subagents", subagent_title_plain(panel))
+            self.assertNotIn("workflow", subagent_title_plain(panel))
+            self.assertEqual(
+                str(panel.query_one("#subagents-groups-label", Static).render()),
+                "GROUPS",
+            )
+            self.assertEqual(
+                str(panel.query_one("#subagents-task-heading", Static).render()),
+                "TASK",
+            )
+
+    def test_workflow_demo_command_stays_hidden(self) -> None:
+        """The internal demo command must not become a discoverable public command."""
+        self.assertNotIn("/workflow-demo", dict(command_help_entries()))
+        self.assertEqual(native_command_items("workflow-demo"), [])
 
     async def test_subagent_panel_uses_native_collapsible_without_ctrl_g(self) -> None:
         """The panel should use Textual's native collapsible interaction."""

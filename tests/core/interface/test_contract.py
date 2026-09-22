@@ -27,6 +27,7 @@ from core.interface import (
     RubricEvent,
     RuntimeEvent,
     ToolEvent,
+    WorkflowEvent,
 )
 from session.dashboard import normalize_dashboard
 from ui.shared.adapter import RendererAdapter
@@ -228,16 +229,22 @@ class FrontendContractTests(unittest.IsolatedAsyncioTestCase):
         emitter.artifact("goal", "implement", artifact, {"action": "implement"})
         emitter.rubric_evaluation_started("rubric-1", 1, 3, grader_model="grader")
         emitter.mcp("initialized", server="docs", detail={"tools": 2})
+        emitter.workflow_task_started("task-1", "review", 2, workflow_id="workflow-1")
 
         session_event = next(event for event in frontend.events if isinstance(event, RuntimeEvent))
         artifact_event = next(event for event in frontend.events if isinstance(event, ArtifactEvent))
         rubric_event = next(event for event in frontend.events if isinstance(event, RubricEvent))
         mcp_event = next(event for event in frontend.events if isinstance(event, MCPEvent))
+        workflow_event = next(event for event in frontend.events if isinstance(event, WorkflowEvent))
         self.assertEqual((session_event.kind, session_event.state), ("session", "opened"))
         self.assertEqual(artifact_event.artifact_id, "goal-1")
         self.assertEqual(artifact_event.decision, {"action": "implement"})
         self.assertEqual(rubric_event.run_id, "rubric-1")
         self.assertEqual((mcp_event.phase, mcp_event.server), ("initialized", "docs"))
+        self.assertEqual(
+            (workflow_event.workflow_id, workflow_event.task_id, workflow_event.step),
+            ("workflow-1", "task-1", 2),
+        )
 
     async def test_mcp_batch_event_projects_to_renderer_without_becoming_a_message(self) -> None:
         class Renderer:

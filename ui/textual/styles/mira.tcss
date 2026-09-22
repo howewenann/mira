@@ -977,6 +977,10 @@ MCPPanelScreen {
     text-style: none;
 }
 
+#subagents-tasks.workflow > .datatable--hover {
+    background: transparent;
+}
+
 #subagents-tasks > .datatable--header-hover,
 #subagents-tasks > .datatable--cursor,
 #subagents-tasks > .datatable--header-cursor {

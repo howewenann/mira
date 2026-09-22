@@ -19,6 +19,7 @@ from core.interface.events import (
     SubagentEvent,
     ToolEvent,
     UsageEvent,
+    WorkflowEvent,
 )
 from core.interface.protocol import Frontend
 from core.interface.requests import (
@@ -223,6 +224,78 @@ class FrontendEmitter:
 
     def subagents_cancelled(self) -> None:
         self.frontend.emit(SubagentEvent(phase="cancel_all", **self._identity()))
+
+    def workflow_started(self, workflow_id: str = "") -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="run_start",
+                workflow_id=workflow_id,
+                **self._identity(),
+            )
+        )
+
+    def workflow_task_started(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="task_start",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                name=name,
+                step=step,
+                status="RUNNING",
+                **self._identity(),
+            )
+        )
+
+    def workflow_task_finished(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        *,
+        status: str = "DONE",
+        error: str = "",
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="task_finish",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                name=name,
+                step=step,
+                status=status,
+                error=error,
+                **self._identity(),
+            )
+        )
+
+    def workflow_finished(self, workflow_id: str = "") -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="run_finish",
+                workflow_id=workflow_id,
+                **self._identity(),
+            )
+        )
+
+    def workflow_cancelled(self, workflow_id: str = "", *, error: str = "") -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="run_cancel",
+                workflow_id=workflow_id,
+                status="ERROR" if error else "CANCELLED",
+                error=error,
+                **self._identity(),
+            )
+        )
 
     def subagent_label(self, subagent: Any) -> str:
         labeler = getattr(self.frontend, "subagent_label", None)

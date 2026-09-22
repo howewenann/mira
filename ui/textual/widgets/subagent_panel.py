@@ -26,6 +26,8 @@ STATUS_RUNNING = "RUNNING"
 STATUS_DONE = "DONE"
 STATUS_CANCELLED = "CANCELLED"
 STATUS_ERROR = "ERROR"
+PANEL_SUBAGENTS = "subagents"
+PANEL_WORKFLOW = "workflow"
 TASKS_GROUP = "__regular_tasks__"
 STATUS_COL = 11
 TIME_COL = 7
@@ -135,6 +137,7 @@ class SubagentsPanel(Vertical):
         self._dismissed = False
         self._pending_reset = False
         self._fallback_suffixes = count(1)
+        self._mode = PANEL_SUBAGENTS
 
     def compose(self) -> Any:
         groups = Vertical(
@@ -174,6 +177,7 @@ class SubagentsPanel(Vertical):
         table.add_column("TASK", key="task", width=40)
         table.add_column("STATUS", key="status", width=STATUS_COL - 2 * table.cell_padding)
         table.add_column(Text("TIME", justify="center"), key="time", width=TIME_COL - 2 * table.cell_padding)
+        self._sync_mode_widgets()
         self._refresh()
         self.call_after_refresh(self._align_task_column)
 
@@ -185,6 +189,14 @@ class SubagentsPanel(Vertical):
 
     def reset(self) -> None:
         """Clear panel state and hide it."""
+        self._mode = PANEL_SUBAGENTS
+        self._clear_state()
+        self.display = False
+        self._sync_mode_widgets()
+        self._refresh()
+
+    def _clear_state(self) -> None:
+        """Clear mode-owned records without choosing the next presentation."""
         self._records = {}
         self._order = []
         self._regular_order = []
@@ -198,8 +210,6 @@ class SubagentsPanel(Vertical):
         self._aliases = {}
         self._pending_reset = False
         self._dismissed = False
-        self.display = False
-        self._refresh()
 
     def close(self) -> None:
         """Hide the current panel without deleting in-memory state."""
@@ -227,7 +237,7 @@ class SubagentsPanel(Vertical):
         inspection_id: str = "",
     ) -> SubagentRecord | None:
         """Add or update a running subagent row."""
-        if self._pending_reset:
+        if self._mode != PANEL_SUBAGENTS or self._pending_reset:
             self.reset()
 
         eval_key = str(eval_id or "")
@@ -264,6 +274,87 @@ class SubagentsPanel(Vertical):
             self._cancel_record(record, time.monotonic())
         self._show()
         return record
+
+    def start_workflow(self) -> None:
+        """Replace current panel state with a fresh Workflow presentation."""
+        self._clear_state()
+        self._mode = PANEL_WORKFLOW
+        self.display = False
+        self._sync_mode_widgets()
+        self._show()
+
+    def start_workflow_task(self, task_id: str, name: str, step: int) -> None:
+        """Add or resume one native root task in its inferred workflow step."""
+        if self._mode != PANEL_WORKFLOW:
+            self.start_workflow()
+        key = str(task_id or "")
+        if not key:
+            return
+        group_key = f"workflow-step-{max(1, int(step))}"
+        self._ensure_group(group_key)
+        self._groups[group_key].index = max(1, int(step))
+        self._active_group = group_key
+        self._selected_group = group_key
+        record = self._records.get(key)
+        if record is None:
+            record = SubagentRecord(
+                key=key,
+                name=sanitize(name or "node", max_chars=MAX_LABEL_CHARS),
+                hint="",
+                group_key=group_key,
+            )
+            self._records[key] = record
+            self._order.append(key)
+            self._groups[group_key].order.append(key)
+        else:
+            record.status = STATUS_RUNNING
+            record.finished_at = None
+            record.duration_ms = None
+            record.output = ""
+        self._show()
+
+    def finish_workflow_task(
+        self,
+        task_id: str,
+        *,
+        status: str = STATUS_DONE,
+        error: str = "",
+    ) -> None:
+        """Mark one Workflow row terminal without creating missing rows."""
+        if self._mode != PANEL_WORKFLOW:
+            return
+        record = self._records.get(str(task_id or ""))
+        if record is None:
+            return
+        record.status = (
+            status
+            if status in {STATUS_DONE, STATUS_ERROR, STATUS_CANCELLED}
+            else STATUS_DONE
+        )
+        record.output = sanitize(error, max_chars=MAX_OUTPUT_CHARS)
+        record.finished_at = time.monotonic()
+        record.duration_ms = int(max(0.0, record.finished_at - record.started) * 1000)
+        self._refresh()
+
+    def finish_workflow(self) -> None:
+        """Refresh the completed Workflow without hiding its rows."""
+        if self._mode == PANEL_WORKFLOW:
+            self._refresh()
+
+    def cancel_workflow(self, error: str = "") -> None:
+        """Stop all running Workflow clocks after cancellation or failure."""
+        if self._mode != PANEL_WORKFLOW:
+            return
+        status = STATUS_ERROR if error else STATUS_CANCELLED
+        finished_at = time.monotonic()
+        for record in self._records.values():
+            if record.status != STATUS_RUNNING:
+                continue
+            record.status = status
+            record.output = sanitize(error, max_chars=MAX_OUTPUT_CHARS)
+            record.finished_at = finished_at
+            record.duration_ms = int(max(0.0, finished_at - record.started) * 1000)
+        self._refresh()
 
     def update_subagent_request(self, name: str, task: str) -> SubagentRecord | None:
         """Fill late-arriving task text for a running ungrouped row."""
@@ -431,6 +522,8 @@ class SubagentsPanel(Vertical):
     def select_subagent(self, event: SubagentRunTable.RowClicked) -> None:
         """Emit selection only; viewport ownership stays with the app."""
         event.stop()
+        if self._mode == PANEL_WORKFLOW:
+            return
         record = self._records.get(event.row_key)
         if record is not None and record.inspection_id:
             self.post_message(SubagentSelected(record.inspection_id))
@@ -574,11 +667,18 @@ class SubagentsPanel(Vertical):
         text = Text()
         if self.has_running_subagents():
             text.append(f"{SPINNER_FRAMES[self._spinner_index]} ", style="bold yellow")
-        text.append("dynamic subagents" if self._eval_only() else "subagents", style="bold #ECE7FF")
+        if self._mode == PANEL_WORKFLOW:
+            title = "workflow"
+        else:
+            title = "dynamic subagents" if self._eval_only() else "subagents"
+        text.append(title, style="bold #ECE7FF")
         if total:
             text.append(f"  {done}/{total} done", style="dim")
         if self._group_order:
-            label = "group" if len(self._group_order) == 1 else "groups"
+            if self._mode == PANEL_WORKFLOW:
+                label = "step" if len(self._group_order) == 1 else "steps"
+            else:
+                label = "group" if len(self._group_order) == 1 else "groups"
             text.append(f"  {len(self._group_order)} {label}", style="dim")
         if failed:
             text.append(f"  {failed} failed", style="red")
@@ -617,7 +717,10 @@ class SubagentsPanel(Vertical):
         if group_key != TASKS_GROUP and self._groups[group_key].terminal_status == STATUS_ERROR:
             failed = max(1, failed)
         status, style = group_status_icon(done=done, total=total, failed=failed, cancelled=cancelled)
-        label = "Tasks" if group_key == TASKS_GROUP else f"Group {self._groups[group_key].index}"
+        if self._mode == PANEL_WORKFLOW:
+            label = f"Step {self._groups[group_key].index}"
+        else:
+            label = "Tasks" if group_key == TASKS_GROUP else f"Group {self._groups[group_key].index}"
         text = Text()
         text.append("> " if group_key == self._selected_group_key() else "  ")
         text.append(status, style=style)
@@ -686,6 +789,8 @@ class SubagentsPanel(Vertical):
         table.refresh(layout=True)
 
     def _display_group_keys(self) -> list[str]:
+        if self._mode == PANEL_WORKFLOW:
+            return list(self._group_order)
         keys = []
         if self._regular_order and self._group_order:
             keys.append(TASKS_GROUP)
@@ -722,7 +827,17 @@ class SubagentsPanel(Vertical):
         return done, total, failed, cancelled
 
     def _eval_only(self) -> bool:
-        return bool(self._group_order) and not self._regular_order
+        return self._mode == PANEL_SUBAGENTS and bool(self._group_order) and not self._regular_order
+
+    def _sync_mode_widgets(self) -> None:
+        """Update native widget labels and hover affordance for the active mode."""
+        if not self.is_mounted:
+            return
+        workflow = self._mode == PANEL_WORKFLOW
+        self.query_one("#subagents-groups-label", Label).update("STEPS" if workflow else "GROUPS")
+        self.query_one("#subagents-task-heading", Label).update("NODE" if workflow else "TASK")
+        table = self.query_one("#subagents-tasks", SubagentRunTable)
+        table.set_class(workflow, "workflow")
 
 
 def status_icon(status: str, spinner_index: int) -> tuple[str, str]:

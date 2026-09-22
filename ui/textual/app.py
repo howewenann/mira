@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.exceptions import ContextOverflowError
+from langgraph.stream.transformers import TasksTransformer
 from textual import on
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -54,8 +55,10 @@ from core.diagnostics.error_report import clear_error_reports, write_error_repor
 from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
 from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
+from core.execution.workflows import WorkflowCoordinator
 from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.persistence import inspection_from_run
+from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
@@ -124,6 +127,7 @@ from ui.textual.platform.windows.file_picker import choose_local_files
 from ui.textual.platform.windows.input import driver_class_for_platform
 from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_platform
 from ui.textual.file_uploads import clear_local_uploads, ingest_local_files
+from ui.textual.workflow_demo import build_workflow_demo
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 DESTRUCTIVE_HISTORY_COMMANDS = {
@@ -498,6 +502,18 @@ class MiraApp(App[None]):
             return
 
         self.query_one(SubagentsPanel).prepare_turn()
+        if text == "/workflow-demo":
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            prompt.disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_workflow_demo(),
+                name="workflow-demo",
+                exclusive=True,
+            )
+            return
+
         if text in DESTRUCTIVE_HISTORY_COMMANDS:
             self.run_worker(self._run_history_command(text), name="history-command", exclusive=False)
             return
@@ -784,6 +800,48 @@ class MiraApp(App[None]):
             self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
             error_path = self._write_error_report(exc, source="tui.compact")
             self.system_message(f"compaction error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _run_workflow_demo(self) -> None:
+        """Run the hidden deterministic graph through the real Workflow UI path."""
+        emitter = FrontendEmitter(
+            self.application.frontend,
+            session_id=str(self.session.get("id") or ""),
+        )
+        coordinator = WorkflowCoordinator(emitter, workflow_id="workflow-demo")
+        coordinator.start()
+        try:
+            graph = build_workflow_demo()
+            run = await graph.astream_events(
+                {"events": []},
+                version="v3",
+                transformers=[TasksTransformer],
+            )
+            tasks = run.extensions.get("tasks")
+            if tasks is None:
+                raise RuntimeError("Workflow demo did not expose the native task projection.")
+            async with run:
+                await coordinator.consume(tasks)
+                await run.output()
+            coordinator.finish()
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            coordinator.cancel()
+            self._set_status(state="ready")
+            raise
+        except Exception as exc:
+            coordinator.cancel(str(exc))
+            error_path = self._write_error_report(exc, source="tui.workflow-demo")
+            self.system_message(
+                f"workflow demo error: {exc}\nerror report: {error_path}",
+                kind="error",
+            )
             self._set_status(state="error")
         finally:
             self.turn_worker = None
@@ -2755,6 +2813,38 @@ class MiraApp(App[None]):
         """Advance subagent status animation."""
         self.query_one(ChatLog).tick_subagents()
         self.query_one(SubagentsPanel).tick()
+
+    def workflow_started(self, _workflow_id: str = "") -> None:
+        """Switch the shared telemetry panel to a fresh Workflow run."""
+        self.query_one(SubagentsPanel).start_workflow()
+
+    def workflow_task_started(self, task_id: str, name: str, step: int) -> None:
+        """Render one native root task in its inferred workflow step."""
+        self.query_one(SubagentsPanel).start_workflow_task(task_id, name, step)
+
+    def workflow_task_finished(
+        self,
+        task_id: str,
+        _name: str,
+        _step: int,
+        *,
+        status: str = "DONE",
+        error: str = "",
+    ) -> None:
+        """Freeze one native Workflow row at its terminal status."""
+        self.query_one(SubagentsPanel).finish_workflow_task(
+            task_id,
+            status=status,
+            error=error,
+        )
+
+    def workflow_finished(self, _workflow_id: str = "") -> None:
+        """Leave completed Workflow rows visible for manual inspection."""
+        self.query_one(SubagentsPanel).finish_workflow()
+
+    def workflow_cancelled(self, _workflow_id: str = "", *, error: str = "") -> None:
+        """Stop active Workflow rows after cancellation or demo failure."""
+        self.query_one(SubagentsPanel).cancel_workflow(error)
 
     @on(SubagentSelected)
     def open_subagent_inspector(self, event: SubagentSelected) -> None:

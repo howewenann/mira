@@ -1703,6 +1703,29 @@ same enriched spans. Start once with pre-existing `LANGSMITH_TRACING` and
 `LANGSMITH_TRACING_MODE` values; disable or reload tracing and confirm both
 original values are restored.
 
+## Native Workflow Panel Demo (Phase 1)
+
+Use a normal Textual MIRA session. No configured model is required for this
+deterministic internal demo.
+
+1. Enter the hidden command `/workflow-demo`. Expected: the existing bottom
+   panel opens as `workflow`, its left heading is `STEPS`, and its right heading
+   is `NODE`.
+2. Watch the run complete. Expected: `prepare` runs in Step 1;
+   `inspect_code` and `inspect_tests` run concurrently in Step 2; and
+   `summarize` runs in Step 3. Status icons and elapsed clocks animate through
+   the existing panel timer without transcript bubbles or Inspector changes.
+3. After completion, select each Step with the mouse. Expected: all four rows
+   are DONE with frozen durations, the title reports `4/4 done` and `3 steps`,
+   the panel remains expanded, and its close button is available. Clicking a
+   node row does not open Inspector.
+4. Run `/workflow-demo` again. Expected: the preceding Workflow rows are
+   replaced rather than accumulated. Then start an ordinary subagent turn;
+   expected: the same panel switches back to its unchanged Subagents mode and
+   no Workflow rows remain.
+5. Open `/help` and type `/workflow` into autocomplete. Expected: the internal
+   demo command is absent from both surfaces.
+
 ## Live Subagent Inspection (Phase 1)
 
 Use a disposable workspace with a configured model and enabled subagents.

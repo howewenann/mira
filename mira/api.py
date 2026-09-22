@@ -12,6 +12,7 @@ from core.interface.events import (
     SubagentEvent,
     ToolEvent,
     UsageEvent,
+    WorkflowEvent,
 )
 from core.interface.protocol import Frontend
 from core.interface.requests import (
@@ -48,4 +49,5 @@ __all__ = [
     "SubagentEvent",
     "ToolEvent",
     "UsageEvent",
+    "WorkflowEvent",
 ]

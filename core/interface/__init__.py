@@ -12,6 +12,7 @@ from core.interface.events import (
     SubagentEvent,
     ToolEvent,
     UsageEvent,
+    WorkflowEvent,
 )
 from core.interface.emitter import FrontendEmitter
 from core.interface.protocol import Frontend, NullFrontend
@@ -53,4 +54,5 @@ __all__ = [
     "SubagentEvent",
     "ToolEvent",
     "UsageEvent",
+    "WorkflowEvent",
 ]

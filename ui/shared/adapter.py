@@ -24,6 +24,7 @@ from mira.api import (
     SubagentEvent,
     ToolEvent,
     UsageEvent,
+    WorkflowEvent,
 )
 
 
@@ -72,6 +73,8 @@ class RendererAdapter:
             self._runtime(event)
         elif isinstance(event, MCPEvent):
             self._call("mcp_activity", event.phase, event.detail)
+        elif isinstance(event, WorkflowEvent):
+            self._workflow(event)
 
     async def request(self, request: FrontendRequest) -> Any:
         """Use the renderer's existing in-process interaction UI."""
@@ -242,6 +245,34 @@ class RendererAdapter:
                 self._call("waiting_finished")
         elif event.kind == "message_group" and event.state == "finish":
             self._call("finish_main")
+
+    def _workflow(self, event: WorkflowEvent) -> None:
+        if event.phase == "run_start":
+            self._call("workflow_started", event.workflow_id)
+        elif event.phase == "task_start":
+            self._call(
+                "workflow_task_started",
+                event.task_id,
+                event.name,
+                event.step,
+            )
+        elif event.phase == "task_finish":
+            self._call(
+                "workflow_task_finished",
+                event.task_id,
+                event.name,
+                event.step,
+                status=event.status,
+                error=event.error,
+            )
+        elif event.phase == "run_finish":
+            self._call("workflow_finished", event.workflow_id)
+        elif event.phase == "run_cancel":
+            self._call(
+                "workflow_cancelled",
+                event.workflow_id,
+                error=event.error,
+            )
 
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         callback = getattr(self.renderer, method, None)

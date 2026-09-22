@@ -25,6 +25,7 @@ from core.interface.events import (
     SubagentEvent as CoreSubagentEvent,
     ToolEvent as CoreToolEvent,
     UsageEvent as CoreUsageEvent,
+    WorkflowEvent as CoreWorkflowEvent,
 )
 from core.interface.protocol import Frontend as CoreFrontend
 from core.interface.requests import (
@@ -71,6 +72,7 @@ API_EXPORTS = {
     "SubagentEvent",
     "ToolEvent",
     "UsageEvent",
+    "WorkflowEvent",
 }
 
 
@@ -111,6 +113,7 @@ class PublicAPITests(unittest.TestCase):
             "RubricEvent": CoreRubricEvent,
             "MCPEvent": CoreMCPEvent,
             "InformationEvent": CoreInformationEvent,
+            "WorkflowEvent": CoreWorkflowEvent,
             "ApprovalRequest": CoreApprovalRequest,
             "AskUserRequest": CoreAskUserRequest,
             "ArtifactReviewRequest": CoreArtifactReviewRequest,

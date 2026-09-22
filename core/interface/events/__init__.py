@@ -15,6 +15,7 @@ from core.interface.events.runtime import (
 )
 from core.interface.events.subagents import SubagentEvent
 from core.interface.events.tools import ToolEvent
+from core.interface.events.workflows import WorkflowEvent, WorkflowPhase
 
 
 FrontendEvent = (
@@ -28,6 +29,7 @@ FrontendEvent = (
     | RubricEvent
     | MCPEvent
     | InformationEvent
+    | WorkflowEvent
 )
 
 
@@ -50,4 +52,6 @@ __all__ = [
     "SubagentEvent",
     "ToolEvent",
     "UsageEvent",
+    "WorkflowEvent",
+    "WorkflowPhase",
 ]
