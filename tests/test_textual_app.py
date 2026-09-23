@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -159,6 +160,7 @@ from ui.textual.widgets.session_history import (
 )
 from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
+from ui.textual.widgets.workflow_bubble import WorkflowCompletionBubble
 
 
 PROMPT_BUTTON_FOCUS_BACKGROUND = Color.parse("#d2a957")
@@ -6149,6 +6151,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             autocomplete_output = output[autocomplete_index:usage_notes_index]
             self.assertIn("CMND", autocomplete_output)
             self.assertIn("PRMT", autocomplete_output)
+            self.assertIn("WFLW", autocomplete_output)
             self.assertIn("FILE", autocomplete_output)
             self.assertIn("RSRC", autocomplete_output)
             self.assertIn("TOOL", autocomplete_output)
@@ -6179,6 +6182,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("/memories", output)
             self.assertIn("/skills", output)
             self.assertIn("/subagents", output)
+            self.assertIn("/workflows", output)
             self.assertIn("/session", output)
             commands = [str(cell) for cell in repl.help_table().columns[0]._cells]
             self.assertIn("/models", commands)
@@ -6797,6 +6801,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 api_key="${TEST_MODEL_API_KEY}",
             )
             (workspace / ".env").write_text("TEST_MODEL_API_KEY=from-env-file\n", encoding="utf-8")
+            workflow_path = workspace / ".mira" / "workflows" / "demo.py"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(
+                (Path("examples") / "workflows" / "demo.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
             os.environ["TEST_MODEL_API_KEY"] = "already-loaded"
             launch_options = LaunchOptions(llm_direct=True)
             mcp_reload_values: list[str | None] = []
@@ -6838,9 +6848,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             ):
                 async with app.run_test(size=(100, 30)) as pilot:
                     await pilot.pause()
+                    initial_workflows = app.application.workflow_registry
                     await app._handle_reload_command()
+                    agent_reload_workflows = app.application.workflow_registry
                     self.assertEqual(mcp_reload_values, [])
                     await app._handle_reload_command(full_runtime=True)
+                    runtime_reload_workflows = app.application.workflow_registry
                     rendered = "\n".join(
                         renderable_plain(block) for block in app.query_one(ChatLog).children
                     )
@@ -6852,6 +6865,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(app.mcp_manager, mcp_manager)
             self.assertEqual(os.environ["TEST_MODEL_API_KEY"], "from-env-file")
             self.assertEqual(mcp_reload_values, ["from-env-file"])
+            self.assertIsNot(agent_reload_workflows, initial_workflows)
+            self.assertIsNot(runtime_reload_workflows, agent_reload_workflows)
+            self.assertIn("demo", agent_reload_workflows.specs)
+            self.assertIn("demo", runtime_reload_workflows.specs)
             mcp_manager.prompt_registry.reload_local.assert_called_once_with()
             self.assertIn("agent reloaded", rendered)
             self.assertIn("runtime reloaded", rendered)
@@ -10702,6 +10719,254 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#transcript-viewport", ContentSwitcher).current,
                 "chat-log",
             )
+
+    async def test_discovered_workflow_lists_runs_once_and_opens_final_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / ".mira" / "workflows" / "demo.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                (Path("examples") / "workflows" / "demo.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            agent = SimpleNamespace(mira_context_factory=lambda: object())
+            app = make_app(workspace, agent=agent, plan_agent=agent)
+
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                spec = app.application.workflow_registry.specs["demo"]
+                self.assertEqual(spec.factory.__globals__["__name__"].startswith("mira_resource_workflow_"), True)
+                self.assertEqual(spec.usage, "/workflow__demo topic=<str> [repeat=<int>]")
+                factory = Mock(wraps=spec.factory)
+                spec = replace(spec, factory=factory)
+                app.application.workflow_registry = replace(
+                    app.application.workflow_registry,
+                    specs={"demo": spec},
+                )
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/workflows"))
+                await pilot.pause()
+                listing = renderable_plain(app.query_one(ChatLog).children[-1])
+                self.assertIn(spec.command, listing)
+                self.assertIn("topic=<str>", listing)
+
+                await app.submit_prompt(
+                    PromptBox.Submitted(
+                        prompt,
+                        '/workflow__demo topic="hello world" repeat=3',
+                    )
+                )
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                bubbles = list(app.query(WorkflowCompletionBubble))
+                self.assertTrue(
+                    bubbles,
+                    [
+                        renderable_plain(child)
+                        for child in app.query_one(ChatLog).children
+                        if "workflow" in renderable_plain(child).lower()
+                    ],
+                )
+                bubble = bubbles[0]
+                self.assertEqual(bubble.workflow_name, "demo")
+                self.assertEqual(bubble.final_state["repeat"], 3)
+                self.assertEqual(len(bubble.final_state["lines"]), 3)
+                self.assertEqual(str(bubble.query_one(Button).label), "Final state")
+                factory.assert_called_once_with(app.application.workflows)
+
+                bubble.query_one(Button).press()
+                await wait_until(
+                    lambda: app.query_one(
+                        "#transcript-viewport", ContentSwitcher
+                    ).current
+                    == "inspector"
+                )
+                await pilot.pause()
+                inspector = app.query_one(Inspector)
+                switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+                self.assertEqual(switcher.current, "inspector")
+                self.assertIsNone(app.focused)
+                self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+                self.assertTrue(inspector.query_one("#inspector-final-state-actions").display)
+                self.assertEqual(
+                    renderable_plain(inspector.query_one("#inspector-title")),
+                    "Workflow · demo · Final state",
+                )
+                self.assertTrue(
+                    any(
+                        "hello world" in renderable_plain(child)
+                        for child in inspector.query_one("#inspector-log", ChatLog).children
+                    )
+                )
+
+                app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
+                inspector.FEEDBACK_SECONDS = 0.1
+                copy_button = inspector.query_one("#inspector-final-state-copy", Button)
+                copy_button.press()
+                await pilot.pause()
+                app.copy_to_clipboard.assert_called_once()
+                self.assertIn("hello world", app.copy_to_clipboard.call_args.args[0])
+                self.assertEqual(str(copy_button.label), "Copied")
+                await asyncio.sleep(0.12)
+                await pilot.pause()
+                self.assertEqual(str(copy_button.label), "Copy")
+
+                inspector.post_message(Inspector.Closed())
+                await wait_until(lambda: switcher.current == "chat-log")
+                await pilot.pause()
+                self.assertEqual(switcher.current, "chat-log")
+                self.assertFalse(inspector.query_one("#inspector-final-state-actions").display)
+                bubble.query_one(Button).press()
+                await wait_until(lambda: switcher.current == "inspector")
+                await pilot.pause()
+                self.assertEqual(switcher.current, "inspector")
+
+                inspector.post_message(Inspector.Closed())
+                await pilot.pause()
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, "/workflow__demo topic=again repeat=1")
+                )
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+                completed = list(app.query(WorkflowCompletionBubble))
+                self.assertEqual(len(completed), 2)
+                self.assertIsNot(completed[0].final_state, completed[1].final_state)
+                factory.assert_called_with(app.application.workflows)
+                self.assertEqual(factory.call_count, 2)
+
+    async def test_workflow_completion_retains_non_json_state_without_session_event(self) -> None:
+        app = make_app()
+        final_state = {
+            "nested": [SimpleNamespace(path=Path("result.txt")), (1, {2, 3})]
+        }
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            session_before = deepcopy(app.session)
+            chat = app.query_one(ChatLog)
+            chat.workflow_completed("native", final_state)
+            await pilot.pause()
+
+            bubble = app.query_one(WorkflowCompletionBubble)
+            self.assertIs(bubble.final_state, final_state)
+            self.assertEqual(app.session, session_before)
+            bubble.query_one(Button).press()
+            await pilot.pause()
+
+            inspector = app.query_one(Inspector)
+            app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
+            inspector.FEEDBACK_SECONDS = 0.3
+            copy_button = inspector.query_one("#inspector-final-state-copy", Button)
+            copy_button.press()
+            await pilot.pause()
+            await asyncio.sleep(0.15)
+            copy_button.press()
+            await pilot.pause()
+            copied = app.copy_to_clipboard.call_args.args[0]
+            self.assertIn("result.txt", copied)
+            self.assertIn("namespace", copied)
+            self.assertIn("3", copied)
+
+            await asyncio.sleep(0.18)
+            await pilot.pause()
+            self.assertEqual(str(copy_button.label), "Copied")
+            await asyncio.sleep(0.15)
+            await pilot.pause()
+            self.assertEqual(str(copy_button.label), "Copy")
+            self.assertEqual(app.copy_to_clipboard.call_count, 2)
+
+    async def test_failed_discovered_workflow_has_no_completion_bubble(self) -> None:
+        source = '''
+from typing import TypedDict
+from langgraph.graph import END, START, StateGraph
+class InputState(TypedDict):
+    value: int
+class State(InputState):
+    result: int
+def workflow(mira):
+    graph = StateGraph(State, input_schema=InputState)
+    def fail(state):
+        raise RuntimeError("workflow failed")
+    graph.add_node("fail", fail)
+    graph.add_edge(START, "fail")
+    graph.add_edge("fail", END)
+    return graph.compile()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / ".mira" / "workflows" / "failure.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            agent = SimpleNamespace(mira_context_factory=lambda: object())
+            app = make_app(workspace, agent=agent, plan_agent=agent)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, "/workflow__failure value=1")
+                )
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                self.assertEqual(list(app.query(WorkflowCompletionBubble)), [])
+                panel = app.query_one(SubagentsPanel)
+                self.assertTrue(panel._records)
+                self.assertTrue(
+                    all(record.status == "ERROR" for record in panel._records.values())
+                )
+                self.assertTrue(
+                    any(
+                        "workflow failure error" in renderable_plain(child)
+                        for child in app.query_one(ChatLog).children
+                    )
+                )
+
+    async def test_cancelled_discovered_workflow_restores_prompt_without_completion(self) -> None:
+        source = '''
+import asyncio
+from typing import TypedDict
+from langgraph.graph import END, START, StateGraph
+class InputState(TypedDict):
+    value: int
+class State(InputState):
+    result: int
+def workflow(mira):
+    graph = StateGraph(State, input_schema=InputState)
+    async def wait_forever(state):
+        await asyncio.Event().wait()
+        return {"result": state["value"]}
+    graph.add_node("wait_forever", wait_forever)
+    graph.add_edge(START, "wait_forever")
+    graph.add_edge("wait_forever", END)
+    return graph.compile()
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / ".mira" / "workflows" / "waiting.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(source, encoding="utf-8")
+            agent = SimpleNamespace(mira_context_factory=lambda: object())
+            app = make_app(workspace, agent=agent, plan_agent=agent)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, "/workflow__waiting value=1")
+                )
+                panel = app.query_one(SubagentsPanel)
+                await wait_until(lambda: bool(panel._records))
+
+                app._cancel_turn()
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                self.assertEqual(list(app.query(WorkflowCompletionBubble)), [])
+                self.assertTrue(all(record.status == "CANCELLED" for record in panel._records.values()))
+                self.assertFalse(app.busy)
+                self.assertFalse(prompt.disabled)
 
     async def test_workflow_rows_open_only_bound_inspections_and_restore_mode(self) -> None:
         """Only agent-backed Workflow rows should open the existing Inspector."""

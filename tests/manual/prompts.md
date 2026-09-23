@@ -1840,3 +1840,23 @@ model.
    Then terminate a process during a running verifier tool and reload the session;
    the historical inspection is CANCELLED, its pending tool is closed, and no
    unrelated root tool event is marked interrupted.
+
+## Launchable Workflow and Final State (Phase 3)
+
+1. From the repository root, run
+   `Copy-Item examples/workflows/demo.py .mira/workflows/demo.py`.
+2. Start the real MIRA TUI, or run `/reload` if it is already open.
+3. Run `/workflows`. Expected: the list includes
+   `/workflow__demo topic=<str> [repeat=<int>]`.
+4. Run `/workflow__demo topic="hello world" repeat=3`. Expected: the existing
+   Workflow panel shows `prepare` and `finish` in normal Steps and completes.
+5. Confirm chat receives only a compact `Workflow demo completed` bubble with a
+   `Final state` action. No full state is dumped into chat.
+6. Open `Final state`. Expected: the existing Inspector/context switcher opens
+   with title `Workflow · demo · Final state` and a pretty-printed state that
+   contains three lines plus the joined result.
+7. Press `Copy`. Expected: `Copy` changes to `Copied`, returns to `Copy`, and the
+   full pretty-printed state is on the clipboard.
+8. Close the Inspector, confirm chat returns, then reopen `Final state` from the
+   same bubble.
+9. After the check, remove only `.mira/workflows/demo.py`.

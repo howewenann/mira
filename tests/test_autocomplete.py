@@ -19,6 +19,7 @@ from ui.textual.widgets.autocomplete_input import (
     completion_fragment,
     discover_project_files,
     file_items,
+    workflow_command_items,
 )
 
 
@@ -111,6 +112,24 @@ class AutocompleteModelTests(unittest.TestCase):
         self.assertTrue(rendered.plain.startswith("SKIL  "))
         self.assertIn("#78d5cf", str(rendered.spans[0].style))
         self.assertTrue(any(item.kind == "native_command" for item in command_items("skill", None, registry)))
+
+    def test_workflow_commands_use_dynamic_registry_and_wflw_label(self) -> None:
+        spec = SimpleNamespace(
+            command="/workflow__research",
+            usage="/workflow__research topic=<str> [depth=<int>]",
+        )
+        registry = SimpleNamespace(specs={"research": spec})
+
+        item = workflow_command_items("research", registry)[0]
+
+        self.assertEqual(item.kind, "workflow_command")
+        self.assertEqual(item.display, spec.usage)
+        self.assertEqual(item.insertion, spec.command)
+        self.assertTrue(_completion_row(item).plain.startswith("WFLW  "))
+        self.assertIn(
+            spec.usage,
+            [candidate.display for candidate in command_items("research", None, None, registry)],
+        )
 
     def test_command_description_matches_do_not_displace_the_typed_command(self) -> None:
         self.assertEqual([item.display for item in command_items("too")], ["/tools"])
@@ -211,6 +230,7 @@ class AutocompleteModelTests(unittest.TestCase):
             "file": ("FILE", "#aeb8be"),
             "native_command": ("CMND", "#d2a957"),
             "prompt_command": ("PRMT", "#8fb9e8"),
+            "workflow_command": ("WFLW", "#B7A4E8"),
         }
 
         for kind, (label, color) in expected.items():

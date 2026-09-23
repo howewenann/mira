@@ -2,9 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+from uuid import uuid4
 
+from langgraph.stream.transformers import TasksTransformer
+from langgraph.types import Command
+
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
+from core.execution.runner import (
+    annotate_filesystem_approvals,
+    approval_resume_value,
+    first_typed_interrupt,
+    resolve_approval_decisions,
+)
+from core.execution.streams.output import capture_output, collect_interrupts
+from core.execution.streams.subagents import consume_workflow_inspections
+from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
 
 
@@ -145,6 +160,101 @@ class WorkflowCoordinator:
             error=error_text,
             workflow_id=self.workflow_id,
         )
+
+
+async def execute_workflow(
+    graph: Any,
+    payload: Any,
+    *,
+    emitter: FrontendEmitter,
+    inspection: SubagentInspectionCoordinator,
+    workflow_id: str,
+    config: dict[str, Any] | None = None,
+    context: Any | None = None,
+    inspection_title: str = "",
+    action_agent: Any | None = None,
+    persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
+) -> Any:
+    """Run one native graph through the established Workflow observation path."""
+    coordinator = WorkflowCoordinator(emitter, workflow_id=workflow_id)
+    coordinator.start()
+    current_payload = payload
+    run_config = dict(config or {})
+    configurable = dict(run_config.get("configurable") or {})
+    configurable.setdefault("thread_id", f"workflow:{uuid4()}")
+    run_config["configurable"] = configurable
+    always_allowed_tools: set[str] = set()
+    try:
+        while True:
+            inspection.begin_pass()
+            kwargs = {
+                "config": run_config,
+                "version": "v3",
+                "transformers": [TasksTransformer],
+            }
+            if context is not None:
+                kwargs["context"] = context
+            run = await graph.astream_events(current_payload, **kwargs)
+            tasks = run.extensions.get("tasks")
+            if tasks is None:
+                raise RuntimeError(
+                    "Workflow did not expose the native task projection."
+                )
+            output: dict[str, Any] = {}
+            async with run:
+                await asyncio.gather(
+                    coordinator.consume(tasks),
+                    consume_live_tool_errors(
+                        run,
+                        emitter,
+                        subagent_capture=inspection,
+                    ),
+                    consume_workflow_inspections(
+                        run.subgraphs,
+                        inspection,
+                        coordinator.bind_inspection,
+                        title=inspection_title,
+                    ),
+                    capture_output(run.output(), output),
+                )
+
+            final_state = output.get("value")
+            interrupts = await collect_interrupts(run, final_state)
+            if not interrupts:
+                coordinator.finish()
+                return final_state
+
+            ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
+            mcp_interrupt = first_typed_interrupt(interrupts, "mcp_elicitation")
+            if ask_user_interrupt is not None:
+                answer = await emitter.ask_user(ask_user_interrupt)
+                current_payload = Command(resume=answer)
+                continue
+            if mcp_interrupt is not None:
+                answer = await emitter.answer_mcp_elicitation(mcp_interrupt)
+                current_payload = Command(resume=answer)
+                continue
+
+            backend = getattr(action_agent, "mira_backend", None)
+            annotate_filesystem_approvals(interrupts, backend)
+            decisions = await resolve_approval_decisions(
+                emitter,
+                interrupts,
+                action_agent,
+                always_allowed_tools,
+                persist_always_allow,
+            )
+            current_payload = Command(
+                resume=approval_resume_value(interrupts, decisions)
+            )
+    except asyncio.CancelledError:
+        inspection.cancel_standalone()
+        coordinator.cancel()
+        raise
+    except Exception as error:
+        inspection.cancel_standalone(str(error))
+        coordinator.cancel(str(error))
+        raise
 
 
 __all__ = ["WorkflowCoordinator", "WorkflowTask"]

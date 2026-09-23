@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
 
 from deepagents.middleware.subagents import create_sub_agent
@@ -22,8 +23,15 @@ from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.streams.output import capture_output, collect_interrupts
 from core.execution.streams.subagents import consume_workflow_inspections
-from core.execution.workflows import WorkflowCoordinator
-from core.interface import FrontendEmitter, FrontendEvent, WorkflowEvent
+from core.execution.workflows import WorkflowCoordinator, execute_workflow
+from core.interface import (
+    ApprovalRequest,
+    AskUserRequest,
+    FrontendEmitter,
+    FrontendEvent,
+    MCPElicitationRequest,
+    WorkflowEvent,
+)
 
 
 class RecordingFrontend:
@@ -35,6 +43,22 @@ class RecordingFrontend:
 
     async def request(self, _request: Any) -> Any:
         raise AssertionError("This test resumes the native interrupt directly")
+
+
+class RespondingFrontend(RecordingFrontend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[Any] = []
+
+    async def request(self, request: Any) -> Any:
+        self.requests.append(request)
+        if isinstance(request, AskUserRequest):
+            return "selected"
+        if isinstance(request, MCPElicitationRequest):
+            return {"responses": {"city": {"action": "accept", "content": "Osaka"}}}
+        if isinstance(request, ApprovalRequest):
+            return [{"type": "allow_once"}]
+        raise AssertionError(f"Unexpected request: {request!r}")
 
 
 class AsyncItems:
@@ -165,6 +189,60 @@ def build_interrupting_workflow():
     return graph.compile(checkpointer=InMemorySaver())
 
 
+class ResumeState(TypedDict):
+    result: Any
+
+
+def build_resume_workflow(value: dict[str, Any]):
+    graph = StateGraph(ResumeState)
+
+    def pause(_state: ResumeState) -> dict[str, Any]:
+        return {"result": interrupt(value)}
+
+    graph.add_node("pause", pause)
+    graph.add_edge(START, "pause")
+    graph.add_edge("pause", END)
+    return graph.compile(checkpointer=InMemorySaver())
+
+
+class CountingRun:
+    """Transparent stream wrapper that counts final-output consumption."""
+
+    def __init__(self, run: Any) -> None:
+        self.run = run
+        self.extensions = run.extensions
+        self.subgraphs = run.subgraphs
+        self.output_calls = 0
+
+    def __aiter__(self):
+        return self.run.__aiter__()
+
+    async def __aenter__(self):
+        await self.run.__aenter__()
+        return self
+
+    async def __aexit__(self, *args: Any):
+        return await self.run.__aexit__(*args)
+
+    def output(self):
+        self.output_calls += 1
+        return self.run.output()
+
+    async def interrupts(self):
+        return []
+
+
+class CountingGraph:
+    def __init__(self, graph: Any) -> None:
+        self.graph = graph
+        self.runs: list[CountingRun] = []
+
+    async def astream_events(self, *args: Any, **kwargs: Any) -> CountingRun:
+        run = CountingRun(await self.graph.astream_events(*args, **kwargs))
+        self.runs.append(run)
+        return run
+
+
 async def consume_protocol(run: Any, inspection: SubagentInspectionCoordinator) -> None:
     async for event in run:
         inspection.handle_protocol_event(event)
@@ -204,6 +282,62 @@ async def run_pass(
 
 
 class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shared_executor_consumes_output_once_and_returns_native_state(self) -> None:
+        graph = StateGraph(ResumeState)
+        graph.add_node("done", lambda _state: {"result": ("native", {1, 2})})
+        graph.add_edge(START, "done")
+        graph.add_edge("done", END)
+        counting = CountingGraph(graph.compile())
+        frontend = RespondingFrontend()
+        inspection = SubagentInspectionCoordinator(LiveInspectionStore())
+
+        output = await execute_workflow(
+            counting,
+            {},
+            emitter=FrontendEmitter(frontend),
+            inspection=inspection,
+            workflow_id="counting",
+        )
+
+        self.assertEqual(output["result"], ("native", {1, 2}))
+        self.assertEqual(len(counting.runs), 1)
+        self.assertEqual(counting.runs[0].output_calls, 1)
+
+    async def test_shared_executor_resumes_ask_user_mcp_and_approval_interrupts(self) -> None:
+        cases = [
+            (
+                {"type": "ask_user", "question": "Choose", "options": ["selected"]},
+                AskUserRequest,
+                "selected",
+            ),
+            (
+                {"type": "mcp_elicitation", "message": "City", "requestedSchema": {}},
+                MCPElicitationRequest,
+                {"responses": {"city": {"action": "accept", "content": "Osaka"}}},
+            ),
+            (
+                {"action_requests": [{"name": "shell", "args": {"command": "echo ok"}}]},
+                ApprovalRequest,
+                {"decisions": [{"type": "approve"}]},
+            ),
+        ]
+        for index, (interrupt_value, request_type, expected) in enumerate(cases):
+            with self.subTest(request=request_type.__name__):
+                frontend = RespondingFrontend()
+                output = await execute_workflow(
+                    build_resume_workflow(interrupt_value),
+                    {},
+                    emitter=FrontendEmitter(frontend),
+                    inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                    workflow_id=f"resume-{index}",
+                    config={"configurable": {"thread_id": f"resume-{index}"}},
+                    action_agent=SimpleNamespace(mira_backend=None),
+                )
+
+                self.assertEqual(output["result"], expected)
+                self.assertEqual(len(frontend.requests), 1)
+                self.assertIsInstance(frontend.requests[0], request_type)
+
     async def test_interrupted_child_reuses_task_row_and_inspection_on_resume(self) -> None:
         frontend = RecordingFrontend()
         workflow = WorkflowCoordinator(FrontendEmitter(frontend), workflow_id="test")

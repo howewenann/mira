@@ -41,6 +41,7 @@ from ui.textual.splash import loading_splash_text, splash_text
 from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.mcp_activity import MCPActivityCell
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
+from ui.textual.widgets.workflow_bubble import WorkflowCompletionBubble
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -235,6 +236,12 @@ class ChatLog(VerticalScroll):
     def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
         self._add_assistant_block(text, created_at=created_at)
+
+    def workflow_completed(self, name: str, final_state: Any) -> None:
+        """Append one process-local Workflow completion feature bubble."""
+        self.finish_stream_phase()
+        self.mount(WorkflowCompletionBubble(name, final_state))
+        self._scroll_to_end()
 
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""

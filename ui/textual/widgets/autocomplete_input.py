@@ -44,6 +44,7 @@ class CompletionItem:
     kind: Literal[
         "tool", "subagent", "file", "mcp_resource", "native_command",
         "prompt_command", "skill_command", "status",
+        "workflow_command",
     ]
     display: str
     insertion: str
@@ -123,6 +124,7 @@ class AutocompleteInput(Vertical):
         tool_provider: Callable[[], list[dict[str, str]]] | None = None,
         subagent_provider: Callable[[], list[dict[str, str]]] | None = None,
         skill_registry_provider: Callable[[], Any] | None = None,
+        workflow_registry_provider: Callable[[], Any] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
@@ -130,6 +132,7 @@ class AutocompleteInput(Vertical):
         self.tool_provider = tool_provider
         self.subagent_provider = subagent_provider
         self.skill_registry_provider = skill_registry_provider
+        self.workflow_registry_provider = workflow_registry_provider
         self._items: list[CompletionItem] = []
         self._file_paths: list[str] | None = None
         self._fragment: _CompletionFragment | None = None
@@ -302,7 +305,12 @@ class AutocompleteInput(Vertical):
             self._interaction_start = None
             self._fragment = fragment
             self._show_items(
-                command_items(fragment.query, self._prompt_registry(), self._skill_registry())
+                command_items(
+                    fragment.query,
+                    self._prompt_registry(),
+                    self._skill_registry(),
+                    self._workflow_registry(),
+                )
             )
             if self.mcp_manager is not None:
                 generation = self._generation
@@ -411,7 +419,12 @@ class AutocompleteInput(Vertical):
         fragment = self._fragment
         if fragment is not None and fragment.kind == "command" and fragment.start == interaction_start:
             self._show_items(
-                command_items(fragment.query, self._prompt_registry(), self._skill_registry())
+                command_items(
+                    fragment.query,
+                    self._prompt_registry(),
+                    self._skill_registry(),
+                    self._workflow_registry(),
+                )
             )
 
     def _prompt_registry(self) -> Any:
@@ -419,6 +432,13 @@ class AutocompleteInput(Vertical):
 
     def _skill_registry(self) -> Any:
         return self.skill_registry_provider() if self.skill_registry_provider is not None else None
+
+    def _workflow_registry(self) -> Any:
+        return (
+            self.workflow_registry_provider()
+            if self.workflow_registry_provider is not None
+            else None
+        )
 
     def _resource_errors(self) -> list[str]:
         return self.mcp_manager.resource_errors() if self.mcp_manager is not None else []
@@ -477,12 +497,14 @@ def command_items(
     query: str,
     prompt_registry: Any = None,
     skill_registry: Any = None,
+    workflow_registry: Any = None,
 ) -> list[CompletionItem]:
     """Merge native, prompt, and skill commands while preserving their kinds."""
     items = [
         *native_command_items(query),
         *prompt_command_items(query, prompt_registry),
         *skill_command_items(query, skill_registry),
+        *workflow_command_items(query, workflow_registry),
     ]
     return sorted(items, key=lambda item: (item.display.casefold(), item.display))
 
@@ -536,6 +558,25 @@ def skill_command_items(query: str, skill_registry: Any = None) -> list[Completi
         )
         for command, skill in skill_registry.commands.items()
         if folded in command.casefold()
+    ]
+
+
+def workflow_command_items(query: str, workflow_registry: Any = None) -> list[CompletionItem]:
+    """Return exact dynamic commands from the workspace Workflow registry."""
+    if workflow_registry is None:
+        return []
+    folded = query.casefold()
+    specs = getattr(workflow_registry, "specs", {})
+    return [
+        CompletionItem(
+            kind="workflow_command",
+            display=spec.usage,
+            insertion=spec.command,
+            description="Local workflow",
+            metadata=spec,
+        )
+        for spec in specs.values()
+        if folded in spec.usage.casefold()
     ]
 
 
@@ -689,6 +730,7 @@ def _completion_row(item: CompletionItem) -> Text:
         "native_command": ("CMND", "#d2a957"),
         "prompt_command": ("PRMT", "#8fb9e8"),
         "skill_command": ("SKIL", "#78d5cf"),
+        "workflow_command": ("WFLW", "#B7A4E8"),
     }
     label, color = labels[item.kind]
     row.append(label, style=f"bold {color}")
@@ -724,4 +766,5 @@ __all__ = [
     "native_command_items",
     "prompt_command_items",
     "skill_command_items",
+    "workflow_command_items",
 ]

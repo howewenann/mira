@@ -32,6 +32,7 @@ COMMAND_HELP_SECTIONS = (
     (
         "Workflow",
         (
+            ("/workflows", "list launchable local Workflows and their inputs"),
             ("/plan [prompt]", "enter conversational read-only Plan mode, optionally sending a prompt"),
             ("/plan-show", "show the exact retained current Plan"),
             ("/plan-resume", "resume an incomplete retained Plan in Act mode"),

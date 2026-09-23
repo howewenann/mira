@@ -13,8 +13,6 @@ from typing import Any
 from uuid import uuid4
 
 from langchain_core.exceptions import ContextOverflowError
-from langgraph.stream.transformers import TasksTransformer
-from langgraph.types import Command
 from textual import on
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -57,13 +55,10 @@ from core.diagnostics.error_report import clear_error_reports, write_error_repor
 from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
 from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
-from core.execution.workflows import WorkflowCoordinator
+from core.execution.workflows import execute_workflow
 from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.inspection.persistence import inspection_from_run
-from core.execution.streams.output import capture_output, collect_interrupts
-from core.execution.streams.subagents import consume_workflow_inspections
-from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
@@ -100,7 +95,7 @@ from ui.shared.interrupts import (
 from ui.textual.artifact_review import PendingArtifactReview
 from ui.textual.adapter import TextualFrontend
 from ui.textual.commands.dispatcher import handle_command
-from ui.textual.runtime_report import prompts_table, runtime_report
+from ui.textual.runtime_report import prompts_table, runtime_report, workflows_table
 from ui.textual.widgets import (
     AutocompleteInput,
     ChatLog,
@@ -120,6 +115,7 @@ from ui.textual.widgets import (
 from ui.textual.widgets.subagent_panel import SubagentSelected
 from ui.textual.widgets.rubric_bubble import RubricInspectionSelected
 from ui.textual.widgets.tool_bubble import SubagentHistoryAnchor
+from ui.textual.widgets.workflow_bubble import WorkflowFinalStateSelected
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
@@ -301,6 +297,7 @@ class MiraApp(App[None]):
                     tool_provider=self._active_autocomplete_tools,
                     subagent_provider=self._active_autocomplete_subagents,
                     skill_registry_provider=self._skill_registry,
+                    workflow_registry_provider=self._workflow_registry,
                 )
                 yield TelemetryBar(
                     show_add_file=self.local_file_uploads_enabled,
@@ -414,6 +411,7 @@ class MiraApp(App[None]):
                 project_backend=self.project_backend,
                 agent_unavailable_message=self.agent_unavailable_message,
             )
+            self.issues = list(self.application.issues)
         if self.core_session is None:
             self.core_session = MiraSession(self.application, self.session)
         self.mode = self.core_session.mode
@@ -486,7 +484,11 @@ class MiraApp(App[None]):
             return
         if self.busy:
             command = text.partition(" ")[0]
-            if command in BUSY_MUTATING_COMMANDS or command == "/goal":
+            if (
+                command in BUSY_MUTATING_COMMANDS
+                or command == "/goal"
+                or command.startswith("/workflow__")
+            ):
                 self._notify_busy_action("using that command")
             self.action_focus_prompt()
             return
@@ -528,6 +530,34 @@ class MiraApp(App[None]):
             self.turn_worker = self.run_worker(
                 self._run_workflow_demo_phase2(),
                 name="workflow-demo-phase2",
+                exclusive=True,
+            )
+            return
+
+        if text == "/workflows":
+            self._run_workflows_command()
+            self.action_focus_prompt()
+            return
+
+        if text.startswith("/workflow__"):
+            try:
+                resolved = self._workflow_registry().resolve(text)
+            except ValueError as error:
+                self.system_message(str(error), kind="warning")
+                self.action_focus_prompt()
+                return
+            if resolved is None:
+                self.system_message("unknown workflow command", kind="warning")
+                self.action_focus_prompt()
+                return
+            spec, inputs = resolved
+            self.busy = True
+            self._main_stream_active = False
+            self._set_status(state="running")
+            prompt.disabled = True
+            self.turn_worker = self.run_worker(
+                self._run_registered_workflow(spec, inputs),
+                name=f"workflow-{spec.name}",
                 exclusive=True,
             )
             return
@@ -832,29 +862,21 @@ class MiraApp(App[None]):
             self.application.frontend,
             session_id=str(self.session.get("id") or ""),
         )
-        coordinator = WorkflowCoordinator(emitter, workflow_id="workflow-demo")
-        coordinator.start()
+        inspection = SubagentInspectionCoordinator(self.live_inspections)
         try:
             graph = build_workflow_demo()
-            run = await graph.astream_events(
+            await execute_workflow(
+                graph,
                 {"events": []},
-                version="v3",
-                transformers=[TasksTransformer],
+                emitter=emitter,
+                inspection=inspection,
+                workflow_id="workflow-demo",
             )
-            tasks = run.extensions.get("tasks")
-            if tasks is None:
-                raise RuntimeError("Workflow demo did not expose the native task projection.")
-            async with run:
-                await coordinator.consume(tasks)
-                await run.output()
-            coordinator.finish()
             self._set_status(state="ready")
         except asyncio.CancelledError:
-            coordinator.cancel()
             self._set_status(state="ready")
             raise
         except Exception as exc:
-            coordinator.cancel(str(exc))
             error_path = self._write_error_report(exc, source="tui.workflow-demo")
             self.system_message(
                 f"workflow demo error: {exc}\nerror report: {error_path}",
@@ -874,9 +896,7 @@ class MiraApp(App[None]):
             self.application.frontend,
             session_id=str(self.session.get("id") or ""),
         )
-        coordinator = WorkflowCoordinator(emitter, workflow_id="workflow-demo-phase2")
         inspection = SubagentInspectionCoordinator(self.live_inspections)
-        coordinator.start()
         try:
             agent = self.application.workflows.agent(
                 name="workflow-demo-agent",
@@ -900,71 +920,81 @@ class MiraApp(App[None]):
                 }
             }
 
-            while True:
-                inspection.begin_pass()
-                run = await graph.astream_events(
-                    payload,
-                    config=config,
-                    version="v3",
-                    transformers=[TasksTransformer],
-                )
-                tasks = run.extensions.get("tasks")
-                if tasks is None:
-                    raise RuntimeError(
-                        "Workflow Phase 2 demo did not expose the native task projection."
-                    )
-                output: dict[str, Any] = {}
-                async with run:
-                    await asyncio.gather(
-                        coordinator.consume(tasks),
-                        consume_live_tool_errors(
-                            run,
-                            emitter,
-                            subagent_capture=inspection,
-                        ),
-                        consume_workflow_inspections(
-                            run.subgraphs,
-                            inspection,
-                            coordinator.bind_inspection,
-                            title="workflow-demo-agent",
-                        ),
-                        capture_output(run.output(), output),
-                    )
-
-                interrupts = await collect_interrupts(run, output.get("value"))
-                if not interrupts:
-                    break
-                ask_user_interrupt = next(
-                    (
-                        item
-                        for item in interrupts
-                        if ask_user_request(item).get("type") == "ask_user"
-                    ),
-                    None,
-                )
-                if ask_user_interrupt is None:
-                    raise RuntimeError(
-                        "Workflow Phase 2 demo received an unsupported interrupt."
-                    )
-                answer = await emitter.ask_user(ask_user_interrupt)
-                payload = Command(resume=answer)
-
-            coordinator.finish()
+            await execute_workflow(
+                graph,
+                payload,
+                emitter=emitter,
+                inspection=inspection,
+                workflow_id="workflow-demo-phase2",
+                config=config,
+                inspection_title="workflow-demo-agent",
+                action_agent=self.agent,
+                persist_always_allow=self.application.persist_tool_always_allow,
+            )
             self._set_status(state="ready")
         except asyncio.CancelledError:
-            inspection.cancel_standalone()
-            coordinator.cancel()
             self._set_status(state="ready")
             raise
         except Exception as exc:
-            inspection.cancel_standalone(str(exc))
-            coordinator.cancel(str(exc))
             error_path = self._write_error_report(
                 exc,
                 source="tui.workflow-demo-phase2",
             )
             self.system_message(
                 f"workflow Phase 2 demo error: {exc}\nerror report: {error_path}",
+                kind="error",
+            )
+            self._set_status(state="error")
+        finally:
+            self.turn_worker = None
+            self.busy = False
+            prompt = self.query_one(PromptBox)
+            prompt.disabled = False
+            self.action_focus_prompt()
+
+    async def _run_registered_workflow(self, spec: Any, inputs: dict[str, Any]) -> None:
+        """Construct and run one discovered Workflow through the shared path."""
+        from agent.workflows.discovery import (
+            validate_runtime_graph,
+            validate_workflow_input,
+        )
+
+        emitter = FrontendEmitter(
+            self.application.frontend,
+            session_id=str(self.session.get("id") or ""),
+        )
+        inspection = SubagentInspectionCoordinator(self.live_inspections)
+        try:
+            graph = spec.factory(self.application.workflows)
+            input_model = validate_runtime_graph(spec, graph)
+            validate_workflow_input(input_model, inputs, spec.usage)
+            final_state = await execute_workflow(
+                graph,
+                inputs,
+                emitter=emitter,
+                inspection=inspection,
+                workflow_id=f"workflow-{spec.name}:{uuid4()}",
+                config={
+                    "configurable": {
+                        "thread_id": f"workflow:{spec.name}:{uuid4()}",
+                    }
+                },
+                context=self.application.workflows.context,
+                action_agent=self.agent,
+                persist_always_allow=self.application.persist_tool_always_allow,
+            )
+            self.query_one(ChatLog).workflow_completed(spec.name, final_state)
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self._set_status(state="ready")
+            raise
+        except Exception as exc:
+            error_path = self._write_error_report(
+                exc,
+                source=f"tui.workflow.{spec.name}",
+            )
+            self.system_message(
+                f"workflow {spec.name} error: {exc}\nerror report: {error_path}",
                 kind="error",
             )
             self._set_status(state="error")
@@ -1249,9 +1279,23 @@ class MiraApp(App[None]):
         self.command_output(prompts_table(specs))
         self.action_focus_prompt()
 
+    def _run_workflows_command(self) -> None:
+        """List the exact process-local launchable Workflow registry."""
+        specs = sorted(
+            self._workflow_registry().specs.values(),
+            key=lambda item: item.command.casefold(),
+        )
+        self.command_output(workflows_table(specs))
+
     def _skill_registry(self) -> SkillRegistry:
         """Build exact commands from the active resource projection."""
         return SkillRegistry(resources_for(self.mode, "skills"))
+
+    def _workflow_registry(self) -> Any:
+        """Return the application's current process-local Workflow registry."""
+        from agent.workflows import WorkflowRegistry
+
+        return getattr(self.application, "workflow_registry", None) or WorkflowRegistry({})
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
@@ -2245,6 +2289,7 @@ class MiraApp(App[None]):
         """Build and install refreshed runtime state for the requested scope."""
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.resources import build_resources
+        from agent.workflows import MiraWorkflowAPI, discover_workflows
         from agent.subagents.discovery import subagent_model_issues
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import load_effective_config
@@ -2304,10 +2349,16 @@ class MiraApp(App[None]):
             )
         from core.diagnostics.issues import unique_issues
 
+        workflow_registry = discover_workflows(
+            self.workspace,
+            MiraWorkflowAPI(lambda: agent),
+        )
+
         issues = unique_issues(
             [
                 *issues,
                 *getattr(agent, "mira_resource_issues", []),
+                *workflow_registry.issues,
             ]
         )
         model_name = get_model_name(config)
@@ -2335,6 +2386,8 @@ class MiraApp(App[None]):
         self.issues = issues
         self.mode.update(mode_updates)
         self._sync_core_application()
+        self.application.workflow_registry = workflow_registry
+        self.application.issues = issues
         self.runtime_snapshot = snapshot
         ensure_dashboard(
             self.session,
@@ -3029,10 +3082,22 @@ class MiraApp(App[None]):
                 return
         self._show_inspector(inspector)
 
-    def _show_inspector(self, inspector: Inspector) -> None:
+    @on(WorkflowFinalStateSelected)
+    def open_workflow_final_state(self, event: WorkflowFinalStateSelected) -> None:
+        """Open one retained Workflow result in the shared Inspector viewport."""
+        event.stop()
+        inspector = self.query_one(Inspector)
+        inspector.open_workflow_state(event.workflow_name, event.final_state)
+        self._show_inspector(inspector, focus=False)
+
+    def _show_inspector(self, inspector: Inspector, *, focus: bool = True) -> None:
         """Reuse the established viewport and focus transition for live inspection."""
         self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
-        self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
+        if focus:
+            self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
+        else:
+            self.screen.set_focus(None)
+            self.call_after_refresh(self.screen.set_focus, None)
 
     @on(SubagentHistoryAnchor.Requested)
     def open_subagent_history(self, event: SubagentHistoryAnchor.Requested) -> None:

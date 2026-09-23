@@ -751,6 +751,20 @@ MCPPanelScreen {
     scrollbar-background: #122023;
 }
 
+#inspector-final-state-actions {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    margin: 0 1 1 1;
+    align-horizontal: left;
+}
+
+#inspector-final-state-copy {
+    width: 10;
+    min-width: 10;
+    max-width: 10;
+}
+
 #autocomplete-input {
     width: 100%;
     height: auto;
@@ -1139,7 +1153,8 @@ Button.prompt-panel-button:focus {
 }
 
 .message.assistant,
-.message.startup {
+.message.startup,
+.message.workflow-completion {
     border: solid #5BB8B1;
 }
 
@@ -1153,6 +1168,11 @@ Button.prompt-panel-button:focus {
     height: auto;
 }
 
+.message.workflow-completion,
+.workflow-completion-body {
+    height: auto;
+}
+
 .assistant-body {
     height: auto;
 }
@@ -1162,6 +1182,14 @@ Button.prompt-panel-button:focus {
 }
 
 .assistant-actions {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    margin-top: 1;
+    align-horizontal: left;
+}
+
+.workflow-completion-actions {
     width: 1fr;
     height: 1;
     min-height: 1;
@@ -1182,7 +1210,9 @@ Button.assistant-display {
 }
 
 Button.assistant-copy,
-Button.assistant-display {
+Button.assistant-display,
+Button.workflow-final-state,
+#inspector-final-state-copy {
     height: 1;
     min-height: 1;
     margin: 0;
@@ -1202,7 +1232,11 @@ Button.assistant-display {
 Button.assistant-copy:focus,
 Button.assistant-copy:hover,
 Button.assistant-display:focus,
-Button.assistant-display:hover {
+Button.assistant-display:hover,
+Button.workflow-final-state:focus,
+Button.workflow-final-state:hover,
+#inspector-final-state-copy:focus,
+#inspector-final-state-copy:hover {
     border: none;
     background: #1b3036;
     color: #eef7f8;
@@ -1303,6 +1337,12 @@ Button.plan-action:focus {
     padding: 0;
     margin: 0;
     background: transparent;
+}
+
+Button.workflow-final-state {
+    width: 15;
+    min-width: 15;
+    max-width: 15;
 }
 
 .rubric-phase-status,

@@ -9,6 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from agent.mcp.models import PromptSpec
+from agent.workflows import WorkflowSpec
 from config.runtime import RuntimeSnapshot
 
 
@@ -109,6 +110,21 @@ def prompts_table(specs: Sequence[PromptSpec]) -> Table:
         )
         source = f"mcp:{spec.server}" if spec.source == "mcp" else "local"
         table.add_row(spec.command, source, arguments or "-", spec.description or "-")
+    return table
+
+
+def workflows_table(specs: Sequence[WorkflowSpec]) -> Table:
+    """Build the launchable workspace Workflow command list."""
+    table = Table(title="Workflows", title_style="bold cyan")
+    table.add_column("Command", style="cyan", no_wrap=True)
+    table.add_column("Inputs")
+    if not specs:
+        table.add_row("none loaded", "-")
+        return table
+
+    for spec in specs:
+        inputs = spec.usage.removeprefix(spec.command).strip()
+        table.add_row(spec.command, Text(inputs or "-"))
     return table
 
 

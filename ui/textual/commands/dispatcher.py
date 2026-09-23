@@ -191,6 +191,10 @@ async def handle_command(
         write_line(renderer, "/prompts is available in the Textual app", kind="warning")
         return True
 
+    if text == "/workflows":
+        write_line(renderer, "/workflows is available in the Textual app", kind="warning")
+        return True
+
     if text == "/compact":
         write_line(renderer, "/compact is available in the Textual app", kind="warning")
         return True
@@ -245,7 +249,7 @@ def autocomplete_table() -> Table:
     table.add_column("Selection")
     table.add_row(
         "/",
-        "CMND commands, PRMT prompts and SKIL skills",
+        "CMND commands, PRMT prompts, SKIL skills and WFLW workflows",
         "Inserts the command without a trailing space",
     )
     table.add_row(

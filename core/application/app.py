@@ -75,6 +75,23 @@ class MiraApplication:
         from agent.workflows import MiraWorkflowAPI
 
         self.workflows = MiraWorkflowAPI(lambda: self.agent)
+        self.reload_workflows()
+
+    def reload_workflows(self) -> Any:
+        """Replace the process-local workspace Workflow registry."""
+        from agent.workflows import discover_workflows
+        from core.diagnostics.issues import unique_issues
+
+        previous = tuple(getattr(getattr(self, "workflow_registry", None), "issues", ()))
+        registry = discover_workflows(self.workspace, self.workflows)
+        self.workflow_registry = registry
+        current_issues = [
+            issue
+            for issue in list(getattr(self, "issues", []) or [])
+            if issue not in previous
+        ]
+        self.issues = unique_issues([*current_issues, *registry.issues])
+        return registry
 
     @classmethod
     async def start(

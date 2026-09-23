@@ -16,6 +16,7 @@ from agent.resources.paths import (
     SKILLS_DIR,
     SUBAGENTS_DIR,
     TOOLS_DIR,
+    WORKFLOWS_DIR,
 )
 
 
@@ -49,6 +50,7 @@ def ensure_project_examples(workspace: Path) -> None:
         SKILLS_DIR,
         SUBAGENTS_DIR,
         TOOLS_DIR,
+        WORKFLOWS_DIR,
     ):
         (mira_dir / relative_dir).mkdir(parents=True, exist_ok=True)
 
@@ -100,6 +102,7 @@ MANAGED_EXAMPLES = {
     "workflows/minimal.py": "workflows/minimal.py",
     "workflows/structured_agents.py": "workflows/structured_agents.py",
     "workflows/tools_and_agents.py": "workflows/tools_and_agents.py",
+    "workflows/demo.py": "workflows/demo.py",
     "mcp/README.md": "mcp/README.md",
     "mcp/example.json": "mcp/example.json",
     "tracing/README.md": "tracing/README.md",

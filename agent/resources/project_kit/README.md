@@ -19,6 +19,7 @@ success-checked work, `@` references a file, and `/` opens commands.
 - Add a skill: [`examples/skills/example-skill/SKILL.md`](examples/skills/example-skill/SKILL.md)
 - Add a custom tool: [`examples/tools/`](examples/tools/)
 - Add a subagent: [`examples/subagents/example_subagent.py`](examples/subagents/example_subagent.py)
+- Add a launchable Workflow: [`examples/workflows/README.md`](examples/workflows/README.md)
 - Connect MCP: [`examples/mcp/README.md`](examples/mcp/README.md)
 - Use an ACP client: [`examples/acp/README.md`](examples/acp/README.md)
 - Build a Python frontend: [`examples/api/README.md`](examples/api/README.md)
@@ -67,4 +68,4 @@ secrets. MIRA does not edit your project `.gitignore`.
 
 After editing models, MCP, tracing, or runtime dependencies, use
 `/reload-runtime`. For ordinary memories, skills, prompts, subagents, and tool
-files, use `/reload`.
+files, including Workflows, use `/reload`.

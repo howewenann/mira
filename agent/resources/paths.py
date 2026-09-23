@@ -13,6 +13,7 @@ MEMORIES_DIR = "memories"
 SKILLS_DIR = "skills"
 SUBAGENTS_DIR = "subagents"
 TOOLS_DIR = "tools"
+WORKFLOWS_DIR = "workflows"
 
 DEFAULTS_ROOT = Path(__file__).parent / "defaults"
 

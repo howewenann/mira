@@ -66,7 +66,14 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertFalse((workspace / ".mira" / "mcp.json").exists())
             self.assertTrue((mcp_dir / "servers").is_dir())
             self.assertFalse((mcp_dir / "example.json").exists())
-            for active_dir in ("memories", "prompts", "skills", "subagents", "tools"):
+            for active_dir in (
+                "memories",
+                "prompts",
+                "skills",
+                "subagents",
+                "tools",
+                "workflows",
+            ):
                 self.assertEqual(list((mira_dir / active_dir).iterdir()), [])
             project_readme = (mira_dir / "README.md").read_text(encoding="utf-8")
             self.assertIn("MIRA is usable once a Main model is configured", project_readme)
@@ -96,6 +103,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 "tools/project_runtime_tool.py",
                 "tools/using_mira_tools.py",
                 "workflows/README.md",
+                "workflows/demo.py",
                 "workflows/minimal.py",
                 "workflows/structured_agents.py",
                 "workflows/tools_and_agents.py",
