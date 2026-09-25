@@ -54,6 +54,9 @@ def tool_lifecycle_status(
     duration_ms: int | float | None,
     is_error: bool,
     terminal_status: str = "",
+    active_status: str = "",
+    active_color: str = "",
+    show_spinner: bool = True,
     frame: int = 0,
     clock: Any = time.monotonic,
 ) -> Text:
@@ -72,10 +75,13 @@ def tool_lifecycle_status(
         status.append(verb, style=verb_color)
         status.append(f" {format_elapsed(duration_ms)}", style=TOOL_DURATION_COLOR)
     elif started_at is not None:
-        state = "Preparing" if draft else "Running"
-        state_color = TOOL_PREPARING_COLOR if draft else TOOL_RUNNING_COLOR
-        spinner = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
-        status.append(f"{spinner} ", style=TOOL_DURATION_COLOR)
+        state = active_status or ("Preparing" if draft else "Running")
+        state_color = active_color or (
+            TOOL_PREPARING_COLOR if draft else TOOL_RUNNING_COLOR
+        )
+        if show_spinner:
+            spinner = SPINNER_FRAMES[frame % len(SPINNER_FRAMES)]
+            status.append(f"{spinner} ", style=TOOL_DURATION_COLOR)
         status.append(state, style=state_color)
         status.append(
             f" · {format_elapsed(elapsed_ms(started_at, clock=clock))} elapsed",

@@ -1,16 +1,22 @@
-"""Focused runtime tests for the process-local Workflow UI projection."""
+"""Focused native Workflow runtime projection tests."""
 
 from __future__ import annotations
 
+import asyncio
+import operator
 import unittest
-from typing import Any
+from typing import Annotated, Any, TypedDict
 
-from langgraph.stream.transformers import TasksTransformer
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send, interrupt
 
-from core.execution.workflows import WorkflowCoordinator
+from core.execution.inspection.live import LiveInspectionStore
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
+from core.execution.workflows import WorkflowCoordinator, execute_workflow
 from core.interface import FrontendEmitter, FrontendEvent, WorkflowEvent
+from core.interface.requests import AskUserRequest
 from ui.shared.adapter import RendererAdapter
-from ui.textual.workflow_demo import build_workflow_demo
 
 
 class RecordingFrontend:
@@ -20,293 +26,336 @@ class RecordingFrontend:
     def emit(self, event: FrontendEvent) -> None:
         self.events.append(event)
 
-    async def request(self, _request: Any) -> Any:
-        raise AssertionError("Workflow projection must not request frontend input")
+    async def request(self, request: Any) -> Any:
+        if isinstance(request, AskUserRequest):
+            return "approved"
+        raise AssertionError(f"unexpected request: {request!r}")
 
 
-class AsyncItems:
-    def __init__(self, items: list[Any]) -> None:
-        self.items = items
+async def run_workflow(
+    graph: Any,
+    payload: Any,
+) -> tuple[Any, list[WorkflowEvent]]:
+    frontend = RecordingFrontend()
+    output = await execute_workflow(
+        graph,
+        payload,
+        emitter=FrontendEmitter(frontend),
+        inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+        workflow_id="workflow:test",
+        workflow_name="test",
+    )
+    return output, [
+        event for event in frontend.events if isinstance(event, WorkflowEvent)
+    ]
 
-    async def __aiter__(self):
-        for item in self.items:
-            yield item
+
+class SequentialState(TypedDict, total=False):
+    seed: str
+    first: str
+    second: str
+
+
+def sequential_graph() -> Any:
+    graph = StateGraph(SequentialState)
+    graph.add_node("first", lambda state: {"first": f"first({state['seed']})"})
+    graph.add_node("second", lambda state: {"second": f"second({state['first']})"})
+    graph.add_edge(START, "first")
+    graph.add_edge("first", "second")
+    graph.add_edge("second", END)
+    return graph.compile()
+
+
+class ParallelState(TypedDict, total=False):
+    seed: str
+    left: str
+    right: str
+
+
+def parallel_graph() -> Any:
+    graph = StateGraph(ParallelState)
+    graph.add_node("left", lambda state: {"left": state["seed"]})
+    graph.add_node("right", lambda state: {"right": state["seed"]})
+    graph.add_edge(START, "left")
+    graph.add_edge(START, "right")
+    graph.add_edge("left", END)
+    graph.add_edge("right", END)
+    return graph.compile()
+
+
+class FanoutState(TypedDict):
+    items: list[str]
+    results: Annotated[list[str], operator.add]
+
+
+def fanout_graph() -> Any:
+    graph = StateGraph(FanoutState)
+    graph.add_node("worker", lambda state: {"results": [state["item"]]})
+    graph.add_conditional_edges(
+        START,
+        lambda state: [Send("worker", {"item": item}) for item in state["items"]],
+        ["worker"],
+    )
+    graph.add_edge("worker", END)
+    return graph.compile()
+
+
+class HitlState(TypedDict):
+    request: str
+    answer: str
+
+
+def hitl_graph() -> Any:
+    def approval(state: HitlState) -> dict[str, str]:
+        answer = interrupt(
+            {
+                "type": "ask_user",
+                "question": f"Approve {state['request']}?",
+                "options": ["approved"],
+            }
+        )
+        return {"answer": str(answer)}
+
+    graph = StateGraph(HitlState)
+    graph.add_node("approval", approval)
+    graph.add_edge(START, "approval")
+    graph.add_edge("approval", END)
+    return graph.compile(checkpointer=InMemorySaver())
 
 
 class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_native_projection_groups_same_node_fanout_and_loop_demo(self) -> None:
+    async def test_sequential_tasks_capture_exact_input_and_result(self) -> None:
+        output, events = await run_workflow(sequential_graph(), {"seed": "alpha"})
+        starts = [event for event in events if event.phase == "task_start"]
+        finishes = [event for event in events if event.phase == "task_finish"]
+
+        self.assertEqual([event.step for event in starts], [1, 2])
+        self.assertEqual(starts[0].input_state, {"seed": "alpha"})
+        self.assertEqual(
+            starts[1].input_state,
+            {"seed": "alpha", "first": "first(alpha)"},
+        )
+        self.assertEqual(finishes[0].result, {"first": "first(alpha)"})
+        self.assertEqual(finishes[1].result, {"second": "second(first(alpha))"})
+        self.assertEqual(output["second"], "second(first(alpha))")
+        self.assertTrue(all(event.result_available for event in finishes))
+
+    async def test_parallel_tasks_are_siblings_with_independent_results(self) -> None:
+        _output, events = await run_workflow(parallel_graph(), {"seed": "alpha"})
+        starts = [event for event in events if event.phase == "task_start"]
+        finishes = [event for event in events if event.phase == "task_finish"]
+
+        self.assertEqual({event.step for event in starts}, {1})
+        self.assertEqual(len({event.task_id for event in starts}), 2)
+        self.assertEqual(
+            {event.name: event.result for event in finishes},
+            {"left": {"left": "alpha"}, "right": {"right": "alpha"}},
+        )
+
+    async def test_send_fanout_keeps_duplicate_names_as_distinct_tasks(self) -> None:
+        _output, events = await run_workflow(
+            fanout_graph(),
+            {"items": ["a", "b", "c"], "results": []},
+        )
+        starts = [event for event in events if event.phase == "task_start"]
+        finishes = [event for event in events if event.phase == "task_finish"]
+
+        self.assertEqual([event.name for event in starts], ["worker"] * 3)
+        self.assertEqual(len({event.task_id for event in starts}), 3)
+        self.assertEqual(
+            [event.input_state for event in starts],
+            [{"item": "a"}, {"item": "b"}, {"item": "c"}],
+        )
+        self.assertEqual(
+            [event.result for event in finishes],
+            [
+                {"results": ["a"]},
+                {"results": ["b"]},
+                {"results": ["c"]},
+            ],
+        )
+
+    async def test_hitl_reuses_task_and_drops_interrupted_empty_result(self) -> None:
+        output, events = await run_workflow(
+            hitl_graph(),
+            {"request": "deploy", "answer": ""},
+        )
+        task_events = [event for event in events if event.task_id]
+
+        self.assertEqual(
+            [event.phase for event in task_events],
+            ["task_start", "task_waiting", "task_resume", "task_finish"],
+        )
+        self.assertEqual(len({event.task_id for event in task_events}), 1)
+        self.assertFalse(task_events[1].result_available)
+        self.assertEqual(task_events[-1].result, {"answer": "approved"})
+        self.assertEqual(output["answer"], "approved")
+
+    async def test_error_and_cancellation_do_not_invent_results(self) -> None:
+        graph = StateGraph(dict)
+
+        def fail(_state: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+        graph.add_node("fail", fail)
+        graph.add_edge(START, "fail")
+        graph.add_edge("fail", END)
+        frontend = RecordingFrontend()
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            await execute_workflow(
+                graph.compile(),
+                {"seed": "alpha"},
+                emitter=FrontendEmitter(frontend),
+                inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                workflow_id="failure",
+                workflow_name="failure",
+            )
+        finish = next(
+            event
+            for event in frontend.events
+            if isinstance(event, WorkflowEvent) and event.phase == "task_finish"
+        )
+        self.assertEqual(finish.status, "ERROR")
+        self.assertFalse(finish.result_available)
+
+        entered = asyncio.Event()
+
+        async def slow(_state: dict[str, Any]) -> dict[str, Any]:
+            entered.set()
+            await asyncio.Event().wait()
+            return {"done": True}
+
+        cancel_graph = StateGraph(dict)
+        cancel_graph.add_node("slow", slow)
+        cancel_graph.add_edge(START, "slow")
+        cancel_graph.add_edge("slow", END)
+        cancelled_frontend = RecordingFrontend()
+        running = asyncio.create_task(
+            execute_workflow(
+                cancel_graph.compile(),
+                {"seed": "alpha"},
+                emitter=FrontendEmitter(cancelled_frontend),
+                inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                workflow_id="cancel",
+                workflow_name="cancel",
+            )
+        )
+        await entered.wait()
+        running.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await running
+        cancel = next(
+            event
+            for event in cancelled_frontend.events
+            if isinstance(event, WorkflowEvent) and event.phase == "run_cancel"
+        )
+        self.assertEqual(cancel.status, "CANCELLED")
+
+    async def test_input_snapshot_survives_in_place_python_mutation(self) -> None:
+        graph = StateGraph(dict)
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            state["mutated_only"] = True
+            return {"returned": True}
+
+        graph.add_node("mutate", mutate)
+        graph.add_edge(START, "mutate")
+        graph.add_edge("mutate", END)
+        _output, events = await run_workflow(graph.compile(), {"original": True})
+        start = next(event for event in events if event.phase == "task_start")
+        self.assertEqual(start.input_state, {"original": True})
+
+    async def test_legitimate_none_result_remains_available(self) -> None:
+        async def native_events():
+            yield {"id": "task-none", "name": "nothing", "input": None}
+            yield {
+                "id": "task-none",
+                "name": "nothing",
+                "result": {"__root__": None},
+                "error": None,
+                "interrupts": (),
+            }
+
         frontend = RecordingFrontend()
         coordinator = WorkflowCoordinator(
             FrontendEmitter(frontend),
-            workflow_id="demo",
+            workflow_id="none",
+            workflow_name="none",
         )
-        graph = build_workflow_demo(delay_scale=0)
-
-        coordinator.start()
-        run = await graph.astream_events(
-            {"events": []},
-            version="v3",
-            transformers=[TasksTransformer],
-        )
-        async with run:
-            await coordinator.consume(run.extensions["tasks"])
-            output = await run.output()
-        coordinator.finish()
-
-        events = [event for event in frontend.events if isinstance(event, WorkflowEvent)]
-        starts = [event for event in events if event.phase == "task_start"]
-        finishes = [event for event in events if event.phase == "task_finish"]
-        self.assertEqual(
-            [(event.name, event.step) for event in starts],
-            [
-                ("prepare", 1),
-                ("worker", 2),
-                ("worker", 2),
-                ("worker", 2),
-                ("review", 3),
-                ("review", 4),
-            ],
-        )
-        self.assertEqual(len({event.task_id for event in starts}), 6)
-        self.assertEqual(
-            len({event.task_id for event in starts if event.name == "worker"}),
-            3,
-        )
-        self.assertEqual(
-            len({event.task_id for event in starts if event.name == "review"}),
-            2,
-        )
-        self.assertEqual([event.status for event in finishes], ["DONE"] * 6)
-        self.assertEqual(events[0].phase, "run_start")
-        self.assertEqual(events[-1].phase, "run_finish")
-        self.assertEqual(output["review_count"], 2)
-        self.assertEqual(output["events"][-2:], ["review 1 complete", "review 2 complete"])
-
-    async def test_repeated_names_use_task_ids_and_errors_are_terminal(self) -> None:
-        frontend = RecordingFrontend()
-        coordinator = WorkflowCoordinator(FrontendEmitter(frontend))
-        await coordinator.consume(
-            AsyncItems(
-                [
-                    {"id": "a", "name": "worker", "input": {}},
-                    {"id": "b", "name": "worker", "input": {}},
-                    {"id": "a", "name": "worker", "error": None},
-                    {"id": "b", "name": "worker", "error": "boom"},
-                    {"id": "c", "name": "worker", "input": {}},
-                    {"id": "c", "name": "worker", "error": None},
-                ]
-            )
-        )
-        coordinator.finish()
-
-        events = [event for event in frontend.events if isinstance(event, WorkflowEvent)]
-        starts = [event for event in events if event.phase == "task_start"]
-        finishes = [event for event in events if event.phase == "task_finish"]
-        self.assertEqual(
-            [(event.task_id, event.step) for event in starts],
-            [("a", 1), ("b", 1), ("c", 2)],
-        )
-        self.assertEqual(
-            [(event.task_id, event.status) for event in finishes],
-            [("a", "DONE"), ("b", "ERROR"), ("c", "DONE")],
-        )
-
-    async def test_repeated_task_id_reuses_original_row_and_step(self) -> None:
-        frontend = RecordingFrontend()
-        coordinator = WorkflowCoordinator(FrontendEmitter(frontend))
-        await coordinator.consume(
-            AsyncItems(
-                [
-                    {"id": "resume", "name": "review", "input": {}},
-                    {"id": "resume", "name": "review", "error": None},
-                    {"id": "resume", "name": "review", "input": {}},
-                    {"id": "resume", "name": "review", "error": None},
-                ]
-            )
-        )
-
-        starts = [
+        await coordinator.consume(native_events())
+        finish = next(
             event
             for event in frontend.events
-            if isinstance(event, WorkflowEvent) and event.phase == "task_start"
-        ]
-        self.assertEqual(
-            [(event.task_id, event.step) for event in starts],
-            [("resume", 1), ("resume", 1)],
+            if isinstance(event, WorkflowEvent) and event.phase == "task_finish"
         )
-        self.assertEqual(len(coordinator.tasks), 1)
-
-    async def test_interrupt_waits_and_resume_reuses_original_task(self) -> None:
-        frontend = RecordingFrontend()
-        coordinator = WorkflowCoordinator(FrontendEmitter(frontend), workflow_id="hitl")
-        await coordinator.consume(
-            AsyncItems(
-                [
-                    {"id": "approval-1", "name": "approval", "input": {}},
-                    {
-                        "id": "approval-1",
-                        "name": "approval",
-                        "error": None,
-                        "interrupts": [{"id": "interrupt-1"}],
-                    },
-                    {"id": "approval-1", "name": "approval", "input": {}},
-                    {"id": "approval-1", "name": "approval", "error": None},
-                ]
-            )
-        )
-
-        events = [
-            event for event in frontend.events if isinstance(event, WorkflowEvent)
-        ]
-        task_events = [event for event in events if event.task_id == "approval-1"]
-        self.assertEqual(
-            [(event.phase, event.status, event.step) for event in task_events],
-            [
-                ("task_start", "RUNNING", 1),
-                ("task_waiting", "WAITING", 1),
-                ("task_resume", "RUNNING", 1),
-                ("task_finish", "DONE", 1),
-            ],
-        )
-        self.assertEqual(len(coordinator.tasks), 1)
-        self.assertEqual(coordinator._active, set())
-
-    async def test_inspection_binding_is_late_idempotent_and_task_scoped(self) -> None:
-        frontend = RecordingFrontend()
-        coordinator = WorkflowCoordinator(FrontendEmitter(frontend))
-
-        self.assertFalse(coordinator.bind_inspection("missing", "inspection:x"))
-        self.assertFalse(coordinator.bind_inspection("missing", ""))
-        await coordinator.consume(
-            AsyncItems(
-                [
-                    {"id": "a", "name": "agent", "input": {}},
-                    {"id": "b", "name": "agent", "input": {}},
-                ]
-            )
-        )
-        self.assertTrue(coordinator.bind_inspection("a", "inspection:a"))
-        self.assertTrue(coordinator.bind_inspection("a", "inspection:a"))
-        self.assertTrue(coordinator.bind_inspection("b", "inspection:b"))
-
-        bindings = [
-            event
-            for event in frontend.events
-            if isinstance(event, WorkflowEvent) and event.phase == "task_inspection"
-        ]
-        self.assertEqual(
-            [(event.task_id, event.inspection_id, event.step) for event in bindings],
-            [("a", "inspection:a", 1), ("b", "inspection:b", 1)],
-        )
-
-    async def test_cancel_emits_one_terminal_run_event(self) -> None:
-        frontend = RecordingFrontend()
-        coordinator = WorkflowCoordinator(FrontendEmitter(frontend), workflow_id="cancel-me")
-        await coordinator.consume(AsyncItems([{"id": "a", "name": "slow", "input": {}}]))
-
-        coordinator.cancel()
-        coordinator.cancel()
-
-        cancelled = [
-            event
-            for event in frontend.events
-            if isinstance(event, WorkflowEvent) and event.phase == "run_cancel"
-        ]
-        self.assertEqual(len(cancelled), 1)
-        self.assertEqual(cancelled[0].status, "CANCELLED")
+        self.assertTrue(finish.result_available)
+        self.assertIsNone(finish.result)
 
 
 class WorkflowAdapterTests(unittest.TestCase):
-    def test_workflow_event_projects_to_renderer_callbacks(self) -> None:
+    def test_all_tree_payloads_project_to_renderer_callbacks(self) -> None:
         class Renderer:
             def __init__(self) -> None:
                 self.calls: list[tuple[Any, ...]] = []
 
-            def workflow_task_finished(
+            def workflow_started(self, workflow_id: str, name: str) -> None:
+                self.calls.append(("run", workflow_id, name))
+
+            def workflow_task_started(
                 self,
                 task_id: str,
                 name: str,
                 step: int,
-                *,
-                status: str,
-                error: str,
+                input_state: Any,
+                **kwargs: Any,
             ) -> None:
-                self.calls.append((task_id, name, step, status, error))
+                self.calls.append(("task", task_id, name, step, input_state, kwargs))
 
-        renderer = Renderer()
-        RendererAdapter(renderer).emit(
-            WorkflowEvent(
-                phase="task_finish",
-                task_id="task-1",
-                name="review",
-                step=2,
-                status="ERROR",
-                error="failed",
-            )
-        )
-
-        self.assertEqual(renderer.calls, [("task-1", "review", 2, "ERROR", "failed")])
-
-    def test_phase_two_events_project_to_renderer_callbacks(self) -> None:
-        class Renderer:
-            def __init__(self) -> None:
-                self.calls: list[tuple[Any, ...]] = []
-
-            def workflow_task_waiting(self, task_id: str, name: str, step: int) -> None:
-                self.calls.append(("waiting", task_id, name, step))
-
-            def workflow_task_resumed(self, task_id: str, name: str, step: int) -> None:
-                self.calls.append(("resume", task_id, name, step))
-
-            def workflow_task_inspection(
+            def workflow_agent_started(
                 self,
                 task_id: str,
                 name: str,
-                step: int,
                 inspection_id: str,
+                **kwargs: Any,
             ) -> None:
-                self.calls.append(
-                    ("inspection", task_id, name, step, inspection_id)
-                )
+                self.calls.append(("agent", task_id, name, inspection_id, kwargs))
 
         renderer = Renderer()
         adapter = RendererAdapter(renderer)
         adapter.emit(
             WorkflowEvent(
-                phase="task_waiting",
-                task_id="task-1",
-                name="approval",
-                step=2,
-                status="WAITING",
+                phase="run_start",
+                workflow_id="wf-1",
+                workflow_name="decision_brief",
             )
         )
         adapter.emit(
             WorkflowEvent(
-                phase="task_resume",
+                phase="task_start",
+                workflow_id="wf-1",
                 task_id="task-1",
-                name="approval",
+                name="analyse",
                 step=2,
-                status="RUNNING",
+                input_state=None,
             )
         )
         adapter.emit(
             WorkflowEvent(
-                phase="task_inspection",
-                task_id="task-2",
-                name="agent",
-                step=1,
-                inspection_id="subagent:task-2",
+                phase="agent_start",
+                workflow_id="wf-1",
+                task_id="task-1",
+                agent_id="agent-1",
+                inspection_id="agent-1",
+                name="researcher",
+                task_input="research",
             )
         )
 
-        self.assertEqual(
-            renderer.calls,
-            [
-                ("waiting", "task-1", "approval", 2),
-                ("resume", "task-1", "approval", 2),
-                ("inspection", "task-2", "agent", 1, "subagent:task-2"),
-            ],
-        )
+        self.assertEqual(renderer.calls[0], ("run", "wf-1", "decision_brief"))
+        self.assertEqual(renderer.calls[1][1:5], ("task-1", "analyse", 2, None))
+        self.assertEqual(renderer.calls[1][5]["workflow_id"], "wf-1")
+        self.assertEqual(renderer.calls[2][1:4], ("task-1", "researcher", "agent-1"))
+        self.assertEqual(renderer.calls[2][4]["task_input"], "research")
 
 
 if __name__ == "__main__":

@@ -248,25 +248,64 @@ class RendererAdapter:
 
     def _workflow(self, event: WorkflowEvent) -> None:
         if event.phase == "run_start":
-            self._call("workflow_started", event.workflow_id)
+            self._call(
+                "workflow_started",
+                event.workflow_id,
+                event.workflow_name,
+            )
         elif event.phase == "task_start":
             self._call(
                 "workflow_task_started",
                 event.task_id,
                 event.name,
                 event.step,
+                event.input_state,
+                workflow_id=event.workflow_id,
             )
         elif event.phase == "task_waiting":
-            self._call("workflow_task_waiting", event.task_id, event.name, event.step)
-        elif event.phase == "task_resume":
-            self._call("workflow_task_resumed", event.task_id, event.name, event.step)
-        elif event.phase == "task_inspection":
             self._call(
-                "workflow_task_inspection",
+                "workflow_task_waiting",
                 event.task_id,
                 event.name,
                 event.step,
+                workflow_id=event.workflow_id,
+            )
+        elif event.phase == "task_resume":
+            self._call(
+                "workflow_task_resumed",
+                event.task_id,
+                event.name,
+                event.step,
+                workflow_id=event.workflow_id,
+            )
+        elif event.phase in {"agent_start", "agent_resume"}:
+            self._call(
+                "workflow_agent_started",
+                event.task_id,
+                event.name,
                 event.inspection_id,
+                task_input=event.task_input,
+                resumed=event.phase == "agent_resume",
+                workflow_id=event.workflow_id,
+            )
+        elif event.phase == "agent_waiting":
+            self._call(
+                "workflow_agent_waiting",
+                event.task_id,
+                event.name,
+                event.inspection_id,
+                workflow_id=event.workflow_id,
+            )
+        elif event.phase == "agent_finish":
+            self._call(
+                "workflow_agent_finished",
+                event.task_id,
+                event.name,
+                event.inspection_id,
+                status=event.status,
+                result=event.result,
+                error=event.error,
+                workflow_id=event.workflow_id,
             )
         elif event.phase == "task_finish":
             self._call(
@@ -276,9 +315,17 @@ class RendererAdapter:
                 event.step,
                 status=event.status,
                 error=event.error,
+                result=event.result,
+                result_available=event.result_available,
+                workflow_id=event.workflow_id,
             )
         elif event.phase == "run_finish":
-            self._call("workflow_finished", event.workflow_id)
+            self._call(
+                "workflow_finished",
+                event.workflow_id,
+                final_state=event.final_state,
+                final_state_available=event.final_state_available,
+            )
         elif event.phase == "run_cancel":
             self._call(
                 "workflow_cancelled",

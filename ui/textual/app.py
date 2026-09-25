@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from langchain_core.exceptions import ContextOverflowError
+from rich.pretty import pretty_repr
 from textual import on
 from textual.actions import SkipAction
 from textual.app import App, ComposeResult
@@ -115,7 +116,11 @@ from ui.textual.widgets import (
 from ui.textual.widgets.subagent_panel import SubagentSelected
 from ui.textual.widgets.rubric_bubble import RubricInspectionSelected
 from ui.textual.widgets.tool_bubble import SubagentHistoryAnchor
-from ui.textual.widgets.workflow_bubble import WorkflowFinalStateSelected
+from ui.textual.widgets.workflow_bubble import (
+    WorkflowAgentSelected,
+    WorkflowFinalStateSelected,
+    WorkflowNodeSelected,
+)
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
@@ -865,12 +870,15 @@ class MiraApp(App[None]):
         inspection = SubagentInspectionCoordinator(self.live_inspections)
         try:
             graph = build_workflow_demo()
+            payload = {"events": []}
+            self._show_workflow_input(payload)
             await execute_workflow(
                 graph,
-                {"events": []},
+                payload,
                 emitter=emitter,
                 inspection=inspection,
                 workflow_id="workflow-demo",
+                workflow_name="workflow-demo",
             )
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -920,12 +928,14 @@ class MiraApp(App[None]):
                 }
             }
 
+            self._show_workflow_input(payload)
             await execute_workflow(
                 graph,
                 payload,
                 emitter=emitter,
                 inspection=inspection,
                 workflow_id="workflow-demo-phase2",
+                workflow_name="workflow-demo-phase2",
                 config=config,
                 inspection_title="workflow-demo-agent",
                 action_agent=self.agent,
@@ -968,12 +978,14 @@ class MiraApp(App[None]):
             graph = spec.factory(self.application.workflows)
             input_model = validate_runtime_graph(spec, graph)
             validate_workflow_input(input_model, inputs, spec.usage)
-            final_state = await execute_workflow(
+            self._show_workflow_input(inputs)
+            await execute_workflow(
                 graph,
                 inputs,
                 emitter=emitter,
                 inspection=inspection,
                 workflow_id=f"workflow-{spec.name}:{uuid4()}",
+                workflow_name=spec.name,
                 config={
                     "configurable": {
                         "thread_id": f"workflow:{spec.name}:{uuid4()}",
@@ -983,7 +995,6 @@ class MiraApp(App[None]):
                 action_agent=self.agent,
                 persist_always_allow=self.application.persist_tool_always_allow,
             )
-            self.query_one(ChatLog).workflow_completed(spec.name, final_state)
             self._set_status(state="ready")
         except asyncio.CancelledError:
             self._set_status(state="ready")
@@ -1004,6 +1015,10 @@ class MiraApp(App[None]):
             prompt = self.query_one(PromptBox)
             prompt.disabled = False
             self.action_focus_prompt()
+
+    def _show_workflow_input(self, payload: Any) -> None:
+        """Render one process-local Workflow payload as a normal user message."""
+        self.query_one(ChatLog).user_message(pretty_repr(payload, expand_all=True))
 
     @on(Button.Pressed, ".plan-action")
     def press_plan_action(self, event: Button.Pressed) -> None:
@@ -2992,34 +3007,106 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).tick_subagents()
         self.query_one(SubagentsPanel).tick()
 
-    def workflow_started(self, _workflow_id: str = "") -> None:
-        """Switch the shared telemetry panel to a fresh Workflow run."""
-        self.query_one(SubagentsPanel).start_workflow()
+    def workflow_started(
+        self,
+        workflow_id: str = "",
+        workflow_name: str = "",
+    ) -> None:
+        """Mount one live Workflow execution tree in the transcript."""
+        self.query_one(ChatLog).workflow_started(workflow_id, workflow_name)
 
-    def workflow_task_started(self, task_id: str, name: str, step: int) -> None:
-        """Render one native root task in its inferred workflow step."""
-        self.query_one(SubagentsPanel).start_workflow_task(task_id, name, step)
+    def workflow_task_started(
+        self,
+        task_id: str,
+        name: str,
+        step: int,
+        input_state: Any,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        """Add one native root task beneath its inferred execution batch."""
+        view = self.query_one(ChatLog).workflow_task_started(
+            workflow_id,
+            task_id,
+            name,
+            step,
+            input_state,
+        )
+        self._refresh_workflow_node_inspector(view)
 
-    def workflow_task_waiting(self, task_id: str, _name: str, _step: int) -> None:
-        """Keep one interrupted Workflow task active on its existing row."""
-        self.query_one(SubagentsPanel).wait_workflow_task(task_id)
-
-    def workflow_task_resumed(self, task_id: str, name: str, step: int) -> None:
-        """Return one waiting Workflow task to RUNNING without replacing it."""
-        self.query_one(SubagentsPanel).resume_workflow_task(task_id, name, step)
-
-    def workflow_task_inspection(
+    def workflow_task_waiting(
         self,
         task_id: str,
         _name: str,
         _step: int,
-        inspection_id: str,
+        *,
+        workflow_id: str = "",
     ) -> None:
-        """Attach a process-local Inspector transcript to a Workflow row."""
-        self.query_one(SubagentsPanel).bind_workflow_inspection(
+        view = self.query_one(ChatLog).workflow_task_waiting(workflow_id, task_id)
+        self._refresh_workflow_node_inspector(view)
+
+    def workflow_task_resumed(
+        self,
+        task_id: str,
+        _name: str,
+        _step: int,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        view = self.query_one(ChatLog).workflow_task_resumed(workflow_id, task_id)
+        self._refresh_workflow_node_inspector(view)
+
+    def workflow_agent_started(
+        self,
+        task_id: str,
+        name: str,
+        inspection_id: str,
+        *,
+        task_input: str = "",
+        resumed: bool = False,
+        workflow_id: str = "",
+    ) -> None:
+        """Attach one observed agent leaf to its owning native task."""
+        self.query_one(ChatLog).workflow_agent_started(
+            workflow_id,
             task_id,
             inspection_id,
+            name,
+            task_input,
+            resumed=resumed,
         )
+        self._refresh_workflow_node_inspector_by_id(workflow_id, task_id)
+
+    def workflow_agent_waiting(
+        self,
+        task_id: str,
+        _name: str,
+        inspection_id: str,
+        *,
+        workflow_id: str = "",
+    ) -> None:
+        self.query_one(ChatLog).workflow_agent_waiting(workflow_id, inspection_id)
+        self._refresh_workflow_node_inspector_by_id(workflow_id, task_id)
+
+    def workflow_agent_finished(
+        self,
+        task_id: str,
+        _name: str,
+        inspection_id: str,
+        *,
+        status: str = "DONE",
+        result: str = "",
+        error: str = "",
+        workflow_id: str = "",
+    ) -> None:
+        self.query_one(ChatLog).workflow_agent_finished(
+            workflow_id,
+            inspection_id,
+            status=status,
+            result=result,
+            error=error,
+        )
+        self._refresh_workflow_node_inspector_by_id(workflow_id, task_id)
 
     def workflow_task_finished(
         self,
@@ -3029,21 +3116,53 @@ class MiraApp(App[None]):
         *,
         status: str = "DONE",
         error: str = "",
+        result: Any = None,
+        result_available: bool = False,
+        workflow_id: str = "",
     ) -> None:
-        """Freeze one native Workflow row at its terminal status."""
-        self.query_one(SubagentsPanel).finish_workflow_task(
+        """Freeze one native Workflow tree node at its terminal status."""
+        view = self.query_one(ChatLog).workflow_task_finished(
+            workflow_id,
             task_id,
             status=status,
             error=error,
+            result=result,
+            result_available=result_available,
+        )
+        self._refresh_workflow_node_inspector(view)
+
+    def workflow_finished(
+        self,
+        workflow_id: str = "",
+        *,
+        final_state: Any = None,
+        final_state_available: bool = False,
+    ) -> None:
+        """Complete the existing tree and expose its final state footer."""
+        self.query_one(ChatLog).workflow_finished(
+            workflow_id,
+            final_state,
+            available=final_state_available,
         )
 
-    def workflow_finished(self, _workflow_id: str = "") -> None:
-        """Leave completed Workflow rows visible for manual inspection."""
-        self.query_one(SubagentsPanel).finish_workflow()
+    def workflow_cancelled(self, workflow_id: str = "", *, error: str = "") -> None:
+        """Freeze active Workflow tree rows after cancellation or failure."""
+        self.query_one(ChatLog).workflow_cancelled(workflow_id, error)
 
-    def workflow_cancelled(self, _workflow_id: str = "", *, error: str = "") -> None:
-        """Stop active Workflow rows after cancellation or demo failure."""
-        self.query_one(SubagentsPanel).cancel_workflow(error)
+    def _refresh_workflow_node_inspector(self, view: Any) -> None:
+        if view is None:
+            return
+        inspector = self.query_one(Inspector)
+        if inspector.workflow_task_id == view.task_id:
+            inspector.open_workflow_node(view)
+
+    def _refresh_workflow_node_inspector_by_id(
+        self,
+        workflow_id: str,
+        task_id: str,
+    ) -> None:
+        view = self.query_one(ChatLog).workflow_task_view(workflow_id, task_id)
+        self._refresh_workflow_node_inspector(view)
 
     @on(SubagentSelected)
     def open_subagent_inspector(self, event: SubagentSelected) -> None:
@@ -3089,6 +3208,22 @@ class MiraApp(App[None]):
         inspector = self.query_one(Inspector)
         inspector.open_workflow_state(event.workflow_name, event.final_state)
         self._show_inspector(inspector, focus=False)
+
+    @on(WorkflowNodeSelected)
+    def open_workflow_node(self, event: WorkflowNodeSelected) -> None:
+        """Open one live Workflow node summary without changing its tree state."""
+        event.stop()
+        inspector = self.query_one(Inspector)
+        inspector.open_workflow_node(event.view)
+        self._show_inspector(inspector, focus=False)
+
+    @on(WorkflowAgentSelected)
+    def open_workflow_agent(self, event: WorkflowAgentSelected) -> None:
+        """Open a Workflow-owned agent in the ordinary full Inspector."""
+        event.stop()
+        inspector = self.query_one(Inspector)
+        if inspector.open(event.inspection_id):
+            self._show_inspector(inspector, focus=False)
 
     def _show_inspector(self, inspector: Inspector, *, focus: bool = True) -> None:
         """Reuse the established viewport and focus transition for live inspection."""
@@ -4478,6 +4613,7 @@ class MiraApp(App[None]):
         chat.tick_compaction()
         chat.tick_rubrics()
         chat.tick_tools()
+        chat.tick_workflows()
         try:
             self.query_one(StatusBar).tick()
         except NoMatches:

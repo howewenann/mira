@@ -1,4 +1,4 @@
-"""Deterministic Workflow inspection and HITL integration coverage."""
+"""Native Workflow agent inspection and HITL integration coverage."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, START, StateGraph
+from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.stream.transformers import TasksTransformer
 from langgraph.types import Command, interrupt
@@ -75,20 +75,13 @@ class RecordingInspectionCoordinator(SubagentInspectionCoordinator):
         super().__init__(store)
         self.starts: list[tuple[str, str, bool]] = []
 
-    def standalone_started(
+    def workflow_started(
         self,
         subagent: Any,
         title: str,
         task: str,
-        *,
-        inspection_type: str = "subagent",
     ) -> tuple[str, str, bool]:
-        started = super().standalone_started(
-            subagent,
-            title,
-            task,
-            inspection_type=inspection_type,
-        )
+        started = super().workflow_started(subagent, title, task)
         self.starts.append(started)
         return started
 
@@ -166,6 +159,42 @@ class WorkflowPhase2Model(BaseChatModel):
                 ],
             )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class StaticWorkflowModel(BaseChatModel):
+    """Return one deterministic response for nested-agent concurrency tests."""
+
+    _response: str = PrivateAttr()
+
+    def __init__(self, response: str) -> None:
+        super().__init__()
+        self._response = response
+
+    @property
+    def _llm_type(self) -> str:
+        return "workflow-static-test"
+
+    def bind_tools(
+        self,
+        _tools: Any,
+        *,
+        tool_choice: Any | None = None,
+        **kwargs: Any,
+    ) -> "StaticWorkflowModel":
+        del tool_choice, kwargs
+        return self
+
+    def _generate(
+        self,
+        _messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        del stop, run_manager, kwargs
+        return ChatResult(
+            generations=[ChatGeneration(message=AIMessage(content=self._response))]
+        )
 
 
 class WorkflowState(TypedDict):
@@ -273,7 +302,9 @@ async def run_pass(
             consume_workflow_inspections(
                 run.subgraphs,
                 inspection,
-                workflow.bind_inspection,
+                workflow.agent_started,
+                workflow.agent_waiting,
+                workflow.agent_finished,
             ),
             capture_output(run.output(), output),
         )
@@ -282,6 +313,110 @@ async def run_pass(
 
 
 class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_parallel_nodes_each_keep_parallel_agents_with_native_owner(self) -> None:
+        def agent(name: str, response: str) -> Any:
+            return create_sub_agent(
+                {
+                    "name": name,
+                    "description": f"Deterministic {name}",
+                    "system_prompt": "Respond once.",
+                    "model": StaticWorkflowModel(response),
+                    "tools": [],
+                }
+            )
+
+        agent_a = agent("researcher", "A complete")
+        agent_b = agent("critic", "B complete")
+        checker_a = agent("checker", "C complete")
+        checker_b = agent("checker", "D complete")
+        parent = StateGraph(MessagesState)
+
+        async def analyse(state: MessagesState) -> dict[str, Any]:
+            request = {"messages": list(state["messages"])}
+            left, right = await asyncio.gather(
+                agent_a.ainvoke(request),
+                agent_b.ainvoke(request),
+            )
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"{left['messages'][-1].content}; "
+                            f"{right['messages'][-1].content}"
+                        )
+                    )
+                ]
+            }
+
+        async def verify(state: MessagesState) -> dict[str, Any]:
+            request = {"messages": list(state["messages"])}
+            left, right = await asyncio.gather(
+                checker_a.ainvoke(request),
+                checker_b.ainvoke(request),
+            )
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"{left['messages'][-1].content}; "
+                            f"{right['messages'][-1].content}"
+                        )
+                    )
+                ]
+            }
+
+        parent.add_node("analyse", analyse)
+        parent.add_node("verify", verify)
+        parent.add_edge(START, "analyse")
+        parent.add_edge(START, "verify")
+        parent.add_edge("analyse", END)
+        parent.add_edge("verify", END)
+        frontend = RecordingFrontend()
+        store = LiveInspectionStore()
+        output = await execute_workflow(
+            parent.compile(),
+            {"messages": [{"role": "user", "content": "Compare."}]},
+            emitter=FrontendEmitter(frontend),
+            inspection=SubagentInspectionCoordinator(store),
+            workflow_id="parallel-agents",
+            workflow_name="parallel-agents",
+        )
+
+        workflow_events = [
+            event for event in frontend.events if isinstance(event, WorkflowEvent)
+        ]
+        root_starts = [
+            event for event in workflow_events if event.phase == "task_start"
+        ]
+        agent_starts = [
+            event for event in workflow_events if event.phase == "agent_start"
+        ]
+        agent_finishes = [
+            event for event in workflow_events if event.phase == "agent_finish"
+        ]
+        self.assertEqual(len(root_starts), 2)
+        self.assertEqual({event.step for event in root_starts}, {1})
+        self.assertEqual(len(agent_starts), 4)
+        self.assertEqual(len({event.agent_id for event in agent_starts}), 4)
+        self.assertEqual(
+            {event.task_id for event in agent_starts},
+            {event.task_id for event in root_starts},
+        )
+        self.assertEqual(
+            {
+                task_id: sum(event.task_id == task_id for event in agent_starts)
+                for task_id in {event.task_id for event in root_starts}
+            },
+            {event.task_id: 2 for event in root_starts},
+        )
+        self.assertEqual(len(agent_finishes), 4)
+        combined = " ".join(str(message.content) for message in output["messages"])
+        self.assertIn("A complete; B complete", combined)
+        self.assertIn("C complete; D complete", combined)
+        self.assertTrue(
+            all(store.get(event.agent_id).inspection_type == "subagent" for event in agent_starts)
+        )
+
     async def test_shared_executor_consumes_output_once_and_returns_native_state(self) -> None:
         graph = StateGraph(ResumeState)
         graph.add_node("done", lambda _state: {"result": ("native", {1, 2})})
@@ -338,7 +473,7 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(frontend.requests), 1)
                 self.assertIsInstance(frontend.requests[0], request_type)
 
-    async def test_interrupted_child_reuses_task_row_and_inspection_on_resume(self) -> None:
+    async def test_interrupted_child_reuses_task_and_agent_on_resume(self) -> None:
         frontend = RecordingFrontend()
         workflow = WorkflowCoordinator(FrontendEmitter(frontend), workflow_id="test")
         store = LiveInspectionStore()
@@ -357,9 +492,8 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(interrupts), 1)
         task = workflow.tasks[0]
         self.assertEqual(task.status, "WAITING")
-        first_inspection_id, first_row_id, first_start = inspection.starts[0]
-        self.assertEqual(task.task_id, first_row_id)
-        self.assertEqual(task.inspection_id, first_inspection_id)
+        first_inspection_id, owner_task_id, first_start = inspection.starts[0]
+        self.assertEqual(task.task_id, owner_task_id)
         self.assertTrue(first_start)
 
         interrupts, _output = await run_pass(
@@ -372,29 +506,39 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interrupts, [])
         self.assertEqual(len(workflow.tasks), 1)
         self.assertEqual(workflow.tasks[0].status, "DONE")
-        second_inspection_id, second_row_id, second_start = inspection.starts[1]
-        self.assertEqual(second_row_id, first_row_id)
+        second_inspection_id, second_owner_task_id, second_start = inspection.starts[1]
+        self.assertEqual(second_owner_task_id, owner_task_id)
         self.assertEqual(second_inspection_id, first_inspection_id)
         self.assertFalse(second_start)
 
-        phases = [
+        task_phases = [
             event.phase
             for event in frontend.events
-            if isinstance(event, WorkflowEvent) and event.task_id == task.task_id
+            if isinstance(event, WorkflowEvent)
+            and event.task_id == task.task_id
+            and event.phase.startswith("task_")
         ]
         self.assertEqual(
-            phases,
+            task_phases,
             [
                 "task_start",
-                "task_inspection",
                 "task_waiting",
                 "task_resume",
                 "task_finish",
             ],
         )
+        agent_events = [
+            event
+            for event in frontend.events
+            if isinstance(event, WorkflowEvent) and event.agent_id == first_inspection_id
+        ]
+        self.assertEqual(
+            [event.phase for event in agent_events],
+            ["agent_start", "agent_waiting", "agent_resume", "agent_finish"],
+        )
         transcript = store.get(first_inspection_id)
         assert transcript is not None
-        self.assertEqual(transcript.inspection_type, "workflow")
+        self.assertEqual(transcript.inspection_type, "subagent")
         self.assertEqual(transcript.status, "DONE")
         tool_calls = [
             event
@@ -407,7 +551,7 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if event.kind == "tool_result" and event.call_id == "approval-call"
         ]
         assistants = [event for event in transcript.events if event.kind == "assistant"]
-        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(len(tool_calls), 1, transcript.events)
         self.assertEqual(len(tool_results), 1)
         self.assertIn("APPROVED", tool_results[0].text)
         self.assertEqual(len(assistants), 1)
@@ -451,14 +595,21 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await consume_workflow_inspections(
             AsyncItems(children),
             inspection,
-            workflow.bind_inspection,
+            workflow.agent_started,
+            workflow.agent_waiting,
+            workflow.agent_finished,
         )
 
         self.assertEqual(
             [task.task_id for task in workflow.tasks],
             ["task-0", "task-1", "task-2"],
         )
-        inspection_ids = [task.inspection_id for task in workflow.tasks]
+        agent_starts = [
+            event
+            for event in frontend.events
+            if isinstance(event, WorkflowEvent) and event.phase == "agent_start"
+        ]
+        inspection_ids = [event.agent_id for event in agent_starts]
         self.assertEqual(len(set(inspection_ids)), 3)
         for index, inspection_id in enumerate(inspection_ids):
             transcript = store.get(inspection_id)

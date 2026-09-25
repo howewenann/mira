@@ -160,7 +160,11 @@ from ui.textual.widgets.session_history import (
 )
 from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.tool_bubble import TOOL_ARGS_MAX_ROWS, ToolArgumentTextArea, ToolBubble
-from ui.textual.widgets.workflow_bubble import WorkflowCompletionBubble
+from ui.textual.widgets.workflow_bubble import (
+    WorkflowAgentSelected,
+    WorkflowNodeSelected,
+    WorkflowTreeBubble,
+)
 
 
 PROMPT_BUTTON_FOCUS_BACKGROUND = Color.parse("#d2a957")
@@ -10565,8 +10569,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("MODEL", rendered)
             self.assertFalse(panel.query_one("#subagents-groups-column").display)
 
-    async def test_workflow_demo_uses_real_event_path_and_leaves_completed_rows(self) -> None:
-        """The hidden demo should drive the native coordinator into the shared panel."""
+    async def test_workflow_demo_builds_one_completed_tree_bubble(self) -> None:
+        """The hidden demo should build one incremental native execution tree."""
         app = make_app()
 
         with patch(
@@ -10582,67 +10586,41 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 panel = app.query_one(SubagentsPanel)
-                groups = panel.query_one("#subagents-groups", OptionList)
-                table = panel.query_one("#subagents-tasks", DataTable)
-                first_keys = set(panel._records)
-
-                self.assertTrue(panel.display)
-                self.assertIn("workflow", subagent_title_plain(panel))
-                self.assertIn("6/6 done", subagent_title_plain(panel))
-                self.assertIn("4 steps", subagent_title_plain(panel))
-                self.assertIn("Step 1", option_list_plain(groups))
-                self.assertIn("Step 2", option_list_plain(groups))
-                self.assertIn("Step 3", option_list_plain(groups))
-                self.assertIn("Step 4", option_list_plain(groups))
-                self.assertEqual(len(first_keys), 6)
+                bubbles = list(app.query(WorkflowTreeBubble))
+                self.assertEqual(len(bubbles), 1)
+                bubble = bubbles[0]
+                self.assertEqual(bubble.workflow_name, "workflow-demo")
+                self.assertEqual(len(bubble.task_views), 6)
+                self.assertEqual(set(bubble.step_nodes), {1, 2, 3, 4})
+                self.assertEqual(
+                    [view.name for view in bubble.task_views.values()].count("worker"),
+                    3,
+                )
+                self.assertEqual(
+                    [view.name for view in bubble.task_views.values()].count("review"),
+                    2,
+                )
                 self.assertTrue(
-                    all(record.status == "DONE" for record in panel._records.values())
+                    all(view.status == "DONE" for view in bubble.task_views.values())
                 )
-                workers = [
-                    record for record in panel._records.values() if record.name == "worker"
-                ]
-                reviews = [
-                    record for record in panel._records.values() if record.name == "review"
-                ]
-                self.assertEqual(len(workers), 3)
-                self.assertEqual({record.group_key for record in workers}, {"workflow-step-2"})
-                self.assertEqual(len(reviews), 2)
-                self.assertEqual(
-                    {record.group_key for record in reviews},
-                    {"workflow-step-3", "workflow-step-4"},
+                self.assertTrue(
+                    all(
+                        view.tree_node is not None and not view.tree_node.allow_expand
+                        for view in bubble.task_views.values()
+                    )
                 )
-                frozen = [record.elapsed_seconds() for record in panel._records.values()]
-                await asyncio.sleep(0.02)
-                self.assertEqual(
-                    frozen,
-                    [record.elapsed_seconds() for record in panel._records.values()],
-                )
-                self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
-                self.assertEqual(
-                    str(panel.query_one("#subagents-groups-label", Static).render()),
-                    "STEPS",
-                )
-                self.assertEqual(
-                    str(panel.query_one("#subagents-task-heading", Static).render()),
-                    "NODE",
-                )
-
-                groups.highlighted = 1
-                groups.action_select()
-                await pilot.pause()
-                parallel = data_table_plain(table)
-                self.assertEqual(parallel.count("worker"), 3)
-                self.assertEqual(parallel.count("DONE"), 3)
+                self.assertTrue(bubble.final_button.display)
+                self.assertFalse(panel._records)
 
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/workflow-demo"))
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
-                self.assertEqual(len(panel._records), 6)
-                self.assertTrue(first_keys.isdisjoint(panel._records))
+                self.assertEqual(len(list(app.query(WorkflowTreeBubble))), 2)
+                self.assertFalse(panel._records)
 
-    async def test_workflow_phase2_demo_uses_inspector_and_existing_hitl_ui(self) -> None:
-        """The hidden Phase 2 command should use the real panel and prompt flow."""
+    async def test_workflow_phase2_demo_uses_tree_agent_inspector_and_hitl(self) -> None:
+        """Agent leaves and resumed tasks stay attached to one Workflow tree."""
         app = make_app()
 
         async def respond(_state: MessagesState) -> dict[str, Any]:
@@ -10671,20 +10649,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 panel = app.query_one(SubagentsPanel)
-                agent_record = next(
-                    record for record in panel._records.values() if record.name == "agent"
+                bubble = app.query_one(WorkflowTreeBubble)
+                agent_task = next(
+                    view for view in bubble.task_views.values() if view.name == "agent"
                 )
-                approval_record = next(
-                    record
-                    for record in panel._records.values()
-                    if record.name == "approval"
+                approval_task = next(
+                    view for view in bubble.task_views.values() if view.name == "approval"
                 )
-                self.assertEqual(len(panel._records), 2)
-                self.assertEqual(agent_record.status, "DONE")
-                self.assertTrue(agent_record.inspection_id)
-                self.assertEqual(approval_record.status, "WAITING")
-                self.assertFalse(approval_record.inspection_id)
-                approval_key = approval_record.key
+                self.assertFalse(panel._records)
+                self.assertEqual(agent_task.status, "DONE")
+                self.assertEqual(len(agent_task.agents), 1)
+                self.assertEqual(approval_task.status, "WAITING")
+                approval_node = approval_task.tree_node
 
                 await pilot.press("1")
                 await wait_until(lambda: app.turn_worker is None)
@@ -10697,21 +10673,24 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "Reply in one short sentence confirming that the Workflow demo agent ran."
                 ),
             )
-            self.assertIs(panel._records[approval_key], approval_record)
-            self.assertEqual(approval_record.status, "DONE")
-            self.assertEqual(len(panel._records), 2)
-            self.assertEqual(len(chat.children), initial_chat_children)
+            self.assertIs(approval_task.tree_node, approval_node)
+            self.assertEqual(approval_task.status, "DONE")
+            self.assertEqual(len(bubble.task_views), 2)
+            self.assertFalse(panel._records)
+            self.assertGreater(len(chat.children), initial_chat_children)
 
-            panel.post_message(SubagentRunTable.RowClicked(agent_record.key))
+            bubble.post_message(
+                WorkflowAgentSelected(agent_task.agents[0].inspection_id)
+            )
             await pilot.pause()
             inspector = app.query_one(Inspector)
             self.assertEqual(
                 inspector.inspection_id,
-                agent_record.inspection_id,
+                agent_task.agents[0].inspection_id,
             )
             self.assertEqual(
                 renderable_plain(inspector.query_one("#inspector-title")),
-                "Inspector · workflow · workflow-demo-agent",
+                "Inspector · subagent · workflow-demo-agent",
             )
             inspector.post_message(Inspector.Closed())
             await pilot.pause()
@@ -10760,7 +10739,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
-                bubbles = list(app.query(WorkflowCompletionBubble))
+                bubbles = list(app.query(WorkflowTreeBubble))
                 self.assertTrue(
                     bubbles,
                     [
@@ -10773,10 +10752,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bubble.workflow_name, "demo")
                 self.assertEqual(bubble.final_state["repeat"], 3)
                 self.assertEqual(len(bubble.final_state["lines"]), 3)
-                self.assertEqual(str(bubble.query_one(Button).label), "Final state")
+                self.assertEqual(str(bubble.final_button.label), "Final state")
                 factory.assert_called_once_with(app.application.workflows)
 
-                bubble.query_one(Button).press()
+                user_messages = [
+                    child
+                    for child in app.query_one(ChatLog).children
+                    if "user" in child.classes and "hello world" in renderable_plain(child)
+                ]
+                self.assertEqual(len(user_messages), 1)
+
+                bubble.final_button.press()
                 await wait_until(
                     lambda: app.query_one(
                         "#transcript-viewport", ContentSwitcher
@@ -10792,7 +10778,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(inspector.query_one("#inspector-final-state-actions").display)
                 self.assertEqual(
                     renderable_plain(inspector.query_one("#inspector-title")),
-                    "Workflow · demo · Final state",
+                    "Inspector · workflow · demo · Final state",
                 )
                 self.assertTrue(
                     any(
@@ -10818,7 +10804,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(switcher.current, "chat-log")
                 self.assertFalse(inspector.query_one("#inspector-final-state-actions").display)
-                bubble.query_one(Button).press()
+                bubble.final_button.press()
                 await wait_until(lambda: switcher.current == "inspector")
                 await pilot.pause()
                 self.assertEqual(switcher.current, "inspector")
@@ -10830,13 +10816,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
-                completed = list(app.query(WorkflowCompletionBubble))
+                completed = list(app.query(WorkflowTreeBubble))
                 self.assertEqual(len(completed), 2)
                 self.assertIsNot(completed[0].final_state, completed[1].final_state)
                 factory.assert_called_with(app.application.workflows)
                 self.assertEqual(factory.call_count, 2)
 
-    async def test_workflow_completion_retains_non_json_state_without_session_event(self) -> None:
+    async def test_workflow_tree_retains_non_json_final_state_without_session_event(self) -> None:
         app = make_app()
         final_state = {
             "nested": [SimpleNamespace(path=Path("result.txt")), (1, {2, 3})]
@@ -10845,13 +10831,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             session_before = deepcopy(app.session)
             chat = app.query_one(ChatLog)
-            chat.workflow_completed("native", final_state)
+            bubble = chat.workflow_started("native-id", "native")
+            chat.workflow_finished("native-id", final_state, available=True)
             await pilot.pause()
 
-            bubble = app.query_one(WorkflowCompletionBubble)
+            self.assertIs(bubble, app.query_one(WorkflowTreeBubble))
             self.assertIs(bubble.final_state, final_state)
             self.assertEqual(app.session, session_before)
-            bubble.query_one(Button).press()
+            bubble.final_button.press()
             await pilot.pause()
 
             inspector = app.query_one(Inspector)
@@ -10876,7 +10863,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(copy_button.label), "Copy")
             self.assertEqual(app.copy_to_clipboard.call_count, 2)
 
-    async def test_failed_discovered_workflow_has_no_completion_bubble(self) -> None:
+    async def test_failed_discovered_workflow_freezes_tree_without_final_state(self) -> None:
         source = '''
 from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
@@ -10910,12 +10897,16 @@ def workflow(mira):
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
-                self.assertEqual(list(app.query(WorkflowCompletionBubble)), [])
-                panel = app.query_one(SubagentsPanel)
-                self.assertTrue(panel._records)
+                bubbles = list(app.query(WorkflowTreeBubble))
+                self.assertEqual(len(bubbles), 1)
+                bubble = bubbles[0]
+                self.assertEqual(bubble.status, "ERROR")
+                self.assertFalse(bubble.final_button.display)
+                self.assertTrue(bubble.task_views)
                 self.assertTrue(
-                    all(record.status == "ERROR" for record in panel._records.values())
+                    all(view.status == "ERROR" for view in bubble.task_views.values())
                 )
+                self.assertFalse(app.query_one(SubagentsPanel)._records)
                 self.assertTrue(
                     any(
                         "workflow failure error" in renderable_plain(child)
@@ -10923,7 +10914,7 @@ def workflow(mira):
                     )
                 )
 
-    async def test_cancelled_discovered_workflow_restores_prompt_without_completion(self) -> None:
+    async def test_cancelled_discovered_workflow_freezes_tree_and_restores_prompt(self) -> None:
         source = '''
 import asyncio
 from typing import TypedDict
@@ -10956,68 +10947,100 @@ def workflow(mira):
                 await app.submit_prompt(
                     PromptBox.Submitted(prompt, "/workflow__waiting value=1")
                 )
-                panel = app.query_one(SubagentsPanel)
-                await wait_until(lambda: bool(panel._records))
+                await wait_until(
+                    lambda: bool(list(app.query(WorkflowTreeBubble)))
+                    and bool(list(app.query(WorkflowTreeBubble))[0].task_views)
+                )
 
                 app._cancel_turn()
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
-                self.assertEqual(list(app.query(WorkflowCompletionBubble)), [])
-                self.assertTrue(all(record.status == "CANCELLED" for record in panel._records.values()))
+                bubble = app.query_one(WorkflowTreeBubble)
+                self.assertEqual(bubble.status, "CANCELLED")
+                self.assertFalse(bubble.final_button.display)
+                self.assertTrue(
+                    all(
+                        view.status == "CANCELLED"
+                        for view in bubble.task_views.values()
+                    )
+                )
+                self.assertFalse(app.query_one(SubagentsPanel)._records)
                 self.assertFalse(app.busy)
                 self.assertFalse(prompt.disabled)
 
-    async def test_workflow_rows_open_only_bound_inspections_and_restore_mode(self) -> None:
-        """Only agent-backed Workflow rows should open the existing Inspector."""
+    async def test_workflow_tree_opens_node_and_agent_inspectors(self) -> None:
+        """Task text opens a summary; agent text opens the ordinary Inspector."""
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            app.workflow_started("demo")
-            app.workflow_task_started("task-1", "prepare", 1)
-            app.workflow_task_finished("task-1", "prepare", 1)
-            app.workflow_finished("demo")
-            await pilot.pause()
-
-            panel = app.query_one(SubagentsPanel)
-            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
-            panel.post_message(SubagentRunTable.RowClicked("task-1"))
-            await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
-
+            app.workflow_started("demo-id", "demo")
+            app.workflow_task_started(
+                "task-1", "prepare", 1, {"topic": "isopods"}, workflow_id="demo-id"
+            )
             inspection_id = app.live_inspections.allocate_id("task-1")
             app.live_inspections.start(
                 inspection_id,
                 "workflow-demo-agent",
                 "Run the demo.",
-                inspection_type="workflow",
+                inspection_type="subagent",
             )
-            app.workflow_task_inspection(
+            app.workflow_agent_started(
+                "task-1",
+                "workflow-demo-agent",
+                inspection_id,
+                task_input="Run the demo.",
+                workflow_id="demo-id",
+            )
+            app.workflow_agent_finished(
+                "task-1",
+                "workflow-demo-agent",
+                inspection_id,
+                result="Agent summary",
+                workflow_id="demo-id",
+            )
+            app.workflow_task_finished(
                 "task-1",
                 "prepare",
                 1,
-                inspection_id,
+                result={"brief": "ready"},
+                result_available=True,
+                workflow_id="demo-id",
             )
-            panel.post_message(SubagentRunTable.RowClicked("task-1"))
+            app.workflow_finished(
+                "demo-id",
+                final_state={"brief": "ready"},
+                final_state_available=True,
+            )
+            await pilot.pause()
+
+            bubble = app.query_one(WorkflowTreeBubble)
+            view = bubble.task_views["task-1"]
+            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+            bubble.post_message(WorkflowNodeSelected(view))
             await pilot.pause()
             self.assertEqual(switcher.current, "inspector")
             self.assertEqual(
                 renderable_plain(app.query_one("#inspector-title")),
-                "Inspector · workflow · workflow-demo-agent",
+                "Inspector · workflow · prepare",
             )
+            node_log = app.query_one(Inspector).query_one("#inspector-log", ChatLog)
+            node_text = [renderable_plain(child) for child in node_log.children]
+            self.assertIn("isopods", node_text[0])
+            self.assertTrue(any("Agent summary" in text for text in node_text))
+            self.assertIn("ready", node_text[-1])
             app.query_one(Inspector).post_message(Inspector.Closed())
             await pilot.pause()
             self.assertEqual(switcher.current, "chat-log")
 
-            app.workflow_started("cancel-demo")
-            app.workflow_task_started("task-cancel", "slow_node", 1)
-            app.workflow_cancelled("cancel-demo")
+            bubble.post_message(WorkflowAgentSelected(inspection_id))
             await pilot.pause()
-            self.assertEqual(panel._records["task-cancel"].status, "CANCELLED")
-            self.assertIsNotNone(panel._records["task-cancel"].duration_ms)
-            self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
+            self.assertEqual(app.query_one(Inspector).inspection_id, inspection_id)
+            app.query_one(Inspector).post_message(Inspector.Closed())
+            await pilot.pause()
 
+            panel = app.query_one(SubagentsPanel)
             app.subagent_started("general-purpose [new]", "inspect README", row_id="subagent-1")
             await pilot.pause()
 
@@ -11033,98 +11056,223 @@ def workflow(mira):
                 "TASK",
             )
 
-    async def test_workflow_waiting_resumes_and_finishes_same_timed_row(self) -> None:
+    async def test_workflow_waiting_resumes_and_finishes_same_tree_node(self) -> None:
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            app.workflow_started("hitl")
-            app.workflow_task_started("approval-1", "approval", 2)
-            panel = app.query_one(SubagentsPanel)
-            record = panel._records["approval-1"]
-            record.started = 10.0
+            app.workflow_started("hitl-id", "hitl")
+            app.workflow_task_started(
+                "approval-1", "approval", 2, None, workflow_id="hitl-id"
+            )
+            bubble = app.query_one(WorkflowTreeBubble)
+            view = bubble.task_views["approval-1"]
+            tree_node = view.tree_node
+            view.started_at = 10.0
 
             with patch(
-                "ui.textual.widgets.subagent_panel.time.monotonic",
+                "ui.textual.widgets.workflow_bubble.time.monotonic",
                 return_value=15.0,
             ):
-                app.workflow_task_waiting("approval-1", "approval", 2)
-                panel.tick()
-                self.assertEqual(record.elapsed_seconds(), 5.0)
+                app.workflow_task_waiting(
+                    "approval-1", "approval", 2, workflow_id="hitl-id"
+                )
             await pilot.pause()
 
-            self.assertIs(panel._records["approval-1"], record)
-            self.assertEqual(record.status, "WAITING")
-            self.assertTrue(panel.has_running_subagents())
-            self.assertFalse(panel.query_one("#subagents-panel-close", Button).display)
-            self.assertIn(
-                "WAITING",
-                data_table_plain(panel.query_one("#subagents-tasks", DataTable)),
+            self.assertIs(view.tree_node, tree_node)
+            self.assertEqual(view.status, "WAITING")
+            self.assertTrue(tree_node.allow_expand)
+
+            app.workflow_task_resumed(
+                "approval-1", "approval", 2, workflow_id="hitl-id"
             )
+            self.assertIs(view.tree_node, tree_node)
+            self.assertEqual(view.status, "RUNNING")
+            self.assertEqual(view.started_at, 10.0)
 
             with patch(
-                "ui.textual.widgets.subagent_panel.time.monotonic",
-                return_value=20.0,
-            ):
-                app.workflow_task_resumed("approval-1", "approval", 2)
-            self.assertIs(panel._records["approval-1"], record)
-            self.assertEqual(record.status, "RUNNING")
-            self.assertEqual(record.started, 10.0)
-
-            with patch(
-                "ui.textual.widgets.subagent_panel.time.monotonic",
+                "ui.textual.widgets.workflow_bubble.time.monotonic",
                 return_value=25.0,
             ):
-                app.workflow_task_finished("approval-1", "approval", 2)
+                app.workflow_task_finished(
+                    "approval-1",
+                    "approval",
+                    2,
+                    result=None,
+                    result_available=True,
+                    workflow_id="hitl-id",
+                )
             await pilot.pause()
 
-            self.assertIs(panel._records["approval-1"], record)
-            self.assertEqual(record.status, "DONE")
-            self.assertEqual(record.elapsed_seconds(), 15.0)
-            self.assertTrue(panel.query_one("#subagents-panel-close", Button).display)
+            self.assertIs(view.tree_node, tree_node)
+            self.assertEqual(view.status, "DONE")
+            self.assertEqual(view.duration_ms, 15_000)
+            self.assertFalse(tree_node.allow_expand)
+            self.assertFalse(app.query_one(SubagentsPanel)._records)
 
-    async def test_same_name_workflow_rows_select_their_own_inspections(self) -> None:
+    async def test_parallel_tasks_keep_multiple_agent_leaves_and_inspections(self) -> None:
         app = make_app()
 
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            app.workflow_started("parallel")
-            for index in range(3):
-                task_id = f"worker-{index}"
-                inspection_id = app.live_inspections.allocate_id(task_id)
-                app.live_inspections.start(
-                    inspection_id,
-                    "agent",
-                    f"request {index}",
-                    inspection_type="workflow",
-                )
-                app.workflow_task_started(task_id, "agent", 1)
-                app.workflow_task_inspection(
+            app.workflow_started("parallel-id", "parallel")
+            inspection_ids: list[str] = []
+            for task_index in range(2):
+                task_id = f"task-{task_index}"
+                app.workflow_task_started(
                     task_id,
-                    "agent",
+                    "analyse" if task_index == 0 else "verify",
                     1,
-                    inspection_id,
+                    {"task": task_index},
+                    workflow_id="parallel-id",
                 )
+                for agent_index in range(2):
+                    inspection_id = app.live_inspections.allocate_id(
+                        f"{task_id}-agent-{agent_index}"
+                    )
+                    inspection_ids.append(inspection_id)
+                    app.live_inspections.start(
+                        inspection_id,
+                        f"agent-{agent_index}",
+                        f"request {task_index}:{agent_index}",
+                        inspection_type="subagent",
+                    )
+                    app.workflow_agent_started(
+                        task_id,
+                        f"agent-{agent_index}",
+                        inspection_id,
+                        task_input=f"request {task_index}:{agent_index}",
+                        workflow_id="parallel-id",
+                    )
+                    app.workflow_agent_finished(
+                        task_id,
+                        f"agent-{agent_index}",
+                        inspection_id,
+                        result=f"response {task_index}:{agent_index}",
+                        workflow_id="parallel-id",
+                    )
             await pilot.pause()
 
-            panel = app.query_one(SubagentsPanel)
-            panel.post_message(SubagentRunTable.RowClicked("worker-1"))
-            await pilot.pause()
-
-            inspector = app.query_one(Inspector)
+            bubble = app.query_one(WorkflowTreeBubble)
+            self.assertEqual(len(bubble.step_nodes), 1)
+            self.assertEqual(len(bubble.task_views), 2)
             self.assertEqual(
-                inspector.inspection_id,
-                panel._records["worker-1"].inspection_id,
+                [len(view.agents) for view in bubble.task_views.values()],
+                [2, 2],
             )
-            self.assertNotEqual(
-                inspector.inspection_id,
-                panel._records["worker-0"].inspection_id,
+            self.assertTrue(
+                all(view.status == "RUNNING" for view in bubble.task_views.values())
             )
-            self.assertNotEqual(
-                inspector.inspection_id,
-                panel._records["worker-2"].inspection_id,
+            self.assertFalse(app.query_one(SubagentsPanel)._records)
+
+            bubble.post_message(WorkflowAgentSelected(inspection_ids[2]))
+            await pilot.pause()
+            inspector = app.query_one(Inspector)
+            self.assertEqual(inspector.inspection_id, inspection_ids[2])
+            self.assertNotEqual(inspector.inspection_id, inspection_ids[0])
+
+    async def test_workflow_tree_selection_and_space_keep_native_semantics(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.workflow_started("interaction-id", "interaction")
+            app.workflow_task_started(
+                "task-1", "analyse", 1, {"value": 1}, workflow_id="interaction-id"
+            )
+            app.workflow_agent_started(
+                "task-1",
+                "researcher",
+                "inspection-1",
+                task_input="research",
+                workflow_id="interaction-id",
+            )
+            await pilot.pause()
+
+            bubble = app.query_one(WorkflowTreeBubble)
+            tree = bubble.workflow_tree
+            step_node = bubble.step_nodes[1]
+            task_node = bubble.task_views["task-1"].tree_node
+            assert task_node is not None
+            self.assertFalse(tree.auto_expand)
+
+            tree.select_node(step_node)
+            tree.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertTrue(step_node.is_expanded)
+            self.assertEqual(
+                app.query_one("#transcript-viewport", ContentSwitcher).current,
+                "chat-log",
             )
 
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertFalse(step_node.is_expanded)
+            await pilot.press("space")
+            await pilot.pause()
+            self.assertTrue(step_node.is_expanded)
+
+            tree.select_node(task_node)
+            was_expanded = task_node.is_expanded
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(task_node.is_expanded, was_expanded)
+            self.assertEqual(
+                app.query_one("#transcript-viewport", ContentSwitcher).current,
+                "inspector",
+            )
+
+    async def test_workflow_status_column_stays_aligned_after_resize(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            app.workflow_started("align-id", "alignment")
+            app.workflow_task_started(
+                "task-1",
+                "a very long analysis node label",
+                1,
+                {},
+                workflow_id="align-id",
+            )
+            app.workflow_agent_started(
+                "task-1",
+                "researcher",
+                "align-agent",
+                workflow_id="align-id",
+            )
+            app.workflow_agent_finished(
+                "task-1",
+                "researcher",
+                "align-agent",
+                result="done",
+                workflow_id="align-id",
+            )
+            app.workflow_task_finished(
+                "task-1",
+                "analyse",
+                1,
+                result={},
+                result_available=True,
+                workflow_id="align-id",
+            )
+            await pilot.pause()
+
+            for width in (160, 120):
+                await pilot.resize_terminal(width, 30)
+                await pilot.pause()
+                lines = [
+                    line
+                    for line in compositor_plain(app).splitlines()
+                    if "Completed in" in line
+                ]
+                self.assertGreaterEqual(len(lines), 2)
+                self.assertEqual(
+                    len({line.index("Completed in") for line in lines}),
+                    1,
+                    lines,
+                )
     def test_workflow_demo_command_stays_hidden(self) -> None:
         """The internal demo command must not become a discoverable public command."""
         self.assertNotIn("/workflow-demo", dict(command_help_entries()))

@@ -1703,28 +1703,27 @@ same enriched spans. Start once with pre-existing `LANGSMITH_TRACING` and
 `LANGSMITH_TRACING_MODE` values; disable or reload tracing and confirm both
 original values are restored.
 
-## Native Workflow Panel Demo (Phase 1)
+## Native Workflow Tree Demo (Phase 1)
 
 Use a normal Textual MIRA session. No configured model is required for this
 deterministic internal demo.
 
-1. Enter the hidden command `/workflow-demo`. Expected: the existing bottom
-   panel opens as `workflow`, its left heading is `STEPS`, and its right heading
-   is `NODE`.
-2. Watch the run complete. Expected: `prepare` runs in Step 1; three separate
-   `worker` rows run concurrently in Step 2 and finish in a different order;
-   and `review` runs in Step 3, then loops once as a new `review` row in Step 4.
-   Status icons and elapsed clocks animate through the existing panel timer
-   without transcript bubbles or Inspector changes.
-3. After completion, select each Step with the mouse. Expected: all six rows
-   are DONE with frozen durations, the three same-name Step 2 workers remain
-   separate, the two same-name reviews appear in their respective later Steps,
-   the title reports `6/6 done` and `4 steps`, the panel remains expanded, and
-   its close button is available. Clicking a node row does not open Inspector.
-4. Run `/workflow-demo` again. Expected: the preceding Workflow rows are
-   replaced rather than accumulated. Then start an ordinary subagent turn;
-   expected: the same panel switches back to its unchanged Subagents mode and
-   no Workflow rows remain.
+1. Enter the hidden command `/workflow-demo`. Expected: one `you` payload bubble
+   is followed by one main-chat bubble titled `workflow - workflow-demo`. The
+   bottom Subagents panel does not open for these Workflow tasks.
+2. Watch the tree grow. Expected: `prepare` runs in Step 1; three distinct
+   same-name `worker` tasks run concurrently beneath Step 2; and `review` runs
+   in Step 3, then loops once as a new task beneath Step 4. Status and elapsed
+   time use ToolBubble vocabulary and align in one right-hand column.
+3. After completion, confirm all six tasks show frozen completion durations.
+   Pure-Python terminal tasks have no meaningless disclosure arrow. Click a Step
+   or task disclosure glyph to collapse/expand it; click Step text to select only;
+   click task text to open its Input state and Result bubbles without toggling.
+   With a parent selected, Space uses the native Tree expand/collapse behavior.
+4. Run `/workflow-demo` again. Expected: a second independent Workflow tree is
+   appended, while the first remains readable. Then start an ordinary subagent
+   turn; expected: it still uses the unchanged bottom Subagents panel and does
+   not add a duplicate leaf to either Workflow tree.
 5. Open `/help` and type `/workflow` into autocomplete. Expected: the internal
    demo command is absent from both surfaces.
 
@@ -1732,20 +1731,19 @@ deterministic internal demo.
 
 Use a normal Textual MIRA session with a configured model.
 
-1. Enter the hidden command `/workflow-demo-phase2`. Expected: the existing
-   Workflow panel appears with an `agent` row in Step 1. No internal model or
-   tool nodes appear as additional Workflow rows.
-2. Click `agent`. Expected: the existing Inspector opens as
-   `Inspector · workflow · workflow-demo-agent` and shows the real agent's
-   request and assistant activity. Close Inspector and confirm the normal chat
-   viewport returns without a synthetic final assistant message.
-3. Watch the deterministic `approval` row in Step 2. Expected: the same row
-   changes from RUNNING to WAITING, its elapsed wall clock continues, it does
-   not show a running spinner, and the panel cannot be closed.
+1. Enter the hidden command `/workflow-demo-phase2`. Expected: one Workflow tree
+   appears. Step 1 contains the native `agent` task and its observed
+   `workflow-demo-agent` leaf; no internal model/tool nodes become tree entries.
+2. Click the `agent` task text. Expected: `Inspector · workflow · agent` opens
+   with Input state, a read-only subagent summary, and Result bubbles. Close it,
+   then click the agent leaf. Expected: the ordinary
+   `Inspector · subagent · workflow-demo-agent` opens with the full live agent
+   transcript. Closing either returns to the same expanded tree.
+3. Watch `approval` in Step 2. Expected: the same tree node changes from Running
+   to Waiting, its elapsed wall clock continues, and Waiting has no spinner.
 4. Answer the existing MIRA ask-user prompt. Expected: the same `approval` row
-   changes from WAITING to RUNNING to DONE without changing Step, task identity,
-   or visible row. No duplicate approval row appears, and completed rows remain
-   visible.
+   changes from Waiting to Running to Completed without changing Step, native
+   task identity, or TreeNode. No duplicate approval node or empty Result appears.
 5. Run `/workflow-demo` again. Expected: the unchanged Phase 1 sequence remains
    `prepare`, three concurrent Step 2 `worker` rows, and two later `review`
    rows in Steps 3 and 4. Confirm both hidden demo commands remain absent from
@@ -1848,12 +1846,14 @@ model.
 2. Start the real MIRA TUI, or run `/reload` if it is already open.
 3. Run `/workflows`. Expected: the list includes
    `/workflow__demo topic=<str> [repeat=<int>]`.
-4. Run `/workflow__demo topic="hello world" repeat=3`. Expected: the existing
-   Workflow panel shows `prepare` and `finish` in normal Steps and completes.
-5. Confirm chat receives only a compact `Workflow demo completed` bubble with a
-   `Final state` action. No full state is dumped into chat.
+4. Run `/workflow__demo topic="hello world" repeat=3`. Expected: one normal
+   `you` bubble pretty-prints the validated payload exactly once, followed by one
+   tree bubble titled `workflow - demo`; `prepare` and `finish` appear in Steps.
+5. Confirm the completed tree's own footer contains `Final state` and overall
+   completion timing. No separate completion card or full state dump appears.
 6. Open `Final state`. Expected: the existing Inspector/context switcher opens
-   with title `Workflow · demo · Final state` and a pretty-printed state that
+   with title `Inspector · workflow · demo · Final state` and a normal
+   pretty-printed value bubble containing a state that
    contains three lines plus the joined result.
 7. Press `Copy`. Expected: `Copy` changes to `Copied`, returns to `Copy`, and the
    full pretty-printed state is on the clipboard.

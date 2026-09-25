@@ -211,7 +211,9 @@ async def consume_subagent(
 async def consume_workflow_inspections(
     subagents: Any,
     inspection: SubagentInspectionCoordinator,
-    bind_inspection: Callable[[str, str], object],
+    agent_started: Callable[..., object],
+    agent_waiting: Callable[..., object],
+    agent_finished: Callable[..., object],
     *,
     title: str = "",
 ) -> None:
@@ -224,7 +226,9 @@ async def consume_workflow_inspections(
                     _consume_workflow_inspection(
                         subagent,
                         inspection,
-                        bind_inspection,
+                        agent_started,
+                        agent_waiting,
+                        agent_finished,
                         title=title,
                     )
                 )
@@ -243,11 +247,13 @@ async def consume_workflow_inspections(
 async def _consume_workflow_inspection(
     subagent: Any,
     inspection: SubagentInspectionCoordinator,
-    bind_inspection: Callable[[str, str], object],
+    agent_started: Callable[..., object],
+    agent_waiting: Callable[..., object],
+    agent_finished: Callable[..., object],
     *,
     title: str = "",
 ) -> None:
-    """Capture one native Workflow child using standalone inspection identity."""
+    """Capture one native Workflow child using ordinary subagent inspection."""
     store = inspection.store
     inspection_title = str(
         title
@@ -256,14 +262,19 @@ async def _consume_workflow_inspection(
         or "agent"
     )
     task_input = str(getattr(subagent, "task_input", "") or "")
-    inspection_id, row_id, _first_start = inspection.standalone_started(
+    inspection_id, row_id, first_start = inspection.workflow_started(
         subagent,
         inspection_title,
         task_input,
-        inspection_type="workflow",
     )
     if row_id and inspection_id:
-        bind_inspection(row_id, inspection_id)
+        agent_started(
+            row_id,
+            inspection_id,
+            inspection_title,
+            task_input,
+            resumed=not first_start,
+        )
 
     capture = SubagentInspectionCapture(store, inspection_id)
     try:
@@ -278,13 +289,39 @@ async def _consume_workflow_inspection(
         )
     except asyncio.CancelledError:
         capture.fail("", status="CANCELLED")
+        if row_id and inspection_id:
+            agent_finished(
+                row_id,
+                inspection_id,
+                inspection_title,
+                status="CANCELLED",
+            )
         raise
     except Exception as exc:
         message = f"error: {exc}"
         capture.fail(message, final_response=message)
+        if row_id and inspection_id:
+            agent_finished(
+                row_id,
+                inspection_id,
+                inspection_title,
+                status="ERROR",
+                error=message,
+            )
         return
-    if str(getattr(subagent, "status", "") or "") != "interrupted":
-        capture.ensure_final_response(str(result))
+    if str(getattr(subagent, "status", "") or "") == "interrupted":
+        if row_id and inspection_id:
+            agent_waiting(row_id, inspection_id, inspection_title)
+        return
+    capture.ensure_final_response(str(result))
+    if row_id and inspection_id:
+        agent_finished(
+            row_id,
+            inspection_id,
+            inspection_title,
+            status="DONE",
+            result=str(result),
+        )
 
 
 async def consume_eval_inspection(

@@ -12,6 +12,7 @@ from itertools import count
 from typing import Any
 
 from rich.markup import escape
+from rich.pretty import Pretty
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -41,7 +42,11 @@ from ui.textual.splash import loading_splash_text, splash_text
 from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.mcp_activity import MCPActivityCell
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
-from ui.textual.widgets.workflow_bubble import WorkflowCompletionBubble
+from ui.textual.widgets.workflow_bubble import (
+    WorkflowAgentView,
+    WorkflowTaskView,
+    WorkflowTreeBubble,
+)
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
@@ -103,6 +108,7 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_id: dict[str, str] = {}
         self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
         self._subagent_aliases: dict[str, deque[str]] = {}
+        self._workflow_bubbles: dict[str, WorkflowTreeBubble] = {}
 
     def on_click(self, event: Click) -> None:
         """Move keyboard focus to the transcript when its content is clicked."""
@@ -237,11 +243,183 @@ class ChatLog(VerticalScroll):
         """Append a completed assistant message."""
         self._add_assistant_block(text, created_at=created_at)
 
-    def workflow_completed(self, name: str, final_state: Any) -> None:
-        """Append one process-local Workflow completion feature bubble."""
+    def workflow_started(
+        self,
+        workflow_id: str,
+        workflow_name: str,
+    ) -> WorkflowTreeBubble:
+        """Mount one transcript-owned live Workflow tree."""
         self.finish_stream_phase()
-        self.mount(WorkflowCompletionBubble(name, final_state))
+        bubble = WorkflowTreeBubble(workflow_id, workflow_name)
+        self._workflow_bubbles[workflow_id] = bubble
+        self.mount(bubble)
         self._scroll_to_end()
+        return bubble
+
+    def workflow_task_started(
+        self,
+        workflow_id: str,
+        task_id: str,
+        name: str,
+        step: int,
+        input_state: Any,
+    ) -> WorkflowTaskView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is None:
+            return None
+        view = bubble.start_task(task_id, name, step, input_state)
+        self._scroll_to_end()
+        return view
+
+    def workflow_task_waiting(
+        self,
+        workflow_id: str,
+        task_id: str,
+    ) -> WorkflowTaskView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        return bubble.wait_task(task_id) if bubble is not None else None
+
+    def workflow_task_resumed(
+        self,
+        workflow_id: str,
+        task_id: str,
+    ) -> WorkflowTaskView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        return bubble.resume_task(task_id) if bubble is not None else None
+
+    def workflow_task_finished(
+        self,
+        workflow_id: str,
+        task_id: str,
+        *,
+        status: str,
+        error: str,
+        result: Any,
+        result_available: bool,
+    ) -> WorkflowTaskView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is None:
+            return None
+        return bubble.finish_task(
+            task_id,
+            status=status,
+            error=error,
+            result=result,
+            result_available=result_available,
+        )
+
+    def workflow_agent_started(
+        self,
+        workflow_id: str,
+        task_id: str,
+        inspection_id: str,
+        name: str,
+        task_input: str,
+        *,
+        resumed: bool,
+    ) -> WorkflowAgentView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is None:
+            return None
+        view = bubble.start_agent(
+            task_id,
+            inspection_id,
+            name,
+            task_input,
+            resumed,
+        )
+        self._scroll_to_end()
+        return view
+
+    def workflow_agent_waiting(
+        self,
+        workflow_id: str,
+        inspection_id: str,
+    ) -> WorkflowAgentView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        return bubble.wait_agent(inspection_id) if bubble is not None else None
+
+    def workflow_agent_finished(
+        self,
+        workflow_id: str,
+        inspection_id: str,
+        *,
+        status: str,
+        result: str,
+        error: str,
+    ) -> WorkflowAgentView | None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is None:
+            return None
+        return bubble.finish_agent(
+            inspection_id,
+            status=status,
+            result=result,
+            error=error,
+        )
+
+    def workflow_finished(
+        self,
+        workflow_id: str,
+        final_state: Any,
+        *,
+        available: bool,
+    ) -> None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is not None:
+            bubble.complete(final_state, available=available)
+            self._scroll_to_end()
+
+    def workflow_cancelled(self, workflow_id: str, error: str = "") -> None:
+        bubble = self._workflow_bubbles.get(workflow_id)
+        if bubble is not None:
+            bubble.cancel(error)
+
+    def workflow_task_view(
+        self,
+        workflow_id: str,
+        task_id: str,
+    ) -> WorkflowTaskView | None:
+        """Return one process-local task view for live Inspector refresh."""
+        bubble = self._workflow_bubbles.get(workflow_id)
+        return bubble.task_views.get(task_id) if bubble is not None else None
+
+    def workflow_value(self, title: str, value: Any) -> None:
+        """Render one retained Workflow object as a normal transcript bubble."""
+        self.finish_stream_phase()
+        self._add_block(
+            title,
+            Pretty(value, expand_all=False),
+            "message command workflow-value",
+        )
+
+    def workflow_agent_summary(self, agent: WorkflowAgentView) -> None:
+        """Render a read-only agent summary using the subagent bubble language."""
+        text = Text()
+        if agent.task:
+            text.append("request: ", style="bold cyan")
+            text.append(self.truncate(agent.task))
+            text.append("\n")
+        text.append("status: ", style="bold cyan")
+        if agent.status == "RUNNING":
+            text.append("RUNNING", style="bold yellow")
+        elif agent.status == "WAITING":
+            text.append("WAITING", style="bold yellow")
+        elif agent.status == "CANCELLED":
+            text.append("CANCELLED", style="bold yellow")
+        elif agent.status == "ERROR":
+            text.append("ERROR", style="bold red")
+        else:
+            text.append("DONE", style="bold green")
+        output = agent.error or agent.result
+        if output:
+            text.append("\n\noutput:\n", style="bold cyan")
+            text.append(self.truncate_multiline(output), style="dim")
+        self._add_block(
+            f"subagent - {agent.name}",
+            text,
+            "message subagent",
+        )
 
     def restore_session(self, session: dict[str, Any]) -> None:
         """Replay persisted visible session events."""
@@ -820,6 +998,7 @@ class ChatLog(VerticalScroll):
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._subagent_aliases = {}
+        self._workflow_bubbles = {}
 
     def discard_delegation_summary(self) -> None:
         """Remove the current live delegation summary from the transcript."""
@@ -1406,6 +1585,11 @@ class ChatLog(VerticalScroll):
             block["last_second"] = second
             block["frame"] = int(block.get("frame") or 0) + 1
             self._update_tool_block(key, scroll=False)
+
+    def tick_workflows(self) -> None:
+        """Advance live Workflow task and agent status rendering."""
+        for bubble in self._workflow_bubbles.values():
+            bubble.tick()
 
     def has_live_tools(self) -> bool:
         """Return whether any tool bubble currently owns live activity."""

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.pretty import Pretty, pretty_repr
+from rich.pretty import pretty_repr
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -45,6 +45,7 @@ class Inspector(Vertical):
         self._final_state: Any = None
         self._final_state_text = ""
         self._copy_feedback_version = 0
+        self.workflow_task_id = ""
         self._copy_button = Button(
             "Copy",
             id="inspector-final-state-copy",
@@ -75,6 +76,7 @@ class Inspector(Vertical):
         self._unsubscribe()
         self._snapshot = None
         self._clear_final_state()
+        self.workflow_task_id = ""
         self.inspection_id = inspection_id
         self._update_header(inspection)
         self._replay()
@@ -89,25 +91,47 @@ class Inspector(Vertical):
         self.inspection_id = inspection.id
         self._snapshot = inspection
         self._clear_final_state()
+        self.workflow_task_id = ""
         self._update_header(inspection)
         self._replay()
         return True
 
     def open_workflow_state(self, name: str, final_state: Any) -> None:
-        """Show one retained Python object in the existing Inspector viewport."""
+        """Show one retained Workflow final state with the shared Copy action."""
         self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
+        self.workflow_task_id = ""
         self._final_state = final_state
         self._final_state_text = pretty_repr(final_state, expand_all=True)
         self.query_one("#inspector-title", Static).update(
-            f"Workflow · {name} · Final state"
+            f"Inspector · workflow · {name} · Final state"
         )
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
-        log.command_output(Pretty(final_state, expand_all=False))
+        log.workflow_value("Final state", final_state)
         self._copy_button.label = "Copy"
         self._final_state_actions.display = True
+
+    def open_workflow_node(self, view: Any) -> None:
+        """Render Input, agent summaries, and the available terminal boundary."""
+        self._unsubscribe()
+        self.inspection_id = ""
+        self._snapshot = None
+        self._clear_final_state()
+        self.workflow_task_id = str(view.task_id)
+        self.query_one("#inspector-title", Static).update(
+            f"Inspector · workflow · {view.name}"
+        )
+        log = self.query_one("#inspector-log", ChatLog)
+        log.clear_log()
+        log.workflow_value("Input state", view.input_state)
+        for agent in view.agents:
+            log.workflow_agent_summary(agent)
+        if view.result_available:
+            log.workflow_value("Result", view.result)
+        elif view.status == "ERROR" and view.error:
+            log.system_message(view.error, kind="error")
 
     def stop_inspection(self) -> None:
         """Detach from the current transcript without changing stored state."""
@@ -115,6 +139,7 @@ class Inspector(Vertical):
         self.inspection_id = ""
         self._snapshot = None
         self._clear_final_state()
+        self.workflow_task_id = ""
 
     def on_unmount(self) -> None:
         self._unsubscribe()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
@@ -23,6 +24,9 @@ from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
 
 
+_MISSING = object()
+
+
 @dataclass(slots=True)
 class WorkflowTask:
     """Coordinator state for one native root task."""
@@ -31,15 +35,24 @@ class WorkflowTask:
     name: str
     step: int
     status: str = "RUNNING"
-    inspection_id: str = ""
+    input_state: Any = _MISSING
+    result: Any = _MISSING
+    error: str = ""
 
 
 class WorkflowCoordinator:
     """Infer visible workflow steps from a native ``TasksTransformer`` stream."""
 
-    def __init__(self, emitter: FrontendEmitter, *, workflow_id: str = "") -> None:
+    def __init__(
+        self,
+        emitter: FrontendEmitter,
+        *,
+        workflow_id: str = "",
+        workflow_name: str = "",
+    ) -> None:
         self.emitter = emitter
         self.workflow_id = workflow_id
+        self.workflow_name = workflow_name or workflow_id
         self._next_step = 0
         self._current_step = 0
         self._active: set[str] = set()
@@ -60,7 +73,7 @@ class WorkflowCoordinator:
         self._tasks.clear()
         self._started = True
         self._finished = False
-        self.emitter.workflow_started(self.workflow_id)
+        self.emitter.workflow_started(self.workflow_id, self.workflow_name)
 
     async def consume(self, tasks: Any) -> None:
         """Consume the root task extension without inspecting debug metadata."""
@@ -73,38 +86,83 @@ class WorkflowCoordinator:
             if not task_id:
                 continue
             if "input" in event:
-                self._task_started(task_id, str(event.get("name") or "node"))
+                self._task_started(
+                    task_id,
+                    str(event.get("name") or "node"),
+                    event["input"],
+                )
             else:
                 self._task_finished(
                     task_id,
                     event.get("error"),
                     event.get("interrupts"),
+                    result=event.get("result", _MISSING),
                 )
 
-    def bind_inspection(self, task_id: str, inspection_id: str) -> bool:
-        """Bind a discovered live inspection to an existing Workflow task."""
-        task = self._tasks.get(str(task_id or ""))
-        value = str(inspection_id or "")
-        if task is None or not value:
-            return False
-        if task.inspection_id == value:
-            return True
-        task.inspection_id = value
-        self.emitter.workflow_task_inspection(
-            task.task_id,
-            task.name,
-            task.step,
-            value,
+    def agent_started(
+        self,
+        task_id: str,
+        inspection_id: str,
+        name: str,
+        task_input: str,
+        *,
+        resumed: bool = False,
+    ) -> None:
+        """Project one observed child agent beneath its native root task."""
+        self.emitter.workflow_agent_started(
+            task_id,
+            name,
+            inspection_id,
+            task_input=task_input,
+            resumed=resumed,
             workflow_id=self.workflow_id,
         )
-        return True
 
-    def finish(self) -> None:
+    def agent_waiting(
+        self,
+        task_id: str,
+        inspection_id: str,
+        name: str,
+    ) -> None:
+        """Keep an interrupted child agent live across the Workflow resume."""
+        self.emitter.workflow_agent_waiting(
+            task_id,
+            name,
+            inspection_id,
+            workflow_id=self.workflow_id,
+        )
+
+    def agent_finished(
+        self,
+        task_id: str,
+        inspection_id: str,
+        name: str,
+        *,
+        status: str,
+        result: str = "",
+        error: str = "",
+    ) -> None:
+        """Project one observed child agent's terminal status."""
+        self.emitter.workflow_agent_finished(
+            task_id,
+            name,
+            inspection_id,
+            status=status,
+            result=result,
+            error=error,
+            workflow_id=self.workflow_id,
+        )
+
+    def finish(self, final_state: Any) -> None:
         """Finish the run while preserving completed rows in the frontend."""
         if self._finished:
             return
         self._finished = True
-        self.emitter.workflow_finished(self.workflow_id)
+        self.emitter.workflow_finished(
+            self.workflow_id,
+            final_state=_retain_value(final_state),
+            final_state_available=True,
+        )
 
     def cancel(self, error: str = "") -> None:
         """Mark any active rows terminal after cancellation or run failure."""
@@ -114,13 +172,18 @@ class WorkflowCoordinator:
         self._active.clear()
         self.emitter.workflow_cancelled(self.workflow_id, error=error)
 
-    def _task_started(self, task_id: str, name: str) -> None:
+    def _task_started(self, task_id: str, name: str, input_state: Any) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             if not self._active:
                 self._next_step += 1
                 self._current_step = self._next_step
-            task = WorkflowTask(task_id, name, self._current_step)
+            task = WorkflowTask(
+                task_id,
+                name,
+                self._current_step,
+                input_state=_retain_value(input_state),
+            )
             self._tasks[task_id] = task
             phase = "start"
         elif task.status == "WAITING":
@@ -134,9 +197,19 @@ class WorkflowCoordinator:
             if phase == "resume"
             else self.emitter.workflow_task_started
         )
-        callback(task.task_id, task.name, task.step, workflow_id=self.workflow_id)
+        kwargs: dict[str, Any] = {"workflow_id": self.workflow_id}
+        if phase == "start":
+            kwargs["input_state"] = task.input_state
+        callback(task.task_id, task.name, task.step, **kwargs)
 
-    def _task_finished(self, task_id: str, error: Any, interrupts: Any = None) -> None:
+    def _task_finished(
+        self,
+        task_id: str,
+        error: Any,
+        interrupts: Any = None,
+        *,
+        result: Any = _MISSING,
+    ) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
@@ -152,12 +225,17 @@ class WorkflowCoordinator:
             return
         error_text = str(error or "")
         task.status = "ERROR" if error_text else "DONE"
+        task.error = error_text
+        if not error_text and result is not _MISSING:
+            task.result = _retain_value(_native_task_result(result))
         self.emitter.workflow_task_finished(
             task.task_id,
             task.name,
             task.step,
             status=task.status,
             error=error_text,
+            result=None if task.result is _MISSING else task.result,
+            result_available=task.result is not _MISSING,
             workflow_id=self.workflow_id,
         )
 
@@ -169,6 +247,7 @@ async def execute_workflow(
     emitter: FrontendEmitter,
     inspection: SubagentInspectionCoordinator,
     workflow_id: str,
+    workflow_name: str = "",
     config: dict[str, Any] | None = None,
     context: Any | None = None,
     inspection_title: str = "",
@@ -176,7 +255,16 @@ async def execute_workflow(
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
 ) -> Any:
     """Run one native graph through the established Workflow observation path."""
-    coordinator = WorkflowCoordinator(emitter, workflow_id=workflow_id)
+    coordinator = WorkflowCoordinator(
+        emitter,
+        workflow_id=workflow_id,
+        workflow_name=workflow_name,
+    )
+    inspection.observe_workflow_agents(
+        coordinator.agent_started,
+        coordinator.agent_waiting,
+        coordinator.agent_finished,
+    )
     coordinator.start()
     current_payload = payload
     run_config = dict(config or {})
@@ -212,7 +300,9 @@ async def execute_workflow(
                     consume_workflow_inspections(
                         run.subgraphs,
                         inspection,
-                        coordinator.bind_inspection,
+                        coordinator.agent_started,
+                        coordinator.agent_waiting,
+                        coordinator.agent_finished,
                         title=inspection_title,
                     ),
                     capture_output(run.output(), output),
@@ -221,7 +311,7 @@ async def execute_workflow(
             final_state = output.get("value")
             interrupts = await collect_interrupts(run, final_state)
             if not interrupts:
-                coordinator.finish()
+                coordinator.finish(final_state)
                 return final_state
 
             ask_user_interrupt = first_typed_interrupt(interrupts, "ask_user")
@@ -255,6 +345,21 @@ async def execute_workflow(
         inspection.cancel_standalone(str(error))
         coordinator.cancel(str(error))
         raise
+
+
+def _native_task_result(value: Any) -> Any:
+    """Unwrap only LangGraph's single-root task-result carrier."""
+    if isinstance(value, dict) and list(value) == ["__root__"]:
+        return value["__root__"]
+    return value
+
+
+def _retain_value(value: Any) -> Any:
+    """Keep one observed runtime boundary stable if its source later mutates."""
+    try:
+        return deepcopy(value)
+    except Exception:
+        return value
 
 
 __all__ = ["WorkflowCoordinator", "WorkflowTask"]

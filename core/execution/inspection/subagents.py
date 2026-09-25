@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from langgraph.stream import ProtocolEvent, StreamTransformer
 
@@ -189,6 +189,14 @@ class SubagentInspectionCoordinator:
         self._standalone_tasks_by_call_id: dict[str, str] = {}
         self._standalone_tool_rows: dict[str, str] = {}
         self._standalone_interrupt_actions: dict[tuple[str, int], dict[str, Any]] = {}
+        self._workflow_inspection_by_key: dict[tuple[str, str], str] = {}
+        self._workflow_inspection_by_namespace: dict[tuple[str, ...], str] = {}
+        self._workflow_protocol_namespaces: set[tuple[str, ...]] = set()
+        self._workflow_protocol_status: dict[tuple[str, ...], str] = {}
+        self._workflow_started_keys: set[tuple[str, str]] = set()
+        self._workflow_agent_started: Callable[..., object] | None = None
+        self._workflow_agent_waiting: Callable[..., object] | None = None
+        self._workflow_agent_finished: Callable[..., object] | None = None
 
     def begin_pass(self) -> None:
         """Forget interrupt candidates from the preceding HITL stream pass."""
@@ -196,6 +204,17 @@ class SubagentInspectionCoordinator:
         self._pass_interrupt_calls.clear()
         self._seen_pass_interrupt_actions.clear()
         self._standalone_interrupt_actions.clear()
+
+    def observe_workflow_agents(
+        self,
+        agent_started: Callable[..., object],
+        agent_waiting: Callable[..., object],
+        agent_finished: Callable[..., object],
+    ) -> None:
+        """Attach semantic callbacks for agents visible only in V3 namespaces."""
+        self._workflow_agent_started = agent_started
+        self._workflow_agent_waiting = agent_waiting
+        self._workflow_agent_finished = agent_finished
 
     def is_eval_tool_call(self, call_id: str) -> bool:
         """Return whether a projected call belongs to an Eval child row."""
@@ -281,6 +300,48 @@ class SubagentInspectionCoordinator:
         self._drain_pending_standalone_events()
         return inspection_id, row_id, first_start
 
+    def workflow_started(
+        self,
+        subagent: Any,
+        title: str,
+        task: str,
+    ) -> tuple[str, str, bool]:
+        """Start or recover one Workflow-owned agent by native execution path."""
+        owner_task_id = native_inspection_hint(subagent)
+        path = getattr(subagent, "path", ())
+        path_key = (
+            "/".join(str(part) for part in path)
+            if isinstance(path, (list, tuple)) and path
+            else str(getattr(subagent, "id", "") or title)
+        )
+        key = (owner_task_id, path_key)
+        namespace = (
+            tuple(str(part) for part in path)
+            if isinstance(path, (list, tuple))
+            else ()
+        )
+        inspection_id = self._workflow_inspection_by_key.get(key, "")
+        if not inspection_id and namespace:
+            inspection_id = self._workflow_inspection_by_namespace.get(namespace, "")
+        if not inspection_id and self.store is not None:
+            inspection_id = self.store.allocate_id(path_key or owner_task_id)
+        if inspection_id:
+            self._workflow_inspection_by_key[key] = inspection_id
+        if inspection_id and self.store is not None:
+            self.store.start(
+                inspection_id,
+                title,
+                task,
+                inspection_type="subagent",
+            )
+        if namespace and inspection_id:
+            self._workflow_inspection_by_namespace[namespace] = inspection_id
+            self._workflow_protocol_namespaces.discard(namespace)
+            self._drain_pending_workflow_snapshots(namespace, inspection_id)
+        first_start = key not in self._workflow_started_keys
+        self._workflow_started_keys.add(key)
+        return inspection_id, owner_task_id, first_start
+
     def register_standalone_task(self, call_id: str, task: str = "") -> None:
         """Remember a root task identity before its child handle is projected."""
         if call_id:
@@ -327,6 +388,18 @@ class SubagentInspectionCoordinator:
         if self.store is None:
             return
         for inspection_id in set(self._standalone_inspection_by_row.values()):
+            current = self.store.get(inspection_id)
+            if current is None or current.status != "RUNNING":
+                continue
+            _close_pending_tools(self.store, inspection_id, error or "cancelled")
+            self.store.finish(
+                inspection_id,
+                status="ERROR" if error else "CANCELLED",
+                error=error,
+            )
+        workflow_inspection_ids = set(self._workflow_inspection_by_key.values())
+        workflow_inspection_ids.update(self._workflow_inspection_by_namespace.values())
+        for inspection_id in workflow_inspection_ids:
             current = self.store.get(inspection_id)
             if current is None or current.status != "RUNNING":
                 continue
@@ -431,6 +504,9 @@ class SubagentInspectionCoordinator:
         if not isinstance(event, dict):
             return
         if event.get("method") == "messages":
+            params = event.get("params")
+            if isinstance(params, dict) and self._handle_workflow_message(params):
+                return
             self._handle_message_event(event)
             return
         if event.get("method") != "values":
@@ -444,6 +520,21 @@ class SubagentInspectionCoordinator:
         if not namespace or not isinstance(messages, list) or not messages:
             return
         self._pending_snapshots[namespace] = messages
+        workflow_inspection_id = self._workflow_inspection_for_namespace(namespace)
+        if not workflow_inspection_id:
+            workflow_inspection_id = self._workflow_agent_from_snapshot(
+                namespace,
+                messages,
+            )
+        if workflow_inspection_id:
+            self._observe_workflow_snapshot(workflow_inspection_id, messages)
+            if namespace in self._workflow_protocol_namespaces:
+                self._finish_workflow_protocol_agent(
+                    namespace,
+                    messages,
+                    params.get("interrupts"),
+                )
+            return
         standalone_row = self._standalone_row_for_native_namespace(namespace)
         if standalone_row:
             self._observe_standalone_snapshot(standalone_row, messages)
@@ -456,6 +547,186 @@ class SubagentInspectionCoordinator:
             self._bind_protocol_namespace(namespace, messages)
         self._emit_protocol_snapshot(namespace, messages)
         self._record_eval_interrupts(namespace, params.get("interrupts"))
+
+    def _handle_workflow_message(self, params: dict[str, Any]) -> bool:
+        namespace = tuple(str(part) for part in params.get("namespace") or ())
+        if not namespace:
+            return False
+        data = params.get("data")
+        if not isinstance(data, (list, tuple)) or not data:
+            return False
+        message = data[0]
+        metadata = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}
+        name = str(
+            metadata.get("lc_agent_name")
+            or value_field(message, "name")
+            or ""
+        )
+        inspection_id = self._workflow_inspection_by_namespace.get(namespace, "")
+        if not inspection_id and name:
+            inspection_id = self._start_workflow_protocol_agent(namespace, name)
+        if not inspection_id:
+            return False
+        if namespace not in self._workflow_protocol_namespaces:
+            return True
+
+        if self._workflow_protocol_status.get(namespace) == "WAITING":
+            self._workflow_protocol_status[namespace] = "RUNNING"
+            if self._workflow_agent_started is not None:
+                self._workflow_agent_started(
+                    _workflow_owner_task_id(namespace),
+                    inspection_id,
+                    name or "agent",
+                    _first_user_text(self._pending_snapshots.get(namespace, [])),
+                    resumed=True,
+                )
+        kind = "assistant"
+        text = ""
+        if (
+            isinstance(message, dict)
+            and str(message.get("event") or "") == "content-block-delta"
+        ):
+            delta = event_delta(message)
+            delta_type = str(delta.get("type") or "")
+            if delta_type in {"reasoning", "reasoning_delta", "reasoning-delta"}:
+                kind = "reasoning"
+            text = str(delta.get("reasoning") or delta.get("text") or "")
+        else:
+            text = visible_message_text(message) or message_text(message)
+        if text and self.store is not None:
+            self.store.append_delta(inspection_id, kind, text)
+        return True
+
+    def _workflow_agent_from_snapshot(
+        self,
+        namespace: tuple[str, ...],
+        messages: list[Any],
+    ) -> str:
+        for message in reversed(messages):
+            name = str(value_field(message, "name") or "")
+            if name and str(value_field(message, "type") or "") in {"ai", "assistant"}:
+                return self._start_workflow_protocol_agent(namespace, name)
+        return ""
+
+    def _start_workflow_protocol_agent(
+        self,
+        namespace: tuple[str, ...],
+        name: str,
+    ) -> str:
+        if self.store is None or self._workflow_agent_started is None:
+            return ""
+        owner_task_id = _workflow_owner_task_id(namespace)
+        if not owner_task_id:
+            return ""
+        inspection_id = self._workflow_inspection_by_namespace.get(namespace, "")
+        if inspection_id:
+            return inspection_id
+        key = "/".join(namespace)
+        inspection_id = self.store.allocate_id(key)
+        task = _first_user_text(self._pending_snapshots.get(namespace, []))
+        self.store.start(inspection_id, name or "agent", task, inspection_type="subagent")
+        self._workflow_inspection_by_namespace[namespace] = inspection_id
+        self._workflow_protocol_namespaces.add(namespace)
+        self._workflow_protocol_status[namespace] = "RUNNING"
+        self._workflow_agent_started(
+            owner_task_id,
+            inspection_id,
+            name or "agent",
+            task,
+            resumed=False,
+        )
+        return inspection_id
+
+    def _finish_workflow_protocol_agent(
+        self,
+        namespace: tuple[str, ...],
+        messages: list[Any],
+        interrupts: Any,
+    ) -> None:
+        inspection_id = self._workflow_inspection_by_namespace.get(namespace, "")
+        if not inspection_id or self.store is None:
+            return
+        name = "agent"
+        response = ""
+        for message in reversed(messages):
+            if str(value_field(message, "type") or "") not in {"ai", "assistant"}:
+                continue
+            name = str(value_field(message, "name") or name)
+            response = visible_message_text(message) or message_text(message)
+            break
+        if interrupts:
+            if self._workflow_protocol_status.get(namespace) != "WAITING":
+                self._workflow_protocol_status[namespace] = "WAITING"
+                if self._workflow_agent_waiting is not None:
+                    self._workflow_agent_waiting(
+                        _workflow_owner_task_id(namespace),
+                        inspection_id,
+                        name,
+                    )
+            return
+        if not response or self._workflow_protocol_status.get(namespace) == "DONE":
+            return
+        self._workflow_protocol_status[namespace] = "DONE"
+        self.store.finish(inspection_id, status="DONE", final_response=response)
+        if self._workflow_agent_finished is not None:
+            self._workflow_agent_finished(
+                _workflow_owner_task_id(namespace),
+                inspection_id,
+                name,
+                status="DONE",
+                result=response,
+            )
+
+    def _workflow_inspection_for_namespace(
+        self,
+        namespace: tuple[str, ...],
+    ) -> str:
+        exact = self._workflow_inspection_by_namespace.get(namespace, "")
+        if exact:
+            return exact
+        matches = [
+            (len(parent), inspection_id)
+            for parent, inspection_id in self._workflow_inspection_by_namespace.items()
+            if len(parent) <= len(namespace) and namespace[: len(parent)] == parent
+        ]
+        return max(matches, default=(0, ""))[1]
+
+    def _drain_pending_workflow_snapshots(
+        self,
+        namespace: tuple[str, ...],
+        inspection_id: str,
+    ) -> None:
+        for pending_namespace, messages in self._pending_snapshots.items():
+            if (
+                len(namespace) <= len(pending_namespace)
+                and pending_namespace[: len(namespace)] == namespace
+            ):
+                self._observe_workflow_snapshot(inspection_id, messages)
+
+    def _observe_workflow_snapshot(
+        self,
+        inspection_id: str,
+        messages: list[Any],
+    ) -> None:
+        """Recover durable tool lifecycles for one Workflow agent Inspector."""
+        if not inspection_id or self.store is None:
+            return
+        task_input = _first_user_text(messages)
+        current = self.store.get(inspection_id)
+        if (
+            task_input
+            and current is not None
+            and current.events
+            and current.events[0].kind == "user"
+            and not current.events[0].text
+        ):
+            self.store.update_task(inspection_id, task_input)
+        for message in messages:
+            for event in _inspection_events_from_message(message):
+                if event.kind == "tool_call":
+                    self.store.upsert_tool_call(inspection_id, event)
+                elif event.kind in {"tool_result", "tool_error"}:
+                    self.store.upsert_tool_completion(inspection_id, event)
 
     def _drain_pending_standalone_events(self) -> None:
         for namespace, messages in self._pending_snapshots.items():
@@ -900,6 +1171,15 @@ def native_inspection_hint(subagent: Any) -> str:
     path = getattr(subagent, "path", ())
     if isinstance(path, (list, tuple)) and path:
         return "/".join(str(item) for item in path)
+    return ""
+
+
+def _workflow_owner_task_id(namespace: tuple[str, ...]) -> str:
+    """Return the native root task ID from the first namespaced segment."""
+    for part in namespace:
+        _name, separator, task_id = str(part).partition(":")
+        if separator and task_id:
+            return task_id
     return ""
 
 

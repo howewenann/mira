@@ -1154,7 +1154,7 @@ Button.prompt-panel-button:focus {
 
 .message.assistant,
 .message.startup,
-.message.workflow-completion {
+.message.workflow-tree-bubble {
     border: solid #5BB8B1;
 }
 
@@ -1168,9 +1168,24 @@ Button.prompt-panel-button:focus {
     height: auto;
 }
 
-.message.workflow-completion,
-.workflow-completion-body {
+.message.workflow-tree-bubble {
     height: auto;
+}
+
+#workflow-tree {
+    width: 1fr;
+    height: 2;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    overflow-y: hidden;
+    scrollbar-size: 0 0;
+}
+
+#workflow-tree > .tree--cursor {
+    background: #17313a;
+    color: #eef7f8;
 }
 
 .assistant-body {
@@ -1189,12 +1204,19 @@ Button.prompt-panel-button:focus {
     align-horizontal: left;
 }
 
-.workflow-completion-actions {
+.workflow-footer {
     width: 1fr;
     height: 1;
     min-height: 1;
     margin-top: 1;
     align-horizontal: left;
+}
+
+.workflow-overall-status {
+    width: 1fr;
+    height: 1;
+    padding-left: 2;
+    color: #82909a;
 }
 
 Button.assistant-copy {

@@ -225,11 +225,16 @@ class FrontendEmitter:
     def subagents_cancelled(self) -> None:
         self.frontend.emit(SubagentEvent(phase="cancel_all", **self._identity()))
 
-    def workflow_started(self, workflow_id: str = "") -> None:
+    def workflow_started(
+        self,
+        workflow_id: str = "",
+        workflow_name: str = "",
+    ) -> None:
         self.frontend.emit(
             WorkflowEvent(
                 phase="run_start",
                 workflow_id=workflow_id,
+                workflow_name=workflow_name,
                 **self._identity(),
             )
         )
@@ -240,6 +245,7 @@ class FrontendEmitter:
         name: str,
         step: int,
         *,
+        input_state: Any = None,
         workflow_id: str = "",
     ) -> None:
         self.frontend.emit(
@@ -250,6 +256,7 @@ class FrontendEmitter:
                 name=name,
                 step=step,
                 status="RUNNING",
+                input_state=input_state,
                 **self._identity(),
             )
         )
@@ -294,23 +301,74 @@ class FrontendEmitter:
             )
         )
 
-    def workflow_task_inspection(
+    def workflow_agent_started(
         self,
         task_id: str,
         name: str,
-        step: int,
+        inspection_id: str,
+        *,
+        task_input: str = "",
+        resumed: bool = False,
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="agent_resume" if resumed else "agent_start",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_id=inspection_id,
+                name=name,
+                status="RUNNING",
+                inspection_id=inspection_id,
+                task_input=task_input,
+                **self._identity(),
+            )
+        )
+
+    def workflow_agent_waiting(
+        self,
+        task_id: str,
+        name: str,
         inspection_id: str,
         *,
         workflow_id: str = "",
     ) -> None:
         self.frontend.emit(
             WorkflowEvent(
-                phase="task_inspection",
+                phase="agent_waiting",
                 workflow_id=workflow_id,
                 task_id=task_id,
+                agent_id=inspection_id,
                 name=name,
-                step=step,
+                status="WAITING",
                 inspection_id=inspection_id,
+                **self._identity(),
+            )
+        )
+
+    def workflow_agent_finished(
+        self,
+        task_id: str,
+        name: str,
+        inspection_id: str,
+        *,
+        status: str = "DONE",
+        result: str = "",
+        error: str = "",
+        workflow_id: str = "",
+    ) -> None:
+        self.frontend.emit(
+            WorkflowEvent(
+                phase="agent_finish",
+                workflow_id=workflow_id,
+                task_id=task_id,
+                agent_id=inspection_id,
+                name=name,
+                status=status,
+                error=error,
+                inspection_id=inspection_id,
+                result=result,
+                result_available=bool(result),
                 **self._identity(),
             )
         )
@@ -323,6 +381,8 @@ class FrontendEmitter:
         *,
         status: str = "DONE",
         error: str = "",
+        result: Any = None,
+        result_available: bool = False,
         workflow_id: str = "",
     ) -> None:
         self.frontend.emit(
@@ -334,15 +394,25 @@ class FrontendEmitter:
                 step=step,
                 status=status,
                 error=error,
+                result=result,
+                result_available=result_available,
                 **self._identity(),
             )
         )
 
-    def workflow_finished(self, workflow_id: str = "") -> None:
+    def workflow_finished(
+        self,
+        workflow_id: str = "",
+        *,
+        final_state: Any = None,
+        final_state_available: bool = False,
+    ) -> None:
         self.frontend.emit(
             WorkflowEvent(
                 phase="run_finish",
                 workflow_id=workflow_id,
+                final_state=final_state,
+                final_state_available=final_state_available,
                 **self._identity(),
             )
         )
