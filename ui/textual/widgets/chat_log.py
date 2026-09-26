@@ -691,7 +691,6 @@ class ChatLog(VerticalScroll):
                 "terminal_status": terminal_status,
                 "terminal": bool(terminal_status),
                 "frame": 0,
-                "last_second": 0,
                 "origin_event_id": origin_event_id,
             }
             self._tool_blocks[key] = block
@@ -772,7 +771,6 @@ class ChatLog(VerticalScroll):
                 "terminal_status": "",
                 "terminal": False,
                 "frame": 0,
-                "last_second": 0,
             }
             self._tool_blocks[key] = block
             self._tool_name_queues[name].append(key)
@@ -1241,7 +1239,6 @@ class ChatLog(VerticalScroll):
                 "grader_model": grader_model,
                 "max_iterations": max_iterations,
                 "phase": phase,
-                "last_second": -1,
             },
         )
 
@@ -1283,10 +1280,6 @@ class ChatLog(VerticalScroll):
     def tick_rubrics(self) -> None:
         """Advance live rubric spinners and elapsed clocks."""
         for key, activity in list(self._rubric_activity.items()):
-            elapsed = max(0, int(time.monotonic() - float(activity["started_at"])))
-            if elapsed == int(activity.get("last_second") or 0):
-                continue
-            activity["last_second"] = elapsed
             verifier = self._rubric_verifier_widgets.get(key)
             grader = self._rubric_grader_widgets.get(key)
             if verifier is not None:
@@ -1578,10 +1571,6 @@ class ChatLog(VerticalScroll):
         for key, block in list(self._tool_blocks.items()):
             if block.get("duration_ms") is not None or block.get("started_at") is None:
                 continue
-            second = elapsed_ms(float(block["started_at"])) // 1000
-            if second == int(block.get("last_second") or 0):
-                continue
-            block["last_second"] = second
             block["frame"] = int(block.get("frame") or 0) + 1
             self._update_tool_block(key, scroll=False)
 

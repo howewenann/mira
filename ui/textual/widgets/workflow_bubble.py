@@ -38,6 +38,7 @@ class WorkflowAgentView:
     error: str = ""
     started_at: float = field(default_factory=time.monotonic)
     duration_ms: int | None = None
+    last_elapsed_second: int = -1
     tree_node: TreeNode[Any] | None = None
 
 
@@ -55,6 +56,7 @@ class WorkflowTaskView:
     error: str = ""
     started_at: float = field(default_factory=time.monotonic)
     duration_ms: int | None = None
+    last_elapsed_second: int = -1
     agents: list[WorkflowAgentView] = field(default_factory=list)
     tree_node: TreeNode[Any] | None = None
 
@@ -76,6 +78,15 @@ def _tree_depth(node: TreeNode[Any]) -> int:
         depth += 1
         parent = parent.parent
     return max(0, depth - 1)
+
+
+def _node_is_visible(node: TreeNode[Any]) -> bool:
+    parent = node.parent
+    while parent is not None:
+        if not parent.is_root and parent.is_collapsed:
+            return False
+        parent = parent.parent
+    return True
 
 
 def _lifecycle_text(view: WorkflowRunView, frame: int) -> Text:
@@ -105,7 +116,6 @@ class WorkflowTree(Tree[Any]):
 
     def advance_spinner(self) -> None:
         self._spinner_frame = (self._spinner_frame + 1) % len(SPINNER_FRAMES)
-        self.refresh()
 
     def render_label(
         self,
@@ -306,7 +316,7 @@ class WorkflowTreeBubble(Vertical):
             agent.status = "RUNNING"
             agent.error = ""
             agent.duration_ms = None
-            self.workflow_tree.refresh()
+            self._refresh_run(agent)
             return agent
 
         agent = WorkflowAgentView(inspection_id, name, task)
@@ -327,7 +337,7 @@ class WorkflowTreeBubble(Vertical):
         agent = self.agent_views.get(inspection_id)
         if agent is not None:
             agent.status = "WAITING"
-            self.workflow_tree.refresh()
+            self._refresh_run(agent)
         return agent
 
     def finish_agent(
@@ -345,7 +355,7 @@ class WorkflowTreeBubble(Vertical):
         agent.result = result
         agent.error = error
         agent.duration_ms = elapsed_ms(agent.started_at)
-        self.workflow_tree.refresh()
+        self._refresh_run(agent)
         return agent
 
     def complete(self, final_state: Any, *, available: bool) -> None:
@@ -364,17 +374,42 @@ class WorkflowTreeBubble(Vertical):
                 task.error = error
                 task.duration_ms = elapsed_ms(task.started_at)
                 self._sync_task_disclosure(task)
+                self._refresh_run(task)
         for agent in self.agent_views.values():
             if agent.status in {"RUNNING", "WAITING"}:
                 agent.status = self.status
                 agent.error = error
                 agent.duration_ms = elapsed_ms(agent.started_at)
+                self._refresh_run(agent)
         self._finish_footer()
-        self.workflow_tree.refresh()
 
     def tick(self) -> None:
-        if self.duration_ms is None:
+        if self.duration_ms is not None:
+            return
+        running = any(
+            view.status == "RUNNING"
+            for view in (*self.task_views.values(), *self.agent_views.values())
+        )
+        if running:
             self.workflow_tree.advance_spinner()
+        nodes_to_refresh: list[TreeNode[Any]] = []
+        for view in (*self.task_views.values(), *self.agent_views.values()):
+            node = view.tree_node
+            if (
+                view.status not in {"RUNNING", "WAITING"}
+                or node is None
+                or not _node_is_visible(node)
+            ):
+                continue
+            elapsed_second = elapsed_ms(view.started_at) // 1000
+            second_changed = elapsed_second != view.last_elapsed_second
+            if not second_changed and view.status != "RUNNING":
+                continue
+            if second_changed:
+                view.last_elapsed_second = elapsed_second
+            nodes_to_refresh.append(node)
+        for node in nodes_to_refresh:
+            node.refresh()
 
     def _step(self, step: int) -> TreeNode[Any]:
         node = self.step_nodes.get(step)
@@ -404,7 +439,16 @@ class WorkflowTreeBubble(Vertical):
 
     def _refresh_task(self, view: WorkflowTaskView) -> None:
         self._sync_task_disclosure(view)
-        self.workflow_tree.refresh()
+        self._refresh_run(view)
+
+    @staticmethod
+    def _refresh_run(view: WorkflowRunView) -> None:
+        if view.duration_ms is not None:
+            view.last_elapsed_second = view.duration_ms // 1000
+        else:
+            view.last_elapsed_second = elapsed_ms(view.started_at) // 1000
+        if view.tree_node is not None:
+            view.tree_node.refresh()
 
     @staticmethod
     def _sync_task_disclosure(view: WorkflowTaskView) -> None:

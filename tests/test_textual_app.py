@@ -3346,6 +3346,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             progress = renderable_plain(chat.children[-1])
             self.assertIn("Verifying · 01:02 elapsed", progress)
 
+            with (
+                patch("ui.textual.widgets.chat_log.time.monotonic", return_value=72.0),
+                patch("ui.textual.widgets.rubric_bubble.time.monotonic", return_value=72.0),
+            ):
+                chat.tick_rubrics()
+            same_second_progress = renderable_plain(chat.children[-1])
+            self.assertNotEqual(same_second_progress, progress)
+            self.assertIn("Verifying · 01:02 elapsed", same_second_progress)
+
             app.rubric_evaluations_cancelled()
             await pilot.pause()
             self.assertIn("Interrupted", renderable_plain(chat.children[-1]))
@@ -9863,6 +9872,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assert_styled_text(tools[0], "Preparing", TOOL_PREPARING_COLOR)
             self.assert_styled_text(tools[0], " · 00:00 elapsed", TOOL_DURATION_COLOR)
 
+            with patch(
+                "ui.textual.widgets.chat_log.time.monotonic",
+                return_value=started_at + 0.5,
+            ):
+                chat.tick_tools()
+                first_frame = renderable_plain(tools[0])
+                chat.tick_tools()
+                second_frame = renderable_plain(tools[0])
+            self.assertNotEqual(second_frame, first_frame)
+            self.assertIn("Preparing · 00:00 elapsed", second_frame)
+
             with patch("ui.textual.widgets.chat_log.time.monotonic", return_value=started_at + 19):
                 app.tool_call("eval", {"code": "1 + 1"}, call_id="call-eval")
                 chat.tick_tools()
@@ -10759,9 +10779,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 user_messages = [
                     child
                     for child in app.query_one(ChatLog).children
-                    if "user" in child.classes and "hello world" in renderable_plain(child)
+                    if "user" in child.classes
                 ]
                 self.assertEqual(len(user_messages), 1)
+                self.assertEqual(
+                    renderable_plain(user_messages[0]),
+                    '/workflow__demo topic="hello world" repeat=3',
+                )
+                self.assertNotIn("{'topic':", renderable_plain(user_messages[0]))
 
                 bubble.final_button.press()
                 await wait_until(
@@ -10774,8 +10799,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 inspector = app.query_one(Inspector)
                 switcher = app.query_one("#transcript-viewport", ContentSwitcher)
                 self.assertEqual(switcher.current, "inspector")
-                self.assertIsNone(app.focused)
+                await wait_until(lambda: app.focused is inspector)
+                self.assertIs(app.focused, inspector)
                 self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+                self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
                 self.assertEqual(
                     renderable_plain(inspector.query_one("#inspector-title")),
                     "Inspector · workflow · demo · Final state",
@@ -10802,8 +10829,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 body = value_bubble.query_one(".workflow-value-body", Static)
                 actions = value_bubble.query_one(".workflow-value-actions", Horizontal)
                 copy_button = value_bubble.query_one(".workflow-value-copy", Button)
+                self.assertFalse(copy_button.has_focus)
                 self.assertEqual(copy_button.region.x, body.region.x)
                 self.assertEqual(actions.region.y - body.region.bottom, 1)
+
+                await pilot.press("escape")
+                await wait_until(lambda: switcher.current == "chat-log")
+                self.assertEqual(switcher.current, "chat-log")
+
+                bubble.final_button.press()
+                await wait_until(lambda: switcher.current == "inspector")
+                await wait_until(lambda: app.focused is inspector)
+                value_bubble = inspector.query_one(WorkflowValueBubble)
+                copy_button = value_bubble.query_one(".workflow-value-copy", Button)
                 value_bubble.FEEDBACK_SECONDS = 0.1
                 copy_button.press()
                 await pilot.pause()
@@ -10861,7 +10899,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             inspector = app.query_one(Inspector)
-            self.assertIsNone(app.focused)
+            await wait_until(lambda: app.focused is inspector)
+            self.assertIs(app.focused, inspector)
             app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
             value_bubbles = list(inspector.query(WorkflowValueBubble))
             self.assertEqual(len(value_bubbles), 1)
@@ -11057,14 +11096,17 @@ def workflow(mira):
             view = bubble.task_views["task-1"]
             switcher = app.query_one("#transcript-viewport", ContentSwitcher)
             bubble.post_message(WorkflowNodeSelected(view))
-            await pilot.pause()
+            await wait_until(lambda: app.focused is app.query_one(Inspector))
             self.assertEqual(switcher.current, "inspector")
-            self.assertIsNone(app.focused)
+            inspector = app.query_one(Inspector)
+            self.assertIs(app.focused, inspector)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
             self.assertEqual(
                 renderable_plain(app.query_one("#inspector-title")),
                 "Inspector · workflow · prepare",
             )
-            node_log = app.query_one(Inspector).query_one("#inspector-log", ChatLog)
+            node_log = inspector.query_one("#inspector-log", ChatLog)
             value_bubbles = list(node_log.query(WorkflowValueBubble))
             self.assertEqual(len(value_bubbles), 2)
             self.assertEqual(
@@ -11082,6 +11124,21 @@ def workflow(mira):
             self.assertIn("Agent summary", renderable_plain(agent_summaries[0]))
             self.assertEqual(len(list(node_log.query(".workflow-value-copy"))), 2)
             self.assertFalse(list(agent_summaries[0].query(".workflow-value-copy")))
+            self.assertTrue(
+                all(
+                    not button.has_focus
+                    for button in node_log.query(".workflow-value-copy")
+                )
+            )
+
+            await pilot.press("escape")
+            await wait_until(lambda: switcher.current == "chat-log")
+            self.assertEqual(switcher.current, "chat-log")
+
+            bubble.post_message(WorkflowNodeSelected(view))
+            await wait_until(lambda: app.focused is inspector)
+            node_log = inspector.query_one("#inspector-log", ChatLog)
+            value_bubbles = list(node_log.query(WorkflowValueBubble))
 
             app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
             input_copy = value_bubbles[0].query_one(".workflow-value-copy", Button)
@@ -11101,15 +11158,19 @@ def workflow(mira):
             self.assertIn("result.txt", result_text)
             self.assertIn("5", result_text)
             self.assertEqual(app.copy_to_clipboard.call_count, 2)
-            app.query_one(Inspector).post_message(Inspector.Closed())
-            await pilot.pause()
+            inspector.post_message(Inspector.Closed())
+            await wait_until(lambda: switcher.current == "chat-log")
             self.assertEqual(switcher.current, "chat-log")
 
             bubble.post_message(WorkflowAgentSelected(inspection_id))
-            await pilot.pause()
-            self.assertEqual(app.query_one(Inspector).inspection_id, inspection_id)
-            app.query_one(Inspector).post_message(Inspector.Closed())
-            await pilot.pause()
+            await wait_until(lambda: app.focused is inspector)
+            self.assertEqual(inspector.inspection_id, inspection_id)
+            self.assertIs(app.focused, inspector)
+            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
+            await pilot.press("escape")
+            await wait_until(lambda: switcher.current == "chat-log")
+            self.assertEqual(switcher.current, "chat-log")
 
             panel = app.query_one(SubagentsPanel)
             app.subagent_started("general-purpose [new]", "inspect README", row_id="subagent-1")
@@ -11126,6 +11187,78 @@ def workflow(mira):
                 str(panel.query_one("#subagents-task-heading", Static).render()),
                 "TASK",
             )
+
+    async def test_workflow_timers_advance_without_workflow_events(self) -> None:
+        app = make_app()
+        elapsed = 0
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            with patch(
+                "ui.textual.widgets.workflow_bubble.elapsed_ms",
+                side_effect=lambda *_args, **_kwargs: elapsed,
+            ), patch(
+                "ui.textual.widgets.tool_bubble.elapsed_ms",
+                side_effect=lambda *_args, **_kwargs: elapsed,
+            ):
+                app.workflow_started("timer-id", "timer")
+                app.workflow_task_started(
+                    "timer-task",
+                    "timer-task",
+                    1,
+                    {},
+                    workflow_id="timer-id",
+                )
+                app.workflow_agent_started(
+                    "timer-task",
+                    "timer-agent",
+                    "timer-agent-inspection",
+                    workflow_id="timer-id",
+                )
+                await pilot.pause()
+                bubble = app.query_one(WorkflowTreeBubble)
+                task = bubble.task_views["timer-task"]
+                agent = bubble.agent_views["timer-agent-inspection"]
+                task.last_elapsed_second = 0
+                agent.last_elapsed_second = 0
+
+                for second in (1, 2, 3):
+                    elapsed = second * 1000
+                    app._tick_animations()
+                    await pilot.pause()
+                    self.assertEqual(task.last_elapsed_second, second)
+                    self.assertEqual(agent.last_elapsed_second, second)
+                    rows = [
+                        line
+                        for line in compositor_widget_lines(
+                            app,
+                            bubble.workflow_tree,
+                        )
+                        if "timer-task" in line or "timer-agent" in line
+                    ]
+                    self.assertEqual(len(rows), 2, rows)
+                    self.assertTrue(
+                        all(f"00:0{second}" in row for row in rows),
+                        rows,
+                    )
+
+                previous_rows = rows
+                elapsed = 3500
+                app._tick_animations()
+                await pilot.pause()
+                same_second_rows = [
+                    line
+                    for line in compositor_widget_lines(
+                        app,
+                        bubble.workflow_tree,
+                    )
+                    if "timer-task" in line or "timer-agent" in line
+                ]
+                self.assertNotEqual(same_second_rows, previous_rows)
+                self.assertTrue(
+                    all("00:03" in row for row in same_second_rows),
+                    same_second_rows,
+                )
 
     async def test_workflow_waiting_resumes_and_finishes_same_tree_node(self) -> None:
         app = make_app()

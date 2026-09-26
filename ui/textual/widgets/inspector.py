@@ -23,7 +23,7 @@ from ui.textual.widgets.chat_log import ChatLog, DEFAULT_TOOL_OUTPUT_CHARS
 class Inspector(Vertical):
     """Generic live inspection surface backed by a LiveInspectionStore."""
 
-    can_focus = False
+    can_focus = True
 
     class Closed(Message):
         """Request restoration of the normal chat viewport."""

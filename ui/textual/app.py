@@ -561,7 +561,7 @@ class MiraApp(App[None]):
             self._set_status(state="running")
             prompt.disabled = True
             self.turn_worker = self.run_worker(
-                self._run_registered_workflow(spec, inputs),
+                self._run_registered_workflow(spec, inputs, text),
                 name=f"workflow-{spec.name}",
                 exclusive=True,
             )
@@ -962,7 +962,12 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
-    async def _run_registered_workflow(self, spec: Any, inputs: dict[str, Any]) -> None:
+    async def _run_registered_workflow(
+        self,
+        spec: Any,
+        inputs: dict[str, Any],
+        command_text: str,
+    ) -> None:
         """Construct and run one discovered Workflow through the shared path."""
         from agent.workflows.discovery import (
             validate_runtime_graph,
@@ -978,7 +983,7 @@ class MiraApp(App[None]):
             graph = spec.factory(self.application.workflows)
             input_model = validate_runtime_graph(spec, graph)
             validate_workflow_input(input_model, inputs, spec.usage)
-            self._show_workflow_input(inputs)
+            self.query_one(ChatLog).user_message(command_text)
             await execute_workflow(
                 graph,
                 inputs,
@@ -3207,7 +3212,7 @@ class MiraApp(App[None]):
         event.stop()
         inspector = self.query_one(Inspector)
         inspector.open_workflow_state(event.workflow_name, event.final_state)
-        self._show_inspector(inspector, focus=False)
+        self._show_workflow_inspector(inspector)
 
     @on(WorkflowNodeSelected)
     def open_workflow_node(self, event: WorkflowNodeSelected) -> None:
@@ -3215,7 +3220,7 @@ class MiraApp(App[None]):
         event.stop()
         inspector = self.query_one(Inspector)
         inspector.open_workflow_node(event.view)
-        self._show_inspector(inspector, focus=False)
+        self._show_workflow_inspector(inspector)
 
     @on(WorkflowAgentSelected)
     def open_workflow_agent(self, event: WorkflowAgentSelected) -> None:
@@ -3223,16 +3228,17 @@ class MiraApp(App[None]):
         event.stop()
         inspector = self.query_one(Inspector)
         if inspector.open(event.inspection_id):
-            self._show_inspector(inspector, focus=False)
+            self._show_workflow_inspector(inspector)
 
-    def _show_inspector(self, inspector: Inspector, *, focus: bool = True) -> None:
+    def _show_inspector(self, inspector: Inspector) -> None:
         """Reuse the established viewport and focus transition for live inspection."""
         self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
-        if focus:
-            self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
-        else:
-            self.screen.set_focus(None)
-            self.call_after_refresh(self.screen.set_focus, None)
+        self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
+
+    def _show_workflow_inspector(self, inspector: Inspector) -> None:
+        """Open a Workflow Inspector with focus on its outer container."""
+        self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
+        self.call_after_refresh(inspector.focus)
 
     @on(SubagentHistoryAnchor.Requested)
     def open_subagent_history(self, event: SubagentHistoryAnchor.Requested) -> None:
@@ -3284,7 +3290,9 @@ class MiraApp(App[None]):
             switcher = self.query_one("#transcript-viewport", ContentSwitcher)
         except NoMatches:
             return
-        if switcher.current == "inspector" and inspector.has_focus_within:
+        if switcher.current == "inspector" and (
+            inspector.has_focus or inspector.has_focus_within
+        ):
             event.stop()
             event.prevent_default()
             self._restore_chat_viewport()
