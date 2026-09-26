@@ -131,6 +131,7 @@ class PersistentWorkflowHistory:
         self.command = command
         self._clock = clock
         self._now = now or _now_iso
+        self._workflow_id = ""
         self._event: dict[str, Any] | None = None
         self._run_started = 0.0
         self._task_started: dict[str, float] = {}
@@ -281,10 +282,12 @@ class PersistentWorkflowHistory:
 
     def close(self) -> None:
         """Release the retained live event after the observer is detached."""
+        self._workflow_id = ""
         self._event = None
 
     def _observe(self, update: Callable[[], None]) -> None:
         try:
+            self._rebind_event()
             if self._event is not None:
                 self._refresh_durations()
             update()
@@ -296,6 +299,7 @@ class PersistentWorkflowHistory:
 
     def _start(self, workflow_id: str, workflow_name: str) -> None:
         now = self._now()
+        self._workflow_id = workflow_id
         self._run_started = self._clock()
         events = self.record.setdefault("events", [])
         next_id = max(
@@ -504,11 +508,16 @@ class PersistentWorkflowHistory:
         return None
 
     def _save(self) -> None:
-        workflow_id = str(self._event.get("workflow_id") or "") if self._event else ""
         try:
             self.store.save(self.record)
         except BaseException as exc:  # persistence must not fail execution
             _warn("workflow history persistence failed: %s", exc)
+            return
+        self._rebind_event()
+
+    def _rebind_event(self) -> None:
+        """Resolve the canonical event after any observer may have saved."""
+        if not self._workflow_id:
             return
         self._event = next(
             (
@@ -516,9 +525,9 @@ class PersistentWorkflowHistory:
                 for event in self.record.get("events", [])
                 if isinstance(event, dict)
                 and event.get("type") == "workflow"
-                and str(event.get("workflow_id") or "") == workflow_id
+                and str(event.get("workflow_id") or "") == self._workflow_id
             ),
-            self._event,
+            None,
         )
 
 

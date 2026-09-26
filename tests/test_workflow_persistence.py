@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from core.execution.inspection.live import LiveInspectionStore
+from core.execution.inspection.persistence import PersistentSubagentRuns
 from core.interface import FrontendEmitter
 from session.context import normalize_messages, normalize_session
 from session.store import SessionStore
@@ -32,7 +34,9 @@ class SavingStore:
 
 
 class Renderer:
-    def __init__(self) -> None:
+    def __init__(self, inspections: LiveInspectionStore | None = None) -> None:
+        if inspections is not None:
+            self.live_inspections = inspections
         self.events: list[Any] = []
 
     def __getattr__(self, name: str) -> Any:
@@ -412,6 +416,170 @@ class WorkflowPersistenceTests(unittest.TestCase):
         self.assertEqual(event["status"], "INTERRUPTED")
         self.assertEqual(event["tasks"][0]["status"], "INTERRUPTED")
         self.assertEqual(reread, loaded)
+
+    def test_external_real_save_does_not_detach_active_workflow_event(self) -> None:
+        current = [10.0]
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            record = store.new("thread-external-save", Path("workspace"))
+            history = PersistentWorkflowHistory(
+                Renderer(),
+                record,
+                store,
+                command="/workflow__demo value=1",
+                clock=lambda: current[0],
+            )
+            observer = FrontendEmitter(RendererAdapter(history))
+            observer.workflow_started("wf-external-save", "demo")
+            current[0] = 11.0
+            observer.workflow_task_started(
+                "task-external-save",
+                "calculate",
+                1,
+                input_state={"value": 1},
+                workflow_id="wf-external-save",
+            )
+
+            store.save(record)
+
+            current[0] = 15.0
+            observer.workflow_task_finished(
+                "task-external-save",
+                "calculate",
+                1,
+                status="DONE",
+                result={"answer": 2},
+                result_available=True,
+                workflow_id="wf-external-save",
+            )
+            current[0] = 18.0
+            observer.workflow_finished(
+                "wf-external-save",
+                final_state={"complete": True},
+                final_state_available=True,
+            )
+            loaded = store.load(
+                "thread-external-save", resume=True, workspace=Path("workspace")
+            )
+
+        event = loaded["events"][0]
+        task = event["tasks"][0]
+        self.assertEqual(event["status"], "DONE")
+        self.assertEqual(task["status"], "DONE")
+        self.assertEqual(event["duration_ms"], 8000)
+        self.assertEqual(task["duration_ms"], 4000)
+        self.assertTrue(task["result_available"])
+        self.assertIn("'answer': 2", task["result"]["copy_text"])
+        self.assertTrue(event["final_state_available"])
+        self.assertIn("'complete': True", event["final_state"]["copy_text"])
+
+    def test_combined_agent_persistence_keeps_canonical_terminal_rows(self) -> None:
+        current = [20.0]
+        with tempfile.TemporaryDirectory() as directory:
+            store = SessionStore(Path(directory))
+            record = store.new("thread-agent-save", Path("workspace"))
+            inspections = LiveInspectionStore()
+            renderer = Renderer(inspections)
+            history = PersistentWorkflowHistory(
+                renderer,
+                record,
+                store,
+                command="/workflow__agents topic=history",
+                clock=lambda: current[0],
+            )
+            runs = PersistentSubagentRuns(history, record, store)
+            observer = FrontendEmitter(RendererAdapter(runs))
+
+            observer.workflow_started("wf-agent-save", "agents")
+            current[0] = 21.0
+            observer.workflow_task_started(
+                "task-agent",
+                "research",
+                1,
+                input_state={"topic": "history"},
+                workflow_id="wf-agent-save",
+            )
+            inspections.start(
+                "inspection-agent-save", "researcher", "research history"
+            )
+            current[0] = 22.0
+            observer.workflow_agent_started(
+                "task-agent",
+                "researcher",
+                "inspection-agent-save",
+                task_input="research history",
+                workflow_id="wf-agent-save",
+            )
+            inspections.finish(
+                "inspection-agent-save",
+                status="DONE",
+                final_response="agent result",
+            )
+            current[0] = 25.0
+            observer.workflow_agent_finished(
+                "task-agent",
+                "researcher",
+                "inspection-agent-save",
+                status="DONE",
+                result="agent result",
+                workflow_id="wf-agent-save",
+            )
+            current[0] = 27.0
+            observer.workflow_task_finished(
+                "task-agent",
+                "research",
+                1,
+                status="DONE",
+                result={"research": "complete"},
+                result_available=True,
+                workflow_id="wf-agent-save",
+            )
+            current[0] = 28.0
+            observer.workflow_task_started(
+                "task-finalize",
+                "finalize",
+                2,
+                input_state={"research": "complete"},
+                workflow_id="wf-agent-save",
+            )
+            current[0] = 29.0
+            observer.workflow_task_finished(
+                "task-finalize",
+                "finalize",
+                2,
+                status="DONE",
+                result="finished",
+                result_available=True,
+                workflow_id="wf-agent-save",
+            )
+            current[0] = 30.0
+            observer.workflow_finished(
+                "wf-agent-save",
+                final_state={"done": True},
+                final_state_available=True,
+            )
+            runs.close()
+            history.close()
+            loaded = store.load(
+                "thread-agent-save", resume=True, workspace=Path("workspace")
+            )
+
+        event = loaded["events"][0]
+        agent_task, final_task = event["tasks"]
+        agent = agent_task["agents"][0]
+        self.assertEqual(event["status"], "DONE")
+        self.assertEqual(event["duration_ms"], 10000)
+        self.assertEqual([task["status"] for task in event["tasks"]], ["DONE", "DONE"])
+        self.assertEqual(agent["status"], "DONE")
+        self.assertEqual(agent["duration_ms"], 3000)
+        self.assertEqual(agent_task["duration_ms"], 6000)
+        self.assertEqual(final_task["duration_ms"], 1000)
+        self.assertEqual(agent_task["result_available"], True)
+        self.assertIn("complete", agent_task["result"]["copy_text"])
+        self.assertIn("'done': True", event["final_state"]["copy_text"])
+        self.assertEqual(len(loaded["runs"]), 1)
+        self.assertEqual(loaded["runs"][0]["inspection_id"], "inspection-agent-save")
+        self.assertEqual(loaded["runs"][0]["status"], "DONE")
 
 
 if __name__ == "__main__":

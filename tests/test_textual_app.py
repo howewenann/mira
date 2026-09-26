@@ -11177,6 +11177,101 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bubble.workflow_tree._spinner_frame, frame)
             self.assertFalse(bubble.final_button.display)
 
+    async def test_completed_workflow_stays_done_after_switching_chats(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "sessions")
+            workflow_session = store.new("workflow-chat", workspace)
+            workflow_session["events"] = [
+                {
+                    "type": "workflow",
+                    "workflow_id": "wf-switch",
+                    "workflow_name": "agents",
+                    "command": "/workflow__agents topic=history",
+                    "status": "DONE",
+                    "duration_ms": 9000,
+                    "tasks": [
+                        {
+                            "task_id": "task-prepare",
+                            "name": "prepare",
+                            "step": 1,
+                            "status": "DONE",
+                            "duration_ms": 1000,
+                            "input_state": freeze_workflow_value({"topic": "history"}),
+                            "result_available": True,
+                            "result": freeze_workflow_value({"prepared": True}),
+                            "agents": [],
+                        },
+                        {
+                            "task_id": "task-agent",
+                            "name": "research",
+                            "step": 2,
+                            "status": "DONE",
+                            "duration_ms": 5000,
+                            "input_state": freeze_workflow_value({"prepared": True}),
+                            "result_available": True,
+                            "result": freeze_workflow_value({"research": "complete"}),
+                            "agents": [
+                                {
+                                    "inspection_id": "inspection-switch",
+                                    "name": "researcher",
+                                    "task_input": "research history",
+                                    "status": "DONE",
+                                    "result": "agent result",
+                                    "error": "",
+                                    "duration_ms": 3000,
+                                }
+                            ],
+                        },
+                    ],
+                    "final_state_available": True,
+                    "final_state": freeze_workflow_value({"done": True}),
+                }
+            ]
+            store.save(workflow_session)
+            other_session = store.new("other-chat", workspace)
+            store.save(other_session)
+            workflow_session = store.load(
+                "workflow-chat", resume=True, workspace=workspace
+            )
+            app = make_app(
+                workspace,
+                session=workflow_session,
+                store=store,
+            )
+
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                await app._load_session("other-chat")
+                await pilot.pause()
+                self.assertFalse(list(app.query(WorkflowTreeBubble)))
+
+                await app._load_session("workflow-chat")
+                await pilot.pause()
+                bubble = app.query_one(WorkflowTreeBubble)
+                self.assertEqual(bubble.status, "DONE")
+                self.assertEqual(
+                    [task.status for task in bubble.task_views.values()],
+                    ["DONE", "DONE"],
+                )
+                self.assertEqual(
+                    [agent.status for agent in bubble.agent_views.values()],
+                    ["DONE"],
+                )
+                self.assertIn("Completed in", renderable_plain(bubble.overall_status))
+                self.assertEqual(bubble.duration_ms, 9000)
+                self.assertEqual(
+                    [task.duration_ms for task in bubble.task_views.values()],
+                    [1000, 5000],
+                )
+                self.assertIsNotNone(
+                    bubble.task_views["task-agent"].result_snapshot
+                )
+                self.assertIsNotNone(bubble.final_state_snapshot)
+                frame = bubble.workflow_tree._spinner_frame
+                app._tick_animations()
+                self.assertEqual(bubble.workflow_tree._spinner_frame, frame)
+
     async def test_invalid_discovered_workflow_does_not_persist_or_echo(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
