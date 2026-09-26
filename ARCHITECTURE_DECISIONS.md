@@ -1226,3 +1226,36 @@ shutdown deterministic if the requesting panel recomposes or closes.
 
 **Update this when:** MCP transport ownership, capability caching, attachment
 authorization, or the Act/Plan rebuild boundary changes.
+
+## Durable Workflow History
+
+**Decision:** MIRA treats a Workflow invocation as a rich inspectable execution
+record analogous to a compound tool call. Live runtime state is process-owned.
+Durable session history retains the retrospective Workflow projection and its
+associated agent Inspector runs. A process restart freezes unfinished
+invocations as `INTERRUPTED` rather than attempting to resume old LangGraph
+execution.
+
+Ownership remains explicit:
+
+```text
+session events
+    -> Workflow transcript/tree history
+
+session runs
+    -> nested agent Inspector history
+
+LangGraph runtime/checkpointer
+    -> live execution only
+```
+
+Workflow commands are stored inside their Workflow events so replay can restore
+the visual `you` bubble without adding a conversational user message to model
+resume context. Historical values are frozen as display and Copy text while the
+live Python objects exist; session JSON never owns arbitrary runtime objects.
+
+**Where to check:** `session/workflows.py`, `session/subagent_runs.py`, and
+`ui/textual/widgets/workflow_bubble.py`.
+
+**Update this when:** Workflow transcript ownership, restart reconciliation, or
+historical inspection behavior changes.

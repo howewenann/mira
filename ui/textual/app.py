@@ -59,7 +59,10 @@ from core.execution.turns import goal_revision_text, plan_command_prompt, plan_r
 from core.execution.workflows import execute_workflow
 from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.subagents import SubagentInspectionCoordinator
-from core.execution.inspection.persistence import inspection_from_run
+from core.execution.inspection.persistence import (
+    PersistentSubagentRuns,
+    inspection_from_run,
+)
 from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
 from tracing.stream import TraceStream
@@ -81,6 +84,7 @@ from session.subagent_runs import (
     run_for_inspection_id,
     runs_for_origin,
 )
+from session.workflows import PersistentWorkflowHistory
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -974,22 +978,36 @@ class MiraApp(App[None]):
             validate_workflow_input,
         )
 
-        emitter = FrontendEmitter(
-            self.application.frontend,
-            session_id=str(self.session.get("id") or ""),
-        )
         inspection = SubagentInspectionCoordinator(self.live_inspections)
+        persistent_runs: PersistentSubagentRuns | None = None
+        workflow_history: PersistentWorkflowHistory | None = None
         try:
             graph = spec.factory(self.application.workflows)
             input_model = validate_runtime_graph(spec, graph)
             validate_workflow_input(input_model, inputs, spec.usage)
+            workflow_id = f"workflow-{spec.name}:{uuid4()}"
             self.query_one(ChatLog).user_message(command_text)
+            workflow_history = PersistentWorkflowHistory(
+                self,
+                self.session,
+                self.store,
+                command=command_text,
+            )
+            persistent_runs = PersistentSubagentRuns(
+                workflow_history,
+                self.session,
+                self.store,
+            )
+            emitter = FrontendEmitter(
+                TextualFrontend(persistent_runs),
+                session_id=str(self.session.get("id") or ""),
+            )
             await execute_workflow(
                 graph,
                 inputs,
                 emitter=emitter,
                 inspection=inspection,
-                workflow_id=f"workflow-{spec.name}:{uuid4()}",
+                workflow_id=workflow_id,
                 workflow_name=spec.name,
                 config={
                     "configurable": {
@@ -1015,6 +1033,10 @@ class MiraApp(App[None]):
             )
             self._set_status(state="error")
         finally:
+            if persistent_runs is not None:
+                persistent_runs.close()
+            if workflow_history is not None:
+                workflow_history.close()
             self.turn_worker = None
             self.busy = False
             prompt = self.query_one(PromptBox)
@@ -3211,7 +3233,11 @@ class MiraApp(App[None]):
         """Open one retained Workflow result in the shared Inspector viewport."""
         event.stop()
         inspector = self.query_one(Inspector)
-        inspector.open_workflow_state(event.workflow_name, event.final_state)
+        inspector.open_workflow_state(
+            event.workflow_name,
+            event.final_state,
+            event.snapshot,
+        )
         self._show_workflow_inspector(inspector)
 
     @on(WorkflowNodeSelected)
@@ -3227,8 +3253,24 @@ class MiraApp(App[None]):
         """Open a Workflow-owned agent in the ordinary full Inspector."""
         event.stop()
         inspector = self.query_one(Inspector)
-        if inspector.open(event.inspection_id):
-            self._show_workflow_inspector(inspector)
+        if not inspector.open(event.inspection_id):
+            try:
+                saved = self._read_current_session()
+                run = run_for_inspection_id(
+                    saved.get("runs"),
+                    event.inspection_id,
+                )
+                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
+                    raise ValueError(
+                        "the selected Workflow inspection is no longer available"
+                    )
+            except Exception as exc:
+                self.system_message(
+                    f"Workflow history unavailable: {exc}",
+                    kind="error",
+                )
+                return
+        self._show_workflow_inspector(inspector)
 
     def _show_inspector(self, inspector: Inspector) -> None:
         """Reuse the established viewport and focus transition for live inspection."""

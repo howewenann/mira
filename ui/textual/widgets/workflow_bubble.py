@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from rich.highlighter import ReprHighlighter
 from rich.markup import escape
 from rich.pretty import Pretty, pretty_repr
 from rich.style import Style
@@ -54,6 +55,8 @@ class WorkflowTaskView:
     result: Any = None
     result_available: bool = False
     error: str = ""
+    input_snapshot: dict[str, str] | None = None
+    result_snapshot: dict[str, str] | None = None
     started_at: float = field(default_factory=time.monotonic)
     duration_ms: int | None = None
     last_elapsed_second: int = -1
@@ -69,6 +72,10 @@ class WorkflowStepView:
 
 
 WorkflowRunView = WorkflowTaskView | WorkflowAgentView
+
+
+def _frozen_value(value: Any) -> dict[str, str] | None:
+    return value if isinstance(value, dict) else None
 
 
 def _tree_depth(node: TreeNode[Any]) -> int:
@@ -96,7 +103,13 @@ def _lifecycle_text(view: WorkflowRunView, frame: int) -> Text:
         started_at=view.started_at,
         duration_ms=view.duration_ms,
         is_error=view.status == "ERROR",
-        terminal_status="cancelled" if view.status == "CANCELLED" else "",
+        terminal_status=(
+            "cancelled"
+            if view.status == "CANCELLED"
+            else "interrupted"
+            if view.status == "INTERRUPTED"
+            else ""
+        ),
         active_status="Waiting" if waiting else "",
         active_color=WAITING_COLOR if waiting else "",
         show_spinner=not waiting,
@@ -158,10 +171,16 @@ class WorkflowAgentSelected(Message):
 class WorkflowFinalStateSelected(Message):
     """Request the Workflow final-state Inspector."""
 
-    def __init__(self, workflow_name: str, final_state: Any) -> None:
+    def __init__(
+        self,
+        workflow_name: str,
+        final_state: Any,
+        snapshot: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.workflow_name = workflow_name
         self.final_state = final_state
+        self.snapshot = snapshot
 
 
 class WorkflowValueBubble(Vertical):
@@ -169,14 +188,22 @@ class WorkflowValueBubble(Vertical):
 
     FEEDBACK_SECONDS = 1.5
 
-    def __init__(self, title: str, value: Any) -> None:
+    def __init__(
+        self,
+        title: str,
+        value: Any = None,
+        *,
+        frozen: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(classes="message command workflow-value")
         self.border_title = escape(title)
-        self.copy_text = pretty_repr(value, expand_all=True)
-        self._body = Static(
-            Pretty(value, expand_all=False),
-            classes="workflow-value-body",
-        )
+        if frozen is None:
+            self.copy_text = pretty_repr(value, expand_all=True)
+            body: Any = Pretty(value, expand_all=False)
+        else:
+            self.copy_text = str(frozen.get("copy_text") or "")
+            body = ReprHighlighter()(str(frozen.get("display_text") or ""))
+        self._body = Static(body, classes="workflow-value-body")
         self._copy_button = Button(
             "Copy",
             classes="workflow-value-copy",
@@ -233,11 +260,82 @@ class WorkflowTreeBubble(Vertical):
         self.duration_ms: int | None = None
         self.status = "RUNNING"
         self.final_state: Any = None
+        self.final_state_snapshot: dict[str, str] | None = None
         self.final_state_available = False
         self.step_nodes: dict[int, TreeNode[Any]] = {}
         self.task_views: dict[str, WorkflowTaskView] = {}
         self.agent_views: dict[str, WorkflowAgentView] = {}
         self._pending_agents: dict[str, list[tuple[Any, ...]]] = {}
+
+    @classmethod
+    def from_snapshot(cls, snapshot: dict[str, Any]) -> "WorkflowTreeBubble":
+        """Construct one immutable historical tree without replaying events."""
+        bubble = cls(
+            str(snapshot.get("workflow_id") or ""),
+            str(snapshot.get("workflow_name") or "workflow"),
+        )
+        bubble.status = str(snapshot.get("status") or "INTERRUPTED")
+        bubble.duration_ms = max(0, int(snapshot.get("duration_ms") or 0))
+        bubble.started_at = 0.0
+        bubble.final_state_available = snapshot.get("final_state_available") is True
+        final_state = snapshot.get("final_state")
+        bubble.final_state_snapshot = final_state if isinstance(final_state, dict) else None
+        tasks = snapshot.get("tasks")
+        if isinstance(tasks, list):
+            for task_data in tasks:
+                if not isinstance(task_data, dict):
+                    continue
+                task = WorkflowTaskView(
+                    str(task_data.get("task_id") or ""),
+                    str(task_data.get("name") or "node"),
+                    max(0, int(task_data.get("step") or 0)),
+                    None,
+                )
+                task.tree_node = bubble._step(task.step).add(
+                    Text(task.name, style="bold #dce7ea"),
+                    data=task,
+                    expand=True,
+                    allow_expand=True,
+                )
+                bubble.task_views[task.task_id] = task
+                task.status = str(task_data.get("status") or "INTERRUPTED")
+                task.error = str(task_data.get("error") or "")
+                task.started_at = 0.0
+                task.duration_ms = max(0, int(task_data.get("duration_ms") or 0))
+                task.input_snapshot = _frozen_value(task_data.get("input_state"))
+                task.result_available = task_data.get("result_available") is True
+                task.result_snapshot = _frozen_value(task_data.get("result"))
+                agents = task_data.get("agents")
+                if isinstance(agents, list):
+                    for agent_data in agents:
+                        if not isinstance(agent_data, dict):
+                            continue
+                        agent = WorkflowAgentView(
+                            str(agent_data.get("inspection_id") or ""),
+                            str(agent_data.get("name") or "agent"),
+                            str(agent_data.get("task_input") or ""),
+                        )
+                        assert task.tree_node is not None
+                        agent.tree_node = task.tree_node.add_leaf(
+                            Text(agent.name, style="#c9d5d8"),
+                            data=agent,
+                        )
+                        task.tree_node.expand()
+                        task.agents.append(agent)
+                        bubble.agent_views[agent.inspection_id] = agent
+                        agent.status = str(
+                            agent_data.get("status") or "INTERRUPTED"
+                        )
+                        agent.result = str(agent_data.get("result") or "")
+                        agent.error = str(agent_data.get("error") or "")
+                        agent.started_at = 0.0
+                        agent.duration_ms = max(
+                            0, int(agent_data.get("duration_ms") or 0)
+                        )
+                bubble._sync_task_disclosure(task)
+        bubble._fit_tree_height()
+        bubble._finish_footer()
+        return bubble
 
     def compose(self) -> ComposeResult:
         yield self.workflow_tree
@@ -454,7 +552,7 @@ class WorkflowTreeBubble(Vertical):
     def _sync_task_disclosure(view: WorkflowTaskView) -> None:
         if view.tree_node is None:
             return
-        terminal = view.status in {"DONE", "ERROR", "CANCELLED"}
+        terminal = view.status in {"DONE", "ERROR", "CANCELLED", "INTERRUPTED"}
         view.tree_node.allow_expand = not terminal or bool(view.tree_node.children)
 
     def _finish_footer(self) -> None:
@@ -466,7 +564,13 @@ class WorkflowTreeBubble(Vertical):
                 started_at=self.started_at,
                 duration_ms=self.duration_ms,
                 is_error=self.status == "ERROR",
-                terminal_status="cancelled" if self.status == "CANCELLED" else "",
+                terminal_status=(
+                    "cancelled"
+                    if self.status == "CANCELLED"
+                    else "interrupted"
+                    if self.status == "INTERRUPTED"
+                    else ""
+                ),
             )
         )
 
@@ -505,6 +609,7 @@ class WorkflowTreeBubble(Vertical):
                 WorkflowFinalStateSelected(
                     self.workflow_name,
                     self.final_state,
+                    self.final_state_snapshot,
                 )
             )
 

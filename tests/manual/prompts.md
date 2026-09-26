@@ -1860,3 +1860,29 @@ model.
 8. Close the Inspector, confirm chat returns, then reopen `Final state` from the
    same bubble.
 9. After the check, remove only `.mira/workflows/demo.py`.
+
+## Durable Workflow History (Phase 4)
+
+1. Start MIRA and run a discovered `/workflow__...` command that includes at
+   least one nested agent. Wait for it to complete and confirm the live tree is
+   unchanged: Steps, parallel siblings, duplicate native task rows, statuses,
+   durations, and Final state remain in one Workflow bubble.
+2. Open a native task and verify Input state and Result. Open the nested agent
+   and verify its normal Inspector transcript. Open Final state. Test each
+   value bubble's Copy action.
+3. Exit MIRA completely, restart it, and reopen the same session. Expected: the
+   exact original Workflow command appears as a normal `you` bubble in the same
+   transcript location, with the frozen Workflow tree immediately beneath it.
+   Step grouping, task multiplicity, statuses, and durations match the live run;
+   nothing animates.
+4. Reopen the historical native task, nested agent, and Final state. Expected:
+   the same Inspector experiences and complete Copy values remain available,
+   even if the Workflow Python file was edited or removed after the run.
+5. Run the same Workflow command twice, exit, and reopen the session. Expected:
+   both invocations remain visible in order as independent trees with distinct
+   Workflow identities.
+6. Start a Workflow that reaches live HITL and wait until its task is `WAITING`.
+   Terminate MIRA, restart, and reopen the session. Expected: the Workflow and
+   previously active task or agent are `INTERRUPTED`; already completed tasks
+   remain `DONE`; timers are frozen; no spinner or Resume action is present;
+   retained state and agent history remain inspectable.

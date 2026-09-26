@@ -159,6 +159,81 @@ class PersistentSubagentRuns:
             get_diagnostics_logger().warning("rubric run projection failed: %s", exc)
         return outcome
 
+    def workflow_agent_started(
+        self,
+        task_id: str,
+        name: str,
+        inspection_id: str,
+        *,
+        task_input: str = "",
+        resumed: bool = False,
+        workflow_id: str = "",
+    ) -> Any:
+        """Attach one Workflow-owned inspection without a root tool origin."""
+        outcome = self.renderer.workflow_agent_started(
+            task_id,
+            name,
+            inspection_id,
+            task_input=task_input,
+            resumed=resumed,
+            workflow_id=workflow_id,
+        )
+        self._attach(
+            inspection_id,
+            requires_origin=False,
+            task=task_input,
+            display_name=name,
+        )
+        return outcome
+
+    def workflow_agent_waiting(
+        self,
+        task_id: str,
+        name: str,
+        inspection_id: str,
+        *,
+        workflow_id: str = "",
+    ) -> Any:
+        """Flush a Workflow-owned inspection at its live HITL boundary."""
+        outcome = self.renderer.workflow_agent_waiting(
+            task_id,
+            name,
+            inspection_id,
+            workflow_id=workflow_id,
+        )
+        self._snapshot(inspection_id, immediate=True)
+        return outcome
+
+    def workflow_agent_finished(
+        self,
+        task_id: str,
+        name: str,
+        inspection_id: str,
+        *,
+        status: str = "DONE",
+        result: str = "",
+        error: str = "",
+        workflow_id: str = "",
+    ) -> Any:
+        """Finalize one origin-less Workflow inspection transcript."""
+        outcome = self.renderer.workflow_agent_finished(
+            task_id,
+            name,
+            inspection_id,
+            status=status,
+            result=result,
+            error=error,
+            workflow_id=workflow_id,
+        )
+        self._terminal(
+            inspection_id,
+            "",
+            result or error,
+            None,
+            status=status,
+        )
+        return outcome
+
     def flush(self) -> None:
         if self._flush_handle is not None:
             self._flush_handle.cancel()

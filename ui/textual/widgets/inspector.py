@@ -78,7 +78,12 @@ class Inspector(Vertical):
         self._replay()
         return True
 
-    def open_workflow_state(self, name: str, final_state: Any) -> None:
+    def open_workflow_state(
+        self,
+        name: str,
+        final_state: Any,
+        snapshot: dict[str, str] | None = None,
+    ) -> None:
         """Show one retained Workflow final state value bubble."""
         self._unsubscribe()
         self.inspection_id = ""
@@ -89,7 +94,7 @@ class Inspector(Vertical):
         )
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
-        log.workflow_value("Final state", final_state)
+        log.workflow_value("Final state", final_state, frozen=snapshot)
 
     def open_workflow_node(self, view: Any) -> None:
         """Render Input, agent summaries, and the available terminal boundary."""
@@ -102,11 +107,19 @@ class Inspector(Vertical):
         )
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
-        log.workflow_value("Input state", view.input_state)
+        log.workflow_value(
+            "Input state",
+            view.input_state,
+            frozen=view.input_snapshot,
+        )
         for agent in view.agents:
             log.workflow_agent_summary(agent)
         if view.result_available:
-            log.workflow_value("Result", view.result)
+            log.workflow_value(
+                "Result",
+                view.result,
+                frozen=view.result_snapshot,
+            )
         elif view.status == "ERROR" and view.error:
             log.system_message(view.error, kind="error")
 

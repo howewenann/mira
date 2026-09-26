@@ -256,6 +256,15 @@ class ChatLog(VerticalScroll):
         self._scroll_to_end()
         return bubble
 
+    def restore_workflow(self, snapshot: dict[str, Any]) -> WorkflowTreeBubble:
+        """Mount one frozen Workflow tree from its normalized session event."""
+        self.finish_stream_phase()
+        bubble = WorkflowTreeBubble.from_snapshot(snapshot)
+        self._workflow_bubbles[bubble.workflow_id] = bubble
+        self.mount(bubble)
+        self._scroll_to_end()
+        return bubble
+
     def workflow_task_started(
         self,
         workflow_id: str,
@@ -384,10 +393,16 @@ class ChatLog(VerticalScroll):
         bubble = self._workflow_bubbles.get(workflow_id)
         return bubble.task_views.get(task_id) if bubble is not None else None
 
-    def workflow_value(self, title: str, value: Any) -> WorkflowValueBubble:
+    def workflow_value(
+        self,
+        title: str,
+        value: Any = None,
+        *,
+        frozen: dict[str, str] | None = None,
+    ) -> WorkflowValueBubble:
         """Mount one retained Workflow object with its own Copy action."""
         self.finish_stream_phase()
-        bubble = WorkflowValueBubble(title, value)
+        bubble = WorkflowValueBubble(title, value, frozen=frozen)
         self.mount(bubble)
         self._scroll_to_end()
         return bubble
@@ -482,6 +497,12 @@ class ChatLog(VerticalScroll):
                         origin=str(event.get("origin") or ""),
                         created_at=created_at,
                     )
+            elif event_type == "workflow":
+                self.timestamped_user_message(
+                    event["command"],
+                    created_at=created_at,
+                )
+                self.restore_workflow(event)
             elif event_type == "compaction":
                 self._add_block("session compacted", self._compaction_text(event), "message summary", created_at=created_at)
             elif event_type == "plan":
@@ -995,7 +1016,6 @@ class ChatLog(VerticalScroll):
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._subagent_aliases = {}
-        self._workflow_bubbles = {}
 
     def discard_delegation_summary(self) -> None:
         """Remove the current live delegation summary from the transcript."""
@@ -1520,6 +1540,7 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_id = {}
         self._pending_tool_results_by_name = defaultdict(deque)
         self._subagent_aliases = {}
+        self._workflow_bubbles = {}
         preserved_widgets = {
             widget
             for widget in (preserved_startup, *preserved_mcp.values())

@@ -17,6 +17,7 @@ from core.execution.streams.subagents import consume_subagent
 from session.context import SESSION_FIELDS, normalize_messages, normalize_session, with_resume_context
 from session.store import SessionStore
 from session.subagent_runs import normalize_runs, upsert_run
+from session.workflows import PersistentWorkflowHistory
 
 
 class SavingStore:
@@ -159,6 +160,91 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         inspections.finish("inspection-1", status="DONE", final_response="one two three")
         self.assertEqual(store.saved[-1]["runs"][0]["output"], "one two three")
         observer.close()
+
+    async def test_workflow_agent_persists_without_root_tool_origin(self) -> None:
+        inspections = LiveInspectionStore()
+        inspections.start(
+            "workflow-inspection",
+            "researcher",
+            "research request",
+        )
+        record: dict[str, Any] = {"events": [], "runs": []}
+        renderer = InspectionRenderer(inspections)
+        store = SavingStore()
+        history = PersistentWorkflowHistory(
+            renderer,
+            record,
+            store,
+            command="/workflow__research topic=history",
+        )
+        observer = PersistentSubagentRuns(history, record, store)
+        observer.workflow_started("wf-1", "research")
+        observer.workflow_task_started(
+            "task-1",
+            "research",
+            1,
+            {"topic": "history"},
+            workflow_id="wf-1",
+        )
+
+        observer.workflow_agent_started(
+            "task-1",
+            "researcher",
+            "workflow-inspection",
+            task_input="research request",
+            workflow_id="wf-1",
+        )
+        inspections.append_delta(
+            "workflow-inspection", "reasoning", "checking sources"
+        )
+        observer.workflow_agent_waiting(
+            "task-1",
+            "researcher",
+            "workflow-inspection",
+            workflow_id="wf-1",
+        )
+        inspections.finish(
+            "workflow-inspection",
+            status="DONE",
+            final_response="complete",
+        )
+        observer.workflow_agent_finished(
+            "task-1",
+            "researcher",
+            "workflow-inspection",
+            result="complete",
+            workflow_id="wf-1",
+        )
+        observer.workflow_task_finished(
+            "task-1",
+            "research",
+            1,
+            status="DONE",
+            result="complete",
+            result_available=True,
+            workflow_id="wf-1",
+        )
+        observer.workflow_finished(
+            "wf-1",
+            final_state={"complete": True},
+            final_state_available=True,
+        )
+        observer.close()
+        history.close()
+
+        self.assertEqual(len(record["runs"]), 1)
+        run = record["runs"][0]
+        self.assertIsNone(run["origin_event_id"])
+        self.assertEqual(run["inspection_id"], "workflow-inspection")
+        self.assertEqual(run["status"], "DONE")
+        self.assertEqual(run["output"], "complete")
+        workflow = record["events"][0]
+        self.assertEqual(workflow["status"], "DONE")
+        self.assertEqual(
+            workflow["tasks"][0]["agents"][0]["inspection_id"],
+            "workflow-inspection",
+        )
+        self.assertIn("workflow_agent_started", [call[0] for call in renderer.calls])
 
     async def test_eval_rows_share_only_their_eval_origin(self) -> None:
         inspections = LiveInspectionStore()

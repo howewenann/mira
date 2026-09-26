@@ -99,6 +99,7 @@ from session.plans import current_plan, plan_artifact
 from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
 from session.store import SessionStore
+from session.workflows import freeze_workflow_value
 from ui.textual.commands import dispatcher as repl
 from ui.textual.commands.help import command_help_entries
 from ui.shared.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
@@ -10632,6 +10633,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(bubble.final_button.display)
                 self.assertFalse(panel._records)
+                self.assertFalse(
+                    [
+                        event
+                        for event in app.session.get("events", [])
+                        if event.get("type") == "workflow"
+                    ]
+                )
 
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/workflow-demo"))
                 await wait_until(lambda: app.turn_worker is None)
@@ -10787,6 +10795,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     '/workflow__demo topic="hello world" repeat=3',
                 )
                 self.assertNotIn("{'topic':", renderable_plain(user_messages[0]))
+                workflow_events = [
+                    event
+                    for event in app.session.get("events", [])
+                    if event.get("type") == "workflow"
+                ]
+                self.assertEqual(len(workflow_events), 1)
+                self.assertEqual(
+                    workflow_events[0]["command"],
+                    '/workflow__demo topic="hello world" repeat=3',
+                )
+                self.assertEqual(workflow_events[0]["status"], "DONE")
+                self.assertEqual(app.session["turns"], 0)
 
                 bubble.final_button.press()
                 await wait_until(
@@ -10842,13 +10862,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: app.focused is inspector)
                 value_bubble = inspector.query_one(WorkflowValueBubble)
                 copy_button = value_bubble.query_one(".workflow-value-copy", Button)
-                value_bubble.FEEDBACK_SECONDS = 0.1
+                value_bubble.FEEDBACK_SECONDS = 0.3
                 copy_button.press()
                 await pilot.pause()
                 app.copy_to_clipboard.assert_called_once()
                 self.assertIn("hello world", app.copy_to_clipboard.call_args.args[0])
                 self.assertEqual(str(copy_button.label), "Copied")
-                await asyncio.sleep(0.12)
+                await asyncio.sleep(0.32)
                 await pilot.pause()
                 self.assertEqual(str(copy_button.label), "Copy")
 
@@ -10873,6 +10893,328 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(completed[0].final_state, completed[1].final_state)
                 factory.assert_called_with(app.application.workflows)
                 self.assertEqual(factory.call_count, 2)
+                workflow_events = [
+                    event
+                    for event in app.session.get("events", [])
+                    if event.get("type") == "workflow"
+                ]
+                self.assertEqual(len(workflow_events), 2)
+                self.assertEqual(
+                    len({event["workflow_id"] for event in workflow_events}),
+                    2,
+                )
+
+    async def test_historical_workflow_restores_frozen_values_and_timing(self) -> None:
+        command = "/workflow__demo topic=history repeat=1"
+        event = {
+            "id": 1,
+            "type": "workflow",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:03+00:00",
+            "finished_at": "2026-01-01T00:00:03+00:00",
+            "workflow_id": "wf-history",
+            "workflow_name": "demo",
+            "command": command,
+            "status": "DONE",
+            "error": "",
+            "duration_ms": 3000,
+            "tasks": [
+                {
+                    "task_id": "task-history",
+                    "name": "analyse",
+                    "step": 1,
+                    "status": "DONE",
+                    "error": "",
+                    "duration_ms": 2000,
+                    "input_state": freeze_workflow_value(
+                        {"path": Path("input.txt"), "values": (1, 2)}
+                    ),
+                    "result_available": True,
+                    "result": freeze_workflow_value(None),
+                    "agents": [],
+                }
+            ],
+            "final_state_available": True,
+            "final_state": freeze_workflow_value(
+                SimpleNamespace(path=Path("final.txt"), tags={"a", "b"})
+            ),
+        }
+        session = {
+            "id": "thread-history",
+            "title": "History",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:03+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "current_plan": None,
+            "current_goal": None,
+            "events": [event],
+            "runs": [],
+        }
+        app = make_app(session=session)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            chat = app.query_one(ChatLog)
+            bubble = app.query_one(WorkflowTreeBubble)
+            user_messages = [child for child in chat.children if "user" in child.classes]
+            self.assertEqual(len(user_messages), 1)
+            self.assertEqual(renderable_plain(user_messages[0]), command)
+            self.assertEqual(bubble.duration_ms, 3000)
+            self.assertEqual(bubble.task_views["task-history"].duration_ms, 2000)
+            frame = bubble.workflow_tree._spinner_frame
+            app._tick_animations()
+            self.assertEqual(bubble.workflow_tree._spinner_frame, frame)
+            self.assertFalse(
+                [button for button in bubble.query(Button) if "Resume" in str(button.label)]
+            )
+
+            bubble.post_message(
+                WorkflowNodeSelected(bubble.task_views["task-history"])
+            )
+            await wait_until(
+                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                == "inspector"
+            )
+            inspector = app.query_one(Inspector)
+            values = list(inspector.query(WorkflowValueBubble))
+            self.assertEqual([value.border_title for value in values], ["Input state", "Result"])
+            await wait_until(
+                lambda: all(
+                    list(value.query(".workflow-value-body"))
+                    and list(value.query(".workflow-value-copy"))
+                    for value in values
+                )
+            )
+            self.assertIn(
+                "input.txt",
+                renderable_plain(values[0].query_one(".workflow-value-body", Static)),
+            )
+            self.assertEqual(
+                renderable_plain(values[1].query_one(".workflow-value-body", Static)),
+                "None",
+            )
+            app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
+            values[0].query_one(".workflow-value-copy", Button).press()
+            await pilot.pause()
+            self.assertIn("input.txt", app.copy_to_clipboard.call_args.args[0])
+
+            inspector.post_message(Inspector.Closed())
+            await wait_until(
+                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                == "chat-log"
+            )
+            bubble.final_button.press()
+            await wait_until(
+                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                == "inspector"
+            )
+            await wait_until(
+                lambda: [
+                    value.border_title
+                    for value in app.query_one(Inspector).query(WorkflowValueBubble)
+                ]
+                == ["Final state"]
+            )
+            final_value = app.query_one(Inspector).query_one(WorkflowValueBubble)
+            self.assertIn(
+                "final.txt",
+                renderable_plain(final_value.query_one(".workflow-value-body", Static)),
+            )
+
+            chat.clear_log()
+            await pilot.pause()
+            self.assertEqual(chat._workflow_bubbles, {})
+
+    async def test_historical_workflow_agent_uses_saved_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "sessions")
+            session = store.new("thread-agent-history", workspace)
+            session["events"] = [
+                {
+                    "type": "workflow",
+                    "workflow_id": "wf-agent-history",
+                    "workflow_name": "demo",
+                    "command": "/workflow__demo topic=agent",
+                    "status": "DONE",
+                    "duration_ms": 1000,
+                    "tasks": [
+                        {
+                            "task_id": "task-agent-history",
+                            "name": "research",
+                            "step": 1,
+                            "status": "DONE",
+                            "duration_ms": 900,
+                            "input_state": freeze_workflow_value({"topic": "agent"}),
+                            "result_available": False,
+                            "result": None,
+                            "agents": [
+                                {
+                                    "inspection_id": "inspection-history",
+                                    "name": "researcher",
+                                    "task_input": "research agent history",
+                                    "status": "DONE",
+                                    "result": "saved response",
+                                    "error": "",
+                                    "duration_ms": 800,
+                                }
+                            ],
+                        }
+                    ],
+                    "final_state_available": False,
+                    "final_state": None,
+                }
+            ]
+            session["runs"] = [
+                {
+                    "id": "run-history",
+                    "inspection_id": "inspection-history",
+                    "origin_event_id": None,
+                    "inspection_type": "subagent",
+                    "display_name": "researcher",
+                    "task": "research agent history",
+                    "status": "DONE",
+                    "started_at": "2026-01-01T00:00:00+00:00",
+                    "updated_at": "2026-01-01T00:00:01+00:00",
+                    "finished_at": "2026-01-01T00:00:01+00:00",
+                    "duration_ms": 800,
+                    "output": "saved response",
+                    "events": [
+                        {"kind": "user", "text": "research agent history"},
+                        {"kind": "assistant", "text": "saved response"},
+                    ],
+                }
+            ]
+            store.save(session)
+            self.assertNotIn("events", session["events"][0]["tasks"][0]["agents"][0])
+            app = make_app(workspace, session=session, store=store)
+
+            async with app.run_test(size=(120, 30)) as pilot:
+                await pilot.pause()
+                bubble = app.query_one(WorkflowTreeBubble)
+                bubble.post_message(WorkflowAgentSelected("inspection-history"))
+                await wait_until(
+                    lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                    == "inspector"
+                )
+                inspector = app.query_one(Inspector)
+                self.assertEqual(inspector.inspection_id, "run-history")
+                rendered = "\n".join(
+                    renderable_plain(child)
+                    for child in inspector.query_one("#inspector-log", ChatLog).children
+                )
+                self.assertIn("research agent history", rendered)
+                self.assertIn("saved response", rendered)
+                self.assertFalse(app.query_one(SubagentsPanel)._records)
+
+    async def test_historical_interrupted_workflow_is_terminal_and_frozen(self) -> None:
+        session = {
+            "id": "thread-interrupted-workflow",
+            "title": "Interrupted Workflow",
+            "workspace": ".",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:05+00:00",
+            "turns": 0,
+            "dashboard": {},
+            "current_plan": None,
+            "current_goal": None,
+            "events": [
+                {
+                    "type": "workflow",
+                    "workflow_id": "wf-interrupted",
+                    "workflow_name": "approval",
+                    "command": "/workflow__approval value=1",
+                    "status": "INTERRUPTED",
+                    "duration_ms": 5000,
+                    "tasks": [
+                        {
+                            "task_id": "done",
+                            "name": "load",
+                            "step": 1,
+                            "status": "DONE",
+                            "duration_ms": 1000,
+                            "input_state": freeze_workflow_value({}),
+                            "result_available": True,
+                            "result": freeze_workflow_value({"loaded": True}),
+                            "agents": [],
+                        },
+                        {
+                            "task_id": "waiting",
+                            "name": "approval",
+                            "step": 2,
+                            "status": "INTERRUPTED",
+                            "duration_ms": 4000,
+                            "input_state": freeze_workflow_value({"value": 1}),
+                            "result_available": False,
+                            "result": None,
+                            "agents": [],
+                        },
+                    ],
+                    "final_state_available": False,
+                    "final_state": None,
+                }
+            ],
+            "runs": [],
+        }
+        app = make_app(session=session)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause()
+            bubble = app.query_one(WorkflowTreeBubble)
+            self.assertEqual(bubble.status, "INTERRUPTED")
+            self.assertEqual(
+                [view.status for view in bubble.task_views.values()],
+                ["DONE", "INTERRUPTED"],
+            )
+            self.assertIn("Interrupted after", renderable_plain(bubble.overall_status))
+            interrupted = bubble.task_views["waiting"]
+            self.assertIsNotNone(interrupted.tree_node)
+            self.assertFalse(interrupted.tree_node.allow_expand)
+            frame = bubble.workflow_tree._spinner_frame
+            app._tick_animations()
+            self.assertEqual(bubble.workflow_tree._spinner_frame, frame)
+            self.assertFalse(bubble.final_button.display)
+
+    async def test_invalid_discovered_workflow_does_not_persist_or_echo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            target = workspace / ".mira" / "workflows" / "demo.py"
+            target.parent.mkdir(parents=True)
+            target.write_text(
+                (Path("examples") / "workflows" / "demo.py").read_text(
+                    encoding="utf-8"
+                ),
+                encoding="utf-8",
+            )
+            agent = SimpleNamespace(mira_context_factory=lambda: object())
+            app = make_app(workspace, agent=agent, plan_agent=agent)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(
+                    PromptBox.Submitted(prompt, "/workflow__demo repeat=1")
+                )
+                await wait_until(lambda: app.turn_worker is None)
+                await pilot.pause()
+
+                self.assertFalse(list(app.query(WorkflowTreeBubble)))
+                self.assertFalse(
+                    [
+                        event
+                        for event in app.session.get("events", [])
+                        if event.get("type") == "workflow"
+                    ]
+                )
+                self.assertFalse(
+                    [
+                        child
+                        for child in app.query_one(ChatLog).children
+                        if "user" in child.classes
+                    ]
+                )
 
     async def test_workflow_tree_retains_non_json_final_state_without_session_event(self) -> None:
         app = make_app()

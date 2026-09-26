@@ -55,11 +55,16 @@ native `StateGraph`, topology, reducers, nodes, loops, `Send()` calls,
 parallelism, and compilation.
 
 `workflow(mira)` should only construct and compile the graph. Put actual work
-inside graph nodes. On success, the chat receives a compact Workflow completion
-bubble whose **Final state** action opens the existing Inspector. Final state is
-process-local and disappears when MIRA restarts. Phase 4 owns persistence,
-restored anchors, run history, and checkpoint lifecycle; none of those are part
-of this launch contract.
+inside graph nodes. Each invocation renders as one Workflow execution tree;
+its **Final state** action and native task or nested-agent rows open the existing
+Inspector. Completed and interrupted Workflow history is stored with the MIRA
+session, so its values and nested agent execution remain inspectable after a
+restart.
+
+Live execution remains process-owned. If MIRA exits while a Workflow is active,
+that invocation becomes a frozen historical `INTERRUPTED` record. It is not
+resumed or reconnected to a new graph. Run the `/workflow__...` command again to
+create a new invocation with a new identity.
 
 Read the examples in this order:
 

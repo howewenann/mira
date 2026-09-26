@@ -12,6 +12,7 @@ from typing import Any
 from session.context import normalize_session
 from session.dashboard import normalize_dashboard
 from session.subagent_runs import reconcile_stale_runs
+from session.workflows import reconcile_stale_workflows
 
 
 def new_session_id() -> str:
@@ -102,8 +103,11 @@ class SessionStore:
         """Read a session record from a JSON file."""
         record = json.loads(path.read_text(encoding="utf-8"))
         normalized = normalize_session(record)
-        if reconcile_running and reconcile_stale_runs(normalized):
-            self._write(normalized, update_timestamp=False)
+        if reconcile_running:
+            workflows_changed = reconcile_stale_workflows(normalized)
+            runs_changed = reconcile_stale_runs(normalized)
+            if workflows_changed or runs_changed:
+                self._write(normalized, update_timestamp=False)
         return normalized
 
     def latest(self) -> Path | None:

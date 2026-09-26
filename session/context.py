@@ -10,6 +10,7 @@ from session.dashboard import normalize_dashboard
 from session.goals import goal_artifact_text, normalize_current_goal
 from session.plans import normalize_current_plan, plan_artifact_text
 from session.subagent_runs import normalize_runs
+from session.workflows import normalize_workflow_event
 from core.execution.streams.corrections import correction_context_text, normalize_correction_event
 
 UNTITLED_SESSION = "Untitled session"
@@ -164,6 +165,11 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
             event["cutoff_index"] = cutoff_index
             event["file_path"] = file_path
             event["summary"] = summary
+        elif event_type == "workflow":
+            workflow = normalize_workflow_event(item)
+            if workflow is None:
+                continue
+            event.update(workflow)
         else:
             continue
 
