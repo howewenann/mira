@@ -164,6 +164,7 @@ from ui.textual.widgets.workflow_bubble import (
     WorkflowAgentSelected,
     WorkflowNodeSelected,
     WorkflowTreeBubble,
+    WorkflowValueBubble,
 )
 
 
@@ -10775,21 +10776,35 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(switcher.current, "inspector")
                 self.assertIsNone(app.focused)
                 self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
-                self.assertTrue(inspector.query_one("#inspector-final-state-actions").display)
                 self.assertEqual(
                     renderable_plain(inspector.query_one("#inspector-title")),
                     "Inspector · workflow · demo · Final state",
                 )
-                self.assertTrue(
-                    any(
-                        "hello world" in renderable_plain(child)
-                        for child in inspector.query_one("#inspector-log", ChatLog).children
-                    )
-                )
 
                 app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
-                inspector.FEEDBACK_SECONDS = 0.1
-                copy_button = inspector.query_one("#inspector-final-state-copy", Button)
+                value_bubbles = list(inspector.query(WorkflowValueBubble))
+                self.assertEqual(len(value_bubbles), 1)
+                value_bubble = value_bubbles[0]
+                self.assertEqual(value_bubble.border_title, "Final state")
+                self.assertIn(
+                    "hello world",
+                    renderable_plain(
+                        value_bubble.query_one(".workflow-value-body", Static)
+                    ),
+                )
+                self.assertEqual(
+                    len(list(value_bubble.query(".workflow-value-copy"))),
+                    1,
+                )
+                self.assertFalse(list(value_bubble.query(".assistant-display")))
+                self.assertFalse(list(inspector.query("#inspector-final-state-actions")))
+                self.assertFalse(list(inspector.query("#inspector-final-state-copy")))
+                body = value_bubble.query_one(".workflow-value-body", Static)
+                actions = value_bubble.query_one(".workflow-value-actions", Horizontal)
+                copy_button = value_bubble.query_one(".workflow-value-copy", Button)
+                self.assertEqual(copy_button.region.x, body.region.x)
+                self.assertEqual(actions.region.y - body.region.bottom, 1)
+                value_bubble.FEEDBACK_SECONDS = 0.1
                 copy_button.press()
                 await pilot.pause()
                 app.copy_to_clipboard.assert_called_once()
@@ -10803,7 +10818,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: switcher.current == "chat-log")
                 await pilot.pause()
                 self.assertEqual(switcher.current, "chat-log")
-                self.assertFalse(inspector.query_one("#inspector-final-state-actions").display)
                 bubble.final_button.press()
                 await wait_until(lambda: switcher.current == "inspector")
                 await pilot.pause()
@@ -10839,12 +10853,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(bubble.final_state, final_state)
             self.assertEqual(app.session, session_before)
             bubble.final_button.press()
+            await wait_until(
+                lambda: bool(
+                    list(app.query_one(Inspector).query(".workflow-value-copy"))
+                )
+            )
             await pilot.pause()
 
             inspector = app.query_one(Inspector)
+            self.assertIsNone(app.focused)
             app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
-            inspector.FEEDBACK_SECONDS = 0.3
-            copy_button = inspector.query_one("#inspector-final-state-copy", Button)
+            value_bubbles = list(inspector.query(WorkflowValueBubble))
+            self.assertEqual(len(value_bubbles), 1)
+            value_bubble = value_bubbles[0]
+            value_bubble.FEEDBACK_SECONDS = 0.3
+            copy_button = value_bubble.query_one(".workflow-value-copy", Button)
+            self.assertFalse(list(inspector.query("#inspector-final-state-actions")))
+            self.assertFalse(list(inspector.query("#inspector-final-state-copy")))
             copy_button.press()
             await pilot.pause()
             await asyncio.sleep(0.15)
@@ -10977,7 +11002,17 @@ def workflow(mira):
             await pilot.pause()
             app.workflow_started("demo-id", "demo")
             app.workflow_task_started(
-                "task-1", "prepare", 1, {"topic": "isopods"}, workflow_id="demo-id"
+                "task-1",
+                "prepare",
+                1,
+                {
+                    "topic": "isopods",
+                    "details": SimpleNamespace(
+                        path=Path("input.txt"),
+                        values=[1, 2, 3],
+                    ),
+                },
+                workflow_id="demo-id",
             )
             inspection_id = app.live_inspections.allocate_id("task-1")
             app.live_inspections.start(
@@ -11004,7 +11039,10 @@ def workflow(mira):
                 "task-1",
                 "prepare",
                 1,
-                result={"brief": "ready"},
+                result={
+                    "brief": "ready",
+                    "details": (Path("result.txt"), {4, 5}),
+                },
                 result_available=True,
                 workflow_id="demo-id",
             )
@@ -11021,15 +11059,48 @@ def workflow(mira):
             bubble.post_message(WorkflowNodeSelected(view))
             await pilot.pause()
             self.assertEqual(switcher.current, "inspector")
+            self.assertIsNone(app.focused)
             self.assertEqual(
                 renderable_plain(app.query_one("#inspector-title")),
                 "Inspector · workflow · prepare",
             )
             node_log = app.query_one(Inspector).query_one("#inspector-log", ChatLog)
-            node_text = [renderable_plain(child) for child in node_log.children]
-            self.assertIn("isopods", node_text[0])
-            self.assertTrue(any("Agent summary" in text for text in node_text))
-            self.assertIn("ready", node_text[-1])
+            value_bubbles = list(node_log.query(WorkflowValueBubble))
+            self.assertEqual(len(value_bubbles), 2)
+            self.assertEqual(
+                [bubble.border_title for bubble in value_bubbles],
+                ["Input state", "Result"],
+            )
+            value_text = [
+                renderable_plain(bubble.query_one(".workflow-value-body", Static))
+                for bubble in value_bubbles
+            ]
+            self.assertIn("isopods", value_text[0])
+            self.assertIn("ready", value_text[1])
+            agent_summaries = list(node_log.query(".message.subagent"))
+            self.assertEqual(len(agent_summaries), 1)
+            self.assertIn("Agent summary", renderable_plain(agent_summaries[0]))
+            self.assertEqual(len(list(node_log.query(".workflow-value-copy"))), 2)
+            self.assertFalse(list(agent_summaries[0].query(".workflow-value-copy")))
+
+            app.copy_to_clipboard = Mock()  # type: ignore[method-assign]
+            input_copy = value_bubbles[0].query_one(".workflow-value-copy", Button)
+            result_copy = value_bubbles[1].query_one(".workflow-value-copy", Button)
+            input_copy.press()
+            await pilot.pause()
+            input_text = app.copy_to_clipboard.call_args.args[0]
+            self.assertIn("input.txt", input_text)
+            self.assertIn("namespace", input_text)
+            self.assertIn("3", input_text)
+            self.assertEqual(str(input_copy.label), "Copied")
+            self.assertEqual(str(result_copy.label), "Copy")
+
+            result_copy.press()
+            await pilot.pause()
+            result_text = app.copy_to_clipboard.call_args.args[0]
+            self.assertIn("result.txt", result_text)
+            self.assertIn("5", result_text)
+            self.assertEqual(app.copy_to_clipboard.call_count, 2)
             app.query_one(Inspector).post_message(Inspector.Closed())
             await pilot.pause()
             self.assertEqual(switcher.current, "chat-log")

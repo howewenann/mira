@@ -12,7 +12,6 @@ from itertools import count
 from typing import Any
 
 from rich.markup import escape
-from rich.pretty import Pretty
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
@@ -46,6 +45,7 @@ from ui.textual.widgets.workflow_bubble import (
     WorkflowAgentView,
     WorkflowTaskView,
     WorkflowTreeBubble,
+    WorkflowValueBubble,
 )
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
@@ -384,14 +384,13 @@ class ChatLog(VerticalScroll):
         bubble = self._workflow_bubbles.get(workflow_id)
         return bubble.task_views.get(task_id) if bubble is not None else None
 
-    def workflow_value(self, title: str, value: Any) -> None:
-        """Render one retained Workflow object as a normal transcript bubble."""
+    def workflow_value(self, title: str, value: Any) -> WorkflowValueBubble:
+        """Mount one retained Workflow object with its own Copy action."""
         self.finish_stream_phase()
-        self._add_block(
-            title,
-            Pretty(value, expand_all=False),
-            "message command workflow-value",
-        )
+        bubble = WorkflowValueBubble(title, value)
+        self.mount(bubble)
+        self._scroll_to_end()
+        return bubble
 
     def workflow_agent_summary(self, agent: WorkflowAgentView) -> None:
         """Render a read-only agent summary using the subagent bubble language."""

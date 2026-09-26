@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from rich.pretty import pretty_repr
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -25,7 +24,6 @@ class Inspector(Vertical):
     """Generic live inspection surface backed by a LiveInspectionStore."""
 
     can_focus = False
-    FEEDBACK_SECONDS = 1.5
 
     class Closed(Message):
         """Request restoration of the normal chat viewport."""
@@ -42,20 +40,7 @@ class Inspector(Vertical):
         self.tool_output_chars = tool_output_chars
         self.inspection_id = ""
         self._snapshot: LiveInspection | None = None
-        self._final_state: Any = None
-        self._final_state_text = ""
-        self._copy_feedback_version = 0
         self.workflow_task_id = ""
-        self._copy_button = Button(
-            "Copy",
-            id="inspector-final-state-copy",
-            compact=True,
-        )
-        self._final_state_actions = Horizontal(
-            self._copy_button,
-            id="inspector-final-state-actions",
-        )
-        self._final_state_actions.display = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="inspector-header"):
@@ -66,7 +51,6 @@ class Inspector(Vertical):
             id="inspector-log",
             classes="inspection-transcript",
         )
-        yield self._final_state_actions
 
     def open(self, inspection_id: str) -> bool:
         """Replay captured state and subscribe for subsequent live updates."""
@@ -75,7 +59,6 @@ class Inspector(Vertical):
             return False
         self._unsubscribe()
         self._snapshot = None
-        self._clear_final_state()
         self.workflow_task_id = ""
         self.inspection_id = inspection_id
         self._update_header(inspection)
@@ -90,35 +73,29 @@ class Inspector(Vertical):
         self._unsubscribe()
         self.inspection_id = inspection.id
         self._snapshot = inspection
-        self._clear_final_state()
         self.workflow_task_id = ""
         self._update_header(inspection)
         self._replay()
         return True
 
     def open_workflow_state(self, name: str, final_state: Any) -> None:
-        """Show one retained Workflow final state with the shared Copy action."""
+        """Show one retained Workflow final state value bubble."""
         self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = ""
-        self._final_state = final_state
-        self._final_state_text = pretty_repr(final_state, expand_all=True)
         self.query_one("#inspector-title", Static).update(
             f"Inspector · workflow · {name} · Final state"
         )
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
         log.workflow_value("Final state", final_state)
-        self._copy_button.label = "Copy"
-        self._final_state_actions.display = True
 
     def open_workflow_node(self, view: Any) -> None:
         """Render Input, agent summaries, and the available terminal boundary."""
         self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
-        self._clear_final_state()
         self.workflow_task_id = str(view.task_id)
         self.query_one("#inspector-title", Static).update(
             f"Inspector · workflow · {view.name}"
@@ -138,7 +115,6 @@ class Inspector(Vertical):
         self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
-        self._clear_final_state()
         self.workflow_task_id = ""
 
     def on_unmount(self) -> None:
@@ -153,18 +129,6 @@ class Inspector(Vertical):
     def close_pressed(self, event: Button.Pressed) -> None:
         event.stop()
         self.post_message(self.Closed())
-
-    @on(Button.Pressed, "#inspector-final-state-copy")
-    def copy_final_state(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.app.copy_to_clipboard(self._final_state_text)
-        self._copy_feedback_version += 1
-        version = self._copy_feedback_version
-        self._copy_button.label = "Copied"
-        self.set_timer(
-            self.FEEDBACK_SECONDS,
-            lambda: self._restore_copy_label(version),
-        )
 
     def _unsubscribe(self) -> None:
         if self.inspection_id:
@@ -215,18 +179,5 @@ class Inspector(Vertical):
         self.query_one("#inspector-title", Static).update(
             f"Inspector · {inspection.inspection_type} · {inspection.title}"
         )
-
-    def _clear_final_state(self) -> None:
-        self._final_state = None
-        self._final_state_text = ""
-        self._copy_feedback_version += 1
-        if self._final_state_actions.is_mounted:
-            self._copy_button.label = "Copy"
-            self._final_state_actions.display = False
-
-    def _restore_copy_label(self, version: int) -> None:
-        if self._copy_feedback_version == version and self._copy_button.is_mounted:
-            self._copy_button.label = "Copy"
-
 
 __all__ = ["Inspector"]

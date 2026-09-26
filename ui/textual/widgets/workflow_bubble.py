@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from rich.markup import escape
+from rich.pretty import Pretty, pretty_repr
 from rich.style import Style
 from rich.text import Text
 from textual import on
@@ -150,6 +152,49 @@ class WorkflowFinalStateSelected(Message):
         super().__init__()
         self.workflow_name = workflow_name
         self.final_state = final_state
+
+
+class WorkflowValueBubble(Vertical):
+    """One retained Workflow value with its own clipboard action."""
+
+    FEEDBACK_SECONDS = 1.5
+
+    def __init__(self, title: str, value: Any) -> None:
+        super().__init__(classes="message command workflow-value")
+        self.border_title = escape(title)
+        self.copy_text = pretty_repr(value, expand_all=True)
+        self._body = Static(
+            Pretty(value, expand_all=False),
+            classes="workflow-value-body",
+        )
+        self._copy_button = Button(
+            "Copy",
+            classes="workflow-value-copy",
+            compact=True,
+        )
+        self._feedback_version = 0
+
+    def compose(self) -> ComposeResult:
+        yield self._body
+        with Horizontal(classes="workflow-value-actions"):
+            yield self._copy_button
+
+    @on(Button.Pressed, ".workflow-value-copy")
+    def copy_value(self, event: Button.Pressed) -> None:
+        """Copy the complete value and show transient feedback."""
+        event.stop()
+        self.app.copy_to_clipboard(self.copy_text)
+        self._feedback_version += 1
+        version = self._feedback_version
+        self._copy_button.label = "Copied"
+        self.set_timer(
+            self.FEEDBACK_SECONDS,
+            lambda: self._restore_copy_label(version),
+        )
+
+    def _restore_copy_label(self, version: int) -> None:
+        if self._feedback_version == version and self._copy_button.is_mounted:
+            self._copy_button.label = "Copy"
 
 
 class WorkflowTreeBubble(Vertical):
@@ -429,4 +474,5 @@ __all__ = [
     "WorkflowTaskView",
     "WorkflowTree",
     "WorkflowTreeBubble",
+    "WorkflowValueBubble",
 ]
