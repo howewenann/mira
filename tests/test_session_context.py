@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent.middleware.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -27,6 +27,7 @@ from session.plans import plan_artifact
 from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
 from session.store import SessionStore
+from session.workflows import PersistentWorkflowHistory
 from core.execution import runner
 from core.execution.streams.messages import consume_messages
 from core.execution.streams.message_metadata import MessageInvocationMetadata
@@ -152,6 +153,178 @@ class Message:
 
 
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
+    def test_workflow_breadcrumb_points_to_session_without_expanding_details(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            record = SessionStore(workspace / ".mira" / "_sessions").new(
+                session_id="thread-1", workspace=workspace
+            )
+            record["events"] = [
+                {
+                    "type": "workflow",
+                    "workflow_name": "stream_capture",
+                    "workflow_id": "workflow-stream_capture:abc123",
+                    "status": "DONE",
+                    "command": "/workflow__stream_capture private-command",
+                    "tasks": [
+                        {
+                            "task_id": "task-1",
+                            "name": "research",
+                            "status": "DONE",
+                            "result_available": True,
+                            "result": {
+                                "display_text": "private task result",
+                                "copy_text": "private task result",
+                            },
+                            "agents": [{"inspection_id": "inspection-1", "name": "researcher"}],
+                        }
+                    ],
+                    "final_state_available": True,
+                    "final_state": {
+                        "display_text": "private final state",
+                        "copy_text": "private final state",
+                    },
+                }
+            ]
+            record["runs"] = [{"inspection_id": "inspection-1", "output": "private agent transcript"}]
+
+            resume = context.build_resume_context(record)
+
+        self.assertIn("stream_capture [DONE]", resume)
+        self.assertIn("workflow_id: workflow-stream_capture:abc123", resume)
+        self.assertIn("Session history: /.mira/_sessions/thread-1.json", resume)
+        self.assertIn('events[] item with type="workflow" and matching workflow_id', resume)
+        self.assertIn("runs[] item with matching inspection_id", resume)
+        self.assertIn("grep/read_file", resume)
+        for private in (
+            "private-command",
+            "private task result",
+            "private final state",
+            "private agent transcript",
+        ):
+            self.assertNotIn(private, resume)
+        self.assertEqual(context.normalize_messages(record["events"]), [])
+        context.update_title(record)
+        self.assertEqual(record["title"], "Untitled session")
+        self.assertEqual(record["turns"], 0)
+
+    def test_workflow_breadcrumb_uses_last_ten_terminal_runs_in_transcript_order(self) -> None:
+        record = {
+            "events": [
+                {
+                    "type": "workflow",
+                    "workflow_id": f"wf-{index}",
+                    "workflow_name": f"run-{index}",
+                    "status": "DONE" if index % 2 else "INTERRUPTED",
+                }
+                for index in range(12)
+            ]
+        }
+
+        resume = context.workflow_history_context(record)
+
+        self.assertNotIn("workflow_id: wf-0\n", resume)
+        self.assertNotIn("workflow_id: wf-1\n", resume)
+        self.assertEqual(resume.count("workflow_id:"), 10)
+        self.assertLess(resume.index("wf-2"), resume.index("wf-11"))
+
+        record["events"].append({
+            "type": "workflow", "workflow_id": "active",
+            "workflow_name": "active", "status": "RUNNING",
+        })
+        resume = context.workflow_history_context(record)
+        self.assertNotIn("workflow_id: wf-2\n", resume)
+        self.assertNotIn("workflow_id: active", resume)
+        self.assertEqual(resume.count("workflow_id:"), 9)
+
+    def test_workflow_only_session_resumes_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "_sessions")
+            record = store.new(session_id="thread-1", workspace=workspace)
+            record["events"] = [
+                {
+                    "type": "workflow", "workflow_id": "wf-1",
+                    "workflow_name": "demo", "status": "ERROR",
+                }
+            ]
+            store.save(record)
+            restored = store.load("thread-1", resume=False, workspace=workspace)
+
+            context.mark_resume_context_pending(restored, resumed=True)
+            self.assertTrue(restored["resume_context_pending"])
+            first = context.with_resume_context(
+                restored, "What happened?", session_root=store.root
+            )
+            second = context.with_resume_context(
+                restored, "Next question", session_root=store.root
+            )
+
+        self.assertIn("Previous MIRA session context:", first)
+        self.assertIn("demo [ERROR]", first)
+        self.assertIn("Current user request:\nWhat happened?", first)
+        self.assertEqual(second, "Next question")
+
+    def test_external_session_directory_has_no_unreadable_history_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "project"
+            record = {
+                "id": "thread-1",
+                "workspace": str(workspace),
+                "events": [
+                    {
+                        "type": "workflow", "workflow_id": "wf-1",
+                        "workflow_name": "demo", "status": "CANCELLED",
+                    }
+                ],
+            }
+
+            resume = context.build_resume_context(
+                record, session_root=Path(directory) / "external_sessions"
+            )
+
+        self.assertIn("demo [CANCELLED]", resume)
+        self.assertNotIn("Session history:", resume)
+        self.assertNotIn("external_sessions", resume)
+
+    async def test_completed_workflow_marks_next_turn_in_same_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "_sessions")
+            record = store.new(session_id="thread-1", workspace=workspace)
+            observer = PersistentWorkflowHistory(Mock(), record, store, command="/workflow__demo")
+            observer.workflow_started("workflow-demo:1", "demo")
+            self.assertFalse(record.get("resume_context_pending"))
+            observer.workflow_finished(
+                "workflow-demo:1", final_state={"secret": "value"}, final_state_available=True
+            )
+            self.assertTrue(record["resume_context_pending"])
+            self.assertNotIn("resume_context_pending", store.read(store.path("thread-1")))
+            requests: list[str] = []
+
+            async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
+                requests.append(str(kwargs["text"]))
+                return runner.TurnResult(final_text="The Workflow completed.")
+
+            agent = AgentWithState({})
+            with patch("tests.support.turns.run_turn", fake_run_turn):
+                await run_user_turn(
+                    agent=agent,
+                    plan_agent=agent,
+                    renderer=RunTurnRenderer(),
+                    store=store,
+                    session=record,
+                    mode={"planning": False},
+                    text="What happened?",
+                )
+
+        self.assertEqual(len(requests), 1)
+        self.assertIn("demo [DONE]", requests[0])
+        self.assertIn("Session history: /.mira/_sessions/thread-1.json", requests[0])
+        self.assertNotIn("secret", requests[0])
+        self.assertFalse(record.get("resume_context_pending"))
+        self.assertEqual(record["turns"], 1)
+
     def test_new_session_id_is_timestamped(self) -> None:
         record = SessionStore(Path(".")).new(session_id=None, workspace=Path("workspace"))
 

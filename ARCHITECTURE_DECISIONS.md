@@ -1253,8 +1253,14 @@ Workflow commands are stored inside their Workflow events so replay can restore
 the visual `you` bubble without adding a conversational user message to model
 resume context. Historical values are frozen as display and Copy text while the
 live Python objects exist; session JSON never owns arbitrary runtime objects.
+The main agent receives only a compact breadcrumb with recent Workflow identities
+and the readable session JSON path. Detailed state stays in that sole durable
+source and is retrieved lazily through existing filesystem tools; MIRA has no
+duplicate Workflow artifact store or Workflow-specific inspection tool. An agent
+row's `inspection_id` in the Workflow event links to the matching `runs[]` entry
+when nested-agent detail is needed.
 
-**Where to check:** `session/workflows.py`, `session/subagent_runs.py`, and
+**Where to check:** `session/context.py`, `session/workflows.py`, `session/subagent_runs.py`, and
 `ui/textual/widgets/workflow_bubble.py`.
 
 **Update this when:** Workflow transcript ownership, restart reconciliation, or

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from session.dashboard import normalize_dashboard
@@ -18,6 +19,8 @@ TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
 RESUME_MESSAGE_LIMIT = 20
 RESUME_GOAL_LIMIT = 3
+RESUME_WORKFLOW_LIMIT = 10
+TERMINAL_WORKFLOW_STATUSES = {"DONE", "ERROR", "CANCELLED", "INTERRUPTED"}
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 SESSION_FIELDS = {
@@ -390,7 +393,58 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
     return False
 
 
-def build_resume_context(record: dict[str, Any], *, exclude_current_goal: bool = False) -> str:
+def workflow_history_context(record: dict[str, Any], *, session_root: Path | None = None) -> str:
+    """Point the model to recent Workflow records in the authoritative session JSON."""
+    workflows = [
+        event
+        for event in normalize_events(record.get("events"))
+        if event["type"] == "workflow"
+    ][-RESUME_WORKFLOW_LIMIT:]
+    workflows = [
+        event for event in workflows if event["status"] in TERMINAL_WORKFLOW_STATUSES
+    ]
+    if not workflows:
+        return ""
+
+    lines = ["Workflow history available in this MIRA session:"]
+    for event in workflows:
+        lines.append(
+            f"- {compact_line(event['workflow_name'])} [{event['status']}]\n"
+            f"  workflow_id: {compact_line(event['workflow_id'])}"
+        )
+
+    workspace = str(record.get("workspace") or "")
+    session_id = str(record.get("id") or "")
+    if workspace and session_id:
+        project = Path(workspace).resolve()
+        root = (
+            Path(session_root).resolve()
+            if session_root is not None
+            else project / ".mira" / "_sessions"
+        )
+        try:
+            relative = (root / f"{session_id}.json").resolve().relative_to(project)
+        except ValueError:
+            pass  # An external session directory is not readable through the project backend.
+        else:
+            lines.extend(
+                [
+                    f"Session history: /{relative.as_posix()}",
+                    "Workflow lookup:",
+                    '- Workflow record: events[] item with type="workflow" and matching workflow_id',
+                    "- Nested agent detail: runs[] item with matching inspection_id from the Workflow agent row",
+                    "- Use grep/read_file only when Workflow details are needed",
+                ]
+            )
+    return "\n".join(lines)
+
+
+def build_resume_context(
+    record: dict[str, Any],
+    *,
+    exclude_current_goal: bool = False,
+    session_root: Path | None = None,
+) -> str:
     compactions = normalize_compactions(record.get("events"))
     retained_plan = normalize_current_plan(record.get("current_plan"))
     retained_goal = normalize_current_goal(record.get("current_goal"))
@@ -398,7 +452,15 @@ def build_resume_context(record: dict[str, Any], *, exclude_current_goal: bool =
     if retained_goal is not None:
         historical_goals = [value for value in historical_goals if value["id"] != retained_goal["id"]]
     messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    if not compactions and not retained_plan and not retained_goal and not historical_goals and not messages:
+    workflow_context = workflow_history_context(record, session_root=session_root)
+    if not (
+        compactions
+        or retained_plan
+        or retained_goal
+        or historical_goals
+        or messages
+        or workflow_context
+    ):
         return ""
 
     parts = ["Previous MIRA session context:"]
@@ -425,6 +487,8 @@ def build_resume_context(record: dict[str, Any], *, exclude_current_goal: bool =
         parts.append("Recent visible transcript:")
         for message in messages:
             parts.append(f"{message['role']} ({message['mode']}): {message['content']}")
+    if workflow_context:
+        parts.append(workflow_context)
     parts.append("Continue from this context without assuming unstated details.")
     return "\n".join(parts)
 
@@ -434,11 +498,14 @@ def with_resume_context(
     text: str,
     *,
     exclude_current_goal: bool = False,
+    session_root: Path | None = None,
 ) -> str:
     if not session.pop("resume_context_pending", False):
         return text
 
-    context = build_resume_context(session, exclude_current_goal=exclude_current_goal)
+    context = build_resume_context(
+        session, exclude_current_goal=exclude_current_goal, session_root=session_root
+    )
     if not context:
         return text
     return f"{context}\n\nCurrent user request:\n{text}"
@@ -451,6 +518,10 @@ def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> Non
         or bool(normalize_current_goal(record.get("current_goal")))
         or bool(normalize_goals(record.get("events")))
         or bool(normalize_messages(record.get("events")))
+        or any(
+            event["type"] == "workflow" and event["status"] in TERMINAL_WORKFLOW_STATUSES
+            for event in normalize_events(record.get("events"))
+        )
     )
 
 

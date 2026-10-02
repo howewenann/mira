@@ -514,6 +514,10 @@ class PersistentWorkflowHistory:
             _warn("workflow history persistence failed: %s", exc)
             return
         self._rebind_event()
+        if self._event is not None and self._event["status"] in {
+            "DONE", "ERROR", "CANCELLED", "INTERRUPTED"
+        }:
+            self.record["resume_context_pending"] = True
 
     def _rebind_event(self) -> None:
         """Resolve the canonical event after any observer may have saved."""

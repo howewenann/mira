@@ -366,7 +366,9 @@ async def run_user_turn(
                 else ""
             ),
         }
-        request_text = with_resume_context(session, proposal)
+        request_text = with_resume_context(
+            session, proposal, session_root=getattr(store, "root", None)
+        )
         result = await run_phase(
             phase_agent=plan_agent,
             request_text=request_text,
@@ -415,6 +417,7 @@ async def run_user_turn(
             session,
             action_text,
             exclude_current_goal=retained_goal is not None,
+            session_root=getattr(store, "root", None),
         )
         result = await run_phase(
             phase_agent=agent,

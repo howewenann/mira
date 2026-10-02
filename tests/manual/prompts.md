@@ -1891,3 +1891,17 @@ model.
    previously active task or agent are `INTERRUPTED`; already completed tasks
    remain `DONE`; timers are frozen; no spinner or Resume action is present;
    retained state and agent history remain inspectable.
+
+## Workflow History Awareness
+
+1. Run a discovered Workflow containing a nested agent and wait for completion.
+   Without opening an Inspector, ask: "What happened in the workflow I just ran?"
+   Expected: MIRA knows the Workflow exists and uses `grep`/`read_file` on the
+   current `.mira/_sessions/<session-id>.json` when details are needed.
+2. Ask: "What did the researcher subagent do?" Expected: MIRA finds the Workflow
+   event in `events[]`, follows the agent's `inspection_id` into `runs[]`, and
+   answers from that persisted history.
+3. Switch to another chat and back, then ask about the Workflow again. Restart
+   MIRA, reopen the same session, and ask again. Expected: the same history is
+   discoverable without Inspector clicks, duplicate Workflow files, or a custom
+   Workflow inspection tool; normal model context contains only a breadcrumb.
