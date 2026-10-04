@@ -77,6 +77,14 @@ The latter examples can also be run directly. They start a headless
 `MiraApplication`; configure the workspace's models and subagents, then use
 `python <example>.py`.
 
+Their direct-run harnesses construct the graph from the local factory because
+files in `.mira/examples/` are not discovered as active Workflows. A new file
+under `.mira/workflows/` should also confirm its registry entry and any
+discovery issue. `minimal.py` invokes the graph and prints its final state;
+the other two stream node updates. An approval interrupt is a partial run,
+even when the harness exits normally. Only observed final output confirms
+end-to-end completion.
+
 Short comments at MIRA-specific seams show what to substitute in a standalone
 LangGraph/DeepAgents host. The graph state, nodes, and topology remain ordinary
 LangGraph.

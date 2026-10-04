@@ -1,6 +1,6 @@
 ---
 name: workflow-creator
-description: Create, update, debug, and smoke-test native MIRA Workflows in a project. Use when the user asks to build or change a Workflow, its LangGraph nodes or agents, or its launch behavior.
+description: Create, edit, debug, and smoke-test launchable Python/LangGraph files in a MIRA project's .mira/workflows/ directory. Use for persistent /workflow__ commands, graph state and nodes, agents, public inputs, or launch behavior.
 license: MIT
 compatibility: designed for MIRA
 ---
@@ -26,15 +26,15 @@ Build a native LangGraph workflow that MIRA can discover and launch. Keep the gr
 
 ## Include and run a developer smoke test
 
-Keep a small permanent `if __name__ == "__main__":` harness in each generated Workflow, including a useful new harness when updating a file that lacks one. Follow `minimal.py`, `structured_agents.py`, or `tools_and_agents.py`: use `asyncio.run(main())`, start a headless `MiraApplication` with the project workspace, get `mira = application.workflows`, and always `await application.shutdown()` in `finally`. Use `application.workflow_registry` to confirm this file was discovered and surface its discovery issue if not. Build the registered Workflow and call its graph with a small, safe, representative public input using `await graph.ainvoke(..., context=mira.context)`; print the result so failures and tracebacks remain visible. Adapt the input and result display to the Workflow. Do not implement your own discovery or input validator.
+Keep a small permanent `if __name__ == "__main__":` harness in each generated Workflow, including a useful new harness when updating a file that lacks one. Follow `minimal.py`, `structured_agents.py`, or `tools_and_agents.py`: use `asyncio.run(main())`, start a headless `MiraApplication` with the project workspace, get `mira = application.workflows`, and always `await application.shutdown()` in `finally`. Those managed examples call their factories directly so they can run from `.mira/examples/`; a generated project Workflow must additionally look up its stem with `application.workflow_registry.specs.get(Path(__file__).stem)`. If absent, report the matching `application.workflow_registry.issues` entry (or that no entry was found); if present, build through `spec.factory(mira)`. Call the graph with a small, safe, representative public input using `await graph.ainvoke(..., context=mira.context)` and print the result. Do not implement your own discovery or input validator.
 
-When `execute` is available, run the harness with `MIRA_PYTHON`, the interpreter hosting MIRA. The shell still uses the configured project environment, so plain `python` may select a different interpreter:
+When `execute` is available, choose the command for the shell that **execute actually runs**, then run the harness with `MIRA_PYTHON`, the interpreter hosting MIRA:
 
-- Windows (`cmd`): `"%MIRA_PYTHON%" .mira/workflows/<name>.py`
-- POSIX shell: `"$MIRA_PYTHON" .mira/workflows/<name>.py`
+- On Windows, `execute` runs through `cmd` even if MIRA was started from PowerShell. Use: `"%MIRA_PYTHON%" .mira/workflows/<name>.py`
+- On POSIX, `execute` runs through a POSIX shell. Use: `"$MIRA_PYTHON" .mira/workflows/<name>.py`
 
-Inspect the output, fix actual failures, and rerun. Never weaken or bypass normal approval behavior to complete a smoke run. An approval interrupt is a partial run, not proof of end-to-end completion; report what ran and where it stopped. If `execute` is unavailable, leave the harness ready to run and say the smoke test was not executed. Do not invent a new testing tool or hard-code a user-specific interpreter.
+Keep the quotes around the interpreter path. If variable expansion fails, correct the shell syntax and retry; **never fall back to bare `python`**. Bare `python` intentionally uses the configured project environment and may lack MIRA dependencies. Inspect the output, fix actual Workflow failures, and rerun. Never weaken or bypass normal approval behavior to complete a smoke run. If `execute` is unavailable, leave the harness ready to run and say the smoke test was not executed. Do not invent a new testing tool or hard-code a user-specific interpreter.
 
 ## Finish
 
-Check the generated Python file before finishing: when it uses MIRA-specific agents, context, or startup, it must contain a few useful comments at those seams explaining standalone substitutions. The answer alone does not satisfy this check. Also check that the Workflow is discoverable, its public inputs match the intended launch contract, and the smoke output demonstrates the requested behavior when execution was available. Report the file changed, launch command, smoke-test result or precise limitation, and any approval boundary reached.
+Check the generated Python file before finishing: when it uses MIRA-specific agents, context, or startup, it must contain a few useful comments at those seams explaining standalone substitutions. The answer alone does not satisfy this check. Also check that the Workflow is discoverable and its public inputs match the intended launch contract. A `[interrupt]` for tool approval is a **partial smoke run**, even with exit code 0: report the exact node or approval boundary reached, and do not claim later nodes ran unless their output was observed. Claim an end-to-end pass only when the expected final Workflow result/state was observed. Report the file changed, launch command, smoke-test result or precise limitation, and any approval boundary reached.

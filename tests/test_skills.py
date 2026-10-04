@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage
 from agent.resources import build_resources
 from agent.resources.skills import load_skills
 from agent.skills import SkillRegistry, prepare_skill
+from agent.workflows.discovery import discover_workflows
 from tests.test_textual_app import make_app, wait_until
 from ui.textual.widgets.prompt_box import PromptBox
 
@@ -50,7 +51,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             resources = build_resources(workspace, create_examples=False)
 
         names = {item["name"] for item in resources.metadata["skills"]}
-        self.assertEqual(names, {"skill-creator", "workflow-creator"})
+        self.assertEqual(names, {"skill-creator", "workflow-creator", "workflow-exporter"})
         self.assertEqual(resources.skills, ["/mira-defaults/skills"])
 
     def test_project_skill_overrides_default_and_propagates_metadata(self) -> None:
@@ -92,6 +93,24 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertEqual(skill["replaces"], "default")
         self.assertEqual(skill["path"], "/.mira/skills/workflow-creator/SKILL.md")
 
+    def test_packaged_workflow_skills_route_to_distinct_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            skills = {
+                item["name"]: item
+                for item in build_resources(Path(directory), create_examples=False).metadata["skills"]
+            }
+
+        creator = skills["workflow-creator"]
+        exporter = skills["workflow-exporter"]
+        self.assertEqual(creator["source"], "default")
+        self.assertEqual(exporter["source"], "default")
+        self.assertIn(".mira/workflows/", creator["description"])
+        self.assertIn("/workflow__", creator["description"])
+        self.assertIn("existing MIRA Workflow", exporter["description"])
+        self.assertIn("standalone LangGraph", exporter["description"])
+        self.assertNotIn("standalone", creator["description"].lower())
+        self.assertNotIn("create", exporter["description"].lower())
+
     def test_packaged_workflow_creator_covers_authoring_and_smoke_testing(self) -> None:
         path = Path("agent/resources/defaults/skills/workflow-creator/SKILL.md")
         text = path.read_text(encoding="utf-8")
@@ -119,6 +138,40 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertIn("standalone", finish)
         self.assertIn('"%MIRA_PYTHON%"', text)
         self.assertIn('"$MIRA_PYTHON"', text)
+        guidance = text.lower()
+        for concept in (
+            "powershell",
+            "cmd",
+            "posix",
+            "fall back",
+            "bare `python`",
+            "partial smoke run",
+            "exit code 0",
+            "final workflow result",
+        ):
+            self.assertIn(concept, guidance)
+
+    def test_packaged_workflow_exporter_covers_standalone_conversion(self) -> None:
+        text = Path("agent/resources/defaults/skills/workflow-exporter/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        for guidance in (
+            "existing MIRA Workflow",
+            "source graph",
+            "conditional routes",
+            "reducers",
+            "Send",
+            "mira.agent(",
+            "Runtime[MiraContext]",
+            "context=mira.context",
+            "MiraApplication.start(",
+            "original",
+            "standalone",
+        ):
+            with self.subTest(guidance=guidance):
+                self.assertIn(guidance, text)
+        self.assertIn("text-substitution", text)
+        self.assertIn("hidden MIRA runtime calls", text)
 
     def test_managed_workflow_examples_model_standalone_seams(self) -> None:
         root = Path("examples/workflows")
@@ -130,6 +183,25 @@ class SkillDiscoveryTests(unittest.TestCase):
                     if line.lstrip().startswith("#") and "standalone" in line.lower()
                 ]
                 self.assertGreaterEqual(len(comments), 2)
+
+        minimal = (root / "minimal.py").read_text(encoding="utf-8")
+        structured = (root / "structured_agents.py").read_text(encoding="utf-8")
+        tools = (root / "tools_and_agents.py").read_text(encoding="utf-8")
+        self.assertIn("await graph.ainvoke(", minimal)
+        self.assertIn('"__interrupt__" in result', minimal)
+        for text in (structured, tools):
+            self.assertIn("graph.astream(", text)
+            self.assertIn("interrupted = True", text)
+            self.assertIn("[complete]", text)
+        self.assertIn("def workflow(mira):", tools)
+        self.assertIn("input_schema=InputState", tools)
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / ".mira" / "workflows" / "tools_and_agents.py"
+            destination.parent.mkdir(parents=True)
+            destination.write_text(tools, encoding="utf-8")
+            registry = discover_workflows(Path(directory), object())
+        self.assertIn("tools_and_agents", registry.specs, registry.issues)
 
     def test_packaged_skill_creator_is_mira_specific(self) -> None:
         path = Path("agent/resources/defaults/skills/skill-creator/SKILL.md")

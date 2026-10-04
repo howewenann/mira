@@ -80,6 +80,8 @@ async def main() -> None:
         # agent, use `agent.astream_events(..., version="v3")` and consume
         # projections such as `run.messages`, `run.tool_calls`, or
         # `run.subagents`.
+        interrupted = False
+        completed = False
         async for update in graph.astream(
             {"topic": "MIRA execution context"},
             context=mira.context,
@@ -87,14 +89,22 @@ async def main() -> None:
         ):
             for node_name, values in update.items():
                 if node_name == "__interrupt__":
-                    print("[interrupt] The workflow paused for tool approval.")
+                    print(f"[interrupt] Partial run at tool approval: {values}")
+                    interrupted = True
                     continue
                 if "scan" in values:
                     print(f"[{node_name}] {values['scan']}")
                 if "findings" in values:
                     print(f"[{node_name}] {values['findings']}")
-                if "plain" in values:
+                if node_name == "plain_research" and "plain" in values:
                     print(f"[{node_name}] {values['plain']}")
+                    completed = True
+        if interrupted:
+            print("[partial] Final result was not verified.")
+        elif completed:
+            print("[complete] Final plain_research output observed.")
+        else:
+            raise RuntimeError("The final plain_research node was not observed.")
     finally:
         await application.shutdown()
 

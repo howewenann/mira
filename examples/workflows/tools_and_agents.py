@@ -9,8 +9,11 @@ from langgraph.runtime import Runtime
 from mira import MiraApplication, MiraContext
 
 
-class State(TypedDict):
+class InputState(TypedDict):
     topic: str
+
+
+class State(InputState):
     report: NotRequired[str]
     saved_to: NotRequired[str]
 
@@ -36,9 +39,10 @@ async def save(state: State, runtime: Runtime[MiraContext]) -> State:
     return {"saved_to": destination}
 
 
-def workflow(_mira):
+def workflow(mira):
     # Standalone: replace MIRA's context schema with your host's runtime context.
-    graph = StateGraph(State, context_schema=MiraContext)
+    _ = mira
+    graph = StateGraph(State, input_schema=InputState, context_schema=MiraContext)
     graph.add_node("research", research)
     graph.add_node("save", save)
     graph.add_edge(START, "research")
@@ -59,6 +63,8 @@ async def main() -> None:
         # V3 events from an individual agent, use
         # `agent.astream_events(..., version="v3")` and consume projections such
         # as `run.messages`, `run.tool_calls`, or `run.subagents`.
+        interrupted = False
+        completed = False
         async for update in graph.astream(
             {
                 "topic": (
@@ -71,12 +77,20 @@ async def main() -> None:
         ):
             for node_name, values in update.items():
                 if node_name == "__interrupt__":
-                    print("[interrupt] The workflow paused for tool approval.")
+                    print(f"[interrupt] Partial run at tool approval: {values}")
+                    interrupted = True
                     continue
                 if "report" in values:
                     print(f"[{node_name}] {values['report']}")
-                if "saved_to" in values:
+                if node_name == "save" and "saved_to" in values:
                     print(f"[{node_name}] {values['saved_to']}")
+                    completed = True
+        if interrupted:
+            print("[partial] Final result was not verified.")
+        elif completed:
+            print("[complete] Final save output observed.")
+        else:
+            raise RuntimeError("The final save node was not observed.")
     finally:
         await application.shutdown()
 

@@ -42,17 +42,13 @@ async def main() -> None:
         mira = application.workflows
         graph = workflow(mira)
 
-        async for update in graph.astream(
-            {"topic": "this workspace"},
-            context=mira.context,
-            stream_mode="updates",
-        ):
-            for node_name, values in update.items():
-                if node_name == "__interrupt__":
-                    print("[interrupt] The workflow paused for tool approval.")
-                    continue
-                if "summary" in values:
-                    print(f"[{node_name}] {values['summary']}")
+        result = await graph.ainvoke({"topic": "this workspace"}, context=mira.context)
+        if "__interrupt__" in result:
+            print(f"[interrupt] Partial run at tool approval: {result['__interrupt__']}")
+            return
+        if "summary" not in result:
+            raise RuntimeError("The final summary was not observed.")
+        print(f"[complete] Final state: {result}")
     finally:
         await application.shutdown()
 
