@@ -17,10 +17,13 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, PrivateAttr
 
+from agent.workflows.discovery import validate_workflow_graph
 from config.metadata import ModelMetadata
 from config.settings import normalize_settings
 from core.application.app import MiraApplication
 from core.interface import NullFrontend
+from examples.workflows.minimal import workflow as minimal_workflow
+from examples.workflows.structured_agents import workflow as structured_workflow
 from mira import INHERIT, MiraContext, MiraWorkflowAPI
 
 
@@ -172,6 +175,27 @@ class WorkflowAPITests(unittest.IsolatedAsyncioTestCase):
                     structured_result["structured_response"].summary,
                     "structured:topic",
                 )
+
+                minimal_graph = minimal_workflow(application.workflows)
+                _, inputs = validate_workflow_graph(minimal_graph)
+                self.assertEqual([item.name for item in inputs], ["topic"])
+                minimal_result = await minimal_graph.ainvoke(
+                    {"topic": "mapped topic"},
+                    context=application.workflows.context,
+                )
+                self.assertEqual(minimal_result["summary"], "answer:mapped topic")
+
+                example_graph = structured_workflow(application.workflows)
+                _, inputs = validate_workflow_graph(example_graph)
+                self.assertEqual([item.name for item in inputs], ["topic"])
+                example_result = await example_graph.ainvoke(
+                    {"topic": "mapped topic"},
+                    context=application.workflows.context,
+                )
+                self.assertEqual(
+                    example_result["findings"].summary, "structured:mapped topic"
+                )
+                self.assertEqual(example_result["plain"], "answer:mapped topic")
             finally:
                 await application.shutdown()
 

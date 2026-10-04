@@ -97,22 +97,62 @@ resolver, `tools=None` inherits, and `tools=[]` selects no tools. The model is
 always inherited from the selected base. Configure a separate MIRA subagent and
 select it by name when a workflow needs a different model.
 
-Workflows remain ordinary LangGraph graphs:
+MIRA Workflows are ordinary LangGraph graphs. Construct a workflow-local agent,
+then call it from an ordinary node that maps domain state into agent input and
+the agent result back into domain state:
 
 ```python
-from langgraph.graph import StateGraph
+from typing import NotRequired, TypedDict
+
+from langchain_core.messages import HumanMessage
+from langgraph.graph import END, START, StateGraph
 from mira import MiraContext
 
-mira = application.workflows
-graph = StateGraph(State, context_schema=MiraContext)
-graph.add_node("researcher", mira.agent("researcher"))
-workflow = graph.compile()
-result = await workflow.ainvoke(input, context=mira.context)
-# The synchronous API is native too:
-result = workflow.invoke(input, context=mira.context)
+
+class InputState(TypedDict):
+    topic: str
+
+
+class State(InputState):
+    research: NotRequired[str]
+
+
+def workflow(mira):
+    researcher = mira.agent(name="researcher", system_prompt="Research carefully.")
+
+    async def research(state: State) -> dict[str, str]:
+        result = await researcher.ainvoke(
+            {"messages": [HumanMessage(state["topic"])]}
+        )
+        return {"research": result["messages"][-1].text}
+
+    graph = StateGraph(State, input_schema=InputState, context_schema=MiraContext)
+    graph.add_node("research", research)
+    graph.add_edge(START, "research")
+    graph.add_edge("research", END)
+    return graph.compile()
+
+
+graph = workflow(application.workflows)
+result = await graph.ainvoke(
+    {"topic": "pineapples"}, context=application.workflows.context
+)
 ```
 
-Nodes use `Runtime[MiraContext]`; ordinary LangChain `@tool` functions use
+The dedicated `input_schema` defines a discovered Workflow's launch arguments.
+For a standalone LangGraph + DeepAgents version, replace the `mira.agent(...)`
+construction with `create_deep_agent(model=model, ...)` and omit MIRA's
+`context_schema` and execution `context`. The node's input/output mapping and
+graph topology can stay the same. `mira.agent(...)` is a shallow MIRA worker
+specialized from the configured subagent environment; a standalone
+`create_deep_agent(...)` may have its own `task` tool and nested subagents. The
+graph does not depend on that hierarchy.
+
+Direct insertion, such as `graph.add_node("worker", mira.agent())`, also works
+when the Workflow state already follows the agent's `messages` contract. The
+node mapping above is better suited to domain-shaped state.
+
+Nodes can use `Runtime[MiraContext]`; ordinary LangChain `@tool` functions use
 their injected `ToolRuntime`. Both can access `runtime.context.tools["..."]`
 and `runtime.context.agents["..."]`. This is a capability-bearing API for
 trusted in-process Python. Direct calls through `context.tools` bypass a second
@@ -125,8 +165,9 @@ policy also redacts these marked nested-call payloads.
 
 MIRA does not provide a workflow DSL or automatic state mapping. User code
 continues to own state, reducers, edges, branches, loops, parallelism, `Send()`,
-and adapters for domain-shaped state. Runnable examples are under
-`.mira/examples/workflows/`.
+and adapters for domain-shaped state. Workflows that use MIRA's context tools or
+agents directly are intentionally more coupled to MIRA. Runnable examples are
+under `.mira/examples/workflows/`.
 
 ## Plans, Goals, and sessions
 

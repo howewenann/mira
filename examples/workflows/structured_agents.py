@@ -15,8 +15,11 @@ class Findings(BaseModel):
     confidence: float
 
 
-class State(TypedDict):
+class InputState(TypedDict):
     topic: str
+
+
+class State(InputState):
     scan: NotRequired[str]
     findings: NotRequired[Findings]
     plain: NotRequired[str]
@@ -52,7 +55,7 @@ def workflow(mira):
         )
         return {"plain": result["messages"][-1].text}
 
-    graph = StateGraph(State, context_schema=MiraContext)
+    graph = StateGraph(State, input_schema=InputState, context_schema=MiraContext)
     graph.add_node("scan", scan)
     graph.add_node("research", research)
     graph.add_node("plain_research", plain_research)

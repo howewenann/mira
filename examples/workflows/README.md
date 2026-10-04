@@ -69,9 +69,9 @@ create a new invocation with a new identity.
 Read the examples in this order:
 
 1. `demo.py` - deterministic launch and final-state inspection.
-2. `minimal.py` - the smallest agent-compatible graph.
+2. `minimal.py` - a workflow-local agent called from a domain-state node.
 3. `structured_agents.py` - independent text and structured variants.
-4. `tools_and_agents.py` - deterministic nodes using runtime capabilities.
+4. `tools_and_agents.py` - deterministic nodes using MIRA runtime capabilities.
 
 The latter examples can also be run directly. They start a headless
 `MiraApplication`; configure the workspace's models and subagents, then use
