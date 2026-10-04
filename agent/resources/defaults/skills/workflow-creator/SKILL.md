@@ -28,7 +28,12 @@ Build a native LangGraph workflow that MIRA can discover and launch. Keep the gr
 
 Keep a small permanent `if __name__ == "__main__":` harness in each generated Workflow, including a useful new harness when updating a file that lacks one. Follow `minimal.py`, `structured_agents.py`, or `tools_and_agents.py`: use `asyncio.run(main())`, start a headless `MiraApplication` with the project workspace, get `mira = application.workflows`, and always `await application.shutdown()` in `finally`. Use `application.workflow_registry` to confirm this file was discovered and surface its discovery issue if not. Build the registered Workflow and call its graph with a small, safe, representative public input using `await graph.ainvoke(..., context=mira.context)`; print the result so failures and tracebacks remain visible. Adapt the input and result display to the Workflow. Do not implement your own discovery or input validator.
 
-When the existing `execute` tool is available, run `python .mira/workflows/<name>.py` through it in the project's configured execution environment. Inspect the output, fix actual failures, and rerun. Never weaken or bypass normal approval behavior to complete a smoke run. An approval interrupt is a partial run, not proof of end-to-end completion; report what ran and where it stopped. If `execute` is unavailable, leave the harness ready to run and say the smoke test was not executed. Do not invent a new testing tool or hard-code a user-specific interpreter.
+When `execute` is available, run the harness with `MIRA_PYTHON`, the interpreter hosting MIRA. The shell still uses the configured project environment, so plain `python` may select a different interpreter:
+
+- Windows (`cmd`): `"%MIRA_PYTHON%" .mira/workflows/<name>.py`
+- POSIX shell: `"$MIRA_PYTHON" .mira/workflows/<name>.py`
+
+Inspect the output, fix actual failures, and rerun. Never weaken or bypass normal approval behavior to complete a smoke run. An approval interrupt is a partial run, not proof of end-to-end completion; report what ran and where it stopped. If `execute` is unavailable, leave the harness ready to run and say the smoke test was not executed. Do not invent a new testing tool or hard-code a user-specific interpreter.
 
 ## Finish
 

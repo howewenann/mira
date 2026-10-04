@@ -108,6 +108,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             "application.shutdown()",
             "context=mira.context",
             "execute",
+            "MIRA_PYTHON",
             "standalone",
         ):
             with self.subTest(guidance=guidance):
@@ -116,6 +117,8 @@ class SkillDiscoveryTests(unittest.TestCase):
         finish = text.split("## Finish", 1)[1].lower()
         self.assertIn("comments", finish)
         self.assertIn("standalone", finish)
+        self.assertIn('"%MIRA_PYTHON%"', text)
+        self.assertIn('"$MIRA_PYTHON"', text)
 
     def test_managed_workflow_examples_model_standalone_seams(self) -> None:
         root = Path("examples/workflows")

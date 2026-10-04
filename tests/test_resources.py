@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -219,6 +220,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertIsInstance(resources.backend.default, ProjectShellBackend)
             self.assertEqual(resources.backend.default._env, execute_env(settings=resources.backend.default._execute_env_settings))
             self.assertLessEqual(set(resources.backend.default._env), set(EXECUTE_ENV_KEYS))
+            self.assertEqual(resources.backend.default._env["MIRA_PYTHON"], sys.executable)
             if os.environ.get("PATH"):
                 self.assertEqual(resources.backend.default._env["PATH"], os.environ["PATH"])
             for secret_name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "PASSWORD", "SECRET"):
@@ -244,7 +246,15 @@ class ResourceDiscoveryTests(unittest.TestCase):
         self.assertEqual(env["PROGRAMDATA"], "C:\\ProgramData")
         self.assertEqual(env["APPDATA"], "C:\\Users\\me\\AppData\\Roaming")
         self.assertEqual(env["LOCALAPPDATA"], "C:\\Users\\me\\AppData\\Local")
+        self.assertEqual(env["MIRA_PYTHON"], sys.executable)
         self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_execute_env_uses_host_python_even_when_ambient_value_is_allowlisted(self) -> None:
+        settings = {"hitl": {"execute_env": {"allow": ["MIRA_PYTHON"]}}}
+        with patch.dict(os.environ, {"MIRA_PYTHON": "C:\\wrong\\python.exe"}, clear=True):
+            env = execute_env(settings=settings)
+
+        self.assertEqual(env["MIRA_PYTHON"], sys.executable)
 
     def test_execute_env_additional_allowlist_reads_current_host_value_only(self) -> None:
         """User allowlists should include present names and ignore missing names."""
@@ -264,8 +274,27 @@ class ResourceDiscoveryTests(unittest.TestCase):
                 env = execute_env(settings=settings, workspace=workspace)
 
         self.assertEqual(env["VIRTUAL_ENV"], str((workspace / ".venv").resolve()))
+        self.assertEqual(env["MIRA_PYTHON"], sys.executable)
         self.assertTrue(env["PATH"].startswith(str((workspace / ".venv" / "Scripts").resolve())))
         self.assertIn(os.pathsep + "C:\\Tools", env["PATH"])
+
+    def test_execute_can_run_mira_python_under_project_venv(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = {
+                "hitl": {
+                    "tools": {"execute": {"enabled": True}},
+                    "execute_env": {"mode": "venv", "path": ".venv"},
+                }
+            }
+            resources = build_resources(Path(directory), create_examples=False, settings=settings)
+            variable = "%MIRA_PYTHON%" if os.name == "nt" else "$MIRA_PYTHON"
+
+            result = resources.project_backend.execute(
+                f'"{variable}" -c "import sys; print(sys.executable)"'
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.output.strip(), sys.executable)
 
     def test_execute_env_conda_modes_wrap_commands(self) -> None:
         """Conda modes should run the full shell command through conda run."""

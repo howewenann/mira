@@ -38,7 +38,7 @@ DEFAULT_EXECUTE_ENV_KEYS = (
     "TEMP",
     "TMP",
 )
-EXECUTE_ENV_KEYS = DEFAULT_EXECUTE_ENV_KEYS
+EXECUTE_ENV_KEYS = (*DEFAULT_EXECUTE_ENV_KEYS, "MIRA_PYTHON")
 
 
 @dataclass(frozen=True)
@@ -176,6 +176,7 @@ def execute_env(
     env_settings = execute_env_settings(settings)
     names = [*DEFAULT_EXECUTE_ENV_KEYS, *env_settings.get("allow", [])]
     env = {key: os.environ[key] for key in names if os.environ.get(key)}
+    env["MIRA_PYTHON"] = sys.executable
     if env_settings.get("mode") == "venv":
         apply_venv_env(env, env_settings, workspace)
     return env
