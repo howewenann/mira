@@ -113,6 +113,21 @@ class SkillDiscoveryTests(unittest.TestCase):
             with self.subTest(guidance=guidance):
                 self.assertIn(guidance, text)
 
+        finish = text.split("## Finish", 1)[1].lower()
+        self.assertIn("comments", finish)
+        self.assertIn("standalone", finish)
+
+    def test_managed_workflow_examples_model_standalone_seams(self) -> None:
+        root = Path("examples/workflows")
+        for name in ("minimal.py", "structured_agents.py", "tools_and_agents.py"):
+            with self.subTest(example=name):
+                lines = (root / name).read_text(encoding="utf-8").splitlines()
+                comments = [
+                    line for line in lines
+                    if line.lstrip().startswith("#") and "standalone" in line.lower()
+                ]
+                self.assertGreaterEqual(len(comments), 2)
+
     def test_packaged_skill_creator_is_mira_specific(self) -> None:
         path = Path("agent/resources/defaults/skills/skill-creator/SKILL.md")
         text = path.read_text(encoding="utf-8")

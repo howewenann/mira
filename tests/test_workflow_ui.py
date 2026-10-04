@@ -124,6 +124,61 @@ def hitl_graph() -> Any:
 
 
 class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_in_process_checkpoint_keeps_native_state_between_nodes(self) -> None:
+        graph = StateGraph(dict)
+
+        def finish(state: dict[str, Any]) -> dict[str, Any]:
+            self.assertIsInstance(state["choices"], set)
+            return {"result": sorted(state["choices"])}
+
+        graph.add_node("prepare", lambda _state: {"choices": {"a", "b"}})
+        graph.add_node("finish", finish)
+        graph.add_edge(START, "prepare")
+        graph.add_edge("prepare", "finish")
+        graph.add_edge("finish", END)
+
+        output, _events = await run_workflow(graph.compile(), {})
+
+        self.assertEqual(output["result"], ["a", "b"])
+
+    async def test_plain_compiled_graph_resumes_without_restarting_completed_node(self) -> None:
+        calls: list[str] = []
+        graph = StateGraph(dict)
+
+        def prepare(state: dict[str, Any]) -> dict[str, str]:
+            calls.append("prepare")
+            return {"prepared": state["request"].upper()}
+
+        def approve(state: dict[str, Any]) -> dict[str, str]:
+            answer = interrupt(
+                {"type": "ask_user", "question": "Continue?", "options": ["approved"]}
+            )
+            calls.append("approved")
+            return {"answer": f"{state['prepared']}:{answer}"}
+
+        def finish(state: dict[str, Any]) -> dict[str, str]:
+            calls.append("finish")
+            return {"result": state["answer"]}
+
+        graph.add_node("prepare", prepare)
+        graph.add_node("approve", approve)
+        graph.add_node("finish", finish)
+        graph.add_edge(START, "prepare")
+        graph.add_edge("prepare", "approve")
+        graph.add_edge("approve", "finish")
+        graph.add_edge("finish", END)
+        compiled = graph.compile()
+        self.assertIsNone(compiled.checkpointer)
+
+        output, events = await run_workflow(compiled, {"request": "deploy"})
+
+        self.assertEqual(output["result"], "DEPLOY:approved")
+        self.assertEqual(calls, ["prepare", "approved", "finish"])
+        self.assertEqual(
+            [event.phase for event in events if event.name == "approve"],
+            ["task_start", "task_waiting", "task_resume", "task_finish"],
+        )
+
     async def test_sequential_tasks_capture_exact_input_and_result(self) -> None:
         output, events = await run_workflow(sequential_graph(), {"seed": "alpha"})
         starts = [event for event in events if event.phase == "task_start"]

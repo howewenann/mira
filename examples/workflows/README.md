@@ -76,3 +76,7 @@ Read the examples in this order:
 The latter examples can also be run directly. They start a headless
 `MiraApplication`; configure the workspace's models and subagents, then use
 `python <example>.py`.
+
+Short comments at MIRA-specific seams show what to substitute in a standalone
+LangGraph/DeepAgents host. The graph state, nodes, and topology remain ordinary
+LangGraph.

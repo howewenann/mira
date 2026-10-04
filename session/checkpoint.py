@@ -54,7 +54,7 @@ class MiraMemorySaver(MemorySaver):
 
 
 def make_checkpointer() -> MemorySaver:
-    """Create the in-memory LangGraph checkpointer used by both agents."""
+    """Create an in-memory LangGraph checkpointer for agents or Workflows."""
     return MiraMemorySaver(serde=MiraJsonPlusSerializer())
 
 

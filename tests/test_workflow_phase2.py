@@ -201,7 +201,7 @@ class WorkflowState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-def build_interrupting_workflow():
+def build_interrupting_workflow(*, author_checkpointer: bool = True):
     agent = create_sub_agent(
         {
             "name": "workflow-agent",
@@ -215,7 +215,9 @@ def build_interrupting_workflow():
     graph.add_node("agent", agent)
     graph.add_edge(START, "agent")
     graph.add_edge("agent", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    if author_checkpointer:
+        return graph.compile(checkpointer=InMemorySaver())
+    return graph.compile()
 
 
 class ResumeState(TypedDict):
@@ -231,7 +233,7 @@ def build_resume_workflow(value: dict[str, Any]):
     graph.add_node("pause", pause)
     graph.add_edge(START, "pause")
     graph.add_edge("pause", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    return graph.compile()
 
 
 class CountingRun:
@@ -313,6 +315,23 @@ async def run_pass(
 
 
 class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_workflow_agent_interrupt_resumes_without_author_checkpointer(self) -> None:
+        graph = build_interrupting_workflow(author_checkpointer=False)
+        self.assertIsNone(graph.checkpointer)
+        frontend = RespondingFrontend()
+
+        output = await execute_workflow(
+            graph,
+            {"messages": [{"role": "user", "content": "Run the tool."}]},
+            emitter=FrontendEmitter(frontend),
+            inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+            workflow_id="agent-no-author-checkpointer",
+        )
+
+        self.assertEqual(len(frontend.requests), 1)
+        self.assertIsInstance(frontend.requests[0], AskUserRequest)
+        self.assertIn("FINAL:APPROVED:phase2:'selected'", output["messages"][-1].content)
+
     async def test_parallel_nodes_each_keep_parallel_agents_with_native_owner(self) -> None:
         def agent(name: str, response: str) -> Any:
             return create_sub_agent(
@@ -459,8 +478,10 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         for index, (interrupt_value, request_type, expected) in enumerate(cases):
             with self.subTest(request=request_type.__name__):
                 frontend = RespondingFrontend()
+                graph = build_resume_workflow(interrupt_value)
+                self.assertIsNone(graph.checkpointer)
                 output = await execute_workflow(
-                    build_resume_workflow(interrupt_value),
+                    graph,
                     {},
                     emitter=FrontendEmitter(frontend),
                     inspection=SubagentInspectionCoordinator(LiveInspectionStore()),

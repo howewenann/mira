@@ -15,6 +15,7 @@ class State(TypedDict):
     saved_to: NotRequired[str]
 
 
+# Standalone: supply equivalent agent and tool capabilities through your own context.
 async def research(state: State, runtime: Runtime[MiraContext]) -> State:
     # `general-purpose` is MIRA's default configured subagent. A workspace may
     # select another configured subagent by its configured name, for example:
@@ -36,6 +37,7 @@ async def save(state: State, runtime: Runtime[MiraContext]) -> State:
 
 
 def workflow(_mira):
+    # Standalone: replace MIRA's context schema with your host's runtime context.
     graph = StateGraph(State, context_schema=MiraContext)
     graph.add_node("research", research)
     graph.add_node("save", save)
@@ -46,6 +48,7 @@ def workflow(_mira):
 
 
 async def main() -> None:
+    # Standalone: start your own host and pass its context to the graph.
     application = await MiraApplication.start(workspace=".")
     try:
         mira = application.workflows

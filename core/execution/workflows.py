@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
 
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.stream.transformers import TasksTransformer
 from langgraph.types import Command
 
@@ -22,6 +23,7 @@ from core.execution.streams.output import capture_output, collect_interrupts
 from core.execution.streams.subagents import consume_workflow_inspections
 from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
+from session.checkpoint import make_checkpointer
 
 
 _MISSING = object()
@@ -265,6 +267,9 @@ async def execute_workflow(
         coordinator.agent_waiting,
         coordinator.agent_finished,
     )
+    if isinstance(graph, CompiledStateGraph) and graph.checkpointer is None:
+        # MIRA owns the in-process checkpoints needed for interactive resume.
+        graph.checkpointer = make_checkpointer()
     coordinator.start()
     current_payload = payload
     run_config = dict(config or {})

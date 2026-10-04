@@ -18,6 +18,7 @@ class State(InputState):
 
 
 def workflow(mira):
+    # Standalone: construct this worker with DeepAgents and your own model/tools.
     worker = mira.agent(name="worker", system_prompt="Summarize the topic briefly.")
 
     async def summarize(state: State) -> dict[str, str]:
@@ -26,6 +27,7 @@ def workflow(mira):
         )
         return {"summary": result["messages"][-1].text}
 
+    # Standalone: omit MIRA's context schema when nodes need no runtime context.
     graph = StateGraph(State, input_schema=InputState, context_schema=MiraContext)
     graph.add_node("worker", summarize)
     graph.add_edge(START, "worker")
@@ -34,6 +36,7 @@ def workflow(mira):
 
 
 async def main() -> None:
+    # Standalone: run in your own host; omit MIRA startup and unused context.
     application = await MiraApplication.start(workspace=".")
     try:
         mira = application.workflows

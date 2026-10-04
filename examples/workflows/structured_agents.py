@@ -26,6 +26,7 @@ class State(InputState):
 
 
 def workflow(mira):
+    # Standalone: create these independent workers with DeepAgents and your own model/tools.
     # `name=` creates a workflow-local specialization of the default
     # `general-purpose` base.
     #
@@ -55,6 +56,7 @@ def workflow(mira):
         )
         return {"plain": result["messages"][-1].text}
 
+    # Standalone: omit MIRA's context schema when nodes need no runtime context.
     graph = StateGraph(State, input_schema=InputState, context_schema=MiraContext)
     graph.add_node("scan", scan)
     graph.add_node("research", research)
@@ -67,6 +69,7 @@ def workflow(mira):
 
 
 async def main() -> None:
+    # Standalone: run in your own host; omit MIRA startup and unused context.
     application = await MiraApplication.start(workspace=".")
     try:
         mira = application.workflows
