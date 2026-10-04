@@ -50,7 +50,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             resources = build_resources(workspace, create_examples=False)
 
         names = {item["name"] for item in resources.metadata["skills"]}
-        self.assertEqual(names, {"skill-creator"})
+        self.assertEqual(names, {"skill-creator", "workflow-creator"})
         self.assertEqual(resources.skills, ["/mira-defaults/skills"])
 
     def test_project_skill_overrides_default_and_propagates_metadata(self) -> None:
@@ -75,6 +75,43 @@ class SkillDiscoveryTests(unittest.TestCase):
                 "replaces": "default",
             },
         )
+
+    def test_project_workflow_creator_overrides_packaged_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            write_skill(
+                workspace,
+                "workflow-creator",
+                "name: workflow-creator\ndescription: Project Workflow guidance.",
+            )
+
+            resources = build_resources(workspace, create_examples=False)
+
+        skill = next(item for item in resources.metadata["skills"] if item["name"] == "workflow-creator")
+        self.assertEqual(skill["source"], "project")
+        self.assertEqual(skill["replaces"], "default")
+        self.assertEqual(skill["path"], "/.mira/skills/workflow-creator/SKILL.md")
+
+    def test_packaged_workflow_creator_covers_authoring_and_smoke_testing(self) -> None:
+        path = Path("agent/resources/defaults/skills/workflow-creator/SKILL.md")
+        text = path.read_text(encoding="utf-8")
+
+        for guidance in (
+            ".mira/workflows/",
+            ".mira/examples/workflows/",
+            "def workflow(mira):",
+            "input_schema",
+            "mira.agent(",
+            "Runtime[MiraContext]",
+            "ask_user",
+            "MiraApplication",
+            "application.shutdown()",
+            "context=mira.context",
+            "execute",
+            "standalone",
+        ):
+            with self.subTest(guidance=guidance):
+                self.assertIn(guidance, text)
 
     def test_packaged_skill_creator_is_mira_specific(self) -> None:
         path = Path("agent/resources/defaults/skills/skill-creator/SKILL.md")

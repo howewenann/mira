@@ -127,7 +127,10 @@ class ResourceDiscoveryTests(unittest.TestCase):
             }
             self.assertEqual(actual_examples, expected_examples)
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
-            self.assertEqual(resources.metadata["skills"][0]["name"], "skill-creator")
+            self.assertEqual(
+                {item["name"] for item in resources.metadata["skills"]},
+                {"skill-creator", "workflow-creator"},
+            )
             self.assertEqual(
                 resources.memory[:2],
                 [
@@ -430,7 +433,10 @@ description: Project-specific workflow.
             resources = build_resources(Path(directory), create_examples=False)
 
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
-            self.assertEqual([item["name"] for item in resources.metadata["skills"]], ["skill-creator"])
+            self.assertEqual(
+                {item["name"] for item in resources.metadata["skills"]},
+                {"skill-creator", "workflow-creator"},
+            )
             self.assertEqual(resources.subagents, [])
             self.assertEqual(resources.metadata["subagents"][0]["name"], "general-purpose")
 
