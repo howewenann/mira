@@ -110,7 +110,7 @@ def factory_patches(agent: Any) -> tuple[Any, ...]:
             return_value="auto-summary",
         ),
         patch(
-            "agent.middleware.builder.create_mira_summarization_tool_middleware",
+            "agent.middleware.builder.SummarizationToolMiddleware",
             return_value="summary",
         ),
         patch("agent.factory.create_deep_agent", return_value=agent),

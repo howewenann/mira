@@ -833,6 +833,11 @@ Expected:
   information from the generated summary.
 - Summary-model reasoning and generated summary text never appear as reasoning
   or assistant bubbles while compaction is running.
+- Running `/compact` again before another substantial exchange reports
+  `nothing to compact` and leaves the archive unchanged.
+- After more conversation, another `/compact` appends to the same archive.
+  Reopen the session or reload MIRA, continue chatting, and repeat; the archive
+  still contains both earlier sections and the resumed compaction.
 
 Afterward, enter a normal prompt that explicitly asks MIRA to discuss the words
 "compact conversation" and "summarize" without invoking compaction.

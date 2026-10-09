@@ -14,11 +14,10 @@ from langgraph.types import Command, Interrupt
 
 from agent.middleware.code_interpreter import EVAL_SUBAGENT_ROW_METADATA
 from agent.middleware.compaction import (
-    MiraSummarizationMiddleware,
-    observe_summarization_counts,
     prepare_summarization_engine,
     sanitize_messages_for_archive,
 )
+from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware import CORRECTION_EVENT, CORRECTION_SOURCE
 from agent.planning.response_status import PLANNING_RESPONSE_STATUS_FAILURE
 from core.context.observation import context_usage_scope
@@ -2720,7 +2719,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.usage["context_tokens"], 0)
         self.assertEqual(result.usage["context_source"], "unknown")
 
-    def test_observed_summarization_count_returns_original_value_once(self) -> None:
+    def test_effective_request_uses_deepagents_count(self) -> None:
         calls = []
 
         class Summarization:
@@ -2733,24 +2732,14 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         summarization = Summarization()
 
-        observe_summarization_counts(summarization)
-        first_wrapper = summarization._count_tokens
-        observe_summarization_counts(summarization)
-
+        observer = ContextReportMiddleware(summarization)
+        request = type("Request", (), {"messages": ["message"], "system_message": None, "tools": []})()
         with context_usage_scope(calls.append):
-            total = summarization._count_tokens(["message"], tools=[])
+            observer.wrap_model_call(request, lambda value: value)
 
-        self.assertEqual(total, 1234)
         self.assertEqual(summarization.calls, 1)
-        self.assertIs(summarization._count_tokens, first_wrapper)
-        self.assertEqual(calls[0]["context_tokens"], 1234)
-        self.assertEqual(calls[0]["context_source"], "deepagents.summarization._count_tokens")
-
-    def test_mira_summarization_middleware_has_distinct_exclusion_name(self) -> None:
-        """DeepAgents should not remove MIRA's observed summarizer with its default one."""
-        middleware = object.__new__(MiraSummarizationMiddleware)
-
-        self.assertEqual(middleware.name, "MiraSummarizationMiddleware")
+        self.assertEqual(calls[-1]["context_tokens"], 1234)
+        self.assertEqual(calls[-1]["context_source"], "deepagents.summarization._count_tokens")
 
     def test_final_output_uses_latest_usage_message_only(self) -> None:
         """DeepAgents final state may contain older messages with stale usage."""

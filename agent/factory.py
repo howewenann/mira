@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from deepagents import FilesystemPermission, HarnessProfile, create_deep_agent, register_harness_profile
+from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.middleware import FilesystemMiddleware
 from langchain.agents.middleware import HumanInTheLoopMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
@@ -83,7 +83,6 @@ ACTION_EXCLUDED_TOOLS = (
     FINALIZE_GOAL_TOOL,
 )
 PLAN_EXCLUDED_TOOLS = PLAN_DISABLED_TOOLS
-_REGISTERED_SUMMARIZATION_PROFILE_KEYS: set[str] = set()
 
 PLAN_SYSTEM_PROMPT = plan_system_prompt()
 ACT_SYSTEM_PROMPT = """You are MIRA, a general-purpose agent.
@@ -214,12 +213,11 @@ def _build_agent(
     rubric_model = model
     if enable_rubric and model_assignment(config, RUBRIC_MODEL):
         rubric_model = get_llm(config, role=RUBRIC_MODEL)
-    summarization_model = (
+    summary_model = (
         get_llm(config, role=SUMMARIZATION_MODEL)
         if model_assignment(config, SUMMARIZATION_MODEL)
-        else model
+        else None
     )
-    _register_summarization_exclusion(config, summarization_model)
     mcp_tools: list[Any] = []
     mcp_metadata: list[dict[str, str]] = []
     if mcp_manager is not None:
@@ -298,7 +296,8 @@ def _build_agent(
             )
 
         middleware_stack = build_agent_middleware(
-            model=summarization_model,
+            model=model,
+            summary_model=summary_model,
             backend=backend,
             workspace=Path(workspace),
             settings=settings,
@@ -457,75 +456,6 @@ def _subagent_name(spec: Any) -> str:
     if isinstance(spec, dict):
         return str(spec.get("name") or "")
     return str(getattr(spec, "name", "") or "")
-
-
-def _register_summarization_exclusion(config: dict[str, Any] | None, model: Any | None = None) -> None:
-    """Ask DeepAgents not to auto-add a second summarization middleware."""
-    keys = _summarization_profile_keys(config, model)
-
-    for key in keys:
-        if key in _REGISTERED_SUMMARIZATION_PROFILE_KEYS:
-            continue
-        register_harness_profile(
-            key,
-            HarnessProfile(excluded_middleware=frozenset({"SummarizationMiddleware"})),
-        )
-        _REGISTERED_SUMMARIZATION_PROFILE_KEYS.add(key)
-
-
-def _summarization_profile_keys(config: dict[str, Any] | None, model: Any | None = None) -> list[str]:
-    """Return DeepAgents harness profile keys that may match this model."""
-    candidates: list[str] = []
-
-    resolved_provider = _model_provider(model)
-    identifier = _model_identifier(model)
-
-    if resolved_provider and identifier and ":" not in identifier:
-        candidates.append(f"{resolved_provider}:{identifier}")
-    if identifier and ":" in identifier:
-        candidates.append(identifier)
-    if resolved_provider:
-        candidates.append(resolved_provider)
-
-    keys: list[str] = []
-    for key in candidates:
-        if _valid_summarization_profile_key(key) and key not in keys:
-            keys.append(key)
-    return keys
-
-
-def _model_identifier(model: Any) -> str:
-    """Return a public model identifier without importing DeepAgents internals."""
-    for attribute in ("model_name", "model", "model_id"):
-        value = getattr(model, attribute, None)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _model_provider(model: Any) -> str:
-    """Return LangChain's tracing provider label when a model exposes one."""
-    get_params = getattr(model, "_get_ls_params", None)
-    if not callable(get_params):
-        return ""
-    try:
-        params = get_params()
-    except (AttributeError, TypeError, NotImplementedError):
-        return ""
-    if not isinstance(params, dict):
-        return ""
-    value = params.get("ls_provider")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _valid_summarization_profile_key(key: str) -> bool:
-    """Return whether a generated key fits DeepAgents' registry shape."""
-    if not key or key != key.strip() or key.count(":") > 1:
-        return False
-    if ":" not in key:
-        return True
-    provider, model = key.split(":", 1)
-    return bool(provider and model and provider == provider.strip() and model == model.strip())
 
 
 def _action_permissions() -> list[FilesystemPermission]:

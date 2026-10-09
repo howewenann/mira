@@ -838,7 +838,10 @@ class MiraApp(App[None]):
                 if await sync_deepagents_compaction(self.session, active_agent, thread_id):
                     self.store.save(self.session)
                     self._refresh_sessions()
-                self.compaction_finished("context compacted", resume_waiting=False)
+                if result.reason == "archive_failed":
+                    self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
+                else:
+                    self.compaction_finished("context compacted", resume_waiting=False)
             elif result.reason in {"no_messages", "nothing_to_compact"}:
                 self.compaction_finished("nothing to compact", success=False, resume_waiting=False)
             else:
@@ -853,6 +856,14 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
             raise
         except Exception as exc:
+            # A failed archive link can follow a successful summary reservation.
+            # Keep session replay aligned with whichever event reached the checkpoint.
+            try:
+                if await sync_deepagents_compaction(self.session, active_agent, thread_id):
+                    self.store.save(self.session)
+                    self._refresh_sessions()
+            except Exception as sync_error:
+                get_diagnostics_logger().warning("Could not sync failed compaction: %s", sync_error)
             self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
             error_path = self._write_error_report(exc, source="tui.compact")
             self.system_message(f"compaction error: {exc}\nerror report: {error_path}", kind="error")

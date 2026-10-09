@@ -66,19 +66,26 @@ class AgentWithMutableState(AgentWithState):
         self.mira_summarization = summarization
         self.updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
-    async def aupdate_state(self, config: dict[str, Any], values: dict[str, Any]) -> None:
+    async def aupdate_state(self, config: dict[str, Any], values: dict[str, Any], *, as_node: str) -> None:
+        assert as_node == "model"
         self.updates.append((config, values))
         self.values.update(values)
 
 
 class FakeSummarization:
     def __init__(self) -> None:
-        self._backend = object()
+        self._backend = self
         self.offloaded: list[Any] = []
         self.thread_ids: list[str] = []
 
-    def _get_thread_id(self) -> str:
-        return "unset"
+    def _get_session_id(self, state: dict[str, Any]) -> str:
+        return state.get("_summarization_session_id") or "thread-1"
+
+    def _get_history_path(self, session_id: str) -> str:
+        return f"/.mira/conversation_history/{session_id}.md"
+
+    async def adownload_files(self, paths: list[str]) -> list[Any]:
+        return [type("Download", (), {"error": "file_not_found", "content": None})()]
 
     def _apply_event_to_messages(self, messages: list[Any], event: Any) -> list[Any]:
         if event is None:
@@ -86,13 +93,13 @@ class FakeSummarization:
         return [event["summary_message"], *messages[int(event["cutoff_index"]) :]]
 
     def _determine_cutoff_index(self, messages: list[Any]) -> int:
-        return 1
+        return 2 if len(messages) >= 3 else 1
 
     def _partition_messages(self, messages: list[Any], cutoff: int) -> tuple[list[Any], list[Any]]:
         return messages[:cutoff], messages[cutoff:]
 
-    async def _aoffload_to_backend(self, backend: Any, messages: list[Any]) -> str:
-        self.thread_ids.append(self._get_thread_id())
+    async def _aoffload_to_backend(self, backend: Any, messages: list[Any], session_id: str) -> str:
+        self.thread_ids.append(session_id)
         self.offloaded.append(messages)
         return "/.mira/conversation_history/thread-1.md"
 
@@ -108,7 +115,7 @@ class FakeSummarization:
         ]
 
     def _compute_state_cutoff(self, event: Any, cutoff: int) -> int:
-        return cutoff
+        return event["cutoff_index"] + cutoff - 1 if event else cutoff
 
 
 class IneligibleFakeSummarization(FakeSummarization):
@@ -866,7 +873,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         prepare_summarization_engine(summarization)
         agent = AgentWithMutableState(
             {
-                "messages": [HumanMessage(content="old"), HumanMessage(content="recent")],
+                "messages": [HumanMessage(content="old"), HumanMessage(content="new"), HumanMessage(content="recent")],
                 "_summarization_event": {
                     "cutoff_index": 1,
                     "summary_message": {
@@ -884,7 +891,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.compacted)
         rendered_archive = repr(summarization.offloaded[0][0])
-        self.assertIn("Checkpointed summary.", rendered_archive)
+        self.assertIn("new", rendered_archive)
+        self.assertNotIn("Checkpointed summary.", rendered_archive)
         self.assertNotIn("{'type': 'human'", rendered_archive)
 
     async def test_compaction_sync_does_not_guess_event_type_from_wording(self) -> None:

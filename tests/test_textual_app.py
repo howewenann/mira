@@ -6373,6 +6373,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.store.saves, [])
         self.assertIn("nothing to compact", rendered)
 
+    async def test_compact_command_reports_archive_failure_after_checkpoint_reservation(self) -> None:
+        app = make_app()
+        compact_result = PostTurnCompactionResult(compacted=True, reason="archive_failed")
+
+        with (
+            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
+            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
+        ):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy)
+                await pilot.pause()
+                rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+
+        sync.assert_awaited_once()
+        self.assertEqual(len(app.store.saves), 1)
+        self.assertIn("context compaction failed", rendered)
+
     async def test_compact_command_reports_failure_and_restores_prompt(self) -> None:
         app = make_app()
 

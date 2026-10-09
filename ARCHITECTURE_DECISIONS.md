@@ -1088,10 +1088,15 @@ artifacts are rejected rather than repaired. Transient fields are not saved.
 The in-memory resume-context marker survives transcript saves until the first
 model invocation after reopening a session, but it is never written to JSON.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
-installs a named `MiraSummarizationMiddleware` subclass built from DeepAgents'
-summarization defaults, then observes that middleware's `_count_tokens` result
-so the UI can show context pressure. MIRA does not run a parallel dashboard
-counter or compute provider prompt tokens. Context pressure belongs to the top
+replaces DeepAgents' default `SummarizationMiddleware` by its native name with
+one instance built from Main's model-aware defaults. The model-triggered
+`compact_conversation` tool and TUI `/compact` use that same instance. An
+optional dedicated summarization model occupies only LangChain's summary-call
+slot; Main still determines profile limits, token counting, and triggers. The
+request observer calls the instance's `_count_tokens` on the effective model
+request, after compaction, so the UI can show context pressure without counting
+summary-model calls. MIRA does not run a parallel dashboard counter or compute
+provider prompt tokens. Context pressure belongs to the top
 operational status row; model identity, cumulative token totals, turn count,
 and elapsed time remain in the bottom passive telemetry row. The operational
 state is a fixed, bold badge with only Starting, Ready, Running, Cancelling, and
@@ -1106,15 +1111,22 @@ canonical status and reopens its exact bubble; it is disabled while runtime work
 is busy. The badge and tool lifecycle text share muted semantic colors without
 recoloring the entire header. Automatic and agent-selected eligibility remain
 DeepAgents decisions. The explicit TUI `/compact` command is
-the narrow exception: it reuses the attached summarization middleware to apply
-the normal retention policy immediately, then writes the same
-`_summarization_event` consumed by subsequent DeepAgents model calls. Provider
+the narrow exception: it applies the shared middleware's retention policy
+immediately without an agent turn. It writes the canonical `_summarization_event`
+and `_summarization_session_id`, preserving raw messages in LangGraph state and
+appending history to the same archive across later compactions and reloads.
+MIRA checks that the checkpoint has not advanced before committing. It reserves
+the summary state before appending history, then links the archive path; archive
+read errors cannot be mistaken for an empty archive. Provider
 `In` and `Out` usage are cumulative per-call totals, not current context
 occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
 response metadata required by DeepAgents' reported-token validation. MIRA's
 model-response normalization fills only that missing integration identity and
 leaves DeepAgents' eligibility thresholds unchanged.
-MIRA reads compaction summary prose only from the canonical
+DeepAgents filters tagged prior summaries from archives; MIRA also strips
+reasoning and provider metadata from archive messages and replayed summary
+messages because DeepAgents does not sanitize those fields. MIRA reads
+compaction summary prose only from the canonical
 `_summarization_event.summary_message`; retired raw `summary` and
 `summary_text` aliases are ignored.
 DeepAgents marks summary-model invocations with `lc_source="summarization"`.

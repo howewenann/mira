@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from deepagents.middleware.summarization import SummarizationToolMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 
@@ -14,7 +15,6 @@ from agent.middleware.code_interpreter import (
 )
 from agent.middleware.compaction import (
     create_mira_summarization_middleware,
-    create_mira_summarization_tool_middleware,
 )
 from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware.execute_tool_description_rewrite import (
@@ -46,6 +46,7 @@ class AgentMiddlewareBundle:
 def build_agent_middleware(
     *,
     model: Any,
+    summary_model: Any | None = None,
     backend: Any,
     workspace: Path,
     settings: dict[str, Any] | None = None,
@@ -53,8 +54,10 @@ def build_agent_middleware(
     extra_middleware: list[AgentMiddleware] | None = None,
 ) -> AgentMiddlewareBundle:
     """Build MIRA's ordered user middleware bundle for DeepAgents."""
-    summarization_middleware = create_mira_summarization_middleware(model=model, backend=backend)
-    summarization_tool_middleware = create_mira_summarization_tool_middleware(model=model, backend=backend)
+    summarization_middleware = create_mira_summarization_middleware(
+        model=model, backend=backend, summary_model=summary_model,
+    )
+    summarization_tool_middleware = SummarizationToolMiddleware(summarization_middleware)
     middleware: list[Any] = [
         *([TodoListMiddleware()] if planning_todos_enabled(settings) else []),
         summarization_middleware,
@@ -72,7 +75,7 @@ def build_agent_middleware(
         ExecuteToolDescriptionRewriteMiddleware(),
     ]
     middleware.extend(extra_middleware or [])
-    middleware.append(ContextReportMiddleware())
+    middleware.append(ContextReportMiddleware(summarization_middleware))
     return AgentMiddlewareBundle(items=middleware, summarization=summarization_middleware)
 
 
