@@ -6,10 +6,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from deepagents.backends import FilesystemBackend
-from langchain_core.messages import HumanMessage
+from deepagents import create_deep_agent
+from deepagents.middleware.skills import SkillsMiddleware
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
 
 from agent.resources import build_resources
 from agent.resources.skills import load_skills
@@ -29,18 +34,19 @@ def write_skill(root: Path, directory: str, frontmatter: str, body: str = "# Ins
 
 class SkillDiscoveryTests(unittest.TestCase):
     def test_deepagents_list_skills_is_the_canonical_source(self) -> None:
-        default = {"name": "default", "description": "Default.", "path": "/default/SKILL.md"}
-        project = {"name": "project", "description": "Project.", "path": "/project/SKILL.md"}
-        backend = object()
-        with patch("agent.resources.skills._list_skills", side_effect=[[default], [project]]) as discover:
-            sources, metadata = load_skills(backend)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            write_skill(workspace, "project", "name: project\ndescription: Project.")
+            resources = build_resources(workspace, create_examples=False)
+            sources, metadata, _ = load_skills(resources.backend)
+            native = SkillsMiddleware(backend=resources.backend, sources=sources)
+            loaded = native.before_agent({}, None, {})
 
         self.assertEqual(sources, ["/mira-defaults/skills", "/.mira/skills"])
         self.assertEqual(
-            [call.args for call in discover.call_args_list],
-            [(backend, "/mira-defaults/skills"), (backend, "/.mira/skills")],
+            [(item["name"], item["path"]) for item in metadata],
+            [(item["name"], item["path"]) for item in loaded["skills_metadata"]],
         )
-        self.assertEqual([item["name"] for item in metadata], ["default", "project"])
 
     def test_malformed_and_missing_description_skills_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -266,44 +272,111 @@ class SkillInvocationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate skill command"):
             SkillRegistry([self.skill, dict(self.skill)])
 
-    def test_prepared_skill_contains_full_human_envelope_and_metadata(self) -> None:
+    def test_prepared_skill_uses_native_pin_and_plain_user_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             skill_file = root / "skills" / "foo" / "SKILL.md"
             skill_file.parent.mkdir(parents=True)
             raw = "---\nname: foo\ndescription: Review a thing.\n---\n\n# Full instructions\n"
             skill_file.write_text(raw, encoding="utf-8")
-            stored = skill_file.read_bytes().decode("utf-8")
             backend = FilesystemBackend(root_dir=root, virtual_mode=True)
 
             prepared = prepare_skill(
                 "/skill__foo inspect this PR carefully",
                 SkillRegistry([self.skill]),
-                backend,
             )
-            bare = prepare_skill("/skill__foo", SkillRegistry([self.skill]), backend)
+            bare = prepare_skill("/skill__foo", SkillRegistry([self.skill]))
+            middleware = SkillsMiddleware(backend=backend, sources=["/skills"])
+            loaded = middleware.before_agent({}, None, {})
+            pinned = middleware.before_model(
+                {**loaded, "pinned_skills": prepared.pinned_skills}, None
+            )
 
         self.assertIsNotNone(prepared)
         assert prepared is not None
         self.assertEqual(prepared.display_text, "/skill__foo inspect this PR carefully")
         self.assertEqual(len(prepared.messages), 1)
         self.assertIsInstance(prepared.messages[0], HumanMessage)
-        self.assertIn(stored, str(prepared.messages[0].content))
-        self.assertIn("**User request:** inspect this PR carefully", str(prepared.messages[0].content))
-        self.assertEqual(
-            prepared.messages[0].additional_kwargs["__skill"],
-            {
-                "name": "foo",
-                "description": "Review a thing.",
-                "source": "project",
-                "args": "inspect this PR carefully",
-            },
-        )
+        self.assertEqual(prepared.messages[0].content, "inspect this PR carefully")
+        self.assertEqual(prepared.messages[0].additional_kwargs, {})
+        self.assertEqual(prepared.pinned_skills, ["foo"])
+        self.assertIn("# Full instructions", pinned["messages"][0].content)
+        self.assertEqual(pinned["messages"][0].additional_kwargs["lc_source"], "pinned_skill")
+        self.assertEqual(pinned["pinned_skills"].value, [])
         assert bare is not None
-        self.assertNotIn("**User request:**", str(bare.messages[0].content))
+        self.assertEqual(bare.messages[0].content, "")
+        self.assertEqual(bare.pinned_skills, ["foo"])
 
 
 class SkillInvocationFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_skill_tool_is_disclosed_after_pin(self) -> None:
+        bound_tools: list[dict[str, dict[str, object]]] = []
+
+        class BindableModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                bound_tools.append({item.name: dict(item.extras or {}) for item in tools})
+                return self
+
+        @tool
+        def web_search(query: str) -> str:
+            """Search the web."""
+            return query
+
+        web_search.extras = {"defer_loading": True}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "skills" / "lookup" / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "---\nname: lookup\ndescription: Look up information.\nmetadata:\n"
+                "  include_tools: web_search\n---\n\nUse web_search.\n", encoding="utf-8"
+            )
+            agent = create_deep_agent(
+                model=BindableModel(responses=[AIMessage(content="done"), AIMessage(content="done")]),
+                backend=FilesystemBackend(root_dir=root, virtual_mode=True),
+                tools=[web_search], skills=["/skills"], checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "tool-thread"}}
+            await agent.ainvoke({"messages": [HumanMessage("Hello")]}, config)
+            await agent.ainvoke(
+                {"messages": [HumanMessage("Search")], "pinned_skills": ["lookup"]}, config
+            )
+
+        self.assertTrue(bound_tools[0]["web_search"]["defer_loading"])
+        self.assertNotIn("defer_loading", bound_tools[-1]["web_search"])
+
+    async def test_native_pin_refreshes_skill_body_in_checkpointed_thread(self) -> None:
+        class BindableModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "skills" / "foo" / "SKILL.md"
+            path.parent.mkdir(parents=True)
+            path.write_text("---\nname: foo\ndescription: Review.\n---\n\nOld guidance.\n", encoding="utf-8")
+            agent = create_deep_agent(
+                model=BindableModel(responses=[AIMessage(content="done"), AIMessage(content="done")]),
+                backend=FilesystemBackend(root_dir=root, virtual_mode=True),
+                skills=["/skills"],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "skill-thread"}}
+            await agent.ainvoke(
+                {"messages": [HumanMessage("First request")], "pinned_skills": ["foo"]}, config
+            )
+            path.write_text("---\nname: foo\ndescription: Revised.\n---\n\nNew guidance.\n", encoding="utf-8")
+            await agent.ainvoke(
+                {"messages": [HumanMessage("Second request")], "pinned_skills": ["foo"], "skills_metadata": None},
+                config,
+            )
+            messages = (await agent.aget_state(config)).values["messages"]
+
+        pins = [message for message in messages if message.additional_kwargs.get("lc_source") == "pinned_skill"]
+        self.assertEqual(len(pins), 2)
+        self.assertIn("Old guidance.", pins[0].content)
+        self.assertIn("New guidance.", pins[1].content)
+
     async def test_textual_submission_uses_existing_prepared_turn_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -327,8 +400,6 @@ class SkillInvocationFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(run_turn.await_args.args, ("/skill__foo review this",))
         prepared = run_turn.await_args.kwargs["prepared_messages"]
-        self.assertEqual(
-            prepared[0].additional_kwargs["__skill"],
-            {"name": "foo", "description": "Review.", "source": "project", "args": "review this"},
-        )
+        self.assertEqual(prepared[0].content, "review this")
+        self.assertEqual(run_turn.await_args.kwargs["pinned_skills"], ["foo"])
         self.assertEqual(run_turn.await_args.kwargs["display_text"], "/skill__foo review this")

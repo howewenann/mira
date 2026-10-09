@@ -26,7 +26,7 @@ from textual.widgets import Button, ContentSwitcher, ListView, Static
 
 from agent.middleware.compaction import compact_after_turn
 from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
-from agent.skills import SkillRegistry, prepare_skill
+from agent.skills import PreparedSkill, SkillRegistry, prepare_skill
 from agent.planning.policy import (
     PLANNING_STAGE_GOAL_FINALIZE,
     PLANNING_STAGE_GOAL_RESEARCH,
@@ -625,12 +625,7 @@ class MiraApp(App[None]):
             if not self._model_agents_available():
                 return
             try:
-                prepared = await asyncio.to_thread(
-                    prepare_skill,
-                    text,
-                    self._skill_registry(),
-                    self.agent.mira_backend,
-                )
+                prepared = prepare_skill(text, self._skill_registry())
             except (AttributeError, ValueError) as error:
                 self.system_message(str(error), kind="warning")
                 self.action_focus_prompt()
@@ -726,6 +721,7 @@ class MiraApp(App[None]):
                 text,
                 prepared_messages=prepared.messages if prepared is not None else None,
                 display_text=prepared.display_text if prepared is not None else None,
+                pinned_skills=prepared.pinned_skills if isinstance(prepared, PreparedSkill) else None,
                 attachments=attachments,
             ),
             name="turn",
@@ -738,6 +734,7 @@ class MiraApp(App[None]):
         *,
         prepared_messages: list[Any] | None = None,
         display_text: str | None = None,
+        pinned_skills: list[str] | None = None,
         attachments: list[dict[str, str]] | None = None,
     ) -> None:
         """Run one agent turn and restore prompt focus when done."""
@@ -748,6 +745,8 @@ class MiraApp(App[None]):
                 turn_kwargs["display_text"] = display_text
             if prepared_messages is not None:
                 turn_kwargs["prepared_messages"] = prepared_messages
+            if pinned_skills is not None:
+                turn_kwargs["pinned_skills"] = pinned_skills
             if attachments:
                 turn_kwargs["attachments"] = attachments
             await self.core_session.prompt(

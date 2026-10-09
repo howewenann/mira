@@ -82,7 +82,7 @@ def build_resources(
     backends = build_backends(workspace, settings=settings, enable_execute=enable_execute)
 
     memories = load_memories(workspace)
-    skill_sources, skills = load_skills(backends.combined)
+    skill_sources, skills, skill_tool_names = load_skills(backends.combined)
     discovery = subagent_discovery or discover_subagents(workspace)
     subagents = effective_subagent_specs(discovery, config) if config is not None else []
     subagent_info = [item.display_item() for item in discovery.items]
@@ -93,6 +93,15 @@ def build_resources(
     ]
     tool_info = [item for item in tool_info if item["name"] != VALIDATE_SKILL_TOOL]
     active_tools = enabled_tools(tools, tool_info, settings)
+    for tool in active_tools:
+        info = next((item for item in tool_info if item["name"] == tool_name(tool)), None)
+        if (
+            info is not None
+            and info["source"] == "project"
+            and tool_name(tool) in skill_tool_names
+            and hasattr(tool, "extras")
+        ):
+            tool.extras = {**(tool.extras or {}), "defer_loading": True}
 
     return ResourceBundle(
         backend=backends.combined,

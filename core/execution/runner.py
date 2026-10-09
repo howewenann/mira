@@ -647,6 +647,7 @@ async def run_turn(
     planning_state: dict[str, str] | None = None,
     planning_context: Any | None = None,
     messages: list[Any] | None = None,
+    pinned_skills: list[str] | None = None,
     always_allowed_tools: set[str] | None = None,
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
 ) -> TurnResult:
@@ -662,6 +663,11 @@ async def run_turn(
     payload: dict[str, Any] | Command = {
         "messages": list(messages) if messages is not None else [{"role": "user", "content": text}]
     }
+    if pinned_skills:
+        payload["pinned_skills"] = pinned_skills
+    refreshed_threads = getattr(agent, "mira_skills_refreshed_threads", None)
+    if isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
+        payload["skills_metadata"] = None
     rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
     if include_rubric_state:
         payload["rubric"] = rubric
@@ -762,6 +768,9 @@ async def run_turn(
             )
             rubric_renderer.cancel()
             raise
+
+        if isinstance(refreshed_threads, set):
+            refreshed_threads.add(thread_id)
 
         if historical_tool_lifecycle is not None:
             render_output_tool_results(

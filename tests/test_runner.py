@@ -726,6 +726,32 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(agent.invocation_kwargs[0]["context"], context)
         self.assertIs(agent.invocation_kwargs[1]["context"], context)
 
+    async def test_skill_pin_is_only_in_initial_payload_and_reload_refreshes_checkpoint(self) -> None:
+        interrupt = {"action_requests": [{"name": "write_file", "args": {"file_path": "/test.txt"}}]}
+        agent = FakeAgent([
+            FakeStream(output={"messages": []}, interrupts=[interrupt]),
+            FakeStream(output={"messages": []}),
+            FakeStream(output={"messages": []}),
+        ])
+        agent.mira_skills_refreshed_threads = set()
+        renderer = RunTurnRenderer(decisions=[{"type": "approve"}])
+
+        await runner.run_turn(
+            agent, "Review this", renderer, "thread-1", pinned_skills=["code-review"]
+        )
+        await runner.run_turn(agent, "Next request", renderer, "thread-1")
+
+        self.assertEqual(agent.payloads[0]["pinned_skills"], ["code-review"])
+        self.assertIsNone(agent.payloads[0]["skills_metadata"])
+        self.assertIsInstance(agent.payloads[1], Command)
+        self.assertNotIn("pinned_skills", agent.payloads[2])
+        self.assertNotIn("skills_metadata", agent.payloads[2])
+
+        rebuilt = FakeAgent([FakeStream(output={"messages": []})])
+        rebuilt.mira_skills_refreshed_threads = set()
+        await runner.run_turn(rebuilt, "After reload", renderer, "thread-1")
+        self.assertIsNone(rebuilt.payloads[0]["skills_metadata"])
+
     async def test_always_allow_translates_and_skips_same_tool_for_rest_of_turn(self) -> None:
         first = {
             "action_requests": [{"name": "write_file", "args": {"file_path": "one.txt"}}]

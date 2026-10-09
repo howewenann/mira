@@ -67,8 +67,8 @@ class FakeToolRequest:
 class AnyLLMMetadataModel:
     """Minimal model identity used by LangChain's reported-token check."""
 
-    def with_retry(self) -> "AnyLLMMetadataModel":
-        """Match the chat-model construction seam required by LangChain 1.3.17."""
+    def with_retry(self, **kwargs: object) -> "AnyLLMMetadataModel":
+        """Match the chat-model construction seam required by LangChain 1.4.4."""
         return self
 
     def _get_ls_params(self) -> dict[str, str]:

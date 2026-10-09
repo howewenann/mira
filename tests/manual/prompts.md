@@ -1376,6 +1376,16 @@ conda run -n mira python -m cli.main --workspace <workspace>
     readable, and ambient host/network APIs are unavailable. Separately run a
     bounded infinite-loop probe and cancel an active eval; both must return
     control without terminating MIRA.
+13. Create a project skill and invoke `/skill__<name> Review this file`.
+    Expected: the transcript keeps the full slash command; the model receives
+    `Review this file` as the request and follows the skill once. Invoke the
+    bare command too; it should select the skill without adding request text.
+14. Edit the skill description and instructions, then run `/reload` and invoke
+    it again in the same conversation. Expected: `/skills`, autocomplete, and
+    the agent use the new metadata and body. Repeat after reopening a saved
+    conversation. A skill-only project tool listed in `metadata.include_tools`
+    should appear after the skill is read or pinned and keep its configured
+    approval behavior.
 
 ## Tool And Formal-Construction Timing
 

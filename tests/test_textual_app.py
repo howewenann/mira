@@ -6956,13 +6956,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reload_keeps_consolidated_issues_notification(self) -> None:
         """Explicit reload should continue to report all Issues in one notification."""
-        app = make_app(issues=[object(), object()])
-        app.notify = Mock()  # type: ignore[method-assign]
-        app._reload_agents = AsyncMock()  # type: ignore[method-assign]
+        with tempfile.TemporaryDirectory() as directory:
+            app = make_app(workspace=Path(directory), issues=[object(), object()])
+            app.notify = Mock()  # type: ignore[method-assign]
+            app._reload_agents = AsyncMock()  # type: ignore[method-assign]
 
-        async with app.run_test():
-            app.notify.reset_mock()
-            await app._handle_reload_command()
+            async with app.run_test():
+                app.notify.reset_mock()
+                await app._handle_reload_command()
 
         app.notify.assert_called_once_with(
             "2 current issues.\nOpen Issues or run /issues.",

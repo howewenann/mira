@@ -741,6 +741,35 @@ def web_search(query: str) -> str:
                 resources.metadata["tools"],
             )
 
+    def test_skill_specific_project_tool_uses_native_deferred_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            skill_dir = workspace / ".mira" / "skills" / "lookup"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: lookup\ndescription: Look things up.\nmetadata:\n"
+                "  include_tools: web_search\n---\n\nUse web_search.\n",
+                encoding="utf-8",
+            )
+            tools_dir = workspace / ".mira" / "tools"
+            tools_dir.mkdir(parents=True)
+            (tools_dir / "web_search.py").write_text(
+                'from langchain_core.tools import tool\n'
+                '@tool\ndef web_search(query: str) -> str:\n'
+                '    """Search the web."""\n    return query\n',
+                encoding="utf-8",
+            )
+            resources = build_resources(workspace, create_examples=False)
+            tool = next(item for item in resources.tools if item.name == "web_search")
+            self.assertTrue(tool.extras["defer_loading"])
+            self.assertEqual(tool.invoke({"query": "mira"}), "mira")
+
+            disabled = build_resources(
+                workspace, create_examples=False,
+                settings={"hitl": {"tools": {"web_search": {"enabled": False, "always_allow": False}}}},
+            )
+            self.assertNotIn("web_search", [item.name for item in disabled.tools])
+
     def test_disabled_project_tool_stays_in_metadata_but_not_agent_tools(self) -> None:
         """Disabled project tools should be hidden from the agent while remaining configurable."""
         with tempfile.TemporaryDirectory() as directory:

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from copy import deepcopy
 from typing import Any
 
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.skills import SkillsMiddleware
-from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, create_sub_agent
+from deepagents.middleware.subagents import create_sub_agent
 from deepagents.middleware.summarization import create_summarization_middleware
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.chat_models import init_chat_model
@@ -22,7 +21,6 @@ def compile_dynamic_subagents(
     model: Any,
     tools: Sequence[Any],
     backend: Any,
-    skills: list[str] | None,
     permissions: list[FilesystemPermission] | None,
     interrupt_on: dict[str, Any] | None,
     enable_todos: bool = False,
@@ -35,13 +33,6 @@ def compile_dynamic_subagents(
     ``mode="fork"`` specs remain declarative so DeepAgents can construct their
     inherited prompt, middleware, state, and conversation itself.
     """
-    specs = list(subagents)
-    if not any(_is_synchronous(spec) and spec.get("name") == "general-purpose" for spec in specs):
-        general_purpose = deepcopy(GENERAL_PURPOSE_SUBAGENT)
-        if skills is not None:
-            general_purpose["skills"] = list(skills)
-        specs.insert(0, general_purpose)
-
     return [
         compile_raw_subagent(
             spec,
@@ -54,16 +45,12 @@ def compile_dynamic_subagents(
         )
         if _is_raw_synchronous(spec) and spec.get("mode") != "fork"
         else spec
-        for spec in specs
+        for spec in subagents
     ]
 
 
-def _is_synchronous(spec: dict[str, Any]) -> bool:
-    return "graph_id" not in spec
-
-
 def _is_raw_synchronous(spec: dict[str, Any]) -> bool:
-    return _is_synchronous(spec) and "runnable" not in spec
+    return "graph_id" not in spec and "runnable" not in spec
 
 
 def compile_raw_subagent(

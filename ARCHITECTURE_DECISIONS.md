@@ -308,8 +308,8 @@ to inspect.
 **How it works at a high level:**
 
 - Defaults live under `agent/resources/defaults/` and are mounted read-only at
-  `/mira-defaults/...`; only default memories and built-in tools are shipped
-  there by default.
+  `/mira-defaults/...`; default memories, skills, and built-in tools are shipped
+  there.
 - Project resources live under the workspace's `.mira/` folder and are mounted
   at `/.mira/...`.
 - A fresh project creates empty active `memories/`, `skills/`, `subagents/`,
@@ -335,11 +335,16 @@ to inspect.
   `.mira/memories/AGENTS.md` replaces the bundled `AGENTS.md`, and a project
   `.mira/memories/software-development.md` replaces the bundled software
   development guide; extra Markdown files are added as additional memories.
-- Skills load from project folders containing `SKILL.md`. MIRA display metadata
-  keys them by YAML frontmatter `name`, falling back to the folder name. If
-  bundled default skills are added later, DeepAgents receives default skill
-  sources first and project skill sources second, so a duplicate skill name
-  follows DeepAgents' later-source-wins behavior.
+- DeepAgents parses and merges skill metadata from bundled and project folders
+  containing `SKILL.md`. MIRA projects the effective metadata into `/skills`
+  and autocomplete. Project skills win when names match. A `/skill__<name>`
+  command passes its trailing text as the user request and names the skill in
+  DeepAgents' `pinned_skills` state; DeepAgents loads and injects the body once.
+  A rebuilt agent refreshes cached skill metadata on each conversation's first
+  turn, including conversations restored from checkpoints.
+- Project tools named by a skill's `metadata.include_tools` use DeepAgents'
+  deferred disclosure. Their settings, execution permissions, and HITL policy
+  still apply.
 - Subagents load from Python files exporting `SUBAGENTS = [...]` in file/list
   order. `general-purpose` is always first and enabled; newly discovered raw,
   compiled, and async definitions default disabled. A single project definition
@@ -692,7 +697,7 @@ Success Criteria or introduce a second grading call. Rubric colors are
 centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
 isolated to Rubric UI.
 
-Each DeepAgents 0.7.13 per-grader call runs two separate static nested agents
+Each DeepAgents 0.7.23 per-grader call runs two separate static nested agents
 with the configured Rubric model. MIRA owns the verifier's effective Rubric
 tools and normal HITL middleware; the verifier has no response format and may
 naturally finish without calling a tool. DeepAgents' grader-owned tool and
@@ -706,7 +711,7 @@ and their real `ToolMessage` results are copied without truncation into a
 private evidence channel for that final grader call. Verifier prose and all
 verifier messages remain outside the main agent state and transcript.
 
-DeepAgents 0.7.13 continues to own grading iterations, frozen criteria,
+DeepAgents 0.7.23 continues to own grading iterations, frozen criteria,
 coverage retry, revision injection, caps, and terminal status. MIRA inserts its
 isolated verifier before each final grader call without replacing that stock
 lifecycle. Transcript and verifier evidence are independently valid; verifier
@@ -974,7 +979,7 @@ differently.
 
 ## DeepAgents Runtime Ownership
 
-**Decision:** MIRA pins DeepAgents 0.7.13 and `langchain-quickjs` 0.3.7. MIRA
+**Decision:** MIRA pins DeepAgents 0.7.23 and `langchain-quickjs` 0.3.7. MIRA
 owns a small general-purpose action prompt and its existing planning prompt;
 DeepAgents owns the filesystem, delegation, streaming, and middleware
 execution. Project and bundled memory files remain opaque Markdown resources,

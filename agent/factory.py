@@ -292,7 +292,6 @@ def _build_agent(
                 model=model,
                 tools=tools,
                 backend=backend,
-                skills=resources.skills,
                 permissions=permissions,
                 interrupt_on=resolved_interrupt_on,
                 enable_todos=planning_todos_enabled(settings),
@@ -385,6 +384,10 @@ def _build_agent(
         resources.subagent_discovery,
     )
     _attach_backend(agent, backend, resources.project_backend)
+    # A rebuilt agent may resume a checkpoint whose DeepAgents skill metadata
+    # predates /reload. Refresh each thread on its first turn with this graph.
+    if hasattr(agent, "astream_events"):
+        agent.mira_skills_refreshed_threads = set()
     _attach_summarization(agent, middleware_stack.summarization)
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))

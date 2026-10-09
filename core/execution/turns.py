@@ -127,6 +127,7 @@ async def run_user_turn(
     context_limit_tokens: int | None = None,
     context_limit_source: str = "unknown",
     prepared_messages: list[Any] | None = None,
+    pinned_skills: list[str] | None = None,
     attachments: list[dict[str, str]] | None = None,
     turn_runner: Any | None = None,
     rubric_override: str | None = None,
@@ -228,6 +229,7 @@ async def run_user_turn(
         rubric: str | None = None,
         rubric_iterations: int = 3,
         supplied_messages: list[Any] | None = None,
+        phase_pinned_skills: list[str] | None = None,
     ) -> TurnResult:
         from core.execution.inspection.persistence import PersistentSubagentRuns
 
@@ -279,6 +281,7 @@ async def run_user_turn(
                     planning_state=state,
                     planning_context=execution_context,
                     messages=invocation_messages(request_text, supplied_messages),
+                    pinned_skills=phase_pinned_skills,
                     **policy_kwargs,
                 )
         except asyncio.CancelledError:
@@ -377,6 +380,7 @@ async def run_user_turn(
             stage=stage,
             state=planning_state,
             supplied_messages=prepared_messages if first_phase else None,
+            phase_pinned_skills=pinned_skills if first_phase else None,
         )
         first_phase = False
         review = result.formal_review
@@ -432,6 +436,7 @@ async def run_user_turn(
                 or 3
             ),
             supplied_messages=prepared_messages if first_phase else None,
+            phase_pinned_skills=pinned_skills if first_phase else None,
         )
 
     session["turns"] = int(session.get("turns") or 0) + 1

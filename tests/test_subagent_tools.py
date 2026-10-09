@@ -162,7 +162,6 @@ class SubagentToolAllowlistTests(unittest.TestCase):
                 model="parent-model",
                 tools=[],
                 backend=StateBackend(),
-                skills=[],
                 permissions=[],
                 interrupt_on=None,
             )
@@ -356,7 +355,6 @@ class SubagentToolAllowlistTests(unittest.TestCase):
                 model="parent-model",
                 tools=[calculator],
                 backend=StateBackend(),
-                skills=[],
                 permissions=[],
                 interrupt_on=None,
             )

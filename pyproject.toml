@@ -6,8 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "coolname>=5.0.0",
-    "deepagents==0.7.13",
-    "langchain[mcp]==1.4.0",
+    "deepagents==0.7.23",
+    "langchain[mcp]==1.4.4",
     "langchain-quickjs==0.3.7",
     "langgraph>=1.2.5",
     "langchain-anyllm>=0.0.1a2",
@@ -29,7 +29,7 @@ acp-http = [
     "hypercorn>=0.17",
 ]
 tracing = [
-    "langsmith>=0.11.2,<0.12.0",
+    "langsmith>=0.14.4,<0.15.0",
     "openinference-instrumentation>=0.1.57,<0.2.0",
     "openinference-semantic-conventions>=0.1.32,<0.2.0",
     "opentelemetry-sdk>=1.44.0,<2.0.0",
@@ -38,7 +38,7 @@ tracing = [
 all = [
     "agent-client-protocol[http]==0.12.1",
     "hypercorn>=0.17",
-    "langsmith>=0.11.2,<0.12.0",
+    "langsmith>=0.14.4,<0.15.0",
     "openinference-instrumentation>=0.1.57,<0.2.0",
     "openinference-semantic-conventions>=0.1.32,<0.2.0",
     "opentelemetry-sdk>=1.44.0,<2.0.0",
