@@ -1115,9 +1115,12 @@ the narrow exception: it applies the shared middleware's retention policy
 immediately without an agent turn. It writes the canonical `_summarization_event`
 and `_summarization_session_id`, preserving raw messages in LangGraph state and
 appending history to the same archive across later compactions and reloads.
-MIRA checks that the checkpoint has not advanced before committing. It reserves
-the summary state before appending history, then links the archive path; archive
-read errors cannot be mistaken for an empty archive. Provider
+MIRA's tool middleware plans forced compaction with DeepAgents' native cutoff,
+summary, and archive primitives. The TUI coordinates a completed checkpoint:
+it checks for a newer checkpoint, appends the archive, then writes the summary
+event through LangGraph's state update. If the state update fails, it restores
+the prior archive content so a retry cannot duplicate history. Archive read
+errors cannot be mistaken for an empty archive. Provider
 `In` and `Out` usage are cumulative per-call totals, not current context
 occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
 response metadata required by DeepAgents' reported-token validation. MIRA's
@@ -1143,7 +1146,7 @@ events back into chat transcript blocks rather than reconstructing the old live
 panel. Eval-created subagent rows are not stored separately; their durable
 history is the surrounding eval tool call/result plus the assistant's summary.
 
-**Where to check:** `agent/middleware/compaction.py`, `agent/middleware/`, `session/store.py`,
+**Where to check:** `agent/middleware/compaction.py`, `core/execution/compaction.py`, `agent/middleware/`, `session/store.py`,
 `session/context.py`, `session/recorder.py`, `session/dashboard.py`,
 `core/context/observation.py`, `core/execution/streams/message_metadata.py`.
 

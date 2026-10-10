@@ -387,7 +387,7 @@ def _build_agent(
     # predates /reload. Refresh each thread on its first turn with this graph.
     if hasattr(agent, "astream_events"):
         agent.mira_skills_refreshed_threads = set()
-    _attach_summarization(agent, middleware_stack.summarization)
+    _attach_summarization(agent, middleware_stack.summarization, middleware_stack.compaction)
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))
     if planning:
@@ -736,10 +736,11 @@ def _attach_backend(agent: Any, backend: Any, project_backend: Any) -> None:
         return
 
 
-def _attach_summarization(agent: Any, summarization: Any) -> None:
-    """Attach DeepAgents summarization for post-turn compaction."""
+def _attach_summarization(agent: Any, summarization: Any, compaction: Any) -> None:
+    """Expose the shared engine and forced path to MIRA consumers."""
     try:
         agent.mira_summarization = summarization
+        agent.mira_compaction = compaction
     except AttributeError:
         return
 

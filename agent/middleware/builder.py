@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from deepagents.middleware.summarization import SummarizationToolMiddleware
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 
@@ -14,6 +13,7 @@ from agent.middleware.code_interpreter import (
     InspectableCodeInterpreterMiddleware as CodeInterpreterMiddleware,
 )
 from agent.middleware.compaction import (
+    MiraCompactionMiddleware,
     create_mira_summarization_middleware,
 )
 from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
@@ -37,10 +37,11 @@ QUICKJS_PERSISTENCE_MODE = "thread"
 
 @dataclass(frozen=True)
 class AgentMiddlewareBundle:
-    """Built middleware items plus the summarization instance MIRA observes."""
+    """Built middleware items and MIRA's shared compaction instances."""
 
     items: list[Any]
     summarization: Any
+    compaction: MiraCompactionMiddleware
 
 
 def build_agent_middleware(
@@ -57,7 +58,7 @@ def build_agent_middleware(
     summarization_middleware = create_mira_summarization_middleware(
         model=model, backend=backend, summary_model=summary_model,
     )
-    summarization_tool_middleware = SummarizationToolMiddleware(summarization_middleware)
+    summarization_tool_middleware = MiraCompactionMiddleware(summarization_middleware)
     middleware: list[Any] = [
         *([TodoListMiddleware()] if planning_todos_enabled(settings) else []),
         summarization_middleware,
@@ -76,7 +77,10 @@ def build_agent_middleware(
     ]
     middleware.extend(extra_middleware or [])
     middleware.append(ContextReportMiddleware(summarization_middleware))
-    return AgentMiddlewareBundle(items=middleware, summarization=summarization_middleware)
+    return AgentMiddlewareBundle(
+        items=middleware, summarization=summarization_middleware,
+        compaction=summarization_tool_middleware,
+    )
 
 
 __all__ = [

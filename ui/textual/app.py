@@ -24,7 +24,7 @@ from textual.events import Key
 from textual.reactive import reactive
 from textual.widgets import Button, ContentSwitcher, ListView, Static
 
-from agent.middleware.compaction import compact_after_turn
+from agent.middleware.compaction import PostTurnCompactionResult
 from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
 from agent.skills import PreparedSkill, SkillRegistry, prepare_skill
 from agent.planning.policy import (
@@ -55,6 +55,7 @@ from core.context.report import (
 from core.diagnostics.error_report import clear_error_reports, write_error_report
 from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
 from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
+from core.execution.compaction import commit_forced_compaction
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from core.execution.workflows import execute_workflow
 from core.execution.inspection.live import LiveInspectionStore
@@ -833,17 +834,28 @@ class MiraApp(App[None]):
 
         self.compaction_started()
         try:
-            result = await compact_after_turn(active_agent, thread_id)
+            middleware = getattr(active_agent, "mira_compaction", None)
+            if middleware is None:
+                result = PostTurnCompactionResult(reason="unavailable")
+            else:
+                config = {"configurable": {"thread_id": thread_id}}
+                snapshot = await active_agent.aget_state(config)
+                if snapshot.next or snapshot.tasks:
+                    result = PostTurnCompactionResult(reason="pending_work")
+                else:
+                    # The command uses the same middleware as compact_conversation
+                    # without adding another agent turn.
+                    plan = await middleware.aplan_forced_compaction_update(snapshot.values)
+                    result = await commit_forced_compaction(active_agent, thread_id, snapshot, plan)
             if result.compacted:
                 if await sync_deepagents_compaction(self.session, active_agent, thread_id):
                     self.store.save(self.session)
                     self._refresh_sessions()
-                if result.reason == "archive_failed":
-                    self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
-                else:
-                    self.compaction_finished("context compacted", resume_waiting=False)
+                self.compaction_finished("context compacted", resume_waiting=False)
             elif result.reason in {"no_messages", "nothing_to_compact"}:
                 self.compaction_finished("nothing to compact", success=False, resume_waiting=False)
+            elif result.reason == "archive_failed":
+                self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
             else:
                 self.compaction_finished(
                     f"context compaction unavailable: {result.reason}",
@@ -856,8 +868,8 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
             raise
         except Exception as exc:
-            # A failed archive link can follow a successful summary reservation.
-            # Keep session replay aligned with whichever event reached the checkpoint.
+            # A checkpoint write may commit before reporting an error. Keep
+            # session replay aligned with the state that actually persisted.
             try:
                 if await sync_deepagents_compaction(self.session, active_agent, thread_id):
                     self.store.save(self.session)

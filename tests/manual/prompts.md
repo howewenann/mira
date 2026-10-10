@@ -825,7 +825,8 @@ Expected:
 - MIRA shows a compaction status without displaying a model-made
   `compact_conversation` tool call.
 - If older messages exceed DeepAgents' retention window, the status finishes as
-  `context compacted` and the saved session gains a compaction event.
+  `context compacted` and the saved session gains a compaction event, without
+  `Conversation changed before its archive could be linked`.
 - If the conversation is already within the retention window, the status
   finishes as `nothing to compact`.
 - `/session` reports the same turn count as before `/compact`.

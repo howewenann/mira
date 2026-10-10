@@ -900,7 +900,7 @@ def get_tools(project_backend):
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
                 patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+                patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
                 built = factory.build_agent({}, Path(directory), "checkpointer")
@@ -964,7 +964,7 @@ def read_file_as_bytes(path: str) -> str:
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
                 patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+                patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create,
             ):
                 factory.build_agent(config, workspace, "checkpointer")
@@ -990,7 +990,7 @@ def read_file_as_bytes(path: str) -> str:
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
                 patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+                patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", side_effect=built_agents) as create,
             ):
                 factory.build_agent({}, workspace, "checkpointer")
@@ -1022,7 +1022,7 @@ def read_file_as_bytes(path: str) -> str:
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
                 patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+                patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
                 patch("agent.factory.create_deep_agent", return_value=agent) as create_deep_agent,
             ):
                 factory.build_agent(config, Path(directory), "checkpointer")
@@ -1158,7 +1158,7 @@ def project_lookup(query: str) -> str:
                 patch("agent.factory.get_llm", return_value="model"),
                 patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code,
                 patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-                patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+                patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
                 patch(
                     "agent.factory.create_deep_agent",
                     side_effect=[type("Agent", (), {})(), type("Agent", (), {})()],

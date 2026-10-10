@@ -501,6 +501,13 @@ def make_app(
     )
 
 
+def compact_test_agent() -> SimpleNamespace:
+    """Give command tests a checkpointed agent with the middleware entry point."""
+    snapshot = SimpleNamespace(values={}, next=(), tasks=(), config={"configurable": {"thread_id": "thread-1"}})
+    middleware = SimpleNamespace(aplan_forced_compaction_update=AsyncMock(return_value=object()))
+    return SimpleNamespace(mira_compaction=middleware, aget_state=AsyncMock(return_value=snapshot))
+
+
 def final_plan_interrupt(title: str = "Reviewed Plan") -> dict[str, Any]:
     """Return the complete payload emitted by the resumed PLAN finalizer."""
     return {
@@ -6310,11 +6317,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("display_text", captured)
 
     async def test_compact_command_updates_action_thread_without_adding_turn(self) -> None:
-        app = make_app()
+        agent = compact_test_agent()
+        app = make_app(agent=agent)
         compact_result = PostTurnCompactionResult(compacted=True, reason="compacted")
 
         with (
-            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact,
+            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact,
             patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -6327,17 +6335,87 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
-        compact.assert_awaited_once_with("agent", "thread-1")
-        sync.assert_awaited_once_with(app.session, "agent", "thread-1")
+        agent.mira_compaction.aplan_forced_compaction_update.assert_awaited_once_with({})
+        compact.assert_awaited_once_with(agent, "thread-1", agent.aget_state.return_value, agent.mira_compaction.aplan_forced_compaction_update.return_value)
+        sync.assert_awaited_once_with(app.session, agent, "thread-1")
         self.assertEqual(app.session["turns"], 0)
         self.assertEqual(len(app.store.saves), 1)
         self.assertIn("context compacted", rendered)
 
+    async def test_compact_command_with_real_mira_checkpoint(self) -> None:
+        """The TUI uses the full MIRA graph without scheduling another turn."""
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage
+        from agent.factory import build_agent
+        from session.checkpoint import make_checkpointer
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools: list[object], **kwargs: object) -> object:
+                return self
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            model = Model(responses=[AIMessage(content="main reply")])
+            model.profile = {"max_input_tokens": 5000}
+            checkpointer = make_checkpointer()
+            with patch("agent.factory.get_llm", return_value=model):
+                agent = build_agent({}, workspace, checkpointer)
+            config = {"configurable": {"thread_id": "thread-1"}}
+            for index in range(12):
+                await agent.ainvoke({"messages": [HumanMessage(content=f"history {index}")]}, config)
+            model.profile = {"max_input_tokens": 100}
+            app = make_app(workspace, agent=agent, plan_agent=agent, checkpointer=checkpointer)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                prompt = app.query_one(PromptBox)
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy, timeout=10)
+                await pilot.pause()
+                first = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("context compacted", first)
+
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy, timeout=10)
+                await pilot.pause()
+                second = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertIn("nothing to compact", second)
+
+                # Reload installs a fresh compiled agent over the same checkpoint.
+                model.profile = {"max_input_tokens": 5000}
+                with patch("agent.factory.get_llm", return_value=model):
+                    reloaded = build_agent({}, workspace, checkpointer)
+                for index in range(12, 20):
+                    await reloaded.ainvoke({"messages": [HumanMessage(content=f"history {index}")]}, config)
+                model.profile = {"max_input_tokens": 100}
+
+                async def reload_agents() -> None:
+                    app.agent = reloaded
+
+                with patch.object(app, "_reload_agents", side_effect=reload_agents):
+                    await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
+                    await wait_until(lambda: app.agent is reloaded, timeout=10)
+                    await wait_until(lambda: not app._reload_in_progress, timeout=10)
+                await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
+                await wait_until(lambda: not app.busy, timeout=10)
+                await pilot.pause()
+                third = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
+                self.assertEqual(third.count("context compacted"), 2)
+
+            snapshot = await reloaded.aget_state(config)
+            self.assertFalse(snapshot.next)
+            self.assertIn("_summarization_event", snapshot.values)
+            archive_path = snapshot.values["_summarization_event"]["file_path"]
+            archive = (await reloaded.mira_backend.adownload_files([archive_path]))[0].content
+            self.assertEqual(archive.count(b"## Summarized at"), 2)
+            self.assertEqual(app.session["turns"], 0)
+
     async def test_compact_command_uses_active_planning_thread(self) -> None:
-        app = make_app()
+        plan_agent = compact_test_agent()
+        app = make_app(plan_agent=plan_agent)
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
-        with patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)) as compact:
+        with patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.mode["planning"] = True
@@ -6348,15 +6426,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: not app.busy)
                 await pilot.pause()
 
-        compact.assert_awaited_once_with("plan-agent", "thread-1:plan:7")
+        compact.assert_awaited_once_with(plan_agent, "thread-1:plan:7", plan_agent.aget_state.return_value, plan_agent.mira_compaction.aplan_forced_compaction_update.return_value)
         self.assertEqual(app.session["turns"], 0)
 
     async def test_compact_command_reports_noop_without_syncing_session(self) -> None:
-        app = make_app()
+        app = make_app(agent=compact_test_agent())
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
         with (
-            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
+            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
             patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock()) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -6373,12 +6451,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app.store.saves, [])
         self.assertIn("nothing to compact", rendered)
 
-    async def test_compact_command_reports_archive_failure_after_checkpoint_reservation(self) -> None:
-        app = make_app()
-        compact_result = PostTurnCompactionResult(compacted=True, reason="archive_failed")
+    async def test_compact_command_reports_archive_failure(self) -> None:
+        app = make_app(agent=compact_test_agent())
+        compact_result = PostTurnCompactionResult(reason="archive_failed")
 
         with (
-            patch("ui.textual.app.compact_after_turn", new=AsyncMock(return_value=compact_result)),
+            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
             patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -6389,15 +6467,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
-        sync.assert_awaited_once()
-        self.assertEqual(len(app.store.saves), 1)
+        sync.assert_not_awaited()
+        self.assertEqual(len(app.store.saves), 0)
         self.assertIn("context compaction failed", rendered)
 
     async def test_compact_command_reports_failure_and_restores_prompt(self) -> None:
-        app = make_app()
+        app = make_app(agent=compact_test_agent())
 
         with (
-            patch("ui.textual.app.compact_after_turn", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
+            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
             patch.object(app, "_write_error_report", return_value=Path("compaction-error.json")),
         ):
             async with app.run_test(size=(100, 30)) as pilot:

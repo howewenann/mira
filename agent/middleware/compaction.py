@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
 from deepagents.backends.protocol import FILE_NOT_FOUND
-from deepagents.middleware.summarization import create_summarization_middleware
+from deepagents.middleware.summarization import SummarizationToolMiddleware, create_summarization_middleware
 from langchain.agents.middleware._retry import default_retry_on
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, convert_to_messages
-
-logger = logging.getLogger(__name__)
-
 
 def create_mira_summarization_middleware(model: Any, backend: Any, summary_model: Any | None = None) -> Any:
     """Use Main for DeepAgents thresholds and an optional model for summary text."""
@@ -41,99 +37,53 @@ class PostTurnCompactionResult:
     summary: str = ""
 
 
-async def compact_after_turn(agent: Any, thread_id: str) -> PostTurnCompactionResult:
-    """Compact older context without running another conversational turn."""
-    summarization = getattr(agent, "mira_summarization", None)
-    if summarization is None:
-        return PostTurnCompactionResult(reason="unavailable")
-    if not callable(getattr(agent, "aget_state", None)) or not callable(getattr(agent, "aupdate_state", None)):
-        return PostTurnCompactionResult(reason="state_unavailable")
+@dataclass(frozen=True)
+class ForcedCompactionPlan:
+    """Native summary and the state-only update to commit after archiving."""
 
-    config = {"configurable": {"thread_id": thread_id}}
-    snapshot = await agent.aget_state(config)
-    state = getattr(snapshot, "values", None)
-    if not isinstance(state, dict):
-        return PostTurnCompactionResult(reason="state_unavailable")
-    if getattr(snapshot, "next", ()) or getattr(snapshot, "tasks", ()):
-        return PostTurnCompactionResult(reason="pending_work")
+    summarization: Any
+    messages: list[Any]
+    summary: str
+    session_id: str
+    cutoff_index: int
 
-    try:
+    def state_update(self, file_path: str) -> dict[str, Any]:
+        # DeepAgents owns the summary message format and archive reference.
+        return {
+            "_summarization_event": {
+                "cutoff_index": self.cutoff_index,
+                "summary_message": self.summarization._build_new_messages_with_path(self.summary, file_path)[0],
+                "file_path": file_path,
+            },
+            "_summarization_session_id": self.session_id,
+        }
+
+
+class MiraCompactionMiddleware(SummarizationToolMiddleware):
+    """Expose a forced path beside DeepAgents' ordinary compact tool."""
+
+    async def aplan_forced_compaction_update(self, state: dict[str, Any]) -> ForcedCompactionPlan | None:
+        """Use the shared summarizer's retention policy without the tool eligibility gate."""
+        summarization = self._summarization
         messages = convert_to_messages(state.get("messages") or [])
-    except Exception:
-        messages = list(state.get("messages") or [])
-    if not messages:
-        return PostTurnCompactionResult(reason="no_messages")
-
-    event = normalize_summarization_event(state.get("_summarization_event"))
-    effective = summarization._apply_event_to_messages(messages, event)
-    cutoff = int(summarization._determine_cutoff_index(effective) or 0)
-    if cutoff <= 0:
-        return PostTurnCompactionResult(reason="nothing_to_compact")
-
-    state_cutoff = summarization._compute_state_cutoff(event, cutoff)
-    prior_cutoff = event.get("cutoff_index", 0) if isinstance(event, dict) else 0
-    if not isinstance(prior_cutoff, int) or isinstance(prior_cutoff, bool):
-        prior_cutoff = 0
-    if state_cutoff <= prior_cutoff:
-        return PostTurnCompactionResult(reason="nothing_to_compact")
-    to_summarize, _preserved = summarization._partition_messages(effective, cutoff)
-    if not to_summarize:
-        return PostTurnCompactionResult(reason="nothing_to_compact")
-
-    backend = getattr(summarization, "_backend", None)
-    if callable(backend):
-        return PostTurnCompactionResult(reason="backend_unavailable")
-    summary = await summarization._acreate_summary(to_summarize)
-    latest = await agent.aget_state(config)
-    if getattr(latest, "config", None) != getattr(snapshot, "config", None) or getattr(latest, "values", None) != state:
-        raise RuntimeError("Conversation changed while compaction was running")
-    session_id = summarization._get_session_id(state)
-    # Reserve the summary in the checkpoint before appending to an archive.
-    # A failed state write must never leave an append that a retry duplicates.
-    reserved_event = {
-        "cutoff_index": state_cutoff,
-        "summary_message": summarization._build_new_messages_with_path(summary, None)[0],
-        "file_path": None,
-    }
-    reservation_config = await agent.aupdate_state(
-        getattr(latest, "config", None) or config,
-        {"_summarization_event": reserved_event, "_summarization_session_id": session_id},
-        as_node="model",
-    )
-    try:
-        file_path = await summarization._aoffload_to_backend(backend, to_summarize, session_id)
-    except Exception:
-        logger.exception("Conversation history archiving failed after reserving a summary")
-        return PostTurnCompactionResult(compacted=True, reason="archive_failed", summary=summary)
-    if file_path is None:
-        return PostTurnCompactionResult(compacted=True, reason="archive_failed", summary=summary)
-
-    reserved = await agent.aget_state(config)
-    reserved_state = getattr(reserved, "values", None)
-    if (
-        (reservation_config and getattr(reserved, "config", None) != reservation_config)
-        or getattr(reserved, "next", ())
-        or getattr(reserved, "tasks", ())
-        or not isinstance(reserved_state, dict)
-        or reserved_state.get("_summarization_event") != reserved_event
-    ):
-        raise RuntimeError("Conversation changed before its archive could be linked")
-    linked_event = {
-        **reserved_event,
-        "summary_message": summarization._build_new_messages_with_path(summary, file_path)[0],
-        "file_path": file_path,
-    }
-    await agent.aupdate_state(
-        getattr(reserved, "config", None) or config,
-        {"_summarization_event": linked_event},
-        as_node="model",
-    )
-    return PostTurnCompactionResult(
-        compacted=True,
-        reason="compacted",
-        file_path=str(file_path or ""),
-        summary=str(summary or ""),
-    )
+        if not messages:
+            return None
+        event = normalize_summarization_event(state.get("_summarization_event"))
+        effective = summarization._apply_event_to_messages(messages, event)
+        cutoff = summarization._determine_cutoff_index(effective)
+        if not cutoff:
+            return None
+        absolute_cutoff = summarization._compute_state_cutoff(event, cutoff)
+        previous_cutoff = event.get("cutoff_index", 0) if isinstance(event, dict) else 0
+        if absolute_cutoff <= previous_cutoff:
+            # DeepAgents can otherwise summarize only its previous summary.
+            return None
+        to_summarize, _ = summarization._partition_messages(effective, cutoff)
+        summary = await summarization._acreate_summary(to_summarize)
+        return ForcedCompactionPlan(
+            summarization, to_summarize, summary,
+            summarization._get_session_id(state), absolute_cutoff,
+        )
 
 
 def prepare_summarization_engine(summarization: Any) -> None:
@@ -319,8 +269,9 @@ def field(value: Any, name: str) -> Any:
 
 
 __all__ = [
+    "ForcedCompactionPlan",
+    "MiraCompactionMiddleware",
     "PostTurnCompactionResult",
-    "compact_after_turn",
     "create_mira_summarization_middleware",
     "prepare_summarization_engine",
     "sanitize_messages_for_archive",

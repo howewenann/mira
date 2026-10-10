@@ -198,7 +198,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -217,7 +217,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -251,7 +251,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             action = factory.build_agent(config, ".", "checkpointer")
@@ -270,7 +270,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -297,7 +297,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -333,7 +333,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.backend_supports_delete", return_value=False),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             agent = factory.build_agent({}, ".", "checkpointer")
@@ -352,7 +352,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer")
@@ -367,7 +367,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -390,7 +390,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code") as code_middleware,
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_plan_agent(config, ".", "checkpointer")
@@ -416,7 +416,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.RubricMiddleware", return_value="rubric") as rubric,
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
@@ -602,7 +602,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", side_effect=("main-model", "grader-model")) as get_llm,
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.RubricMiddleware", return_value="rubric") as rubric,
             patch("agent.factory.create_deep_agent", return_value=built_agent) as create,
         ):
@@ -632,7 +632,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
             factory.build_plan_agent(config, ".", "checkpointer")
@@ -650,7 +650,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.RubricMiddleware") as rubric,
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
         ):
@@ -684,7 +684,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.compile_dynamic_subagents", return_value=compiled) as compile_subagents,
             patch("agent.factory.create_deep_agent", return_value="agent") as create_deep_agent,
         ):
@@ -708,7 +708,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.compile_dynamic_subagents") as compile_subagents,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
@@ -725,7 +725,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value=model) as get_llm,
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary") as auto_summary,
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary") as summary,
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary") as summary,
             patch("agent.factory.create_deep_agent", return_value="agent"),
         ):
             factory.build_agent({}, ".", "checkpointer", metadata=metadata)
@@ -746,7 +746,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", side_effect=[main, summary_model]) as get_llm,
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary") as auto_summary,
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary") as summary_tool,
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary") as summary_tool,
             patch("agent.factory.create_deep_agent", return_value="agent") as create,
         ):
             factory.build_agent(config, ".", "checkpointer")
@@ -763,7 +763,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
             patch("agent.tools.specs.mira_environment_label", return_value="ai_agents"),
         ):
@@ -797,7 +797,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_plan_agent({}, ".", "checkpointer")
@@ -825,7 +825,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             patch("agent.factory.get_llm", return_value="model"),
             patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
             patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
-            patch("agent.middleware.builder.SummarizationToolMiddleware", return_value="summary"),
+            patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
             patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()),
         ):
             agent = factory.build_agent(config, ".", "checkpointer")

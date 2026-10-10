@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
-from agent.middleware.compaction import PostTurnCompactionResult, compact_after_turn, prepare_summarization_engine
+from agent.middleware.compaction import prepare_summarization_engine
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from session import context
@@ -60,18 +60,6 @@ class AgentWithState:
         return Snapshot(self.values)
 
 
-class AgentWithMutableState(AgentWithState):
-    def __init__(self, values: dict[str, Any], summarization: Any) -> None:
-        super().__init__(values)
-        self.mira_summarization = summarization
-        self.updates: list[tuple[dict[str, Any], dict[str, Any]]] = []
-
-    async def aupdate_state(self, config: dict[str, Any], values: dict[str, Any], *, as_node: str) -> None:
-        assert as_node == "model"
-        self.updates.append((config, values))
-        self.values.update(values)
-
-
 class FakeSummarization:
     def __init__(self) -> None:
         self._backend = self
@@ -116,21 +104,6 @@ class FakeSummarization:
 
     def _compute_state_cutoff(self, event: Any, cutoff: int) -> int:
         return event["cutoff_index"] + cutoff - 1 if event else cutoff
-
-
-class IneligibleFakeSummarization(FakeSummarization):
-    def _is_eligible_for_compaction(self, messages: list[Any]) -> bool:
-        return False
-
-
-class EmptyRetentionFakeSummarization(FakeSummarization):
-    def _determine_cutoff_index(self, messages: list[Any]) -> int:
-        return 0
-
-
-class FailingSummaryFakeSummarization(FakeSummarization):
-    async def _acreate_summary(self, messages: list[Any]) -> str:
-        raise RuntimeError("summary failed")
 
 
 class AgentWithFailingState(FakeAgent):
@@ -747,80 +720,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 compactions = context.normalize_compactions(record["events"])
                 self.assertEqual(compactions[0]["summary"], "")
 
-    async def test_post_turn_compaction_updates_summary_event_and_sanitizes_archive_messages(self) -> None:
-        summarization = FakeSummarization()
-        prepare_summarization_engine(summarization)
-        agent = AgentWithMutableState(
-            {
-                "messages": [
-                    AIMessage(
-                        content=[
-                            {"type": "reasoning", "reasoning": "private chain of thought"},
-                            {"type": "text", "text": "Visible answer."},
-                        ],
-                        additional_kwargs={"reasoning_content": "private chain of thought"},
-                    ),
-                    HumanMessage(content="recent prompt"),
-                ]
-            },
-            summarization,
-        )
-
-        result = await compact_after_turn(agent, "thread-1")
-
-        self.assertTrue(result.compacted)
-        self.assertEqual(summarization.thread_ids, ["thread-1"])
-        self.assertEqual(agent.updates[0][0], {"configurable": {"thread_id": "thread-1"}})
-        event = agent.values["_summarization_event"]
-        self.assertEqual(event["cutoff_index"], 1)
-        self.assertEqual(event["file_path"], "/.mira/conversation_history/thread-1.md")
-        self.assertIsInstance(event["summary_message"], HumanMessage)
-        self.assertNotEqual(event["summary_message"].additional_kwargs.get("lc_source"), "summarization")
-        rendered_archive = repr(summarization.offloaded[0][0])
-        self.assertIn("Visible answer.", rendered_archive)
-        self.assertNotIn("private chain", rendered_archive)
-        self.assertNotIn("reasoning_content", rendered_archive)
-
-    async def test_manual_compaction_does_not_apply_agent_tool_eligibility_gate(self) -> None:
-        summarization = IneligibleFakeSummarization()
-        agent = AgentWithMutableState(
-            {"messages": [HumanMessage(content="old"), HumanMessage(content="recent")]},
-            summarization,
-        )
-
-        result = await compact_after_turn(agent, "thread-1")
-
-        self.assertTrue(result.compacted)
-        self.assertIn("_summarization_event", agent.values)
-
-    async def test_manual_compaction_returns_noop_within_retention_window(self) -> None:
-        summarization = EmptyRetentionFakeSummarization()
-        agent = AgentWithMutableState(
-            {"messages": [HumanMessage(content="recent")]},
-            summarization,
-        )
-
-        result = await compact_after_turn(agent, "thread-1")
-
-        self.assertFalse(result.compacted)
-        self.assertEqual(result.reason, "nothing_to_compact")
-        self.assertEqual(summarization.offloaded, [])
-        self.assertEqual(agent.updates, [])
-
-    async def test_manual_compaction_summary_failure_has_no_side_effects(self) -> None:
-        summarization = FailingSummaryFakeSummarization()
-        agent = AgentWithMutableState(
-            {"messages": [HumanMessage(content="old"), HumanMessage(content="recent")]},
-            summarization,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "summary failed"):
-            await compact_after_turn(agent, "thread-1")
-
-        self.assertEqual(summarization.offloaded, [])
-        self.assertEqual(agent.updates, [])
-        self.assertNotIn("_summarization_event", agent.values)
-
     def test_checkpointed_summary_event_replays_as_human_message(self) -> None:
         summarization = FakeSummarization()
         prepare_summarization_engine(summarization)
@@ -867,33 +766,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(effective[0], HumanMessage)
         self.assertEqual(effective[0].content, "OpenAI-style summary message.")
         self.assertNotEqual(effective[0].additional_kwargs.get("lc_source"), "summarization")
-
-    async def test_post_turn_compaction_accepts_checkpointed_summary_event(self) -> None:
-        summarization = FakeSummarization()
-        prepare_summarization_engine(summarization)
-        agent = AgentWithMutableState(
-            {
-                "messages": [HumanMessage(content="old"), HumanMessage(content="new"), HumanMessage(content="recent")],
-                "_summarization_event": {
-                    "cutoff_index": 1,
-                    "summary_message": {
-                        "type": "human",
-                        "content": "Checkpointed summary.",
-                        "additional_kwargs": {"lc_source": "summarization"},
-                    },
-                    "file_path": "/.mira/conversation_history/thread-1.md",
-                },
-            },
-            summarization,
-        )
-
-        result = await compact_after_turn(agent, "thread-1")
-
-        self.assertTrue(result.compacted)
-        rendered_archive = repr(summarization.offloaded[0][0])
-        self.assertIn("new", rendered_archive)
-        self.assertNotIn("Checkpointed summary.", rendered_archive)
-        self.assertNotIn("{'type': 'human'", rendered_archive)
 
     async def test_compaction_sync_does_not_guess_event_type_from_wording(self) -> None:
         record = {
