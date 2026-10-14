@@ -29,7 +29,7 @@ from config.settings import (
     planning_todos_enabled,
 )
 
-QUICKJS_PTC_TOOLS = READ_ONLY_BUILTIN_TOOLS
+QUICKJS_PTC_TOOLS = tuple(name for name in READ_ONLY_BUILTIN_TOOLS if name != "screenshot")
 QUICKJS_MEMORY_LIMIT = 64 * 1024 * 1024
 QUICKJS_TIMEOUT_SECONDS = 5.0
 QUICKJS_PERSISTENCE_MODE = "thread"

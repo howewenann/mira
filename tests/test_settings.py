@@ -46,15 +46,16 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.tool_rubric_access(loaded, "execute"))
         self.assertFalse(settings.tool_rubric_access(loaded, "custom_search"))
         for name in settings.READ_ONLY_BUILTIN_TOOLS:
+            ptc_and_rubric = name != "screenshot"
             self.assertEqual(
                 loaded["hitl"]["tools"][name],
-                {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+                {"enabled": True, "plan_access": True, "ptc": ptc_and_rubric, "rubric": ptc_and_rubric},
             )
             self.assertTrue(settings.tool_enabled(loaded, name))
             self.assertTrue(settings.tool_always_allow(loaded, name))
             self.assertTrue(settings.tool_plan_access(loaded, name))
-            self.assertTrue(settings.tool_ptc(loaded, name))
-            self.assertTrue(settings.tool_rubric_access(loaded, name))
+            self.assertEqual(settings.tool_ptc(loaded, name), ptc_and_rubric)
+            self.assertEqual(settings.tool_rubric_access(loaded, name), ptc_and_rubric)
         self.assertEqual(
             settings.execute_env_settings(loaded),
             {"mode": "system", "name": "", "prefix": "", "path": "", "allow": []},
@@ -171,7 +172,7 @@ class SettingsTests(unittest.TestCase):
 
         for index, name in enumerate(settings.READ_ONLY_BUILTIN_TOOLS):
             self.assertEqual(settings.tool_plan_access(loaded, name), index % 2 == 0)
-            self.assertEqual(settings.tool_ptc(loaded, name), index % 2 == 1)
+            self.assertEqual(settings.tool_ptc(loaded, name), index % 2 == 1 and name != "screenshot")
             self.assertEqual(settings.tool_rubric_access(loaded, name), index < 2)
             self.assertTrue(settings.tool_always_allow(loaded, name))
 

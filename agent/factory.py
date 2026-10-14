@@ -337,7 +337,7 @@ def _build_agent(
             for spec in subagents
             if (name := _subagent_name(spec))
         ) if "task" in executable_tools else ()
-        _attach_execution_context(agent, executable_tools, subagent_names)
+        _attach_execution_context(agent, executable_tools, subagent_names, Path(workspace))
         _attach_workflow_agents(
             agent,
             WorkflowAgentRegistry(
@@ -597,7 +597,7 @@ def effective_rubric_tools(
     filesystem_names = [
         name
         for name in READ_ONLY_BUILTIN_TOOLS
-        if name != VALIDATE_SKILL_TOOL
+        if name not in {VALIDATE_SKILL_TOOL, "screenshot"}
         and name not in excluded
         and tool_enabled(config, name)
         and tool_rubric_access(config, name)
@@ -625,6 +625,9 @@ def effective_rubric_tools(
         name = tool_name(tool)
         item = metadata_by_name.get(name, {})
         source = item.get("source")
+        if name == "screenshot" and name not in excluded and tool_rubric_access(config, name):
+            resolved.append(tool)
+            continue
         if name == VALIDATE_SKILL_TOOL:
             if (
                 name not in excluded
@@ -757,10 +760,11 @@ def _attach_execution_context(
     agent: Any,
     tools: Any,
     subagent_names: tuple[str, ...],
+    workspace: Path,
 ) -> None:
     """Attach a factory for fresh capability-bearing graph contexts."""
     try:
-        agent.mira_context_factory = lambda: create_mira_context(tools, subagent_names)
+        agent.mira_context_factory = lambda: create_mira_context(tools, subagent_names, workspace)
     except AttributeError:
         return
 
@@ -784,6 +788,7 @@ def _attach_planning_context(agent: Any, service: SuccessCriteriaService) -> Non
                 success_criteria=service,
                 tools=base.tools,
                 agents=base.agents,
+                workspace=base.workspace,
             )
 
         agent.mira_context_factory = planning_context

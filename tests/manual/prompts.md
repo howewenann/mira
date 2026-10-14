@@ -1921,3 +1921,43 @@ model.
    MIRA, reopen the same session, and ask again. Expected: the same history is
    discoverable without Inspector clicks, duplicate Workflow files, or a custom
    Workflow inspection tool; normal model context contains only a breadcrumb.
+
+## Primary-Monitor Computer Use
+
+1. On Windows, configure a vision-capable Main model with `image_inputs: true`.
+   Open a disposable application window with a visible, harmless control such
+   as a button or tab. Keep the pointer away from the upper-left corner.
+2. Run `/skill__computer-use Take a screenshot, tell me its pixel dimensions,
+   and identify the visible button or tab I can click. Do not click yet.`
+   Expected: MIRA loads the bundled computer-use skill, calls
+   `screenshot` without approval, receives the actual image, and reports a
+   cell containing the control's centre. The full-screen image shows subtle
+   100-pixel grid lines over the captured pixels, with column letters and row
+   numbers in ruler margins above and to the left, never over buttons or text.
+   Confirm MIRA reports the captured desktop dimensions separately from the
+   larger annotated image dimensions. Ask MIRA to capture a smaller
+   `region=[left, top, width, height]` around the control. Expected: the crop
+   has 50-pixel grid spacing by default, reports its absolute origin, crop
+   dimensions, full screen dimensions, and annotated image dimensions, and
+   labels cells from A1 at the crop's top-left. Ask for `grid_spacing=25`, then
+   `grid_mode="coordinates"` to compare absolute pixel rulers, then
+   `grid=False`. Confirm the unannotated crop matches the captured desktop
+   dimensions without ruler margins.
+   Ask for `save_debug=True` on another cropped screenshot. Expected: MIRA
+   reports a unique PNG path under `.mira/_debug/screenshots/` in the selected
+   workspace, and that file matches the annotated image returned to the model.
+3. Ask MIRA to click that element. Expected: it calls `click_cell` with the
+   selected cell and matching screenshot region and spacing, without estimating
+   coordinates. The normal HITL prompt names `click_cell`; approving it clicks
+   the centre of that cell. Ask for another screenshot to verify the result.
+   Rejecting it leaves the desktop unchanged. Repeat after enabling Always
+   Allow for `click_cell` in `/settings`; the same action then runs without a prompt.
+4. In a text field, ask MIRA to type a short ASCII phrase, press `enter`, then
+   scroll down. Expected: each action has its own normal HITL prompt unless
+   Always Allow is enabled. Move the pointer to the upper-left corner during
+   an action to confirm PyAutoGUI's fail-safe stops it. Use Alt+Q to interrupt
+   MIRA when needed.
+5. With a text-only Main model (`image_inputs: false`), ask for a screenshot.
+   Expected: MIRA receives a clear unsupported-image notice rather than
+   unusable Base64. If Windows reports different screenshot and mouse sizes,
+   `screenshot` and `click_cell` return a DPI scaling error and do not click.

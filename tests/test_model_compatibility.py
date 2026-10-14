@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from deepagents.backends import StateBackend
-from deepagents.middleware.filesystem import FilesystemMiddleware
+from deepagents.middleware.unsupported_content import UnsupportedContentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_anyllm import ChatAnyLLM
@@ -139,7 +138,7 @@ class AsyncModelCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message.content, [IMAGE_BLOCK])
 
     async def test_deepagents_filters_before_compatibility_conversion(self) -> None:
-        filesystem = FilesystemMiddleware(backend=StateBackend())
+        unsupported_content = UnsupportedContentMiddleware()
         compatibility = ModelCompatibilityMiddleware(Path("."))
 
         for supported in (False, True):
@@ -164,13 +163,13 @@ class AsyncModelCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 async def apply_compatibility(bound: ModelRequest[Any]) -> ModelResponse[Any]:
                     return await compatibility.awrap_model_call(bound, capture)
 
-                await filesystem.awrap_model_call(request, apply_compatibility)
+                await unsupported_content.awrap_model_call(request, apply_compatibility)
 
                 bound_message = captured[0].messages[0]
                 if supported:
                     self.assertEqual(bound_message.content, [IMAGE_URL_BLOCK])
                 else:
-                    self.assertIn("does not support image content", bound_message.text)
+                    self.assertIn("does not support image content", str(bound_message.content))
                     self.assertNotEqual(bound_message.content, [IMAGE_URL_BLOCK])
                 self.assertEqual(message.content, [IMAGE_BLOCK])
                 self.assertIs(state["messages"][0], message)

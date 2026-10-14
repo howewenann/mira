@@ -36,10 +36,13 @@ RUBRIC_MODEL = "rubric"
 SUMMARIZATION_MODEL = "summarization"
 SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
-READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep", "validate_skill")
-INBUILT_DANGEROUS_TOOLS = ("write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task")
+READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep", "validate_skill", "screenshot")
+INBUILT_DANGEROUS_TOOLS = (
+    "write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task",
+    "click", "click_cell", "type_text", "press_key", "scroll",
+)
 INBUILT_TOOLS = (*READ_ONLY_BUILTIN_TOOLS, *INBUILT_DANGEROUS_TOOLS)
-PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task"})
+PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task", "screenshot"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,12 +109,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "glob": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "grep": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "validate_skill": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
+            "screenshot": {"enabled": True, "plan_access": True, "ptc": False, "rubric": False},
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
             "execute": {"enabled": False, "always_allow": False, "ptc": False, "rubric": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
+            "click": {"enabled": True, "always_allow": False, "ptc": False},
+            "click_cell": {"enabled": True, "always_allow": False, "ptc": False},
+            "type_text": {"enabled": True, "always_allow": False, "ptc": False},
+            "press_key": {"enabled": True, "always_allow": False, "ptc": False},
+            "scroll": {"enabled": True, "always_allow": False, "ptc": False},
         },
     }
 }
@@ -255,6 +264,8 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 if isinstance(spec.get("enabled"), bool):
                     normalized_tools[name]["enabled"] = spec["enabled"]
                 for key in ("plan_access", "ptc", "rubric"):
+                    if key == "ptc" and name in PTC_INAPPLICABLE_TOOLS:
+                        continue
                     if isinstance(spec.get(key), bool):
                         normalized_tools[name][key] = spec[key]
                 continue
@@ -897,12 +908,12 @@ def tool_plan_access(config_or_settings: dict[str, Any] | None, tool_name: str) 
 
 def tool_ptc(config_or_settings: dict[str, Any] | None, tool_name: str) -> bool:
     """Return whether an applicable local tool may be called from eval."""
+    if tool_name in PTC_INAPPLICABLE_TOOLS:
+        return False
     if tool_name in READ_ONLY_BUILTIN_TOOLS:
         return tool_enabled(config_or_settings, tool_name) and _tool_access_value(
             config_or_settings, tool_name, "ptc"
         )
-    if tool_name in PTC_INAPPLICABLE_TOOLS:
-        return False
     return _tool_access_value(config_or_settings, tool_name, "ptc")
 
 

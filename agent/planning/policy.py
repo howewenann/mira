@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 PLAN_PROJECT_WRITE_TOOLS = ("write_file", "edit_file", "delete")
-PLAN_DISABLED_TOOLS = (*PLAN_PROJECT_WRITE_TOOLS, "execute", "task", "eval")
+PLAN_DISABLED_TOOLS = (
+    *PLAN_PROJECT_WRITE_TOOLS, "execute", "task", "eval",
+    "click", "click_cell", "type_text", "press_key", "scroll",
+)
 PLAN_DENIED_FS_OPERATIONS = ("write",)
 PLAN_BLOCKED_RESULT_MARKERS = ("permission denied for write",)
 

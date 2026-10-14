@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, ToolCallRequest
@@ -23,6 +24,7 @@ class MiraContext:
 
     tools: BoundToolMap
     agents: BoundAgentMap
+    workspace: Path | None = None
 
 
 _ACTIVE_TOOL_RUNTIME: ContextVar[ToolRuntime[Any, Any] | None] = ContextVar(
@@ -60,7 +62,7 @@ def _set_runtime(runtime: ToolRuntime[Any, Any]) -> Token[ToolRuntime[Any, Any] 
     return _ACTIVE_TOOL_RUNTIME.set(runtime)
 
 
-def create_mira_context(tool_registry: Any, subagent_names: Any) -> MiraContext:
+def create_mira_context(tool_registry: Any, subagent_names: Any, workspace: Path | None = None) -> MiraContext:
     """Bind one immutable context to an already-resolved executable surface."""
     bound_tools = bind_tools(tool_registry)
     return MiraContext(
@@ -69,6 +71,7 @@ def create_mira_context(tool_registry: Any, subagent_names: Any) -> MiraContext:
             task=bound_tools.get("task"),
             names=subagent_names,
         ),
+        workspace=Path(workspace).expanduser().resolve() if workspace is not None else None,
     )
 
 

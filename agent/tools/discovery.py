@@ -32,6 +32,12 @@ BUILT_IN_TOOL_NAMES = {
     "eval",
     "task",
     "validate_skill",
+    "screenshot",
+    "click",
+    "click_cell",
+    "type_text",
+    "press_key",
+    "scroll",
 }
 
 

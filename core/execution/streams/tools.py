@@ -606,6 +606,16 @@ def tool_output_text(output: Any) -> str:
 
     content = field(output, "content")
     if content is not None:
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block, dict) and block.get("type") == "image":
+                    parts.append("[image attached]")
+                else:
+                    parts.append(str(block))
+            return "\n".join(parts)
         return str(content)
 
     return str(output)

@@ -143,6 +143,7 @@ class ExecutionContextTests(unittest.IsolatedAsyncioTestCase):
             context = agent.mira_context_factory()
 
             self.assertIs(context.tools["write_file"].tool, registry["write_file"])
+            self.assertEqual(context.workspace, workspace.resolve())
             self.assertIn("general-purpose", context.agents)
             with self.assertRaisesRegex(TypeError, "immutable"):
                 context.tools["replacement"] = context.tools["write_file"]

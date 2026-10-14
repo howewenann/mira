@@ -8145,12 +8145,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "glob",
                         "grep",
                         "validate_skill",
+                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "execute",
                         "eval",
                         "task",
+                        "click",
+                        "click_cell",
+                        "type_text",
+                        "press_key",
+                        "scroll",
                     ],
                 )
                 general_children = list(panel.query_one("#settings-body").children)
@@ -8260,7 +8266,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
                 self.assertTrue(
-                    str(buttons["settings-access-policy-plan"].label).endswith("5 allowed      >")
+                    str(buttons["settings-access-policy-plan"].label).endswith("6 allowed      >")
                 )
                 self.assertTrue(
                     str(buttons["settings-access-policy-ptc"].label).endswith("5 allowed      >")
@@ -8572,7 +8578,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
                 self.assertTrue(labels["settings-access-policy-plan"].startswith("Plan"))
-                self.assertTrue(labels["settings-access-policy-plan"].endswith("6 allowed      >"))
+                self.assertTrue(labels["settings-access-policy-plan"].endswith("7 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-ptc"].startswith("PTC"))
                 self.assertTrue(labels["settings-access-policy-ptc"].endswith("5 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-rubric"].startswith("Rubric"))
@@ -8651,20 +8657,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "glob",
                         "grep",
                         "validate_skill",
+                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "eval",
                         "task",
+                        "click",
+                        "click_cell",
+                        "type_text",
+                        "press_key",
+                        "scroll",
                         "custom_search",
                         "search",
                     ],
                 )
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
                     editable = panel.query_one(f"#settings-toggle-rubric_access-{read_tool}", Button)
-                    self.assertEqual(str(editable.label), "yes")
+                    self.assertEqual(str(editable.label), "no" if read_tool == "screenshot" else "yes")
                     self.assertFalse(editable.disabled)
-                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task"):
+                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task", "click", "click_cell", "type_text", "press_key", "scroll"):
                     fixed = panel.query_one(
                         f"#settings-access-fixed-rubric-{blocked_tool}", Static
                     )
@@ -8752,12 +8764,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "glob",
                         "grep",
                         "validate_skill",
+                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "execute",
                         "eval",
                         "task",
+                        "click",
+                        "click_cell",
+                        "type_text",
+                        "press_key",
+                        "scroll",
                     ],
                 )
                 self.assertEqual(
@@ -8769,7 +8787,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(str(editable.label), "no" if read_tool == "read_file" else "yes")
                     self.assertFalse(editable.disabled)
                 first_editable = detail.query_one("#settings-toggle-plan_access-ls", Button)
-                for blocked_tool in ("write_file", "edit_file", "delete", "execute", "eval", "task"):
+                for blocked_tool in ("write_file", "edit_file", "delete", "execute", "eval", "task", "click", "click_cell", "type_text", "press_key", "scroll"):
                     fixed = detail.query_one(f"#settings-access-fixed-plan-{blocked_tool}", Static)
                     self.assertEqual(renderable_plain(fixed), "blocked")
                     self.assertEqual(fixed.region.x, first_editable.region.x)
@@ -9180,10 +9198,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(panel.query("#settings-toggle-ptc-write_file")) == 1)
 
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
+                    if read_tool == "screenshot":
+                        continue
                     editable = panel.query_one(f"#settings-toggle-ptc-{read_tool}", Button)
                     self.assertEqual(str(editable.label), "no" if read_tool == "grep" else "yes")
                     self.assertFalse(editable.disabled)
-                for gateway in ("eval", "task"):
+                for gateway in ("eval", "task", "screenshot"):
                     inapplicable = panel.query_one(f"#settings-access-fixed-ptc-{gateway}", Static)
                     self.assertEqual(renderable_plain(inapplicable), "-")
                     self.assertEqual(len(panel.query(f"#settings-toggle-ptc-{gateway}")), 0)

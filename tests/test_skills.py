@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from agent.resources import build_resources
 from agent.resources.skills import load_skills
 from agent.skills import SkillRegistry, prepare_skill
+from agent.tools.skill_validation import validate_skill_content
 from agent.workflows.discovery import discover_workflows
 from tests.test_textual_app import make_app, wait_until
 from ui.textual.widgets.prompt_box import PromptBox
@@ -57,7 +58,7 @@ class SkillDiscoveryTests(unittest.TestCase):
             resources = build_resources(workspace, create_examples=False)
 
         names = {item["name"] for item in resources.metadata["skills"]}
-        self.assertEqual(names, {"skill-creator", "workflow-creator", "workflow-exporter"})
+        self.assertEqual(names, {"skill-creator", "workflow-creator", "workflow-exporter", "computer-use"})
         self.assertEqual(resources.skills, ["/mira-defaults/skills"])
 
     def test_project_skill_overrides_default_and_propagates_metadata(self) -> None:
@@ -116,6 +117,18 @@ class SkillDiscoveryTests(unittest.TestCase):
         self.assertIn("standalone LangGraph", exporter["description"])
         self.assertNotIn("standalone", creator["description"].lower())
         self.assertNotIn("create", exporter["description"].lower())
+
+    def test_packaged_computer_use_skill_is_valid_and_discoverable(self) -> None:
+        path = Path("agent/resources/defaults/skills/computer-use/SKILL.md")
+        content = path.read_text(encoding="utf-8")
+        self.assertTrue(validate_skill_content(content, "computer-use")["valid"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+        skill = next(item for item in resources.metadata["skills"] if item["name"] == "computer-use")
+        self.assertEqual(skill["source"], "default")
+        self.assertEqual(skill["path"], "/mira-defaults/skills/computer-use/SKILL.md")
+        self.assertIn("visible Windows desktop", skill["description"])
 
     def test_packaged_workflow_creator_covers_authoring_and_smoke_testing(self) -> None:
         path = Path("agent/resources/defaults/skills/workflow-creator/SKILL.md")

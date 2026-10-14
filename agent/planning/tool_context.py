@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from agent.execution.agents import BoundAgentMap
 from agent.execution.mappings import ImmutableDict
@@ -17,3 +18,4 @@ class PlanningToolContext:
     success_criteria: SuccessCriteriaService
     tools: BoundToolMap = field(default_factory=ImmutableDict)
     agents: BoundAgentMap = field(default_factory=ImmutableDict)
+    workspace: Path | None = None

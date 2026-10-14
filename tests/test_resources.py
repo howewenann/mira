@@ -130,7 +130,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
             self.assertEqual(
                 {item["name"] for item in resources.metadata["skills"]},
-                {"skill-creator", "workflow-creator", "workflow-exporter"},
+                {"skill-creator", "workflow-creator", "workflow-exporter", "computer-use"},
             )
             self.assertEqual(
                 resources.memory[:2],
@@ -464,7 +464,7 @@ description: Project-specific workflow.
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
             self.assertEqual(
                 {item["name"] for item in resources.metadata["skills"]},
-                {"skill-creator", "workflow-creator", "workflow-exporter"},
+                {"skill-creator", "workflow-creator", "workflow-exporter", "computer-use"},
             )
             self.assertEqual(resources.subagents, [])
             self.assertEqual(resources.metadata["subagents"][0]["name"], "general-purpose")
@@ -491,6 +491,10 @@ description: Project-specific workflow.
                         "source": "default",
                         "replaces": "",
                     },
+                    *[
+                        {"name": name, "path": "/mira-defaults/tools/computer.py", "source": "default", "replaces": "built-in"}
+                        for name in ("screenshot", "click", "click_cell", "type_text", "press_key", "scroll")
+                    ],
                     {
                         "name": "finalize_goal",
                         "path": "/mira-defaults/tools/finalize_goal.py",
@@ -637,6 +641,12 @@ def project_status() -> str:
                 [
                     "validate_skill",
                     "ask_user",
+                    "screenshot",
+                    "click",
+                    "click_cell",
+                    "type_text",
+                    "press_key",
+                    "scroll",
                     "finalize_goal",
                     "finalize_plan",
                     "prepare_goal",
@@ -658,6 +668,10 @@ def project_status() -> str:
                         "source": "default",
                         "replaces": "",
                     },
+                    *[
+                        {"name": name, "path": "/mira-defaults/tools/computer.py", "source": "default", "replaces": "built-in"}
+                        for name in ("screenshot", "click", "click_cell", "type_text", "press_key", "scroll")
+                    ],
                     {
                         "name": "finalize_goal",
                         "path": "/mira-defaults/tools/finalize_goal.py",
@@ -1039,7 +1053,7 @@ def read_file_as_bytes(path: str) -> str:
         ptc_tools = set(QUICKJS_PTC_TOOLS)
 
         self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep", "validate_skill"})
-        self.assertEqual(QUICKJS_PTC_TOOLS, READ_ONLY_BUILTIN_TOOLS)
+        self.assertEqual(QUICKJS_PTC_TOOLS, tuple(name for name in READ_ONLY_BUILTIN_TOOLS if name != "screenshot"))
         self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
 
     def test_effective_ptc_tools_exclude_globally_disabled_reads(self) -> None:

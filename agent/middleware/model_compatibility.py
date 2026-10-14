@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, convert_to_openai_image_block
+from langchain_core.messages import AIMessage, ToolMessage, convert_to_openai_image_block
 
 
 class ModelCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
@@ -31,8 +31,12 @@ class ModelCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
     def _normalize_request(self, request: ModelRequest[Any]) -> ModelRequest[Any]:
         changed = False
         normalized_messages = []
+        profile = getattr(request.model, "profile", None) or {}
         for message in request.messages:
-            normalized_content, content_changed = self._normalize_image_blocks(message.content)
+            image_supported = profile.get("image_inputs") is not False and (
+                not isinstance(message, ToolMessage) or profile.get("image_tool_message") is not False
+            )
+            normalized_content, content_changed = self._normalize_image_blocks(message.content, image_supported)
             normalized_messages.append(
                 message.model_copy(update={"content": normalized_content})
                 if content_changed
@@ -41,8 +45,8 @@ class ModelCompatibilityMiddleware(AgentMiddleware[Any, Any, Any]):
             changed = changed or content_changed
         return request.override(messages=normalized_messages) if changed else request
 
-    def _normalize_image_blocks(self, content: Any) -> tuple[Any, bool]:
-        if not isinstance(content, list):
+    def _normalize_image_blocks(self, content: Any, image_supported: bool) -> tuple[Any, bool]:
+        if not isinstance(content, list) or not image_supported:
             return content, False
         changed = False
         normalized_blocks = []
