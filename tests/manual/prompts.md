@@ -1940,12 +1940,13 @@ model.
    has 50-pixel grid spacing by default, reports its absolute origin, crop
    dimensions, full screen dimensions, and annotated image dimensions, and
    labels cells from A1 at the crop's top-left. Ask for `grid_spacing=25`, then
-   `grid_mode="coordinates"` to compare absolute pixel rulers, then
    `grid=False`. Confirm the unannotated crop matches the captured desktop
    dimensions without ruler margins.
-   Ask for `save_debug=True` on another cropped screenshot. Expected: MIRA
+   In a separate MIRA process launched with `MIRA_SCREENSHOT_DEBUG=1`, ask for
+   another cropped screenshot without invoking the skill. Expected: MIRA
    reports a unique PNG path under `.mira/_debug/screenshots/` in the selected
-   workspace, and that file matches the annotated image returned to the model.
+   workspace, and that file matches the image returned to the model. Without
+   that environment variable, screenshots create no debug PNGs.
 3. Ask MIRA to click that element. Expected: it calls `click_cell` with the
    selected cell and matching screenshot region and spacing, without estimating
    coordinates. The normal HITL prompt names `click_cell`; approving it clicks

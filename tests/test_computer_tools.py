@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import sys
 import tempfile
 import unittest
@@ -49,6 +50,9 @@ class ComputerToolTests(unittest.TestCase):
         self.module_patch = patch.dict(sys.modules, {"pyautogui": self.desktop})
         self.module_patch.start()
         self.addCleanup(self.module_patch.stop)
+        self.debug_patch = patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": ""})
+        self.debug_patch.start()
+        self.addCleanup(self.debug_patch.stop)
 
     def test_screenshot_is_in_memory_and_uses_deepagents_image_block(self) -> None:
         with patch("pathlib.Path.write_bytes", side_effect=AssertionError("disk write")):
@@ -70,7 +74,8 @@ class ComputerToolTests(unittest.TestCase):
         self.assertTrue(self.desktop.FAILSAFE)
         self.assertEqual(tool_output_text(result), result.content_blocks[0]["text"] + "\n[image attached]")
         self.assertNotIn(image_block["base64"], tool_output_text(result))
-        self.assertEqual(screenshot.args["save_debug"]["default"], False)
+        self.assertNotIn("save_debug", screenshot.args)
+        self.assertNotIn("grid_mode", screenshot.args)
 
     def test_debug_screenshot_saves_exact_cropped_png_with_unique_names(self) -> None:
         screen = Image.new("RGB", (640, 480), "white")
@@ -82,13 +87,20 @@ class ComputerToolTests(unittest.TestCase):
             workspace = Path(directory)
             context = SimpleNamespace(workspace=workspace)
             debug_dir = workspace / ".mira" / "_debug" / "screenshots"
-            args = {"region": [73, 127, 210, 190], "save_debug": True}
-            first = call(screenshot, args, context=context)
-            first_files = list(debug_dir.glob("*.png"))
-            self.assertEqual(len(first_files), 1)
-            second = call(screenshot, {**args, "grid": False}, context=context)
-            second_files = list(debug_dir.glob("*.png"))
-            self.assertEqual(len(second_files), 2)
+            args = {"region": [73, 127, 210, 190]}
+            with patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": "0"}):
+                self.assertEqual(call(screenshot, args, context=context).status, "success")
+            with patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": ""}):
+                os.environ.pop("MIRA_SCREENSHOT_DEBUG")
+                self.assertEqual(call(screenshot, args, context=context).status, "success")
+            self.assertFalse(debug_dir.exists())
+            with patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": "1"}):
+                first = call(screenshot, args, context=context)
+                first_files = list(debug_dir.glob("*.png"))
+                self.assertEqual(len(first_files), 1)
+                second = call(screenshot, {**args, "grid": False}, context=context)
+                second_files = list(debug_dir.glob("*.png"))
+                self.assertEqual(len(second_files), 2)
 
             newest = next(path for path in second_files if path != first_files[0])
             for result, saved_path in ((first, first_files[0]), (second, newest)):
@@ -108,84 +120,14 @@ class ComputerToolTests(unittest.TestCase):
                 else:
                     self.assertEqual(image.size, (210, 190))
                     self.assertEqual(image.getpixel((27, 38)), (255, 255, 255))
-            self.desktop.screenshot.assert_has_calls([mock_call(region=(73, 127, 210, 190))] * 2)
+            self.desktop.screenshot.assert_has_calls([mock_call(region=(73, 127, 210, 190))] * 4)
         self.desktop.click.assert_not_called()
 
     def test_debug_screenshot_requires_workspace_context(self) -> None:
-        result = call(screenshot, {"save_debug": True})
+        with patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": "1"}):
+            result = call(screenshot, {})
         self.assertEqual(result.status, "error")
         self.assertIn("requires a MIRA workspace", result.text)
-
-    def test_screenshot_grid_uses_original_pixel_positions_and_can_be_disabled(self) -> None:
-        original = Image.new("RGB", (450, 450), "white")
-        original.putpixel((237, 237), (7, 111, 203))
-        self.desktop.screenshot.side_effect = original.copy
-        self.desktop.size.return_value = original.size
-        labels = []
-        draw_text = ImageDraw.ImageDraw.text
-
-        def record_text(draw, xy, value, *args, **kwargs):
-            bbox = draw.textbbox(xy, value, font=kwargs["font"], stroke_width=kwargs["stroke_width"])
-            labels.append((value, xy, bbox, kwargs["fill"], kwargs["stroke_fill"]))
-            return draw_text(draw, xy, value, *args, **kwargs)
-
-        plain = call(screenshot, {"grid": False})
-        self.assertEqual(plain.content_blocks[1]["type"], "image")
-        plain_image = Image.open(BytesIO(base64.b64decode(plain.content_blocks[1]["base64"])))
-        self.assertEqual(plain_image.size, (450, 450))
-        self.assertEqual(plain_image.getpixel((100, 237)), (255, 255, 255))
-        self.assertEqual(plain_image.getpixel((237, 237)), (7, 111, 203))
-        expected_labels = ["(0,0)"]
-        expected_labels += [f"X:{x}" for x in (100, 200, 300, 400)]
-        expected_labels += [f"Y:{y}" for y in (100, 200, 300, 400)]
-        for spacing in (25, 50, 100):
-            with self.subTest(spacing=spacing):
-                labels.clear()
-                args = {"grid_mode": "coordinates"}
-                if spacing != 100:
-                    args["grid_spacing"] = spacing
-                with patch.object(ImageDraw.ImageDraw, "text", record_text):
-                    annotated = call(screenshot, args)
-
-                self.assertEqual(annotated.status, plain.status)
-                self.assertIn(plain.content_blocks[0]["text"], annotated.content_blocks[0]["text"])
-                self.assertEqual(annotated.content_blocks[1]["type"], "image")
-                self.assertEqual(annotated.content_blocks[1]["mime_type"], "image/png")
-                grid_image = Image.open(BytesIO(base64.b64decode(annotated.content_blocks[1]["base64"])))
-                ruler_left, ruler_top = grid_image.width - original.width, grid_image.height - original.height
-                self.assertGreater(ruler_left, 0)
-                self.assertGreater(ruler_top, 0)
-                self.assertIn(f"image ({ruler_left}, {ruler_top})", annotated.content_blocks[0]["text"])
-                self.assertEqual(grid_image.getpixel((ruler_left + 237, ruler_top + 237)), (7, 111, 203))
-                for coordinate in range(spacing, 450, spacing):
-                    self.assertNotEqual(grid_image.getpixel((ruler_left + coordinate, ruler_top + 237)), (255, 255, 255))
-                    self.assertNotEqual(grid_image.getpixel((ruler_left + 237, ruler_top + coordinate)), (255, 255, 255))
-                    self.assertEqual(grid_image.getpixel((ruler_left + coordinate + 1, ruler_top + 237)), (255, 255, 255))
-                self.assertEqual(grid_image.getpixel((ruler_left + 100, ruler_top + 237)), grid_image.getpixel((ruler_left + 200, ruler_top + 237)))
-                self.assertEqual(grid_image.getpixel((ruler_left + 237, ruler_top + 100)), grid_image.getpixel((ruler_left + 237, ruler_top + 200)))
-                if spacing < 100:
-                    self.assertLess(grid_image.getpixel((ruler_left + 100, ruler_top + 237))[0], grid_image.getpixel((ruler_left + spacing, ruler_top + 237))[0])
-                    self.assertLess(grid_image.getpixel((ruler_left + 237, ruler_top + 100))[0], grid_image.getpixel((ruler_left + 237, ruler_top + spacing))[0])
-                else:
-                    self.assertEqual(grid_image.getpixel((ruler_left + 50, ruler_top + 237)), (255, 255, 255))
-                if spacing > 25:
-                    self.assertEqual(grid_image.getpixel((ruler_left + 25, ruler_top + 237)), (255, 255, 255))
-                self.assertEqual([value for value, _, _, _, _ in labels], expected_labels)
-                for x, (_, (label_x, label_y), bbox, _, _) in zip((100, 200, 300, 400), labels[1:5]):
-                    self.assertTrue(ruler_left + x <= label_x <= ruler_left + x + 4)
-                    self.assertEqual(label_y, 4)
-                    self.assertLessEqual(bbox[3], ruler_top)
-                for y, (_, xy, bbox, _, _) in zip((100, 200, 300, 400), labels[5:]):
-                    self.assertEqual(xy, (4, ruler_top + y + 4))
-                    self.assertLessEqual(bbox[2], ruler_left)
-                self.assertLessEqual(labels[0][2][2], ruler_left)
-                self.assertLessEqual(labels[0][2][3], ruler_top)
-                self.assertTrue(all(fill == "white" and stroke == "black" for _, _, _, fill, stroke in labels))
-        self.assertEqual(screenshot.args["grid"]["default"], True)
-        self.assertEqual(screenshot.args["grid_mode"]["default"], "categorical")
-        self.assertIsNone(screenshot.args["grid_spacing"]["default"])
-        self.assertIsNone(screenshot.args["region"]["default"])
-        self.desktop.click.assert_not_called()
 
     def test_categorical_full_screen_grid_centres_labels_outside_capture(self) -> None:
         self.desktop.size.return_value = (300, 200)
@@ -215,6 +157,30 @@ class ComputerToolTests(unittest.TestCase):
         self.assertNotEqual(image.getpixel((ruler_left + 100, ruler_top + 37)), (255, 255, 255))
         self.assertEqual(image.getpixel((ruler_left + 99, ruler_top + 37)), (255, 255, 255))
         self.assertIn("Categorical grid: 3 columns and 2 rows of 100-pixel cells", result.content_blocks[0]["text"])
+
+    def test_categorical_spacing_and_plain_image_preserve_screen_pixels(self) -> None:
+        original = Image.new("RGB", (230, 180), "white")
+        original.putpixel((117, 77), (7, 111, 203))
+        self.desktop.size.return_value = original.size
+        self.desktop.screenshot.side_effect = original.copy
+
+        plain = call(screenshot, {"grid": False})
+        plain_image = Image.open(BytesIO(base64.b64decode(plain.content_blocks[1]["base64"])))
+        self.assertEqual(plain_image.size, original.size)
+        self.assertEqual(plain_image.getpixel((117, 77)), (7, 111, 203))
+        for spacing in (25, 50, 100):
+            with self.subTest(spacing=spacing):
+                result = call(screenshot, {"grid_spacing": spacing})
+                self.assertEqual(result.status, "success")
+                image = Image.open(BytesIO(base64.b64decode(result.content_blocks[1]["base64"])))
+                ruler_left, ruler_top = image.width - 230, image.height - 180
+                self.assertEqual(image.getpixel((ruler_left + 117, ruler_top + 77)), (7, 111, 203))
+                self.assertNotEqual(image.getpixel((ruler_left + spacing, ruler_top + 17)), (255, 255, 255))
+                self.assertEqual(image.getpixel((ruler_left + spacing + 1, ruler_top + 17)), (255, 255, 255))
+                self.assertIn(f"of {spacing}-pixel cells", result.content_blocks[0]["text"])
+        self.assertEqual(screenshot.args["grid"]["default"], True)
+        self.assertIsNone(screenshot.args["grid_spacing"]["default"])
+        self.assertIsNone(screenshot.args["region"]["default"])
 
     def test_categorical_crop_labels_are_relative_to_capture(self) -> None:
         self.desktop.size.return_value = (2560, 1440)
@@ -252,52 +218,13 @@ class ComputerToolTests(unittest.TestCase):
         self.assertEqual(image.getpixel((ruler_left + 47, ruler_top + 37)), (255, 255, 255))
         self.assertNotEqual(image.getpixel((ruler_left + 37, ruler_top + 50)), (255, 255, 255))
         self.assertEqual(image.getpixel((ruler_left + 37, ruler_top + 43)), (255, 255, 255))
-
-    def test_cropped_screenshot_uses_absolute_grid_and_in_memory_image(self) -> None:
-        screen = Image.new("RGB", (640, 480), "white")
-        screen.putpixel((111, 165), (7, 111, 203))
-        self.desktop.size.return_value = screen.size
-        self.desktop.screenshot.side_effect = lambda *, region: screen.crop(
-            (region[0], region[1], region[0] + region[2], region[1] + region[3])
+        self.desktop.screenshot.side_effect = None
+        self.desktop.screenshot.return_value = SimpleNamespace(size=(2560, 1440))
+        self.assertEqual(
+            call(click_cell, {"cell": "C2", "region": [2203, 7, 125, 75], "grid_spacing": 50}).text,
+            "Clicked cell C2 at (2315, 69).",
         )
-        labels = []
-        draw_text = ImageDraw.ImageDraw.text
-
-        def record_text(draw, xy, value, *args, **kwargs):
-            bbox = draw.textbbox(xy, value, font=kwargs["font"], stroke_width=kwargs["stroke_width"])
-            labels.append((value, xy, bbox))
-            return draw_text(draw, xy, value, *args, **kwargs)
-
-        with patch("pathlib.Path.write_bytes", side_effect=AssertionError("disk write")):
-            with patch.object(ImageDraw.ImageDraw, "text", record_text):
-                result = call(screenshot, {"region": [73, 127, 210, 190], "grid_mode": "coordinates"})
-
-        self.assertEqual(result.status, "success")
-        self.desktop.screenshot.assert_called_once_with(region=(73, 127, 210, 190))
-        self.assertIn("origin (73, 127), size 210x190", result.content_blocks[0]["text"])
-        self.assertIn("Original screen: 640x480", result.content_blocks[0]["text"])
-        self.assertEqual(result.content_blocks[1]["type"], "image")
-        self.assertEqual(result.content_blocks[1]["mime_type"], "image/png")
-        image = Image.open(BytesIO(base64.b64decode(result.content_blocks[1]["base64"])))
-        ruler_left, ruler_top = image.width - 210, image.height - 190
-        self.assertGreater(ruler_left, 0)
-        self.assertGreater(ruler_top, 0)
-        self.assertIn(f"Annotated image: {image.width}x{image.height} pixels", result.content_blocks[0]["text"])
-        self.assertEqual(image.getpixel((ruler_left + 38, ruler_top + 38)), (7, 111, 203))
-        self.assertEqual(image.getpixel((ruler_left, ruler_top + 38)), (255, 255, 255))
-        self.assertNotEqual(image.getpixel((ruler_left + 27, ruler_top + 38)), (255, 255, 255))  # screen x=100
-        self.assertNotEqual(image.getpixel((ruler_left + 77, ruler_top + 38)), (255, 255, 255))  # screen x=150
-        self.assertLess(image.getpixel((ruler_left + 27, ruler_top + 38))[0], image.getpixel((ruler_left + 77, ruler_top + 38))[0])
-        self.assertNotEqual(image.getpixel((ruler_left + 38, ruler_top + 73)), (255, 255, 255))  # screen y=200
-        self.assertNotEqual(image.getpixel((ruler_left + 38, ruler_top + 23)), (255, 255, 255))  # screen y=150
-        self.assertLess(image.getpixel((ruler_left + 38, ruler_top + 73))[0], image.getpixel((ruler_left + 38, ruler_top + 23))[0])
-        self.assertEqual([value for value, _, _ in labels], ["X:100", "X:200", "Y:200", "Y:300"])
-        self.assertEqual(labels[0][1], (ruler_left + 31, 4))
-        self.assertEqual(labels[2][1], (4, ruler_top + 77))
-        self.assertTrue(all(bbox[3] <= ruler_top for _, _, bbox in labels[:2]))
-        self.assertTrue(all(bbox[2] <= ruler_left for _, _, bbox in labels[2:]))
-        self.assertNotIn(result.content_blocks[1]["base64"], tool_output_text(result))
-        self.desktop.click.assert_not_called()
+        self.desktop.click.assert_called_once_with(x=2315, y=69, button="left")
 
     def test_cropped_screenshot_validates_screen_edges_and_plain_view(self) -> None:
         screen = Image.new("RGB", (640, 480), "white")
@@ -324,27 +251,6 @@ class ComputerToolTests(unittest.TestCase):
         self.desktop.screenshot.assert_not_called()
         self.desktop.click.assert_not_called()
 
-    def test_ruler_labels_fit_outside_high_coordinate_crop(self) -> None:
-        self.desktop.size.return_value = (12000, 12000)
-        self.desktop.screenshot.return_value = Image.new("RGB", (120, 120), "white")
-        labels = []
-        draw_text = ImageDraw.ImageDraw.text
-
-        def record_text(draw, xy, value, *args, **kwargs):
-            labels.append((value, draw.textbbox(xy, value, font=kwargs["font"], stroke_width=kwargs["stroke_width"])))
-            return draw_text(draw, xy, value, *args, **kwargs)
-
-        with patch.object(ImageDraw.ImageDraw, "text", record_text):
-            result = call(screenshot, {"region": [11880, 11880, 120, 120], "grid_mode": "coordinates"})
-
-        self.assertEqual(result.status, "success")
-        image = Image.open(BytesIO(base64.b64decode(result.content_blocks[1]["base64"])))
-        ruler_left, ruler_top = image.width - 120, image.height - 120
-        self.assertEqual([value for value, _ in labels], ["X:11900", "Y:11900"])
-        self.assertLessEqual(labels[0][1][3], ruler_top)
-        self.assertLessEqual(labels[1][1][2], ruler_left)
-        self.assertEqual(image.getpixel((ruler_left + 1, ruler_top + 1)), (255, 255, 255))
-
     def test_cropped_screenshot_rejects_capture_geometry_mismatch(self) -> None:
         self.desktop.size.return_value = (640, 480)
         self.desktop.screenshot.return_value = Image.new("RGB", (10, 10))
@@ -360,16 +266,18 @@ class ComputerToolTests(unittest.TestCase):
         graph.add_edge("tools", END)
         request = AIMessage(content="", tool_calls=[{
             "name": "screenshot",
-            "args": {"region": [10, 5, 20, 15], "save_debug": True},
+            "args": {"region": [10, 5, 20, 15]},
             "id": "screen-1",
         }])
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
             workspace = Path(directory)
             context = create_mira_context({}, (), workspace)
-            output = graph.compile().invoke({"messages": [request]}, context=context)
+            with patch.dict(os.environ, {"MIRA_SCREENSHOT_DEBUG": "1"}):
+                output = graph.compile().invoke({"messages": [request]}, context=context)
             saved = list((workspace / ".mira" / "_debug" / "screenshots").glob("*.png"))
             self.assertEqual(len(saved), 1)
             self.assertIn(str(saved[0]), output["messages"][-1].content_blocks[0]["text"])
+            self.assertEqual(saved[0].read_bytes(), base64.b64decode(output["messages"][-1].content_blocks[1]["base64"]))
         message = output["messages"][-1]
         self.assertIsInstance(message, ToolMessage)
         self.assertEqual(message.tool_call_id, "screen-1")

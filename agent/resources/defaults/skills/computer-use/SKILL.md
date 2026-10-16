@@ -11,10 +11,9 @@ Use MIRA's atomic computer tools to work with the visible primary monitor. Keep 
 
 ## Inspect the screen
 
-1. Call `screenshot` for a full-screen view before choosing a target. The default categorical grid has 100-pixel cells, with column letters above the captured pixels and row numbers to the left. Identify the cell containing the target's centre. For a closer view, call `screenshot(region=[left, top, width, height])` around the target; the crop defaults to 50-pixel cells. Cell names start at A1 in the crop's top-left corner. Set `grid_spacing` to 25, 50, or 100 for another density, `grid_mode="coordinates"` to compare the older absolute-pixel ruler, or `grid=False` for an unannotated view. The annotated image is larger than the unscaled desktop capture because of its ruler margins.
+1. Call `screenshot` for a full-screen view before choosing a target. Its categorical grid has 100-pixel cells, with column letters above the captured pixels and row numbers to the left. Identify the cell containing the target's centre. For a closer view, call `screenshot(region=[left, top, width, height])` around the target; the crop defaults to 50-pixel cells. Cell names start at A1 in the crop's top-left corner. Set `grid_spacing` to 25, 50, or 100 for another density, or `grid=False` for an unannotated view. The annotated image is larger than the unscaled desktop capture because of its ruler margins.
 2. Identify the intended control from what is actually visible. If several controls could match, use `ask_user` for a focused clarification. Do not invent coordinates when an image is unavailable.
 3. A text-only model cannot inspect the screenshot. If the tool reports unsupported image content, explain that a vision-capable Main model with `image_inputs: true` is needed. If screenshot and mouse dimensions differ, stop and report the DPI scaling error; do not rescale or guess coordinates.
-4. Use `save_debug=True` only when the user explicitly asks to keep a screenshot for inspection. MIRA saves the annotated or cropped image under the workspace's `.mira/_debug/screenshots/` directory and reports its full path.
 
 ## Act through the tools
 
