@@ -181,6 +181,7 @@ class FakeStore:
         self.clear_all_calls = 0
         self.clear_compactions_calls = 0
         self.new_sessions = 0
+        self._checkpoint_directory = tempfile.TemporaryDirectory()
 
     def save(self, record: dict[str, Any]) -> None:
         """Ignore session saves."""
@@ -197,8 +198,12 @@ class FakeStore:
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
             "turns": 0,
+            "plan_runs": 0,
             "dashboard": {},
+            "current_plan": None,
+            "current_goal": None,
             "events": [],
+            "runs": [],
         }
         self.save(record)
         return record
@@ -212,6 +217,15 @@ class FakeStore:
         """Record compaction archive clears."""
         self.clear_compactions_calls += 1
         return 2
+
+    def checkpoint_path(self, session_id: str) -> Path:
+        return Path(self._checkpoint_directory.name) / f"{session_id}.sqlite"
+
+    def delete_checkpoints(self, session_id: str) -> None:
+        self.checkpoint_path(session_id).unlink(missing_ok=True)
+
+    def __del__(self) -> None:
+        self._checkpoint_directory.cleanup()
 
 
 class FakeWorker:
@@ -1968,7 +1982,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = True
             await pilot.pause()
 
-            handled = app._handle_new_chat()
+            handled = await app._handle_new_chat()
             await pilot.pause()
 
             self.assertTrue(handled)
@@ -1979,6 +1993,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.query_one("#model-settings-button", Button).disabled)
             self.assertTrue(app.query_one(SessionHistory).disabled)
             app.notify.assert_called_once()
+
+    async def test_open_chat_reenters_pending_checkpoint_without_new_user_message(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.core_session.pending_thread_id = app.session["id"]
+            app.core_session.resume_pending = AsyncMock()  # type: ignore[method-assign]
+            app._refresh_model_metadata = AsyncMock()  # type: ignore[method-assign]
+            before_events = list(app.session.get("events", []))
+
+            app._start_pending_resume()
+            await wait_until(lambda: app.core_session.resume_pending.await_count == 1)
+            await wait_until(lambda: not app.busy)
+
+            self.assertEqual(app.session.get("events", []), before_events)
+            app.core_session.resume_pending.assert_awaited_once_with()
 
     async def test_busy_new_chat_slash_uses_toast_without_transcript_output(self) -> None:
         app = make_app()
@@ -2413,7 +2444,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs["text"])
             kwargs["frontend"].renderer.text_delta("done")
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with patch("core.execution.turns.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -2601,7 +2632,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls.append(kwargs["text"])
             kwargs["renderer"].text_delta("done")
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with patch("core.execution.turns.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(80, 24)) as pilot:
                 await pilot.pause()
                 chat = app.query_one(ChatLog)
@@ -2631,7 +2662,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             kwargs["session"]["dashboard"]["tokens"]["out"] += 20
             kwargs["renderer"].usage_updated()
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with patch("core.execution.turns.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -2650,7 +2681,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("turn boom")
 
         with (
-            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("core.execution.turns.run_user_turn", fake_run_user_turn),
             patch("ui.textual.app.write_error_report", return_value=Path("turn-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -2674,7 +2705,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("plan boom")
 
         with (
-            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("core.execution.turns.run_user_turn", fake_run_user_turn),
             patch("ui.textual.app.write_error_report", return_value=Path("plan-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -2696,7 +2727,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("revision boom")
 
         with (
-            patch("core.application.session.run_user_turn", fake_run_user_turn),
+            patch("core.execution.turns.run_user_turn", fake_run_user_turn),
             patch("ui.textual.app.write_error_report", return_value=Path("revision-report.txt")) as report,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -3965,7 +3996,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.mode["rubric_enabled"] = True
-            with patch("core.application.session.run_user_turn", side_effect=run_goal) as run:
+            with patch("core.execution.turns.run_user_turn", side_effect=run_goal) as run:
                 await app._run_goal_command("Write a professional announcement.")
 
         self.assertFalse(app.mode["planning"])
@@ -3982,7 +4013,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def cancel_goal(**_kwargs: Any) -> None:
             raise asyncio.CancelledError
 
-        with patch("core.application.session.run_user_turn", side_effect=cancel_goal):
+        with patch("core.execution.turns.run_user_turn", side_effect=cancel_goal):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.busy = True
@@ -4227,7 +4258,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
-                    patch("core.application.session.run_user_turn", side_effect=show_retained_goal),
+                    patch("core.execution.turns.run_user_turn", side_effect=show_retained_goal),
                 ):
                     async with app.run_test(size=(100, 35)) as pilot:
                         await pilot.pause()
@@ -4275,7 +4306,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
-            patch("core.application.session.run_user_turn", side_effect=finish_paused),
+            patch("core.execution.turns.run_user_turn", side_effect=finish_paused),
         ):
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.pause()
@@ -4313,7 +4344,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.session["current_plan"] = plan
-            with patch("core.application.session.run_user_turn", new_callable=AsyncMock) as run:
+            with patch("core.execution.turns.run_user_turn", new_callable=AsyncMock) as run:
                 await app._run_goal_command("Create a replacement Goal.")
 
         run.assert_not_awaited()
@@ -4962,7 +4993,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run_user_turn(**kwargs: Any) -> None:
             raise context_overflow_error("provider context limit reached", notice)
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with patch("core.execution.turns.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -6247,7 +6278,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_mira_command_appends_fresh_unpersisted_splash(self) -> None:
         app = make_app(workspace=Path("current-workspace"))
 
-        with patch("core.application.session.run_user_turn", new=AsyncMock()) as run_turn:
+        with patch("core.execution.turns.run_user_turn", new=AsyncMock()) as run_turn:
             async with app.run_test(size=(80, 20)) as pilot:
                 await pilot.pause()
                 chat = app.query_one(ChatLog)
@@ -6288,7 +6319,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_command_runs_with_rubrics_disabled(self) -> None:
         app = make_app()
         app.mode["rubric_enabled"] = False
-        with patch("core.application.session.run_user_turn", new=AsyncMock()) as run:
+        with patch("core.execution.turns.run_user_turn", new=AsyncMock()) as run:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 await app._run_goal_command("add search")
@@ -6302,7 +6333,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run_user_turn(**kwargs: Any) -> None:
             captured.update(kwargs)
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with patch("core.execution.turns.run_user_turn", fake_run_user_turn):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
@@ -6568,7 +6599,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             patch("config.metadata.infer_model_metadata", new_callable=AsyncMock) as infer_metadata,
             patch("agent.factory.build_agent") as build_agent,
             patch("agent.factory.build_plan_agent") as build_plan_agent,
-            patch("core.application.session.run_user_turn", new_callable=AsyncMock) as run_turn,
+            patch("core.execution.turns.run_user_turn", new_callable=AsyncMock) as run_turn,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -7552,7 +7583,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.session["events"], [])
             self.assertEqual(app.session["runs"], [])
             self.assertEqual(app.session["dashboard"]["tokens"], {"in": 0, "out": 0})
-            self.assertEqual(len(store.saves), 1)
+            self.assertEqual(len(store.saves), 2)
             self.assertIn("current chat history cleared", rendered)
             self.assertNotIn("clear me", rendered)
 
@@ -7587,7 +7618,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await wait_until(lambda: app.session["events"] == [])
 
             self.assertEqual(app.session["events"], [])
-            self.assertEqual(len(store.saves), 1)
+            self.assertEqual(len(store.saves), 2)
 
     async def test_clear_all_chats_requires_confirmation_and_keeps_active_clean_session(self) -> None:
         """The all-chat clear should require confirmation before deleting sessions."""

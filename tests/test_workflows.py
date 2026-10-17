@@ -120,7 +120,9 @@ class WorkflowAPITests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=metadata),
             ),
         ):
-            return await MiraApplication.start(workspace=workspace, config=config)
+            application = await MiraApplication.start(workspace=workspace, config=config)
+            await application.open_session()
+            return application
 
     async def test_application_exposes_facade_and_native_graph_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

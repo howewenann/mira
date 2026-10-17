@@ -10,8 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from config import settings
-from core.application import MiraApplication
+from core.application import MiraApplication, MiraSession
 from core.interface import NullFrontend
+from session.store import SessionStore
 
 
 class SettingsTests(unittest.TestCase):
@@ -530,6 +531,14 @@ class ApplicationPolicyTests(unittest.IsolatedAsyncioTestCase):
                 context_limit_source="test",
                 checkpointer=object(),
                 mcp_manager=mcp_manager,
+                agent=SimpleNamespace(mira_tool_specs=[]),
+                plan_agent=SimpleNamespace(mira_tool_specs=[]),
+            )
+            application.store = SessionStore(workspace / ".mira" / "_sessions")
+            session = MiraSession(
+                application,
+                application.store.new("policy-chat", workspace),
+                checkpointer=application.checkpointer,
             )
             source_agent = SimpleNamespace(
                 mira_tool_specs=[{"name": "write_file"}, {"name": "edit_file"}]
@@ -555,6 +564,7 @@ class ApplicationPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(application.agent, rebuilt)
         self.assertIs(application.plan_agent, rebuilt_plan)
+        self.assertIs(session.agent, rebuilt)
         self.assertEqual(build_resources.call_count, 2)
         build_agent.assert_called_once()
         build_plan_agent.assert_called_once()

@@ -4,7 +4,7 @@ Durable MIRA session state and persistence.
 
 ## Owns
 
-Checkpoints, context state, dashboards, Goal/Plan records, event recording, stores, and values.
+Per-chat SQLite checkpoints, JSON display history, dashboards, Goal/Plan records, event recording, stores, and values.
 
 ## Does not own
 

@@ -78,8 +78,8 @@ owned interface or external protocol adapter is introduced.
 ## Core, MIRA API, And Consumer Boundary
 
 **Decision:** MIRA's application lifecycle and complete turn orchestration are
-headless. `MiraApplication` owns shared agents, resources, checkpoints, MCP,
-and shutdown; each `MiraSession` owns one durable MIRA session projection and
+headless. `MiraApplication` owns shared resources, MCP, and shutdown; each
+`MiraSession` owns its Act/Plan agents, SQLite checkpointer, and durable session projection and
 offers prompt, cancellation, mode, snapshot, and close operations. The Core
 Interface under `core/interface/` implements ordered event emission plus
 blocking interaction requests. The thin `mira` and `mira.api` facades expose
@@ -535,8 +535,8 @@ result, completion source, attempts, and timestamps while `current_goal` is
 null. Supported
 statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
 `completed`. Dedicated Plan events remain durable history, while their chat
-projection may be hidden after an explicit Close or Clear; resume context labels
-only the populated current artifact as authoritative.
+projection may be hidden after an explicit Close or Clear. The populated current
+artifact remains authoritative for MIRA's UI and explicit execution controls.
 Session normalization requires the exact current `current_plan` fields and
 types. A populated malformed or retired Plan artifact rejects the session;
 retired Summary, generic-stage, and pre-staging transcript event shapes are
@@ -1077,16 +1077,24 @@ secret-resolution boundaries change.
 
 ## Sessions And Compaction
 
-**Decision:** MIRA stores durable session JSON for replayable UI history, while
-DeepAgents handles runtime context counting and compaction.
+**Decision:** Each chat owns one native LangGraph SQLite database for its Act,
+Plan, Goal, and subagent checkpoint threads. Session JSON stores replayable UI
+history and diagnostic events. DeepAgents handles runtime context counting and
+compaction.
 
 **Why:** Session files should be stable user-facing history after restart.
 Starting a new chat is therefore non-destructive: MIRA creates another session
 record and makes it active instead of clearing the previous one.
 Session records require the current fields; missing or conflicting formal
 artifacts are rejected rather than repaired. Transient fields are not saved.
-The in-memory resume-context marker survives transcript saves until the first
-model invocation after reopening a session, but it is never written to JSON.
+Opening a historical chat requires a real checkpoint. MIRA never builds model
+conversation state from the JSON transcript. Closing or switching a chat closes
+its SQLite connection; deleting or clearing it then removes the database and
+sidecars along with its JSON record. Plan/Goal run counters persist with the
+session record so a new planning branch cannot reuse an old thread ID. When a
+checkpoint has pending graph work, reopening the chat re-enters that graph with
+native `None` input; LangGraph re-emits interrupts for MIRA's ordinary approval
+loop, which resumes through `Command` on the same thread.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 replaces DeepAgents' default `SummarizationMiddleware` by its native name with
 one instance built from Main's model-aware defaults. The model-triggered
@@ -1139,7 +1147,7 @@ reasoning or summary text. Compaction classification never depends on model
 wording, prompt fragments, or task-local flags; unmarked reasoning and replies
 remain visible even when they discuss compaction or summarization.
 Regular subagent completions remain durable `subagent` transcript events so
-past sessions can replay them and resume context can refer to their outputs.
+past sessions can replay them.
 The live panel's open/collapsed/closed state and row layout are intentionally
 not persisted or replayed. Reopening a session projects those durable subagent
 events back into chat transcript blocks rather than reconstructing the old live
@@ -1274,12 +1282,9 @@ compiled graph has none, so native interrupts resume without asking Workflow
 authors to configure checkpoints. This state remains process-owned.
 
 Workflow commands are stored inside their Workflow events so replay can restore
-the visual `you` bubble without adding a conversational user message to model
-resume context. Historical values are frozen as display and Copy text while the
+the visual `you` bubble. Historical values are frozen as display and Copy text while the
 live Python objects exist; session JSON never owns arbitrary runtime objects.
-The main agent receives only a compact breadcrumb with recent Workflow identities
-and the readable session JSON path. Detailed state stays in that sole durable
-source and is retrieved lazily through existing filesystem tools; MIRA has no
+Detailed Workflow history stays in session JSON; MIRA has no
 duplicate Workflow artifact store or Workflow-specific inspection tool. An agent
 row's `inspection_id` in the Workflow event links to the matching `runs[]` entry
 when nested-agent detail is needed.

@@ -1,4 +1,4 @@
-"""JSON-backed session metadata storage."""
+"""JSON session records and their SQLite checkpoint file paths."""
 
 from __future__ import annotations
 
@@ -72,6 +72,7 @@ class SessionStore:
             "created_at": now,
             "updated_at": now,
             "turns": 0,
+            "plan_runs": 0,
             "dashboard": normalize_dashboard(None),
             "current_plan": None,
             "current_goal": None,
@@ -89,15 +90,12 @@ class SessionStore:
 
     def _write(self, record: dict[str, Any], *, update_timestamp: bool) -> None:
         """Normalize and persist one record with explicit timestamp ownership."""
-        resume_context_pending = record.get("resume_context_pending") is True
         if update_timestamp:
             record["updated_at"] = datetime.now(timezone.utc).isoformat()
         normalized = normalize_session(record)
         self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         record.clear()
         record.update(normalized)
-        if resume_context_pending:
-            record["resume_context_pending"] = True
 
     def read(self, path: Path, *, reconcile_running: bool = False) -> dict[str, Any]:
         """Read a session record from a JSON file."""
@@ -130,10 +128,11 @@ class SessionStore:
             return path.stat().st_mtime
 
     def delete(self, session_id: str) -> bool:
-        """Delete one saved session JSON file."""
+        """Delete one saved chat and its closed SQLite checkpoint files."""
         path = self.path(session_id)
         if not path.exists():
             return False
+        self.delete_checkpoints(session_id)
         path.unlink()
         return True
 
@@ -141,8 +140,14 @@ class SessionStore:
         """Delete all saved session JSON files under the session root."""
         count = 0
         for path in list(self.root.glob("*.json")):
+            self.delete_checkpoints(path.stem)
             path.unlink()
             count += 1
+        for path in (self.root / "checkpoints").glob("*.sqlite"):
+            self.delete_checkpoints(path.stem)
+        for suffix in ("wal", "shm", "journal"):
+            for path in (self.root / "checkpoints").glob(f"*.sqlite-{suffix}"):
+                self.delete_checkpoints(path.name.removesuffix(f".sqlite-{suffix}"))
         return count
 
     def clear_compactions(self) -> int:
@@ -164,3 +169,13 @@ class SessionStore:
     def path(self, session_id: str) -> Path:
         """Return the JSON path for a session id."""
         return self.root / f"{session_id}.json"
+
+    def checkpoint_path(self, session_id: str) -> Path:
+        """Return the SQLite database path for one conversation."""
+        return self.root / "checkpoints" / f"{session_id}.sqlite"
+
+    def delete_checkpoints(self, session_id: str) -> None:
+        """Remove SQLite's database and sidecars after the saver has closed."""
+        path = self.checkpoint_path(session_id)
+        for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal")):
+            candidate.unlink(missing_ok=True)

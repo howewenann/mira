@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 from agent.planning.policy import PLANNING_STAGE_GOAL_RESEARCH, PLANNING_STAGE_PLAN_RESEARCH
 from core.interface import FrontendEmitter, SessionSnapshot
-from core.execution.turns import plan_thread_id, run_user_turn
 from session.dashboard import normalize_dashboard, update_duration
 from session.goals import clear_current_goal, current_goal, pause_current_goal, start_goal_attempt
 from session.plans import clear_current_plan, current_plan, pause_current_plan, start_plan_attempt
@@ -19,14 +18,23 @@ if TYPE_CHECKING:
 class MiraSession:
     """One MIRA application session over native agents and graph threads."""
 
-    def __init__(self, application: MiraApplication, record: dict[str, Any]) -> None:
+    def __init__(
+        self, application: MiraApplication, record: dict[str, Any], *,
+        agent: Any = None, plan_agent: Any = None,
+        checkpointer: Any = None, checkpoint_manager: Any = None,
+    ) -> None:
         from core.application.app import initial_mode
 
         self.application = application
         self.record = record
+        self.agent = agent if agent is not None else application.agent
+        self.plan_agent = plan_agent if plan_agent is not None else application.plan_agent
+        self.checkpointer = checkpointer
+        self._checkpoint_manager = checkpoint_manager
+        self.pending_thread_id: str | None = None
         self.mode = initial_mode(
-            application.agent,
-            application.plan_agent,
+            self.agent,
+            self.plan_agent,
             (application.config or {}).get("settings"),
             record,
         )
@@ -40,11 +48,15 @@ class MiraSession:
 
     async def prompt(self, text: str, **kwargs: Any) -> Any:
         """Execute one complete ACT/PLAN/Goal workflow through the MIRA API."""
+        from core.execution.turns import run_user_turn
+
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
         if self._active_task is not None and not self._active_task.done():
             raise RuntimeError("MIRA session already has an active turn")
-        if self.application.agent is None:
+        if self.pending_thread_id and "resume_thread_id" not in kwargs:
+            await self.resume_pending()
+        if self.agent is None:
             raise RuntimeError(self.application.agent_unavailable_message or "Main model is not configured.")
         current = asyncio.current_task()
         self._active_task = current
@@ -58,9 +70,9 @@ class MiraSession:
         )
         turn_error: BaseException | None = None
         try:
-            return await run_user_turn(
-                agent=self.application.agent,
-                plan_agent=self.application.plan_agent,
+            result = await run_user_turn(
+                agent=self.agent,
+                plan_agent=self.plan_agent,
                 frontend=self.application.frontend,
                 store=self.application.store,
                 session=self.record,
@@ -72,6 +84,9 @@ class MiraSession:
                 persist_always_allow=self.application.persist_tool_always_allow,
                 **kwargs,
             )
+            if kwargs.get("resume_thread_id"):
+                self.pending_thread_id = None
+            return result
         except (Exception, asyncio.CancelledError) as exc:
             turn_error = exc
             self.pause_active_artifacts()
@@ -91,6 +106,14 @@ class MiraSession:
                 self.runtime_state = "ready"
                 emitter.session_state("ready")
 
+    async def resume_pending(self) -> Any | None:
+        """Re-enter a checkpointed interrupt and request its native decision."""
+        if self.pending_thread_id is None:
+            return None
+        return await self.prompt(
+            "", record_user=False, resume_thread_id=self.pending_thread_id
+        )
+
     async def cancel(self) -> None:
         """Cancel the active MIRA operation for this session."""
         task = self._active_task
@@ -109,7 +132,11 @@ class MiraSession:
 
     def begin_goal(self, objective: str) -> None:
         """Stage an explicit Goal request on an isolated planning thread."""
+        from core.execution.turns import plan_thread_id
+
         self.mode["plan_runs"] = int(self.mode.get("plan_runs") or 0) + 1
+        self.record["plan_runs"] = self.mode["plan_runs"]
+        self.application.store.save(self.record)
         self.mode["goal_staging"] = {
             "authoritative_objective": objective,
             "objective": objective,
@@ -123,6 +150,8 @@ class MiraSession:
 
     def begin_artifact_revision(self, kind: str, artifact: dict[str, Any], feedback: str) -> None:
         """Stage revision of the exact retained formal artifact."""
+        from core.execution.turns import plan_thread_id
+
         if kind == "plan":
             self.mode["planning"] = True
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
@@ -130,6 +159,8 @@ class MiraSession:
             self.mode["plan_revision"] = {"previous_plan": artifact, "feedback": feedback}
             return
         self.mode["plan_runs"] = int(self.mode.get("plan_runs") or 0) + 1
+        self.record["plan_runs"] = self.mode["plan_runs"]
+        self.application.store.save(self.record)
         self.mode["goal_revision"] = {"previous_goal": artifact, "feedback": feedback}
         self.mode["goal_staging"] = {
             "authoritative_objective": str(artifact.get("objective") or ""),
@@ -218,11 +249,19 @@ class MiraSession:
         if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if persist:
-            update_duration(self.record)
-            self.application.store.save(self.record)
-        self.runtime_state = "closed"
-        FrontendEmitter(self.application.frontend, session_id=self.id).session_state("closed")
+        try:
+            if persist:
+                update_duration(self.record)
+                self.application.store.save(self.record)
+        finally:
+            self.runtime_state = "closed"
+            try:
+                if self._checkpoint_manager is not None:
+                    await self._checkpoint_manager.__aexit__(None, None, None)
+                    self._checkpoint_manager = None
+            finally:
+                self.application._sessions.pop(self.id, None)
+                FrontendEmitter(self.application.frontend, session_id=self.id).session_state("closed")
 
 
 __all__ = ["MiraSession"]

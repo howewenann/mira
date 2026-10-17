@@ -23,7 +23,7 @@ from agent.planning.policy import (
     SHARED_QUESTION_POLICY,
     plan_system_prompt,
 )
-from session.context import build_resume_context, normalize_session
+from session.context import normalize_session
 from session.plans import (
     clear_current_plan,
     current_plan,
@@ -155,7 +155,7 @@ class CurrentPlanTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(completed["completion_source"], "rubric-verified")
 
-    def test_current_plan_persists_and_is_authoritative_resume_context(self) -> None:
+    def test_current_plan_persists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
             record = store.new("session-1", Path(directory))
@@ -172,10 +172,6 @@ class CurrentPlanTests(unittest.TestCase):
             store.save(record)
             loaded = store.read(store.path("session-1"))
         self.assertEqual(current_plan(loaded), current_plan(record))
-        resume = build_resume_context(loaded)
-        self.assertIn("Authoritative current Plan:", resume)
-        self.assertIn("Durable Plan", resume)
-        self.assertNotIn("Stale", resume)
 
     def test_sessions_without_current_schema_fields_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "current schema"):

@@ -457,6 +457,7 @@ class MiraApp(App[None]):
         self._set_status(state="ready")
         self._sync_issues()
         self.action_focus_prompt()
+        self.call_after_refresh(self._start_pending_resume)
 
     def _write_error_report(
         self,
@@ -733,6 +734,7 @@ class MiraApp(App[None]):
         self,
         text: str,
         *,
+        resume_only: bool = False,
         prepared_messages: list[Any] | None = None,
         display_text: str | None = None,
         pinned_skills: list[str] | None = None,
@@ -750,13 +752,16 @@ class MiraApp(App[None]):
                 turn_kwargs["pinned_skills"] = pinned_skills
             if attachments:
                 turn_kwargs["attachments"] = attachments
-            await self.core_session.prompt(
-                text=text,
-                **turn_kwargs,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
+            if resume_only:
+                await self.core_session.resume_pending()
+            else:
+                await self.core_session.prompt(
+                    text=text,
+                    **turn_kwargs,
+                    model_name=self.model_name,
+                    context_limit_tokens=self.context_limit_tokens,
+                    context_limit_source=self.context_limit_source,
+                )
             self._refresh_sessions()
             self._set_status(state="ready")
         except asyncio.CancelledError:
@@ -1266,13 +1271,12 @@ class MiraApp(App[None]):
         )
         if answer != "o" or self.store is None:
             return
-        delete = getattr(self.store, "delete", None)
-        if not callable(delete) or not delete(item.session_id):
+        if not await self.application.delete_session(item.session_id):
             self.notify("The saved chat no longer exists.", title="History")
             self._refresh_sessions()
             return
         if item.session_id == str(self.session.get("id") or ""):
-            self._handle_new_chat()
+            await self._handle_new_chat()
         else:
             self._refresh_sessions()
 
@@ -1280,7 +1284,7 @@ class MiraApp(App[None]):
         """Create and switch to a fresh session outside event handlers."""
         try:
             previous_session = self.session
-            if self._handle_new_chat() and self.session is not previous_session:
+            if await self._handle_new_chat() and self.session is not previous_session:
                 self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"new chat error: {exc}", kind="error")
@@ -1288,7 +1292,7 @@ class MiraApp(App[None]):
         finally:
             self.action_focus_prompt()
 
-    def _handle_new_chat(self) -> bool:
+    async def _handle_new_chat(self) -> bool:
         """Create a fresh saved session while preserving the current one."""
         if self.busy:
             self._notify_busy_action("starting a new chat")
@@ -1297,32 +1301,22 @@ class MiraApp(App[None]):
             self.system_message("new chat needs the normal session store", kind="warning")
             return True
 
-        load = getattr(self.store, "load", None)
-        if callable(load):
-            session = load(None, resume=False, workspace=self.workspace)
-        else:
-            new = getattr(self.store, "new", None)
-            if not callable(new):
-                self.system_message("new chat needs the normal session store", kind="warning")
-                return True
-            session = new(session_id=None, workspace=self.workspace)
-            save = getattr(self.store, "save", None)
-            if callable(save):
-                save(session)
-
-        self._switch_to_session(session)
+        previous = self.core_session
+        core_session = await self.application.open_session()
+        if previous is not None:
+            await previous.close()
+        self._activate_core_session(core_session)
         self.system_message("started new chat", kind="info")
         return True
-
-    def _switch_to_session(self, session: dict[str, Any]) -> None:
-        """Install a new active session without rebuilding agents."""
-        self._activate_core_session(MiraSession(self.application, session))
 
     def _activate_core_session(self, core_session: MiraSession) -> None:
         """Install one headless session projection into the existing UI shell."""
         self.core_session = core_session
         self.session = core_session.record
         self.mode = self.core_session.mode
+        self.agent = core_session.agent
+        self.plan_agent = core_session.plan_agent
+        self.checkpointer = core_session.checkpointer
         self.query_one(SubagentsPanel).reset()
         ensure_dashboard(
             self.session,
@@ -1331,6 +1325,18 @@ class MiraApp(App[None]):
             context_limit_source=self.context_limit_source,
         )
         self._render_current_session()
+        self.call_after_refresh(self._start_pending_resume)
+
+    def _start_pending_resume(self) -> None:
+        """Reopen an interrupted native turn after the chat is rendered."""
+        if self.busy or not getattr(self.core_session, "pending_thread_id", None):
+            return
+        self.busy = True
+        self.query_one(PromptBox).disabled = True
+        self._set_status(state="running")
+        self.turn_worker = self.run_worker(
+            self._run_turn("", resume_only=True), name="resume-turn", exclusive=True
+        )
 
     async def _run_prompts_command(self) -> None:
         """List the exact shared prompt registry after lazy MCP discovery."""
@@ -2176,7 +2182,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear chat cancelled", kind="muted")
                 return True
-            self._clear_current_chat()
+            await self._clear_current_chat()
             self.system_message("current chat history cleared", kind="info")
             return True
 
@@ -2190,7 +2196,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear all chats cancelled", kind="muted")
                 return True
-            sessions, compactions = self._clear_all_chats()
+            sessions, compactions = await self._clear_all_chats()
             session_suffix = "s" if sessions != 1 else ""
             compaction_suffix = "s" if compactions != 1 else ""
             self.system_message(
@@ -2450,6 +2456,11 @@ class MiraApp(App[None]):
         self.issues = issues
         self.mode.update(mode_updates)
         self._sync_core_application()
+        if self.core_session is not None:
+            self.core_session.pending_thread_id = await self.application.pending_thread_for(
+                self.session, self.agent, self.plan_agent
+            )
+            self.call_after_refresh(self._start_pending_resume)
         self.application.workflow_registry = workflow_registry
         self.application.issues = issues
         self.runtime_snapshot = snapshot
@@ -2722,10 +2733,17 @@ class MiraApp(App[None]):
         self._settings_panel = None
         self.action_focus_prompt()
 
-    def _clear_current_chat(self) -> None:
+    async def _clear_current_chat(self) -> None:
         """Reset the active persisted transcript while keeping the same session id."""
+        session_id = str(self.session["id"])
+        if self.core_session is not None:
+            await self.core_session.close(persist=False)
+        self.store.delete_checkpoints(session_id)
         self.session["title"] = "Untitled session"
         self.session["turns"] = 0
+        self.session["plan_runs"] = 0
+        self.session["current_plan"] = None
+        self.session["current_goal"] = None
         self.session["events"] = []
         clear_runs(self.session)
         self.session["dashboard"] = normalize_dashboard(None)
@@ -2737,20 +2755,18 @@ class MiraApp(App[None]):
         )
         if self.store is not None:
             self.store.save(self.session)
-        self._render_current_session()
+        self._activate_core_session(await self.application.open_session(session_id))
 
-    def _clear_all_chats(self) -> tuple[int, int]:
+    async def _clear_all_chats(self) -> tuple[int, int]:
         """Delete saved session files and keep the active session usable."""
         sessions = 0
         compactions = 0
         if self.store is not None:
-            clear_all = getattr(self.store, "clear_all", None)
-            if callable(clear_all):
-                sessions = int(clear_all())
+            sessions = await self.application.clear_all_sessions()
             clear_compactions = getattr(self.store, "clear_compactions", None)
             if callable(clear_compactions):
                 compactions = int(clear_compactions())
-        self._clear_current_chat()
+        self._activate_core_session(await self.application.open_session())
         return sessions, compactions
 
     def _clear_prompt_history(self) -> None:
@@ -4362,6 +4378,8 @@ class MiraApp(App[None]):
         self._set_status(state="running")
         try:
             core_session = await self.application.open_session(session_id, resume=True)
+            if self.core_session is not None:
+                await self.core_session.close()
             self._activate_core_session(core_session)
             self._set_status(state="ready")
         except Exception as exc:
@@ -4522,6 +4540,11 @@ class MiraApp(App[None]):
         )
         self.mode.update(mode_updates)
         self._sync_core_application()
+        if self.core_session is not None:
+            self.core_session.pending_thread_id = await self.application.pending_thread_for(
+                self.session, self.agent, self.plan_agent
+            )
+            self.call_after_refresh(self._start_pending_resume)
         self._set_project_backend(resources.project_backend)
         self._sync_issues()
 
@@ -4541,6 +4564,9 @@ class MiraApp(App[None]):
             settings=config.get("settings"),
             config=config,
         )
+        if self.application is not None:
+            self.application.action_resources = action_resources
+            self.application.agent_metadata = metadata
         plan_resources = build_resources(
             self.workspace,
             create_examples=False,
@@ -4616,6 +4642,10 @@ class MiraApp(App[None]):
             return
         self.application.agent = self.agent
         self.application.plan_agent = self.plan_agent
+        self.application.checkpointer = self.checkpointer
+        if self.core_session is not None:
+            self.core_session.agent = self.agent
+            self.core_session.plan_agent = self.plan_agent
         self.application.config = self.config
         self.application.model_name = self.model_name
         self.application.context_limit_tokens = self.context_limit_tokens

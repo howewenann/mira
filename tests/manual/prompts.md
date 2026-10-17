@@ -2,6 +2,26 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## SQLite Chat Persistence
+
+Use a disposable workspace with a configured model. Send a prompt containing a
+distinct phrase, close MIRA, then reopen with `mira --resume` and ask for that
+phrase. Expected: the previous chat is visible and the model continues from its
+native checkpoint. Create a second chat and switch between them; neither chat
+should contain the other's messages. Run `/reload` and `/reload-runtime` in each
+chat and confirm follow-up prompts still see their own earlier messages.
+
+Start a tool call that asks for approval, exit while the approval is pending,
+and reopen the chat. Expected: the pending interrupt remains resumable and the
+tool executes at most once after approval. Repeat with a delegated subagent.
+Create a Plan and a Goal in separate attempts, restart, then revise each; new
+planning runs must not reuse an earlier thread's state.
+
+Delete one chat, clear the current chat, and clear all chats. Expected: the
+selected history and its checkpoint database disappear, while unrelated chats
+continue normally. A cleared chat starts with empty model state even when it
+keeps the same visible session ID.
+
 ## Stock ACP stdio integration
 
 Install `mira[acp]` and run

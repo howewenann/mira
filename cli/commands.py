@@ -348,7 +348,11 @@ async def _bootstrap(
     )
     progress.startup_progress("loading model metadata...")
     progress.startup_progress("building agents...")
-    core_session = await application.open_session(session, resume=resume)
+    try:
+        core_session = await application.open_session(session, resume=resume)
+    except BaseException:
+        await application.shutdown(persist_sessions=False)
+        raise
     setattr(renderer, "mcp_manager", application.mcp_manager)
 
     return {

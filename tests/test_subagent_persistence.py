@@ -14,7 +14,7 @@ from typing import Any
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
 from core.execution.inspection.persistence import PersistentSubagentRuns
 from core.execution.streams.subagents import consume_subagent
-from session.context import SESSION_FIELDS, normalize_messages, normalize_session, with_resume_context
+from session.context import SESSION_FIELDS, normalize_messages, normalize_session
 from session.store import SessionStore
 from session.subagent_runs import normalize_runs, upsert_run
 from session.workflows import PersistentWorkflowHistory
@@ -420,7 +420,6 @@ class SubagentRunCompatibilityTests(unittest.TestCase):
             }
         ]
         self.assertEqual(normalize_messages(record["events"]), [])
-        self.assertNotIn("secret child", with_resume_context(record, "next request"))
 
     def test_real_load_reconciles_stale_run_without_advancing_recency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

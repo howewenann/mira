@@ -650,6 +650,7 @@ async def run_turn(
     pinned_skills: list[str] | None = None,
     always_allowed_tools: set[str] | None = None,
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
+    resume_existing: bool = False,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -660,21 +661,23 @@ async def run_turn(
     prompt, this function asks the renderer for the needed input and resumes
     the same thread with a ``Command`` payload.
     """
-    payload: dict[str, Any] | Command = {
+    payload: dict[str, Any] | Command | None = None if resume_existing else {
         "messages": list(messages) if messages is not None else [{"role": "user", "content": text}]
     }
-    if pinned_skills:
-        payload["pinned_skills"] = pinned_skills
     refreshed_threads = getattr(agent, "mira_skills_refreshed_threads", None)
-    if isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
-        payload["skills_metadata"] = None
+    if isinstance(payload, dict):
+        if pinned_skills:
+            payload["pinned_skills"] = pinned_skills
+        if isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
+            payload["skills_metadata"] = None
     rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
-    if include_rubric_state:
-        payload["rubric"] = rubric
-    if planning_stage in PLANNING_STAGES:
-        payload["planning_stage"] = planning_stage
-    if planning_state:
-        payload.update(planning_state)
+    if isinstance(payload, dict):
+        if include_rubric_state:
+            payload["rubric"] = rubric
+        if planning_stage in PLANNING_STAGES:
+            payload["planning_stage"] = planning_stage
+        if planning_state:
+            payload.update(planning_state)
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
     historical_tool_lifecycle = await checkpoint_tool_lifecycle(agent, config)

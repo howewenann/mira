@@ -12,7 +12,7 @@ from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.persistence import PersistentSubagentRuns
 from core.execution.inspection.rubric import rubric_inspection_id
 from core.execution.streams.rubric import RubricEventRenderer
-from session.context import normalize_messages, with_resume_context
+from session.context import normalize_messages
 from session.store import SessionStore
 from session.subagent_runs import (
     run_count,
@@ -317,10 +317,7 @@ class RubricPersistenceCompatibilityTests(unittest.TestCase):
                 "events": [{"kind": "assistant", "text": "private raw grader JSON"}],
             }
         ]
-        record["resume_context_pending"] = True
-
         self.assertEqual(normalize_messages(record["events"]), [])
-        self.assertNotIn("private raw grader JSON", with_resume_context(record, "next"))
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from agent.planning.policy import (
 from core.context.observation import context_usage_scope
 from core.interface import Frontend, FrontendEmitter
 from core.execution.runner import TurnResult, run_turn, supported_kwargs
-from session.context import session_mcp_attachments, update_title, with_resume_context
+from session.context import session_mcp_attachments, update_title
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.goals import current_goal, finish_goal_attempt, goal_artifact_text
 from session.plans import current_plan, finish_plan_attempt, plan_artifact_text
@@ -132,6 +132,7 @@ async def run_user_turn(
     turn_runner: Any | None = None,
     rubric_override: str | None = None,
     persist_always_allow: Any | None = None,
+    resume_thread_id: str | None = None,
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
     emitter = FrontendEmitter(
@@ -230,6 +231,7 @@ async def run_user_turn(
         rubric_iterations: int = 3,
         supplied_messages: list[Any] | None = None,
         phase_pinned_skills: list[str] | None = None,
+        resume_existing: bool = False,
     ) -> TurnResult:
         from core.execution.inspection.persistence import PersistentSubagentRuns
 
@@ -258,6 +260,7 @@ async def run_user_turn(
                     {
                         "always_allowed_tools": always_allowed_tools,
                         "persist_always_allow": persist_always_allow,
+                        "resume_existing": resume_existing,
                     },
                 )
                 context_factory = getattr(phase_agent, "mira_context_factory", None)
@@ -280,7 +283,10 @@ async def run_user_turn(
                     planning_stage=stage,
                     planning_state=state,
                     planning_context=execution_context,
-                    messages=invocation_messages(request_text, supplied_messages),
+                    messages=(
+                        None if resume_existing
+                        else invocation_messages(request_text, supplied_messages)
+                    ),
                     pinned_skills=phase_pinned_skills,
                     **policy_kwargs,
                 )
@@ -315,6 +321,69 @@ async def run_user_turn(
         return phase_result
 
     first_phase = True
+    if resume_thread_id is not None:
+        using_plan_agent = resume_thread_id != str(session["id"])
+        mode["planning"] = resume_thread_id == plan_thread_id(session)
+        if not using_plan_agent:
+            mode["executing_plan"] = bool(
+                (current_plan(session) or {}).get("status") == "active"
+            )
+            mode["executing_goal"] = bool(
+                (current_goal(session) or {}).get("status") == "active"
+            )
+        result = await run_phase(
+            phase_agent=plan_agent if using_plan_agent else agent,
+            request_text="",
+            thread_id=resume_thread_id,
+            phase_mode="planning" if mode["planning"] else "action",
+            resume_existing=True,
+        )
+        review = result.formal_review
+        if isinstance(review, dict) and review.get("action") in {"implement", "revise"}:
+            action = str(review["action"])
+            feedback = str(review.get("feedback") or "").strip()
+            if action == "revise":
+                artifact = review.get("artifact")
+                if not isinstance(artifact, dict) or not feedback:
+                    raise RuntimeError("formal revision requires an artifact and feedback")
+                if resume_thread_id == plan_thread_id(session):
+                    mode["planning"] = True
+                    mode["plan_revision"] = {"previous_plan": artifact, "feedback": feedback}
+                else:
+                    mode["plan_runs"] = int(mode.get("plan_runs") or 0) + 1
+                    session["plan_runs"] = mode["plan_runs"]
+                    store.save(session)
+                    mode["goal_revision"] = {"previous_goal": artifact, "feedback": feedback}
+                    mode["goal_staging"] = {
+                        "authoritative_objective": str(artifact.get("objective") or ""),
+                        "thread_id": plan_thread_id(session, mode["plan_runs"]),
+                        "replacement_confirmed": True,
+                    }
+            followup = await run_user_turn(
+                agent=agent, plan_agent=plan_agent, frontend=frontend,
+                store=store, session=session, mode=mode,
+                text=feedback if action == "revise" else "",
+                record_user=False, model_name=model_name,
+                context_limit_tokens=context_limit_tokens,
+                context_limit_source=context_limit_source,
+                turn_runner=turn_runner, rubric_override=rubric_override,
+                persist_always_allow=persist_always_allow,
+            )
+            merge_turn_results(result, followup)
+            return result
+        if mode.get("executing_goal"):
+            finish_goal_attempt(session, rubric_status=result.rubric_status)
+            mode["current_goal"] = current_goal(session)
+            mode["executing_goal"] = False
+        if mode.get("executing_plan"):
+            finish_plan_attempt(session, rubric_status=result.rubric_status)
+            mode["current_plan"] = current_plan(session)
+            mode["executing_plan"] = False
+        session["turns"] = int(session.get("turns") or 0) + 1
+        update_title(session)
+        store.save(session)
+        return result
+
     workflow = "goal" if goal_staging is not None else "plan" if using_planning_agent else ""
     existing_revision = mode.get("goal_revision") if workflow == "goal" else mode.get("plan_revision")
     previous_key = "previous_goal" if workflow == "goal" else "previous_plan"
@@ -345,6 +414,8 @@ async def run_user_turn(
                 thread_id = str((goal_staging or {}).get("thread_id") or mode.get("plan_thread_id"))
             else:
                 mode["plan_runs"] = int(mode.get("plan_runs") or 0) + 1
+                session["plan_runs"] = mode["plan_runs"]
+                store.save(session)
                 thread_id = plan_thread_id(session, mode["plan_runs"])
         else:
             authoritative = str((previous_artifact or {}).get("objective") or text)
@@ -369,9 +440,7 @@ async def run_user_turn(
                 else ""
             ),
         }
-        request_text = with_resume_context(
-            session, proposal, session_root=getattr(store, "root", None)
-        )
+        request_text = proposal
         result = await run_phase(
             phase_agent=plan_agent,
             request_text=request_text,
@@ -417,12 +486,7 @@ async def run_user_turn(
             retained_goal=retained_goal,
             retained_plan=retained_plan,
         )
-        request_text = with_resume_context(
-            session,
-            action_text,
-            exclude_current_goal=retained_goal is not None,
-            session_root=getattr(store, "root", None),
-        )
+        request_text = action_text
         result = await run_phase(
             phase_agent=agent,
             request_text=request_text,

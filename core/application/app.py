@@ -23,8 +23,6 @@ from agent.planning.policy import (
 from agent.tools.specs import mira_environment_label
 from config.settings import rubric_enabled, rubric_max_iterations
 from core.interface import Frontend, FrontendEmitter, MCPApprovalRequest, NullFrontend
-from core.execution.turns import plan_thread_id
-from session.context import mark_resume_context_pending
 from session.dashboard import ensure_dashboard
 from session.goals import current_goal
 from session.plans import current_plan
@@ -67,6 +65,11 @@ class MiraApplication:
         self.workspace = Path(workspace)
         for key, value in state.items():
             setattr(self, key, value)
+        self.agent = getattr(self, "agent", None)
+        self.plan_agent = getattr(self, "plan_agent", None)
+        self.checkpointer = getattr(self, "checkpointer", None)
+        self.action_resources = getattr(self, "action_resources", None)
+        self.agent_metadata = getattr(self, "agent_metadata", None)
         self._sessions: dict[str, MiraSession] = {}
         self._closed = False
         self._policy_refresh_generation = 0
@@ -101,14 +104,13 @@ class MiraApplication:
         frontend: Frontend | None = None,
         config: dict[str, Any] | None = None,
     ) -> "MiraApplication":
-        """Build MIRA's native agents/resources without constructing a UI."""
+        """Initialize shared resources; agents are built when a chat opens."""
         from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
         from agent.mcp import MCPManager
         from agent.resources import build_resources, configure_subagents
         from agent.subagents.discovery import subagent_model_issues
         from config.metadata import ModelMetadata, infer_model_metadata
         from config.runtime import LaunchOptions, load_effective_config
-        from session.checkpoint import make_checkpointer
         from session.store import SessionStore
 
         workspace = Path(workspace).expanduser().resolve()
@@ -116,7 +118,6 @@ class MiraApplication:
         if config is None:
             config = load_effective_config(workspace, LaunchOptions())
         store = SessionStore(Path(config["session_dir"]))
-        checkpointer = make_checkpointer()
         mcp_manager = MCPManager(workspace)
         emitter = FrontendEmitter(frontend)
         mcp_manager.set_activity_handler(
@@ -166,39 +167,27 @@ class MiraApplication:
             context_tokens=int((config.get("settings") or {}).get("models", {}).get("context_limit_tokens", 32768)),
             context_source="settings.models.context_limit_tokens",
         )
-        agent = None
-        plan_agent = None
+        action_resources = None
         if not blocking:
             action_resources = configure_subagents(resources, config)
             inspect_model = get_llm(config, metadata=ModelMetadata())
             metadata = await infer_model_metadata(config, model=inspect_model)
-            agent, plan_agent = build_agent_pair(
-                config=config,
-                workspace=workspace,
-                checkpointer=checkpointer,
-                metadata=metadata,
-                mcp_manager=mcp_manager,
-                action_resources=action_resources,
-            )
         from core.diagnostics.issues import unique_issues
 
-        issues = unique_issues(
-            [
-                *issues,
-                *getattr(agent, "mira_resource_issues", []),
-            ]
-        )
+        issues = unique_issues(issues)
         return cls(
             frontend=frontend,
             workspace=workspace,
-            agent=agent,
-            plan_agent=plan_agent,
+            agent=None,
+            plan_agent=None,
             config=config,
             model_name=get_model_name(config),
             context_limit_tokens=metadata.context_tokens,
             context_limit_source=metadata.context_source,
             store=store,
-            checkpointer=checkpointer,
+            checkpointer=None,
+            action_resources=action_resources,
+            agent_metadata=metadata,
             mcp_manager=mcp_manager,
             tool_failures=resources.tool_failures,
             issues=issues,
@@ -221,23 +210,114 @@ class MiraApplication:
         if self._closed:
             raise RuntimeError("MIRA application is shut down")
         record = self.store.load(session_id, resume=resume, workspace=self.workspace)
-        mark_resume_context_pending(record, resumed=bool(session_id or resume))
-        ensure_dashboard(
-            record,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
+        existing = self._sessions.get(str(record["id"]))
+        if existing is not None:
+            await existing.close()
+            record = self.store.load(str(record["id"]), resume=True, workspace=self.workspace)
+        checkpoint_path = self.store.checkpoint_path(str(record["id"]))
+        historical = int(record.get("turns") or 0) > 0 or any(
+            event.get("type") in {"user", "assistant", "tool_call", "plan", "goal"}
+            for event in record.get("events", ()) if isinstance(event, dict)
         )
-        session = MiraSession(self, record)
+        if historical and not checkpoint_path.is_file():
+            raise RuntimeError(f"Chat {record['id']} has no LangGraph checkpoint database")
+        manager = None
+        pending_thread_id = None
+        agent = self.agent if self.action_resources is None else None
+        plan_agent = self.plan_agent if self.action_resources is None else None
+        from session.checkpoint import session_checkpointer
+
+        manager = session_checkpointer(checkpoint_path)
+        checkpointer = None
+        try:
+            checkpointer = await manager.__aenter__()
+            if historical:
+                history = checkpointer.alist(None, limit=1)
+                try:
+                    has_checkpoint = await anext(history, None) is not None
+                finally:
+                    await history.aclose()
+                if not has_checkpoint:
+                    raise RuntimeError(f"Chat {record['id']} has no LangGraph checkpoints")
+            if self.action_resources is not None:
+                agent, plan_agent = build_agent_pair(
+                    config=self.config,
+                    workspace=self.workspace,
+                    checkpointer=checkpointer,
+                    metadata=self.agent_metadata,
+                    mcp_manager=self.mcp_manager,
+                    action_resources=self.action_resources,
+                )
+                from core.diagnostics.issues import unique_issues
+
+                self.issues = unique_issues([
+                    *getattr(self, "issues", []), *getattr(agent, "mira_resource_issues", [])
+                ])
+                pending_thread_id = await self.pending_thread_for(record, agent, plan_agent)
+        except BaseException:
+            if checkpointer is not None:
+                await manager.__aexit__(None, None, None)
+            raise
+        try:
+            ensure_dashboard(
+                record,
+                model_name=self.model_name,
+                context_limit_tokens=self.context_limit_tokens,
+                context_limit_source=self.context_limit_source,
+            )
+            session = MiraSession(
+                self, record, agent=agent, plan_agent=plan_agent,
+                checkpointer=checkpointer, checkpoint_manager=manager,
+            )
+        except BaseException:
+            await manager.__aexit__(None, None, None)
+            raise
+        session.pending_thread_id = pending_thread_id
+        self.agent, self.plan_agent, self.checkpointer = agent, plan_agent, checkpointer
         FrontendEmitter(self.frontend, session_id=session.id).session_state(
             "opened",
             {"resume": bool(session_id or resume)},
         )
         return session
 
+    @staticmethod
+    async def pending_thread_for(record: dict[str, Any], agent: Any, plan_agent: Any) -> str | None:
+        """Find the latest unfinished native graph thread in one chat."""
+        if agent is None or plan_agent is None:
+            return None
+        session_id = str(record["id"])
+        threads = [session_id, f"{session_id}:plan"]
+        threads.extend(
+            f"{session_id}:plan:{number}"
+            for number in range(1, int(record.get("plan_runs") or 0) + 1)
+        )
+        pending = []
+        for thread_id in threads:
+            graph = agent if thread_id == session_id else plan_agent
+            getter = getattr(graph, "aget_state", None)
+            if not callable(getter):
+                continue
+            snapshot = await getter({"configurable": {"thread_id": thread_id}})
+            if snapshot.next:
+                pending.append((str(snapshot.created_at or ""), thread_id))
+        return max(pending)[1] if pending else None
+
     def session_exists(self, session_id: str) -> bool:
         """Return whether an explicit durable session already exists."""
         return bool(session_id) and self.store.path(session_id).is_file()
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Close an open chat before removing its JSON and SQLite files."""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            await session.close(persist=False)
+        return self.store.delete(session_id)
+
+    async def clear_all_sessions(self) -> int:
+        """Close every chat before clearing saved chat files."""
+        for session in tuple(self._sessions.values()):
+            await session.close(persist=False)
+        return self.store.clear_all()
 
     def persist_tool_always_allow(self, agent: Any, action: dict[str, Any]) -> None:
         """Persist one interrupted tool's existing MIRA always-allow policy."""
@@ -294,34 +374,47 @@ class MiraApplication:
                 config=None,
             )
             action_resources = configure_subagents(resources, self.config)
-            agent, plan_agent = build_agent_pair(
-                config=self.config,
-                workspace=self.workspace,
-                checkpointer=self.checkpointer,
-                metadata=metadata,
-                mcp_manager=self.mcp_manager,
-                action_resources=action_resources,
-            )
-            self.agent, self.plan_agent = agent, plan_agent
+            self.action_resources = action_resources
+            self.agent_metadata = metadata
             self.tool_failures = resources.tool_failures
             self.resource_metadata = resources.metadata
             self.project_backend = resources.project_backend
             for session in self._sessions.values():
-                refresh_agent_specs(session.mode, agent, plan_agent)
+                session.agent, session.plan_agent = build_agent_pair(
+                    config=self.config, workspace=self.workspace,
+                    checkpointer=session.checkpointer, metadata=metadata,
+                    mcp_manager=self.mcp_manager, action_resources=action_resources,
+                )
+                refresh_agent_specs(session.mode, session.agent, session.plan_agent)
                 session.mode["resources"] = resources.metadata
+            active = next(reversed(list(self._sessions.values())), None)
+            if active is not None:
+                self.agent, self.plan_agent, self.checkpointer = (
+                    active.agent, active.plan_agent, active.checkpointer
+                )
             self._policy_refreshed_generation = generation
 
     async def shutdown(self, *, persist_sessions: bool = True) -> None:
         """Close sessions and shared external resources."""
         if self._closed:
             return
-        for session in tuple(self._sessions.values()):
-            if session.runtime_state != "closed":
-                await session.close(persist=persist_sessions)
-        mcp_manager = getattr(self, "mcp_manager", None)
-        if mcp_manager is not None:
-            await mcp_manager.shutdown()
-        self._closed = True
+        results = await asyncio.gather(
+            *(
+                session.close(persist=persist_sessions)
+                for session in tuple(self._sessions.values())
+                if session.runtime_state != "closed"
+            ),
+            return_exceptions=True,
+        )
+        try:
+            mcp_manager = getattr(self, "mcp_manager", None)
+            if mcp_manager is not None:
+                await mcp_manager.shutdown()
+        finally:
+            self._closed = True
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
 
 def build_agent_pair(
@@ -333,7 +426,7 @@ def build_agent_pair(
     mcp_manager: Any,
     action_resources: Any,
 ) -> tuple[Any, Any]:
-    """Build the shared Act/Plan pair without touching live MCP connections."""
+    """Build one chat's Act/Plan pair without touching live MCP connections."""
     from agent.factory import build_agent, build_plan_agent
     from agent.resources import build_resources
 
@@ -365,6 +458,8 @@ def initial_mode(
     session: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return MIRA's mutable semantic state for one application session."""
+    from core.execution.turns import plan_thread_id
+
     return {
         "planning": False,
         "current_plan": current_plan(session or {}),
@@ -378,7 +473,7 @@ def initial_mode(
         "rubric_enabled": rubric_enabled(settings),
         "rubric_max_iterations": rubric_max_iterations(settings),
         "plan_counter": 0,
-        "plan_runs": 0,
+        "plan_runs": int((session or {}).get("plan_runs") or 0),
         "plan_thread_id": plan_thread_id(session) if session else "",
         "action_tools": tool_specs(agent),
         "planning_tools": tool_specs(plan_agent),
@@ -392,6 +487,8 @@ def select_mode(
     requested: str,
 ) -> None:
     """Apply ACT/PLAN semantics to authoritative session state."""
+    from core.execution.turns import plan_thread_id
+
     normalized = requested.strip().lower()
     if normalized not in {"act", "action", "plan", "planning"}:
         raise ValueError(f"unknown MIRA mode: {requested}")
@@ -400,7 +497,6 @@ def select_mode(
     mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
     if planning:
         mode["plan_thread_id"] = plan_thread_id(session)
-        mark_resume_context_pending(session, resumed=True)
 
 
 def refresh_agent_specs(mode: dict[str, Any], agent: Any, plan_agent: Any) -> None:

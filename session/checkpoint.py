@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from typing import Any
 
+import aiosqlite
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from pydantic import BaseModel
@@ -54,8 +58,18 @@ class MiraMemorySaver(MemorySaver):
 
 
 def make_checkpointer() -> MemorySaver:
-    """Create an in-memory LangGraph checkpointer for agents or Workflows."""
+    """Create a transient LangGraph checkpointer for standalone Workflows."""
     return MiraMemorySaver(serde=MiraJsonPlusSerializer())
+
+
+@asynccontextmanager
+async def session_checkpointer(path: Path) -> AsyncIterator[AsyncSqliteSaver]:
+    """Keep one native SQLite saver open for a chat's agent lifetime."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(path) as connection:
+        saver = AsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+        await saver.setup()
+        yield saver
 
 
 def normalize_checkpoint_value(value: Any) -> Any:

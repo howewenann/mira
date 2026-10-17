@@ -133,177 +133,10 @@ class Message:
 
 
 class SessionContextTests(unittest.IsolatedAsyncioTestCase):
-    def test_workflow_breadcrumb_points_to_session_without_expanding_details(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            record = SessionStore(workspace / ".mira" / "_sessions").new(
-                session_id="thread-1", workspace=workspace
-            )
-            record["events"] = [
-                {
-                    "type": "workflow",
-                    "workflow_name": "stream_capture",
-                    "workflow_id": "workflow-stream_capture:abc123",
-                    "status": "DONE",
-                    "command": "/workflow__stream_capture private-command",
-                    "tasks": [
-                        {
-                            "task_id": "task-1",
-                            "name": "research",
-                            "status": "DONE",
-                            "result_available": True,
-                            "result": {
-                                "display_text": "private task result",
-                                "copy_text": "private task result",
-                            },
-                            "agents": [{"inspection_id": "inspection-1", "name": "researcher"}],
-                        }
-                    ],
-                    "final_state_available": True,
-                    "final_state": {
-                        "display_text": "private final state",
-                        "copy_text": "private final state",
-                    },
-                }
-            ]
-            record["runs"] = [{"inspection_id": "inspection-1", "output": "private agent transcript"}]
 
-            resume = context.build_resume_context(record)
 
-        self.assertIn("stream_capture [DONE]", resume)
-        self.assertIn("workflow_id: workflow-stream_capture:abc123", resume)
-        self.assertIn("Session history: /.mira/_sessions/thread-1.json", resume)
-        self.assertIn('events[] item with type="workflow" and matching workflow_id', resume)
-        self.assertIn("runs[] item with matching inspection_id", resume)
-        self.assertIn("grep/read_file", resume)
-        for private in (
-            "private-command",
-            "private task result",
-            "private final state",
-            "private agent transcript",
-        ):
-            self.assertNotIn(private, resume)
-        self.assertEqual(context.normalize_messages(record["events"]), [])
-        context.update_title(record)
-        self.assertEqual(record["title"], "Untitled session")
-        self.assertEqual(record["turns"], 0)
 
-    def test_workflow_breadcrumb_uses_last_ten_terminal_runs_in_transcript_order(self) -> None:
-        record = {
-            "events": [
-                {
-                    "type": "workflow",
-                    "workflow_id": f"wf-{index}",
-                    "workflow_name": f"run-{index}",
-                    "status": "DONE" if index % 2 else "INTERRUPTED",
-                }
-                for index in range(12)
-            ]
-        }
 
-        resume = context.workflow_history_context(record)
-
-        self.assertNotIn("workflow_id: wf-0\n", resume)
-        self.assertNotIn("workflow_id: wf-1\n", resume)
-        self.assertEqual(resume.count("workflow_id:"), 10)
-        self.assertLess(resume.index("wf-2"), resume.index("wf-11"))
-
-        record["events"].append({
-            "type": "workflow", "workflow_id": "active",
-            "workflow_name": "active", "status": "RUNNING",
-        })
-        resume = context.workflow_history_context(record)
-        self.assertNotIn("workflow_id: wf-2\n", resume)
-        self.assertNotIn("workflow_id: active", resume)
-        self.assertEqual(resume.count("workflow_id:"), 9)
-
-    def test_workflow_only_session_resumes_once(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            store = SessionStore(workspace / ".mira" / "_sessions")
-            record = store.new(session_id="thread-1", workspace=workspace)
-            record["events"] = [
-                {
-                    "type": "workflow", "workflow_id": "wf-1",
-                    "workflow_name": "demo", "status": "ERROR",
-                }
-            ]
-            store.save(record)
-            restored = store.load("thread-1", resume=False, workspace=workspace)
-
-            context.mark_resume_context_pending(restored, resumed=True)
-            self.assertTrue(restored["resume_context_pending"])
-            first = context.with_resume_context(
-                restored, "What happened?", session_root=store.root
-            )
-            second = context.with_resume_context(
-                restored, "Next question", session_root=store.root
-            )
-
-        self.assertIn("Previous MIRA session context:", first)
-        self.assertIn("demo [ERROR]", first)
-        self.assertIn("Current user request:\nWhat happened?", first)
-        self.assertEqual(second, "Next question")
-
-    def test_external_session_directory_has_no_unreadable_history_pointer(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory) / "project"
-            record = {
-                "id": "thread-1",
-                "workspace": str(workspace),
-                "events": [
-                    {
-                        "type": "workflow", "workflow_id": "wf-1",
-                        "workflow_name": "demo", "status": "CANCELLED",
-                    }
-                ],
-            }
-
-            resume = context.build_resume_context(
-                record, session_root=Path(directory) / "external_sessions"
-            )
-
-        self.assertIn("demo [CANCELLED]", resume)
-        self.assertNotIn("Session history:", resume)
-        self.assertNotIn("external_sessions", resume)
-
-    async def test_completed_workflow_marks_next_turn_in_same_process(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            store = SessionStore(workspace / ".mira" / "_sessions")
-            record = store.new(session_id="thread-1", workspace=workspace)
-            observer = PersistentWorkflowHistory(Mock(), record, store, command="/workflow__demo")
-            observer.workflow_started("workflow-demo:1", "demo")
-            self.assertFalse(record.get("resume_context_pending"))
-            observer.workflow_finished(
-                "workflow-demo:1", final_state={"secret": "value"}, final_state_available=True
-            )
-            self.assertTrue(record["resume_context_pending"])
-            self.assertNotIn("resume_context_pending", store.read(store.path("thread-1")))
-            requests: list[str] = []
-
-            async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
-                requests.append(str(kwargs["text"]))
-                return runner.TurnResult(final_text="The Workflow completed.")
-
-            agent = AgentWithState({})
-            with patch("tests.support.turns.run_turn", fake_run_turn):
-                await run_user_turn(
-                    agent=agent,
-                    plan_agent=agent,
-                    renderer=RunTurnRenderer(),
-                    store=store,
-                    session=record,
-                    mode={"planning": False},
-                    text="What happened?",
-                )
-
-        self.assertEqual(len(requests), 1)
-        self.assertIn("demo [DONE]", requests[0])
-        self.assertIn("Session history: /.mira/_sessions/thread-1.json", requests[0])
-        self.assertNotIn("secret", requests[0])
-        self.assertFalse(record.get("resume_context_pending"))
-        self.assertEqual(record["turns"], 1)
 
     def test_new_session_id_is_timestamped(self) -> None:
         record = SessionStore(Path(".")).new(session_id=None, workspace=Path("workspace"))
@@ -388,6 +221,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 "created_at",
                 "updated_at",
                 "turns",
+                "plan_runs",
                 "dashboard",
                 "current_plan",
                 "current_goal",
@@ -427,17 +261,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(latest)
         self.assertEqual(latest.stem, "newer")
 
-    def test_transient_resume_flag_survives_save_without_being_persisted(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = SessionStore(Path(directory))
-            record = store.new(session_id="thread-1", workspace=Path("workspace"))
-            record["resume_context_pending"] = True
-
-            store.save(record)
-            restored = store.read(store.path("thread-1"))
-
-        self.assertTrue(record["resume_context_pending"])
-        self.assertNotIn("resume_context_pending", restored)
 
     def test_current_goal_survives_save_load_and_old_events_are_discarded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -511,15 +334,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["events"][0]["status"], "superseded")
         self.assertEqual(record["current_goal"]["id"], "goal-2")
 
-    def test_action_resume_context_can_exclude_duplicate_current_goal(self) -> None:
-        goal = goal_artifact(goal_id="goal-1", title="Search", objective="Build search.", success_criteria="- Search works.", rubric_enabled=True, rubric_iterations=3)
-        record = {"current_goal": goal, "events": [{"id": 1, "type": "goal", "goal": goal, "status": "proposed"}]}
-
-        planning_context = context.build_resume_context(record)
-        action_context = context.build_resume_context(record, exclude_current_goal=True)
-
-        self.assertIn("Authoritative current Goal", planning_context)
-        self.assertNotIn("Authoritative current Goal", action_context)
 
     def test_dashboard_usage_is_persisted_in_session_shape(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -1000,57 +814,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(event[0] == "correction" for event in renderer.events))
 
-    def test_complete_response_status_survives_session_and_resume_context(self) -> None:
-        record = {"events": []}
-        recorder = SessionRecorder(record, Store(), "planning")
-        recording = SessionEventEmitter(RunTurnRenderer(), recorder)
 
-        exact = "Navigation explained.\nRESPONSE_STATUS: COMPLETE"
-        recording.text_delta(exact)
-        recording.finish_main()
-
-        events = context.normalize_events(record["events"])
-        self.assertEqual(events[-1]["text"], exact)
-        resume = context.build_resume_context(
-            {"events": events, "current_plan": None, "current_goal": None}
-        )
-        self.assertIn(exact, resume)
-
-    def test_correction_exhaustion_keeps_last_candidate_and_appends_failure(self) -> None:
-        record = {"events": []}
-        recorder = SessionRecorder(record, Store(), "planning")
-        renderer = RunTurnRenderer()
-        recording = SessionEventEmitter(renderer, recorder)
-
-        recording.text_delta("Still researching.\nRESPONSE_STATUS: NEEDS_RESEARCH")
-        recording.correction(
-            {
-                "type": "correction",
-                "protocol": "plan_response_status",
-                "check_name": "Response",
-                "workflow": "Plan",
-                "failed_check": (
-                    "RESPONSE_STATUS: NEEDS_RESEARCH was declared without a tool call."
-                ),
-                "attempt": 2,
-                "max_retries": 2,
-                "exhausted": True,
-            }
-        )
-        recording.text_delta("MIRA could not produce a valid response.")
-
-        events = context.normalize_events(record["events"])
-        self.assertEqual([event["type"] for event in events], ["assistant", "correction", "assistant"])
-        self.assertEqual(
-            events[0]["text"],
-            "Still researching.\nRESPONSE_STATUS: NEEDS_RESEARCH",
-        )
-        self.assertTrue(events[1]["exhausted"])
-        self.assertEqual(events[2]["text"], "MIRA could not produce a valid response.")
-        self.assertIn(
-            "correction (planning): Response check (Plan) failed",
-            context.build_resume_context({"events": events, "current_plan": None, "current_goal": None}),
-        )
 
     def test_recovered_call_and_result_persist_before_final_assistant(self) -> None:
         record = {"events": []}
@@ -1390,28 +1154,6 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[0]["evaluation"]["duration_ms"], 65_000)
         self.assertEqual(events[0]["max_iterations"], 1)
 
-    def test_proposal_events_are_discarded(self) -> None:
-        events = [
-            {
-                "id": 1,
-                "type": "proposal",
-                "status": "pending",
-                "proposal": {
-                    "id": "proposal-1",
-                    "kind": "plan",
-                    "original_objective": "Build search.",
-                    "objective": "Build search.\n\nResolved decisions:\n- Backend: SQLite",
-                    "resolved_decisions": [{"question": "Backend?", "answer": "SQLite"}],
-                    "criteria": "- Search returns ranked results.",
-                    "plan": {"id": "plan-1", "title": "Search plan", "summary": ["Add search."]},
-                    "rubric_iterations": 3,
-                },
-            }
-        ]
-
-        self.assertEqual(context.normalize_events(events), [])
-        self.assertEqual(context.normalize_goals(events), [])
-        self.assertEqual(context.build_resume_context({"events": events}), "")
 
     def test_malformed_persisted_iteration_values_restore_defaults(self) -> None:
         events = [
@@ -1632,65 +1374,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    def test_done_subagent_output_contributes_to_resume_context(self) -> None:
-        record = {
-            "events": [
-                {
-                    "id": 1,
-                    "type": "subagent",
-                    "mode": "action",
-                    "name": "general-purpose [one]",
-                    "status": "RUNNING",
-                    "task_input": "find dead code",
-                    "output": "",
-                },
-                {
-                    "id": 2,
-                    "type": "subagent",
-                    "mode": "action",
-                    "name": "general-purpose [one]",
-                    "status": "DONE",
-                    "task_input": "find dead code",
-                    "output": "No dead code found.",
-                },
-            ]
-        }
 
-        messages = context.normalize_messages(record["events"])
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["role"], "subagent")
-        self.assertIn("general-purpose [one] completed", messages[0]["content"])
-        self.assertIn("Request:\nfind dead code", messages[0]["content"])
-        self.assertIn("Output:\nNo dead code found.", messages[0]["content"])
-
-        resume = context.build_resume_context(record)
-        self.assertIn("subagent (action):", resume)
-        self.assertIn("No dead code found.", resume)
-
-    def test_cancelled_subagent_output_contributes_to_resume_context(self) -> None:
-        record = {
-            "events": [
-                {
-                    "id": 1,
-                    "type": "subagent",
-                    "mode": "action",
-                    "name": "general-purpose [one]",
-                    "status": "CANCELLED",
-                    "task_input": "inspect README",
-                    "output": "Partial notes before cancellation.",
-                },
-            ]
-        }
-
-        messages = context.normalize_messages(record["events"])
-        self.assertEqual(len(messages), 1)
-        self.assertEqual(messages[0]["role"], "subagent")
-        self.assertIn("general-purpose [one] was cancelled", messages[0]["content"])
-        self.assertIn("Partial notes before cancellation.", messages[0]["content"])
-
-        resume = context.build_resume_context(record)
-        self.assertIn("subagent (action):", resume)
-        self.assertIn("Partial notes before cancellation.", resume)
 
     def test_recorder_deduplicates_delegation_events(self) -> None:
         record = {"events": []}
@@ -1910,111 +1594,9 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["type"] for event in events], ["user", "assistant"])
         self.assertFalse(any(event["type"] == "compaction" for event in events))
 
-    def test_resume_context_injects_once(self) -> None:
-        record = {
-            "resume_context_pending": True,
-            "events": [
-                {
-                    "id": 1,
-                    "type": "compaction",
-                    "cutoff_index": 8,
-                    "file_path": "/.mira/conversation_history/thread-1.md",
-                    "summary": "Earlier work debugged session latency.",
-                    "created_at": "now",
-                },
-                {
-                    "id": 2,
-                    "type": "user",
-                    "mode": "action",
-                    "created_at": "now",
-                    "text": "recent request",
-                },
-            ],
-        }
 
-        first = context.with_resume_context(record, "next request")
-        second = context.with_resume_context(record, "another request")
 
-        self.assertIn("Previous MIRA session context:", first)
-        self.assertIn("Earlier work debugged session latency.", first)
-        self.assertIn("/.mira/conversation_history/thread-1.md", first)
-        self.assertIn("recent request", first)
-        self.assertEqual(second, "another request")
 
-    async def test_resumed_tui_turn_keeps_context_through_initial_session_save(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            store = SessionStore(Path(directory))
-            record = store.new(session_id="thread-1", workspace=Path("workspace"))
-            context.append_event(
-                record,
-                {"type": "user", "mode": "action", "text": "Write a story about Elara."},
-            )
-            context.append_event(
-                record,
-                {"type": "assistant", "mode": "action", "text": "Elara protected the archive."},
-            )
-            store.save(record)
-            context.mark_resume_context_pending(record, resumed=True)
-            requests: list[str] = []
-
-            async def fake_run_turn(*args: Any, **kwargs: Any) -> runner.TurnResult:
-                requests.append(str(kwargs["text"]))
-                return runner.TurnResult(final_text="We were writing Elara's story.")
-
-            agent = AgentWithState({})
-            with patch("tests.support.turns.run_turn", fake_run_turn):
-                await run_user_turn(
-                    agent=agent,
-                    plan_agent=agent,
-                    renderer=RunTurnRenderer(),
-                    store=store,
-                    session=record,
-                    mode={"planning": False},
-                    text="What were we talking about?",
-                )
-
-        self.assertEqual(len(requests), 1)
-        self.assertIn("Previous MIRA session context:", requests[0])
-        self.assertIn("Write a story about Elara.", requests[0])
-        self.assertIn("Elara protected the archive.", requests[0])
-        self.assertIn("Current user request:\nWhat were we talking about?", requests[0])
-        self.assertFalse(record.get("resume_context_pending"))
-
-    def test_old_historical_plan_events_are_discarded(self) -> None:
-        record = {
-            "events": [
-                {
-                    "id": index,
-                    "type": "plan",
-                    "status": "discarded" if index == 2 else "pending",
-                    "plan": {
-                        "id": f"plan-{index}",
-                        "title": f"Plan {index}",
-                        "summary": [f"Summary {index}."],
-                    },
-                }
-                for index in range(1, 5)
-            ],
-        }
-
-        self.assertEqual(context.normalize_events(record["events"]), [])
-        self.assertEqual(context.build_resume_context(record), "")
-
-    def test_resume_context_not_pending_for_historical_plan_events_only(self) -> None:
-        record = {
-            "events": [
-                {
-                    "id": 1,
-                    "type": "plan",
-                    "status": "discarded",
-                    "plan": {"id": "plan-1", "title": "Saved Plan", "summary": ["Do it."]},
-                }
-            ]
-        }
-
-        context.mark_resume_context_pending(record, resumed=True)
-
-        self.assertFalse(record["resume_context_pending"])
 
 
 if __name__ == "__main__":

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from session.dashboard import normalize_dashboard
-from session.goals import goal_artifact_text, normalize_current_goal
-from session.plans import normalize_current_plan, plan_artifact_text
+from session.goals import normalize_current_goal
+from session.plans import normalize_current_plan
 from session.subagent_runs import normalize_runs
 from session.workflows import normalize_workflow_event
 from core.execution.streams.corrections import correction_context_text, normalize_correction_event
@@ -17,10 +16,6 @@ from core.execution.streams.corrections import correction_context_text, normaliz
 UNTITLED_SESSION = "Untitled session"
 TITLE_MAX_CHARS = 48
 TITLE_MESSAGE_LIMIT = 3
-RESUME_MESSAGE_LIMIT = 20
-RESUME_GOAL_LIMIT = 3
-RESUME_WORKFLOW_LIMIT = 10
-TERMINAL_WORKFLOW_STATUSES = {"DONE", "ERROR", "CANCELLED", "INTERRUPTED"}
 
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL | re.IGNORECASE)
 SESSION_FIELDS = {
@@ -61,6 +56,7 @@ def normalize_session(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": str(record.get("created_at", now_iso())),
         "updated_at": str(record.get("updated_at", record.get("created_at", now_iso()))),
         "turns": int(record.get("turns") or 0),
+        "plan_runs": int(record.get("plan_runs") or 0),
         "dashboard": normalize_dashboard(record.get("dashboard")),
         "current_plan": plan,
         "current_goal": goal,
@@ -260,7 +256,7 @@ def session_mcp_attachments(record: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def subagent_message_text(event: dict[str, Any], output: str) -> str:
-    """Return resume-context text for a terminal subagent."""
+    """Return readable transcript text for a terminal subagent."""
     name = compact_line(event.get("name") or "subagent")
     task_input = compact_text(event.get("task_input"))
     status = compact_line(event.get("status") or "DONE")
@@ -391,138 +387,6 @@ def is_known_compaction(record: dict[str, Any], compaction: dict[str, Any]) -> b
         ):
             return True
     return False
-
-
-def workflow_history_context(record: dict[str, Any], *, session_root: Path | None = None) -> str:
-    """Point the model to recent Workflow records in the authoritative session JSON."""
-    workflows = [
-        event
-        for event in normalize_events(record.get("events"))
-        if event["type"] == "workflow"
-    ][-RESUME_WORKFLOW_LIMIT:]
-    workflows = [
-        event for event in workflows if event["status"] in TERMINAL_WORKFLOW_STATUSES
-    ]
-    if not workflows:
-        return ""
-
-    lines = ["Workflow history available in this MIRA session:"]
-    for event in workflows:
-        lines.append(
-            f"- {compact_line(event['workflow_name'])} [{event['status']}]\n"
-            f"  workflow_id: {compact_line(event['workflow_id'])}"
-        )
-
-    workspace = str(record.get("workspace") or "")
-    session_id = str(record.get("id") or "")
-    if workspace and session_id:
-        project = Path(workspace).resolve()
-        root = (
-            Path(session_root).resolve()
-            if session_root is not None
-            else project / ".mira" / "_sessions"
-        )
-        try:
-            relative = (root / f"{session_id}.json").resolve().relative_to(project)
-        except ValueError:
-            pass  # An external session directory is not readable through the project backend.
-        else:
-            lines.extend(
-                [
-                    f"Session history: /{relative.as_posix()}",
-                    "Workflow lookup:",
-                    '- Workflow record: events[] item with type="workflow" and matching workflow_id',
-                    "- Nested agent detail: runs[] item with matching inspection_id from the Workflow agent row",
-                    "- Use grep/read_file only when Workflow details are needed",
-                ]
-            )
-    return "\n".join(lines)
-
-
-def build_resume_context(
-    record: dict[str, Any],
-    *,
-    exclude_current_goal: bool = False,
-    session_root: Path | None = None,
-) -> str:
-    compactions = normalize_compactions(record.get("events"))
-    retained_plan = normalize_current_plan(record.get("current_plan"))
-    retained_goal = normalize_current_goal(record.get("current_goal"))
-    historical_goals = normalize_goals(record.get("events"))[-RESUME_GOAL_LIMIT:]
-    if retained_goal is not None:
-        historical_goals = [value for value in historical_goals if value["id"] != retained_goal["id"]]
-    messages = normalize_messages(record.get("events"))[-RESUME_MESSAGE_LIMIT:]
-    workflow_context = workflow_history_context(record, session_root=session_root)
-    if not (
-        compactions
-        or retained_plan
-        or retained_goal
-        or historical_goals
-        or messages
-        or workflow_context
-    ):
-        return ""
-
-    parts = ["Previous MIRA session context:"]
-    if compactions:
-        latest = compactions[-1]
-        if latest["summary"]:
-            parts.append("Latest DeepAgents compaction summary:")
-            parts.append(latest["summary"])
-        if latest["file_path"]:
-            parts.append(f"Evicted conversation archive: {latest['file_path']}")
-    if retained_plan:
-        parts.append("Authoritative current Plan:")
-        parts.append(
-            f"Status: {retained_plan['status']}\n{plan_artifact_text(retained_plan)}"
-        )
-    if retained_goal and not exclude_current_goal:
-        parts.append("Authoritative current Goal:")
-        parts.append(f"Status: {retained_goal['status']}\n{goal_artifact_text(retained_goal)}")
-    if historical_goals:
-        parts.append("Historical Goals (not authoritative):")
-        for value in historical_goals:
-            parts.append(f"{value['id']} ({value.get('event_status') or value['status']})\n{goal_artifact_text(value)}")
-    if messages:
-        parts.append("Recent visible transcript:")
-        for message in messages:
-            parts.append(f"{message['role']} ({message['mode']}): {message['content']}")
-    if workflow_context:
-        parts.append(workflow_context)
-    parts.append("Continue from this context without assuming unstated details.")
-    return "\n".join(parts)
-
-
-def with_resume_context(
-    session: dict[str, Any],
-    text: str,
-    *,
-    exclude_current_goal: bool = False,
-    session_root: Path | None = None,
-) -> str:
-    if not session.pop("resume_context_pending", False):
-        return text
-
-    context = build_resume_context(
-        session, exclude_current_goal=exclude_current_goal, session_root=session_root
-    )
-    if not context:
-        return text
-    return f"{context}\n\nCurrent user request:\n{text}"
-
-
-def mark_resume_context_pending(record: dict[str, Any], *, resumed: bool) -> None:
-    record["resume_context_pending"] = resumed and (
-        bool(normalize_compactions(record.get("events")))
-        or bool(normalize_current_plan(record.get("current_plan")))
-        or bool(normalize_current_goal(record.get("current_goal")))
-        or bool(normalize_goals(record.get("events")))
-        or bool(normalize_messages(record.get("events")))
-        or any(
-            event["type"] == "workflow" and event["status"] in TERMINAL_WORKFLOW_STATUSES
-            for event in normalize_events(record.get("events"))
-        )
-    )
 
 
 def safe_title(value: Any) -> str:

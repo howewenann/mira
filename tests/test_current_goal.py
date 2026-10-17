@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from core.execution.runner import TurnResult
-from session.context import build_resume_context, normalize_session
+from session.context import normalize_session
 from session.goals import (
     clear_current_goal,
     current_goal,
@@ -140,14 +140,6 @@ class CurrentGoalTests(unittest.TestCase):
         record["current_goal"] = goal
         with self.assertRaisesRegex(ValueError, "cannot contain both"):
             normalize_session(record)
-
-    def test_resume_context_labels_only_current_goal_authoritative(self) -> None:
-        goal = artifact()
-        record = {"events": [{"id": 1, "type": "goal", "goal": goal, "status": "proposed"}], "current_goal": goal}
-        text = build_resume_context(record)
-        self.assertIn("Authoritative current Goal", text)
-        self.assertIn("Success Criteria", text)
-        self.assertNotIn("Plan:", text)
 
     def test_action_context_contains_no_plan_fields(self) -> None:
         text = action_request_text({}, "Continue.", retained_goal=artifact())

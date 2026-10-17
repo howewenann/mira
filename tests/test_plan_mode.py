@@ -921,59 +921,6 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
 
-    async def test_plan_command_primes_resume_context_for_current_plan(self) -> None:
-        """Plan mode should carry only the authoritative retained Plan."""
-        renderer = RecordingRenderer()
-        mode: dict[str, Any] = {"planning": False}
-        session = {
-            "id": "thread-1",
-            "workspace": ".",
-            "turns": 1,
-            "current_plan": plan_artifact(
-                plan_id="plan-1",
-                title="Palindrome Plan",
-                objective="Create palindrome.py.",
-                context_and_constraints="Use Python.",
-                key_changes=["Add is_palindrome."],
-                test_plan=["Run python palindrome.py."],
-                assumptions=["Use Python."],
-                success_criteria="- Palindromes are detected.",
-                rubric_enabled=False,
-                rubric_iterations=3,
-            ),
-            "events": [],
-        }
-        calls: list[str] = []
-
-        async def fake_run_turn(
-            agent: Any,
-            text: str,
-            renderer: Any,
-            thread_id: str,
-            **kwargs: Any,
-        ) -> runner.TurnResult:
-            calls.append(text)
-            return runner.TurnResult(final_text="done")
-
-        handled = await repl.handle_command("/plan", renderer, session, "model", mode)
-        self.assertTrue(handled)
-        self.assertTrue(session["resume_context_pending"])
-
-        with patch("tests.support.turns.run_turn", fake_run_turn):
-            await run_user_turn(
-                agent="action-agent",
-                plan_agent="plan-agent",
-                renderer=renderer,
-                store=FakeStore(),
-                session=session,
-                mode=mode,
-                text="show me the previous plan",
-            )
-
-        self.assertIn("Authoritative current Plan:", calls[0])
-        self.assertIn("Title: Palindrome Plan", calls[0])
-        self.assertIn("Current user request:", calls[0])
-        self.assertFalse(session.get("resume_context_pending"))
 
     async def test_act_does_not_queue_current_plan(self) -> None:
         """Leaving planning mode should not queue plan execution."""
