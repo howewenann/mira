@@ -129,10 +129,13 @@ def finish_goal_attempt(
     *,
     rubric_status: str = "",
     outcome: str = "completed",
+    resumed_checkpoint: bool = False,
 ) -> dict[str, Any] | None:
     """Finish or pause the active Goal attempt from observable runtime state."""
     value = current_goal(record)
-    if value is None or value["status"] != "active":
+    if value is None or value["status"] not in (
+        {"active", "paused"} if resumed_checkpoint else {"active"}
+    ):
         return value
     status = compact_text(rubric_status)
     if status:

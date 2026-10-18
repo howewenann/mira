@@ -55,6 +55,7 @@ async def main() -> None:
     # Standalone: start your own host and pass its context to the graph.
     application = await MiraApplication.start(workspace=".")
     try:
+        await application.open_session()
         mira = application.workflows
         graph = workflow(mira)
 

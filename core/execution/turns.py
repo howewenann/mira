@@ -326,10 +326,10 @@ async def run_user_turn(
         mode["planning"] = resume_thread_id == plan_thread_id(session)
         if not using_plan_agent:
             mode["executing_plan"] = bool(
-                (current_plan(session) or {}).get("status") == "active"
+                (current_plan(session) or {}).get("status") in {"active", "paused"}
             )
             mode["executing_goal"] = bool(
-                (current_goal(session) or {}).get("status") == "active"
+                (current_goal(session) or {}).get("status") in {"active", "paused"}
             )
         result = await run_phase(
             phase_agent=plan_agent if using_plan_agent else agent,
@@ -372,11 +372,15 @@ async def run_user_turn(
             merge_turn_results(result, followup)
             return result
         if mode.get("executing_goal"):
-            finish_goal_attempt(session, rubric_status=result.rubric_status)
+            finish_goal_attempt(
+                session, rubric_status=result.rubric_status, resumed_checkpoint=True
+            )
             mode["current_goal"] = current_goal(session)
             mode["executing_goal"] = False
         if mode.get("executing_plan"):
-            finish_plan_attempt(session, rubric_status=result.rubric_status)
+            finish_plan_attempt(
+                session, rubric_status=result.rubric_status, resumed_checkpoint=True
+            )
             mode["current_plan"] = current_plan(session)
             mode["executing_plan"] = False
         session["turns"] = int(session.get("turns") or 0) + 1

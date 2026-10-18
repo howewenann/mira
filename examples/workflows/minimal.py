@@ -39,6 +39,7 @@ async def main() -> None:
     # Standalone: run in your own host; omit MIRA startup and unused context.
     application = await MiraApplication.start(workspace=".")
     try:
+        await application.open_session()
         mira = application.workflows
         graph = workflow(mira)
 

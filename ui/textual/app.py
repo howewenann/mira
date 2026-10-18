@@ -453,6 +453,8 @@ class MiraApp(App[None]):
             workspace=str(self.session["workspace"]),
         )
         chat.restore_session(self.session)
+        if self.core_session.checkpoint_error:
+            self.system_message(self.core_session.checkpoint_error, kind="warning")
         self._refresh_sessions()
         self._set_status(state="ready")
         self._sync_issues()
@@ -1325,6 +1327,8 @@ class MiraApp(App[None]):
             context_limit_source=self.context_limit_source,
         )
         self._render_current_session()
+        if core_session.checkpoint_error:
+            self.system_message(core_session.checkpoint_error, kind="warning")
         self.call_after_refresh(self._start_pending_resume)
 
     def _start_pending_resume(self) -> None:

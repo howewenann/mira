@@ -2011,6 +2011,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.session.get("events", []), before_events)
             app.core_session.resume_pending.assert_awaited_once_with()
 
+    async def test_checkpointless_history_shows_read_only_reason(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.core_session.checkpoint_error = (
+                "Chat thread-1 has no LangGraph checkpoint database. "
+                "Its visible history is available, but execution cannot be resumed."
+            )
+            app._activate_core_session(app.core_session)
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(child) for child in app.query_one(ChatLog).children)
+            self.assertIn("execution cannot be resumed", rendered)
+
     async def test_busy_new_chat_slash_uses_toast_without_transcript_output(self) -> None:
         app = make_app()
 

@@ -102,6 +102,8 @@ class WorkflowAPITests(unittest.IsolatedAsyncioTestCase):
         self,
         workspace: Path,
         settings: dict[str, Any] | None = None,
+        *,
+        open_session: bool = True,
     ) -> MiraApplication:
         WorkflowModel.bound_history = []
         config = {
@@ -121,8 +123,32 @@ class WorkflowAPITests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             application = await MiraApplication.start(workspace=workspace, config=config)
-            await application.open_session()
+            if open_session:
+                await application.open_session()
             return application
+
+    async def test_structured_workflow_is_discovered_after_session_agent_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            workflow_dir = workspace / ".mira" / "workflows"
+            workflow_dir.mkdir(parents=True)
+            source = Path(__file__).resolve().parents[1] / "examples/workflows/structured_agents.py"
+            (workflow_dir / "structured_agents.py").write_bytes(source.read_bytes())
+
+            application = await self.start_application(workspace, open_session=False)
+            try:
+                self.assertNotIn("structured_agents", application.workflow_registry.specs)
+                with patch("agent.factory.get_llm", return_value=WorkflowModel()):
+                    await application.open_session()
+                registry = application.workflow_registry
+                self.assertIn("structured_agents", registry.specs, registry.issues)
+                self.assertEqual(registry.issues, ())
+                await application.open_session()
+                self.assertIs(application.workflow_registry, registry)
+                graph = registry.specs["structured_agents"].factory(application.workflows)
+                self.assertIsNotNone(graph)
+            finally:
+                await application.shutdown()
 
     async def test_application_exposes_facade_and_native_graph_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -22,15 +22,17 @@ class MiraSession:
         self, application: MiraApplication, record: dict[str, Any], *,
         agent: Any = None, plan_agent: Any = None,
         checkpointer: Any = None, checkpoint_manager: Any = None,
+        checkpoint_error: str = "",
     ) -> None:
         from core.application.app import initial_mode
 
         self.application = application
         self.record = record
-        self.agent = agent if agent is not None else application.agent
-        self.plan_agent = plan_agent if plan_agent is not None else application.plan_agent
+        self.agent = None if checkpoint_error else agent if agent is not None else application.agent
+        self.plan_agent = None if checkpoint_error else plan_agent if plan_agent is not None else application.plan_agent
         self.checkpointer = checkpointer
         self._checkpoint_manager = checkpoint_manager
+        self.checkpoint_error = checkpoint_error
         self.pending_thread_id: str | None = None
         self.mode = initial_mode(
             self.agent,
@@ -52,6 +54,8 @@ class MiraSession:
 
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
+        if self.checkpoint_error:
+            raise RuntimeError(self.checkpoint_error)
         if self._active_task is not None and not self._active_task.done():
             raise RuntimeError("MIRA session already has an active turn")
         if self.pending_thread_id and "resume_thread_id" not in kwargs:

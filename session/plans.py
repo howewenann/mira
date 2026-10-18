@@ -147,10 +147,13 @@ def finish_plan_attempt(
     *,
     rubric_status: str = "",
     outcome: str = "completed",
+    resumed_checkpoint: bool = False,
 ) -> dict[str, Any] | None:
     """Finish or pause the active Plan attempt from observable runtime state."""
     value = current_plan(record)
-    if value is None or value["status"] != "active":
+    if value is None or value["status"] not in (
+        {"active", "paused"} if resumed_checkpoint else {"active"}
+    ):
         return value
     status = compact_text(rubric_status)
     if status:

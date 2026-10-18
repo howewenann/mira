@@ -75,10 +75,13 @@ class MiraApplication:
         self._policy_refresh_generation = 0
         self._policy_refreshed_generation = 0
         self._agent_refresh_lock = asyncio.Lock()
-        from agent.workflows import MiraWorkflowAPI
+        from agent.workflows import MiraWorkflowAPI, WorkflowRegistry
 
         self.workflows = MiraWorkflowAPI(lambda: self.agent)
-        self.reload_workflows()
+        self.workflow_registry = WorkflowRegistry({})
+        self._workflow_discovered = False
+        if self.agent is not None:
+            self.reload_workflows()
 
     def reload_workflows(self) -> Any:
         """Replace the process-local workspace Workflow registry."""
@@ -88,6 +91,7 @@ class MiraApplication:
         previous = tuple(getattr(getattr(self, "workflow_registry", None), "issues", ()))
         registry = discover_workflows(self.workspace, self.workflows)
         self.workflow_registry = registry
+        self._workflow_discovered = True
         current_issues = [
             issue
             for issue in list(getattr(self, "issues", []) or [])
@@ -219,45 +223,57 @@ class MiraApplication:
             event.get("type") in {"user", "assistant", "tool_call", "plan", "goal"}
             for event in record.get("events", ()) if isinstance(event, dict)
         )
-        if historical and not checkpoint_path.is_file():
-            raise RuntimeError(f"Chat {record['id']} has no LangGraph checkpoint database")
+        checkpoint_error = (
+            f"Chat {record['id']} has no LangGraph checkpoint database. "
+            "Its visible history is available, but execution cannot be resumed."
+            if historical and not checkpoint_path.is_file() else ""
+        )
         manager = None
         pending_thread_id = None
-        agent = self.agent if self.action_resources is None else None
-        plan_agent = self.plan_agent if self.action_resources is None else None
+        agent = self.agent if self.action_resources is None and not checkpoint_error else None
+        plan_agent = self.plan_agent if self.action_resources is None and not checkpoint_error else None
         from session.checkpoint import session_checkpointer
 
-        manager = session_checkpointer(checkpoint_path)
         checkpointer = None
-        try:
-            checkpointer = await manager.__aenter__()
-            if historical:
-                history = checkpointer.alist(None, limit=1)
-                try:
-                    has_checkpoint = await anext(history, None) is not None
-                finally:
-                    await history.aclose()
-                if not has_checkpoint:
-                    raise RuntimeError(f"Chat {record['id']} has no LangGraph checkpoints")
-            if self.action_resources is not None:
-                agent, plan_agent = build_agent_pair(
-                    config=self.config,
-                    workspace=self.workspace,
-                    checkpointer=checkpointer,
-                    metadata=self.agent_metadata,
-                    mcp_manager=self.mcp_manager,
-                    action_resources=self.action_resources,
-                )
-                from core.diagnostics.issues import unique_issues
+        if not checkpoint_error:
+            manager = session_checkpointer(checkpoint_path)
+            try:
+                checkpointer = await manager.__aenter__()
+                if historical:
+                    history = checkpointer.alist(None, limit=1)
+                    try:
+                        has_checkpoint = await anext(history, None) is not None
+                    finally:
+                        await history.aclose()
+                    if not has_checkpoint:
+                        checkpoint_error = (
+                            f"Chat {record['id']} has no LangGraph checkpoints. "
+                            "Its visible history is available, but execution cannot be resumed."
+                        )
+                        await manager.__aexit__(None, None, None)
+                        manager = None
+                        checkpointer = None
+                        agent = None
+                        plan_agent = None
+                if not checkpoint_error and self.action_resources is not None:
+                    agent, plan_agent = build_agent_pair(
+                        config=self.config,
+                        workspace=self.workspace,
+                        checkpointer=checkpointer,
+                        metadata=self.agent_metadata,
+                        mcp_manager=self.mcp_manager,
+                        action_resources=self.action_resources,
+                    )
+                    from core.diagnostics.issues import unique_issues
 
-                self.issues = unique_issues([
-                    *getattr(self, "issues", []), *getattr(agent, "mira_resource_issues", [])
-                ])
-                pending_thread_id = await self.pending_thread_for(record, agent, plan_agent)
-        except BaseException:
-            if checkpointer is not None:
-                await manager.__aexit__(None, None, None)
-            raise
+                    self.issues = unique_issues([
+                        *getattr(self, "issues", []), *getattr(agent, "mira_resource_issues", [])
+                    ])
+                    pending_thread_id = await self.pending_thread_for(record, agent, plan_agent)
+            except BaseException:
+                if checkpointer is not None:
+                    await manager.__aexit__(None, None, None)
+                raise
         try:
             ensure_dashboard(
                 record,
@@ -268,12 +284,16 @@ class MiraApplication:
             session = MiraSession(
                 self, record, agent=agent, plan_agent=plan_agent,
                 checkpointer=checkpointer, checkpoint_manager=manager,
+                checkpoint_error=checkpoint_error,
             )
         except BaseException:
-            await manager.__aexit__(None, None, None)
+            if manager is not None:
+                await manager.__aexit__(None, None, None)
             raise
         session.pending_thread_id = pending_thread_id
         self.agent, self.plan_agent, self.checkpointer = agent, plan_agent, checkpointer
+        if agent is not None and not self._workflow_discovered:
+            self.reload_workflows()
         FrontendEmitter(self.frontend, session_id=session.id).session_state(
             "opened",
             {"resume": bool(session_id or resume)},

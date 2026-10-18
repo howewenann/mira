@@ -284,7 +284,7 @@ class SqliteCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(restored.record["plan_runs"], 2)
                 await second_app.shutdown()
 
-    async def test_missing_checkpoint_is_not_restored_from_json(self) -> None:
+    async def test_empty_checkpoint_database_does_not_restore_json_as_graph_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             store = SessionStore(workspace / ".mira" / "_sessions")
@@ -292,6 +292,8 @@ class SqliteCheckpointTests(unittest.IsolatedAsyncioTestCase):
             record["turns"] = 1
             record["events"] = [{"type": "user", "text": "old JSON only"}]
             store.save(record)
+            async with session_checkpointer(store.checkpoint_path(record["id"])):
+                pass
             app = MiraApplication(
                 frontend=NullFrontend(), workspace=workspace,
                 store=store, config={"settings": {}}, action_resources=None,
@@ -299,8 +301,31 @@ class SqliteCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 context_limit_source="test", mcp_manager=None,
                 agent_unavailable_message="", agent=None, plan_agent=None,
             )
+            session = await app.open_session(record["id"], resume=True)
+            self.assertIsNone(session.agent)
             with self.assertRaisesRegex(RuntimeError, "no LangGraph checkpoint"):
-                await app.open_session(record["id"], resume=True)
+                await session.prompt("continue")
+            await app.shutdown()
+
+    async def test_json_history_remains_viewable_when_first_checkpoint_was_never_written(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "_sessions")
+            record = store.load(None, resume=False, workspace=workspace)
+            record["events"] = [{"type": "user", "text": "Attempted request"}]
+            store.save(record)
+            app = MiraApplication(
+                frontend=NullFrontend(), workspace=workspace, store=store,
+                config={"settings": {}}, action_resources=None,
+                agent_metadata=None, model_name="fake", context_limit_tokens=100,
+                context_limit_source="test", mcp_manager=None,
+                agent_unavailable_message="", agent=None, plan_agent=None,
+            )
+            session = await app.open_session(record["id"], resume=True)
+            self.assertEqual(session.snapshot().transcript[0]["text"], "Attempted request")
+            with self.assertRaisesRegex(RuntimeError, "no LangGraph checkpoint"):
+                await session.prompt("continue")
+            self.assertFalse(store.checkpoint_path(record["id"]).exists())
             await app.shutdown()
 
     async def test_application_reopens_and_resumes_pending_hitl(self) -> None:
@@ -362,6 +387,323 @@ class SqliteCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 state = await restored.agent.aget_state(config)
                 self.assertEqual(state.values["messages"][-1].content, "finished")
                 await second_app.shutdown()
+
+    async def test_goal_research_interrupt_keeps_checkpointed_objective_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / ".mira" / "_sessions")
+
+            def planning_graph(saver, responses):
+                from agent.middleware.planning_stage_enforcement import PlanningStageEnforcementMiddleware
+
+                return create_agent(
+                    model=BindableFakeMessagesListChatModel(responses=responses),
+                    tools=[toy],
+                    middleware=[
+                        PlanningStageEnforcementMiddleware(),
+                        HumanInTheLoopMiddleware(interrupt_on={"toy": True}),
+                    ],
+                    checkpointer=saver,
+                )
+
+            class ApprovingFrontend:
+                def emit(self, event):
+                    pass
+
+                async def request(self, request):
+                    return [{"type": "approve"}]
+
+            def application():
+                return MiraApplication(
+                    frontend=ApprovingFrontend(), workspace=workspace, store=store,
+                    config={"settings": {}}, action_resources=object(),
+                    agent_metadata=None, model_name="fake", context_limit_tokens=100,
+                    context_limit_source="test", mcp_manager=None,
+                    agent_unavailable_message="", agent=None, plan_agent=None,
+                )
+
+            builds = 0
+
+            def build_pair(**kw):
+                nonlocal builds
+                builds += 1
+                responses = ([AIMessage(content="", tool_calls=[{
+                    "name": "toy", "args": {"command": "safe"}, "id": "research-call",
+                }])] if builds == 1 else [
+                    AIMessage(content="Research complete"),
+                    AIMessage(content="Plan continued"),
+                ])
+                return (
+                    create_agent(
+                        model=BindableFakeMessagesListChatModel(responses=[AIMessage(content="Action happened")]),
+                        tools=[], checkpointer=kw["checkpointer"],
+                    ),
+                    planning_graph(kw["checkpointer"], responses),
+                )
+
+            with patch("core.application.app.build_agent_pair", side_effect=build_pair):
+                first_app = application()
+                first = await first_app.open_session()
+                first.begin_goal("Original objective")
+                thread_id = first.mode["goal_staging"]["thread_id"]
+                result = await first.plan_agent.ainvoke(
+                    {"messages": [HumanMessage(content="Create Goal")],
+                     "planning_stage": "goal_research",
+                     "planning_authoritative_request": "Original objective"},
+                    {"configurable": {"thread_id": thread_id}},
+                )
+                self.assertIn("__interrupt__", result)
+                first.record["events"] = [{"type": "user", "text": "Create Goal"}]
+                store.save(first.record)
+                session_id = first.id
+                await first_app.shutdown()
+
+                second_app = application()
+                try:
+                    restored = await second_app.open_session(session_id, resume=True)
+                    self.assertEqual(restored.pending_thread_id, thread_id)
+                    resumed = await restored.resume_pending()
+                    self.assertEqual(resumed.final_text, "Research complete")
+                    continuation = await restored.prompt("Continue the Goal")
+                    self.assertEqual(continuation.final_text, "Action happened")
+                    state = await restored.plan_agent.aget_state(
+                        {"configurable": {"thread_id": thread_id}}
+                    )
+                    self.assertEqual(state.values["planning_authoritative_request"], "Original objective")
+                finally:
+                    await second_app.shutdown()
+
+    async def test_paused_goal_and_plan_execution_finish_after_checkpoint_resume(self) -> None:
+        from session.goals import goal_artifact, replace_current_goal
+        from session.plans import plan_artifact, replace_current_plan
+
+        for kind in ("goal", "plan"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                store = SessionStore(workspace / ".mira" / "_sessions")
+
+                class ApprovingFrontend:
+                    def emit(self, event):
+                        pass
+
+                    async def request(self, request):
+                        return [{"type": "approve"}]
+
+                def application():
+                    return MiraApplication(
+                        frontend=ApprovingFrontend(), workspace=workspace, store=store,
+                        config={"settings": {}}, action_resources=object(),
+                        agent_metadata=None, model_name="fake", context_limit_tokens=100,
+                        context_limit_source="test", mcp_manager=None,
+                        agent_unavailable_message="", agent=None, plan_agent=None,
+                    )
+
+                builds = 0
+
+                def build_pair(**kw):
+                    nonlocal builds
+                    builds += 1
+                    response = (AIMessage(content="", tool_calls=[{
+                        "name": "toy", "args": {"command": "safe"}, "id": "execution-call",
+                    }]) if builds == 1 else AIMessage(content="Finished"))
+                    return (
+                        create_agent(
+                            model=BindableFakeMessagesListChatModel(responses=[response]),
+                            tools=[toy],
+                            middleware=[HumanInTheLoopMiddleware(interrupt_on={"toy": True})],
+                            checkpointer=kw["checkpointer"],
+                        ),
+                        conversation(kw["checkpointer"]),
+                    )
+
+                with patch("core.application.app.build_agent_pair", side_effect=build_pair):
+                    first_app = application()
+                    first = await first_app.open_session()
+                    if kind == "goal":
+                        replace_current_goal(first.record, goal_artifact(
+                            goal_id="goal-1", title="Finish Goal", objective="Exact objective",
+                            success_criteria="- Exact criterion", rubric_enabled=False,
+                            rubric_iterations=3,
+                        ))
+                    else:
+                        replace_current_plan(first.record, plan_artifact(
+                            plan_id="plan-1", title="Finish Plan", objective="Exact objective",
+                            context_and_constraints="Constraint", key_changes=["Change"],
+                            test_plan=["Test"], assumptions=["None"],
+                            success_criteria="- Exact criterion", rubric_enabled=False,
+                            rubric_iterations=3,
+                        ))
+                    first.start_artifact(kind)
+                    result = await first.agent.ainvoke(
+                        {"messages": [HumanMessage(content="Implement")],
+                         "rubric": None},
+                        {"configurable": {"thread_id": first.id}},
+                    )
+                    self.assertIn("__interrupt__", result)
+                    first.record["events"] = [{"type": "user", "text": "Implement"}]
+                    first.pause_active_artifacts()
+                    session_id = first.id
+                    await first_app.shutdown()
+
+                    second_app = application()
+                    try:
+                        restored = await second_app.open_session(session_id, resume=True)
+                        self.assertEqual(restored.pending_thread_id, session_id)
+                        await restored.resume_pending()
+                        self.assertEqual(restored.record[f"current_{kind}"]["status"], "completed")
+                    finally:
+                        await second_app.shutdown()
+
+    async def test_goal_and_plan_formal_review_after_restart(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from agent.middleware.planning_stage_enforcement import PlanningStageEnforcementMiddleware
+        from agent.planning.tool_context import PlanningToolContext
+        from agent.resources.defaults.tools.finalize_goal import finalize_goal
+        from agent.resources.defaults.tools.finalize_plan import finalize_plan
+        from agent.resources.defaults.tools.prepare_goal import prepare_goal
+        from agent.resources.defaults.tools.prepare_plan import prepare_plan
+        from core.interface import ArtifactReviewRequest
+        from tests.test_current_plan import BindablePlanningModel
+
+        for kind, first_decision in (
+            ("goal", "implement"), ("plan", "implement"),
+            ("goal", "revise"), ("plan", "revise"),
+        ):
+            with self.subTest(kind=kind, decision=first_decision), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                store = SessionStore(workspace / ".mira" / "_sessions")
+                criteria = f"- Exact {kind} criterion"
+                revised_criteria = f"- Revised {kind} criterion"
+                service = SimpleNamespace(
+                    generate=AsyncMock(return_value=criteria),
+                    revise=AsyncMock(return_value=revised_criteria),
+                )
+
+                class ReviewFrontend:
+                    reviews = 0
+
+                    def emit(self, event):
+                        pass
+
+                    async def request(self, request):
+                        if isinstance(request, ArtifactReviewRequest):
+                            self.reviews += 1
+                            if first_decision == "revise" and self.reviews == 1:
+                                return {"action": "revise", "feedback": "Keep the objective; tighten the criterion."}
+                            return {"action": "close" if first_decision == "revise" else "implement"}
+                        raise AssertionError(f"unexpected request: {request}")
+
+                def application():
+                    return MiraApplication(
+                        frontend=ReviewFrontend(), workspace=workspace, store=store,
+                        config={"settings": {}}, action_resources=object(),
+                        agent_metadata=None, model_name="fake", context_limit_tokens=100,
+                        context_limit_source="test", mcp_manager=None,
+                        agent_unavailable_message="", agent=None, plan_agent=None,
+                    )
+
+                builds = 0
+
+                def build_pair(**kw):
+                    nonlocal builds
+                    builds += 1
+                    prepare = prepare_goal if kind == "goal" else prepare_plan
+                    finalize = finalize_goal if kind == "goal" else finalize_plan
+                    prepare_args = {
+                        "objective": "Exact objective",
+                        "context_and_constraints": "Constraint",
+                    }
+                    if kind == "goal":
+                        prepare_args["research_evidence"] = "Evidence"
+                    finalize_args = {"title": f"Exact {kind.title()}"}
+                    if kind == "plan":
+                        finalize_args.update({
+                            "key_changes": ["Change"], "test_plan": ["Test"],
+                            "assumptions": ["None"],
+                        })
+                    proposal_responses = [
+                        AIMessage(content="", tool_calls=[{
+                            "name": prepare.name, "args": prepare_args, "id": "prepare-call",
+                        }]),
+                        AIMessage(content="", tool_calls=[{
+                            "name": finalize.name, "args": finalize_args, "id": "finalize-call",
+                        }]),
+                    ]
+                    responses = (
+                        proposal_responses if builds == 1 or first_decision == "revise"
+                        else [AIMessage(content="Unexpected planner call")]
+                    )
+                    planner = create_agent(
+                        model=BindablePlanningModel(responses=responses),
+                        tools=[prepare, finalize],
+                        middleware=[PlanningStageEnforcementMiddleware()],
+                        context_schema=PlanningToolContext,
+                        checkpointer=kw["checkpointer"],
+                    )
+                    planner.mira_context_factory = lambda: PlanningToolContext(service)
+                    action = create_agent(
+                        model=BindableFakeMessagesListChatModel(
+                            responses=[AIMessage(content="Action completed")]
+                        ),
+                        tools=[], checkpointer=kw["checkpointer"],
+                    )
+                    return action, planner
+
+                with patch("core.application.app.build_agent_pair", side_effect=build_pair):
+                    first_app = application()
+                    first = await first_app.open_session()
+                    if kind == "goal":
+                        first.begin_goal("Exact objective")
+                        thread_id = first.mode["goal_staging"]["thread_id"]
+                    else:
+                        await first.set_mode("plan")
+                        thread_id = first.mode["plan_thread_id"]
+                    result = await first.plan_agent.ainvoke(
+                        {"messages": [HumanMessage(content="Create artifact")],
+                         "planning_stage": f"{kind}_research",
+                         "planning_authoritative_request": "Exact objective"},
+                        {"configurable": {"thread_id": thread_id}},
+                        context=PlanningToolContext(service),
+                    )
+                    self.assertIn("__interrupt__", result)
+                    first.record["events"] = [{"type": "user", "text": "Create artifact"}]
+                    store.save(first.record)
+                    session_id = first.id
+                    await first_app.shutdown()
+
+                    second_app = application()
+                    try:
+                        restored = await second_app.open_session(session_id, resume=True)
+                        self.assertEqual(restored.pending_thread_id, thread_id)
+                        await restored.resume_pending()
+                        artifact = restored.record[f"current_{kind}"]
+                        self.assertEqual(artifact["objective"], "Exact objective")
+                        self.assertEqual(
+                            artifact["success_criteria"],
+                            revised_criteria if first_decision == "revise" else criteria,
+                        )
+                        if first_decision == "revise":
+                            service.revise.assert_awaited_once()
+                            self.assertIn(
+                                "Keep the objective; tighten the criterion.",
+                                service.revise.await_args.args,
+                            )
+                            if kind == "goal":
+                                self.assertNotEqual(
+                                    restored.mode["goal_staging"]["thread_id"], thread_id
+                                )
+                            else:
+                                self.assertEqual(restored.mode["plan_thread_id"], thread_id)
+                        else:
+                            self.assertEqual(artifact["status"], "completed")
+                            action_state = await restored.agent.aget_state(
+                                {"configurable": {"thread_id": session_id}}
+                            )
+                            self.assertEqual(action_state.values["messages"][-1].content, "Action completed")
+                    finally:
+                        await second_app.shutdown()
 
     async def test_clear_all_removes_orphaned_checkpoint_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
