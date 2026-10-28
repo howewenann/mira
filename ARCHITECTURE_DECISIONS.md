@@ -1084,6 +1084,9 @@ secret-resolution boundaries change.
 checkpoint database per session for native graph restoration. DeepAgents
 handles runtime context counting and compaction.
 
+`SessionStore` keeps each session's `session.json` and `checkpoints.db` under
+`<session_dir>/<session_id>/`; older flat files are ignored.
+
 **Why:** Session files should be stable user-facing history after restart.
 Starting a new chat is therefore non-destructive: MIRA creates another session
 record and makes it active instead of clearing the previous one.
@@ -1096,8 +1099,8 @@ other MIRA-specific semantics. Session reopening reads these checkpoints and
 never injects a JSON-derived transcript summary into a new request. Pending
 interrupts are displayed before graph continuation; incomplete operations
 without an interrupt require an explicit `/continue` because an external side
-effect may have occurred. Closing a session closes its SQLite connection, and
-deletion removes the database and sidecars with the JSON file.
+effect may have occurred. Closing a session closes its SQLite connection before
+deletion removes that session's directory, including SQLite sidecars.
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 replaces DeepAgents' default `SummarizationMiddleware` by its native name with
 one instance built from Main's model-aware defaults. The model-triggered

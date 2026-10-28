@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 from textwrap import wrap
 from typing import Any
 
@@ -201,12 +200,12 @@ class SessionActionMenuScreen(ModalScreen[str | None]):
 
 def session_records(store: Any) -> list[dict[str, Any]]:
     """Return sessions sorted by most recently updated."""
-    root = getattr(store, "root", None)
-    if not isinstance(root, Path):
+    session_paths = getattr(store, "session_paths", None)
+    if not callable(session_paths):
         return []
 
     records = []
-    for path in root.glob("*.json"):
+    for path in session_paths():
         try:
             records.append(store.read(path))
         except Exception:

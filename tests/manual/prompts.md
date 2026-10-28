@@ -1911,7 +1911,7 @@ model.
 ## Workflow History Awareness
 
 1. Run a discovered Workflow containing a nested agent and wait for completion.
-   Ask MIRA to inspect `.mira/_sessions/<session-id>.json` for the Workflow run.
+   Ask MIRA to inspect `.mira/_sessions/<session-id>/session.json` for the Workflow run.
    Expected: MIRA uses `grep`/`read_file` when details are needed.
 2. Ask: "What did the researcher subagent do?" Expected: MIRA finds the Workflow
    event in `events[]`, follows the agent's `inspection_id` into `runs[]`, and
@@ -1926,9 +1926,10 @@ model.
 
 1. In a disposable workspace, start a chat, exchange two messages, enter `/plan`,
    and ask for a Plan. Exit MIRA, then reopen the same session. Expected: a
-   `<session-id>.db` sits beside `<session-id>.json`; Act and Plan conversations
-   continue from their saved graph messages without repeating old user messages
-   or inserting a "Previous MIRA session context" block.
+   `checkpoints.db` sits beside `session.json` inside `<session-id>/`; Act and
+   Plan conversations continue from their saved graph messages without
+   repeating old user messages or inserting a "Previous MIRA session context"
+   block.
 2. Approve a Plan or Goal, exit, reopen, and use `/plan-show` or `/goal-show`.
    Expected: the exact artifact, criteria, status, and attempts return. Resume
    it, interrupt the attempt, reopen again, then clear it. Expected: the
@@ -1943,8 +1944,12 @@ model.
    the saved operation and warns that the effect may repeat.
 5. Run `/compact`, exit, reopen, and ask a follow-up. Expected: DeepAgents'
    summary remains in the graph and the follow-up works. Delete the chat from
-   history. Expected: its JSON, DB, and SQLite sidecars disappear; another chat
+   history. Expected: its whole session directory disappears; another chat
    remains usable.
+6. Run `/clear-chat`, then send another message. Expected: the same session
+   directory and checkpoint database remain usable. Run `/clear-all-chats`.
+   Expected: saved session directories are removed and the active chat is
+   recreated cleanly.
 
 ## Primary-Monitor Computer Use
 

@@ -172,7 +172,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("stream_capture [DONE]", resume)
         self.assertIn("workflow_id: workflow-stream_capture:abc123", resume)
-        self.assertIn("Session history: /.mira/_sessions/thread-1.json", resume)
+        self.assertIn("Session history: /.mira/_sessions/thread-1/session.json", resume)
         self.assertIn('events[] item with type="workflow" and matching workflow_id', resume)
         self.assertIn("runs[] item with matching inspection_id", resume)
         self.assertIn("grep/read_file", resume)
@@ -319,12 +319,14 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             custom["updated_at"] = "2026-01-01T00:00:00+00:00"
             store.save(custom)
             loaded = store.load("custom-session", resume=False, workspace=Path("workspace"))
+            spaced = store.load("custom session", resume=False, workspace=Path("workspace"))
 
         self.assertEqual(explicit["id"], "thread-1")
         self.assertEqual(loaded["id"], "custom-session")
+        self.assertEqual(spaced["id"], "custom session")
         self.assertFalse(re.match(r"^\d{8}-\d{6}[+-]\d{4}-[0-9a-f]{8}$", loaded["id"]))
 
-    def test_session_store_clear_all_deletes_only_session_json(self) -> None:
+    def test_session_store_clear_all_deletes_only_session_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = SessionStore(root)
@@ -332,12 +334,16 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             store.save(store.new(session_id="two", workspace=Path("workspace")))
             note = root / "notes.md"
             note.write_text("keep", encoding="utf-8")
+            legacy = root / "legacy.json"
+            legacy.write_text("old", encoding="utf-8")
 
             removed = store.clear_all()
 
             self.assertEqual(removed, 2)
-            self.assertEqual(list(root.glob("*.json")), [])
+            self.assertFalse(store.session_directory("one").exists())
+            self.assertFalse(store.session_directory("two").exists())
             self.assertEqual(note.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "old")
 
     def test_session_store_clear_compactions_deletes_conversation_history_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -370,7 +376,31 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(store.delete("missing"))
 
             self.assertFalse(store.path("one").exists())
+            self.assertFalse(store.session_directory("one").exists())
             self.assertTrue(store.path("two").exists())
+
+    def test_session_paths_reject_escaping_ids_and_symlinked_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sessions"
+            store = SessionStore(root)
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (outside / "session.json").write_text("{}", encoding="utf-8")
+            for session_id in (
+                "../outside", "..", "nested/child", "nested\\child", "", "one.", "CON", "aux.txt"
+            ):
+                with self.assertRaises(ValueError):
+                    store.delete(session_id)
+            link = root / "linked"
+            try:
+                link.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pass
+            else:
+                with self.assertRaises(ValueError):
+                    store.delete("linked")
+                self.assertEqual(store.session_paths(), [])
+            self.assertTrue((outside / "session.json").exists())
 
     def test_new_session_shape_is_readable(self) -> None:
         record = SessionStore(Path(".")).new(session_id="thread-1", workspace=Path("workspace"))
@@ -416,14 +446,20 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             older["custom_title"] = "Pinned reference"
             older["pinned"] = True
             store.save_metadata(older)
+            (store.root / "legacy.json").write_text(
+                '{"id": "legacy", "updated_at": "2099-01-01T00:00:00+00:00"}',
+                encoding="utf-8",
+            )
             restored = store.read(store.path("older"))
             latest = store.latest()
+            resumed = store.load(None, resume=True, workspace=Path("workspace"))
 
         self.assertEqual(restored["custom_title"], "Pinned reference")
         self.assertTrue(restored["pinned"])
         self.assertEqual(restored["updated_at"], "2026-09-08T01:00:00+00:00")
         self.assertIsNotNone(latest)
-        self.assertEqual(latest.stem, "newer")
+        self.assertEqual(latest, store.path("newer"))
+        self.assertEqual(resumed["id"], "newer")
 
     def test_transient_resume_flag_survives_save_without_being_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

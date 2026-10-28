@@ -1312,11 +1312,7 @@ class MiraApp(App[None]):
         )
         if answer != "o" or self.store is None:
             return
-        delete = getattr(self.store, "delete", None)
-        target = self.application._sessions.get(item.session_id) if self.application is not None else None
-        if target is not None:
-            await target.close()
-        if not callable(delete) or not delete(item.session_id):
+        if self.application is None or not await self.application.delete_session(item.session_id):
             self.notify("The saved chat no longer exists.", title="History")
             self._refresh_sessions()
             return
@@ -2818,13 +2814,11 @@ class MiraApp(App[None]):
         sessions = 0
         compactions = 0
         active_id = str(self.session.get("id") or "")
-        if self.application is not None:
-            for core_session in tuple(self.application._sessions.values()):
-                await core_session.close()
         if self.store is not None:
-            clear_all = getattr(self.store, "clear_all", None)
-            if callable(clear_all):
-                sessions = int(clear_all())
+            if self.application is not None:
+                sessions = await self.application.clear_sessions()
+            else:
+                sessions = int(self.store.clear_all())
             clear_compactions = getattr(self.store, "clear_compactions", None)
             if callable(clear_compactions):
                 compactions = int(clear_compactions())

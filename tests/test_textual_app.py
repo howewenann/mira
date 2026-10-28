@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
+import aiosqlite
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from pyfiglet import Figlet
@@ -95,6 +96,7 @@ from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
 from tracing.stream import TraceStream
 from session.goals import current_goal, goal_artifact
+from session.checkpoint import MiraAsyncSqliteSaver, MiraJsonPlusSerializer
 from session.plans import current_plan, plan_artifact
 from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
@@ -7588,6 +7590,36 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(app.session["events"], [])
             self.assertEqual(len(store.saves), 1)
+
+    async def test_clear_chat_keeps_session_directory_and_usable_checkpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            store = SessionStore(workspace / "sessions")
+            record = store.load("current", resume=False, workspace=workspace)
+            record["events"] = [{"type": "user", "text": "clear me"}]
+            store.save(record)
+            connection = await aiosqlite.connect(str(store.database_path("current")))
+            saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+            app = make_app(workspace=workspace, session=record, store=store)
+
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                app.core_session.checkpointer = saver
+                await saver.setup()
+                await app._clear_current_chat()
+
+                self.assertTrue(store.session_directory("current").is_dir())
+                self.assertTrue(store.path("current").is_file())
+                self.assertTrue(store.database_path("current").is_file())
+                self.assertEqual(store.read(store.path("current"))["events"], [])
+                checkpoint = {
+                    "v": 4, "ts": "2026-01-01T00:00:00+00:00", "id": "after-clear",
+                    "channel_values": {}, "channel_versions": {},
+                    "versions_seen": {}, "pending_sends": [],
+                }
+                config = {"configurable": {"thread_id": "current", "checkpoint_ns": ""}}
+                saved = await saver.aput(config, checkpoint, {}, {})
+                self.assertEqual((await saver.aget_tuple(saved)).checkpoint["id"], "after-clear")
 
     async def test_clear_all_chats_requires_confirmation_and_keeps_active_clean_session(self) -> None:
         """The all-chat clear should require confirmation before deleting sessions."""

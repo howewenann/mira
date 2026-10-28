@@ -80,9 +80,12 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             await session.prompt("plan something")
             database = first.store.database_path("one")
             self.assertTrue(database.is_file())
-            self.assertEqual([path.name for path in database.parent.glob("*.json")], ["one.json"])
+            self.assertEqual(database.name, "checkpoints.db")
+            self.assertEqual(first.store.path("one"), database.parent / "session.json")
+            self.assertEqual([path.name for path in database.parent.glob("*.json")], ["session.json"])
             self.assertTrue(any(event.get("type") == "user" for event in session.record["events"]))
             with closing(sqlite3.connect(database)) as connection:
+                self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
                 self.assertGreater(connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0], 0)
             await self.stop(first)
 
@@ -117,16 +120,21 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNot(first.checkpointer, second.checkpointer)
                 self.assertTrue(application.store.database_path("one").is_file())
                 self.assertTrue(application.store.database_path("two").is_file())
+                self.assertEqual(
+                    {path.name for path in application.store.root.iterdir()}, {"one", "two"}
+                )
                 state = await second.agent.aget_state({"configurable": {"thread_id": "two"}})
                 self.assertFalse(any(getattr(message, "content", "") == "alpha" for message in state.values["messages"]))
                 application._policy_refresh_generation += 1
                 await application.refresh_agents_for_policy()
                 self.assertIs(first.agent.checkpointer, first.checkpointer)
                 self.assertIs(second.agent.checkpointer, second.checkpointer)
-                await first.close()
+                # Windows will refuse rmtree while SQLite still owns these files.
                 for suffix in ("-wal", "-shm", "-journal"):
-                    Path(f"{application.store.database_path('one')}{suffix}").write_bytes(b"")
-                self.assertTrue(application.store.delete("one"))
+                    Path(f"{application.store.database_path('one')}{suffix}").touch()
+                self.assertTrue(await application.delete_session("one"))
+                self.assertEqual(first.runtime_state, "closed")
+                self.assertFalse(application.store.session_directory("one").exists())
                 self.assertFalse(application.store.database_path("one").exists())
                 self.assertFalse(any(
                     Path(f"{application.store.database_path('one')}{suffix}").exists()
@@ -134,8 +142,9 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
                 ))
                 self.assertTrue(application.store.database_path("two").exists())
                 await second.prompt("still here")
-                await second.close()
-                self.assertEqual(application.store.clear_all(), 1)
+                self.assertEqual(await application.clear_sessions(), 1)
+                self.assertEqual(second.runtime_state, "closed")
+                self.assertFalse(application.store.session_directory("two").exists())
                 self.assertFalse(application.store.database_path("two").exists())
             finally:
                 await self.stop(application)

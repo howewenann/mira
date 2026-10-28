@@ -423,7 +423,7 @@ def workflow_history_context(record: dict[str, Any], *, session_root: Path | Non
             else project / ".mira" / "_sessions"
         )
         try:
-            relative = (root / f"{session_id}.json").resolve().relative_to(project)
+            relative = (root / session_id / "session.json").resolve().relative_to(project)
         except ValueError:
             pass  # An external session directory is not readable through the project backend.
         else:

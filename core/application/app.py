@@ -281,7 +281,25 @@ class MiraApplication:
 
     def session_exists(self, session_id: str) -> bool:
         """Return whether an explicit durable session already exists."""
-        return bool(session_id) and self.store.path(session_id).is_file()
+        if not session_id:
+            return False
+        try:
+            return self.store.path(session_id).is_file()
+        except ValueError:
+            return False
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Close a live checkpoint connection before deleting its files."""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            await session.close()
+        return self.store.delete(session_id)
+
+    async def clear_sessions(self) -> int:
+        """Close every checkpoint connection before deleting saved sessions."""
+        for session in tuple(self._sessions.values()):
+            await session.close()
+        return self.store.clear_all()
 
     def persist_tool_always_allow(self, agent: Any, action: dict[str, Any]) -> None:
         """Persist one interrupted tool's existing MIRA always-allow policy."""

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +95,7 @@ class SessionStore:
         if update_timestamp:
             record["updated_at"] = datetime.now(timezone.utc).isoformat()
         normalized = normalize_session(record)
+        self.session_directory(str(record["id"])).mkdir(parents=True, exist_ok=True)
         self.path(str(record["id"])).write_text(json.dumps(normalized, indent=2), encoding="utf-8")
         record.clear()
         record.update(normalized)
@@ -111,12 +114,26 @@ class SessionStore:
         return normalized
 
     def latest(self) -> Path | None:
-        """Return the most recently modified session file, if any exist."""
-        paths = list(self.root.glob("*.json"))
+        """Return the session file with the latest saved conversation timestamp."""
+        paths = self.session_paths()
         if not paths:
             return None
 
         return max(paths, key=self._updated_at_timestamp)
+
+    def session_paths(self) -> list[Path]:
+        """Return JSON files belonging to sessions in the current layout."""
+        paths = []
+        for directory in self.root.iterdir():
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            try:
+                path = self.path(directory.name)
+            except ValueError:
+                continue
+            if path.is_file():
+                paths.append(path)
+        return paths
 
     def _updated_at_timestamp(self, path: Path) -> float:
         """Read conversation recency without treating metadata writes as turns."""
@@ -130,31 +147,43 @@ class SessionStore:
             return path.stat().st_mtime
 
     def delete(self, session_id: str) -> bool:
-        """Delete one saved session and its checkpoint database files."""
+        """Delete one saved session directory after its SQLite owner has closed."""
         path = self.path(session_id)
-        if not path.exists():
+        if not path.is_file():
             return False
-        path.unlink()
-        self._delete_database_files(session_id)
+        shutil.rmtree(self.session_directory(session_id))
         return True
 
     def clear_all(self) -> int:
-        """Delete all saved session JSON files under the session root."""
+        """Delete saved session directories after active sessions have closed."""
         count = 0
-        for path in list(self.root.glob("*.json")):
-            path.unlink()
-            self._delete_database_files(path.stem)
+        for path in self.session_paths():
+            shutil.rmtree(path.parent)
             count += 1
         return count
 
-    def database_path(self, session_id: str) -> Path:
-        """Return the SQLite checkpoint path beside a session's JSON file."""
-        return self.root / f"{session_id}.db"
+    def session_directory(self, session_id: str) -> Path:
+        """Resolve a single safe session directory inside the configured root."""
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or session_id in {".", ".."}
+            or session_id != session_id.strip()
+            or session_id.endswith(".")
+            or any(character in '/\\<>:"|?*' or ord(character) < 32 for character in session_id)
+        ):
+            raise ValueError("invalid session id")
+        device_name = session_id.split(".", 1)[0].upper()
+        if device_name in {"CON", "PRN", "AUX", "NUL"} or re.fullmatch(r"(?:COM|LPT)[1-9]", device_name):
+            raise ValueError("invalid session id")
+        directory = self.root / session_id
+        if directory.is_symlink() or directory.resolve().parent != self.root.resolve():
+            raise ValueError("session directory escapes the session root")
+        return directory
 
-    def _delete_database_files(self, session_id: str) -> None:
-        database = self.database_path(session_id)
-        for suffix in ("", "-wal", "-shm", "-journal"):
-            (self.root / f"{database.name}{suffix}").unlink(missing_ok=True)
+    def database_path(self, session_id: str) -> Path:
+        """Return the SQLite checkpoint path inside a session directory."""
+        return self.session_directory(session_id) / "checkpoints.db"
 
     def clear_compactions(self) -> int:
         """Delete saved DeepAgents conversation-history files for this workspace."""
@@ -174,4 +203,4 @@ class SessionStore:
 
     def path(self, session_id: str) -> Path:
         """Return the JSON path for a session id."""
-        return self.root / f"{session_id}.json"
+        return self.session_directory(session_id) / "session.json"
