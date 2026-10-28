@@ -68,7 +68,7 @@ def compile_raw_subagent(
     subagent_permissions = spec.get("permissions", permissions)
     middleware: list[Any] = [
         *([TodoListMiddleware()] if enable_todos else []),
-        FilesystemMiddleware(backend=backend, _permissions=subagent_permissions),
+        FilesystemMiddleware(backend=backend, permissions=subagent_permissions),
         create_summarization_middleware(subagent_model, backend),
         PatchToolCallsMiddleware(),
     ]

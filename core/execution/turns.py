@@ -24,7 +24,7 @@ from agent.planning.policy import (
 from core.context.observation import context_usage_scope
 from core.interface import Frontend, FrontendEmitter
 from core.execution.runner import TurnResult, run_turn, supported_kwargs
-from session.context import session_mcp_attachments, update_title, with_resume_context
+from session.context import session_mcp_attachments, update_title
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
 from session.goals import current_goal, finish_goal_attempt, goal_artifact_text
 from session.plans import current_plan, finish_plan_attempt, plan_artifact_text
@@ -132,6 +132,8 @@ async def run_user_turn(
     turn_runner: Any | None = None,
     rubric_override: str | None = None,
     persist_always_allow: Any | None = None,
+    persist_graph_state: Any | None = None,
+    recovery: dict[str, Any] | None = None,
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
     emitter = FrontendEmitter(
@@ -180,6 +182,12 @@ async def run_user_turn(
         emitter.usage_updated(usage)
 
     goal_staging = mode.get("goal_staging") if isinstance(mode.get("goal_staging"), dict) else None
+    if recovery is not None and recovery.get("agent") is agent:
+        goal_staging = None
+        mode["goal_staging"] = None
+        mode["goal_revision"] = None
+    if persist_graph_state is not None:
+        mode["_persist_graph_state"] = persist_graph_state
     using_planning_agent = bool(mode["planning"] or goal_staging is not None)
     ensure_dashboard(
         session,
@@ -233,6 +241,8 @@ async def run_user_turn(
     ) -> TurnResult:
         from core.execution.inspection.persistence import PersistentSubagentRuns
 
+        nonlocal recovery
+
         phase_recorder = SessionRecorder(session, store, phase_mode)
         recording_emitter = PersistentSubagentRuns(
             SessionEventEmitter(
@@ -258,6 +268,19 @@ async def run_user_turn(
                     {
                         "always_allowed_tools": always_allowed_tools,
                         "persist_always_allow": persist_always_allow,
+                        "resume_interrupts": (
+                            recovery["interrupts"]
+                            if recovery is not None
+                            and recovery.get("agent") is phase_agent
+                            and recovery.get("thread_id") == thread_id
+                            else None
+                        ),
+                        "resume_incomplete": bool(
+                            recovery is not None
+                            and recovery.get("incomplete")
+                            and recovery.get("agent") is phase_agent
+                            and recovery.get("thread_id") == thread_id
+                        ),
                     },
                 )
                 context_factory = getattr(phase_agent, "mira_context_factory", None)
@@ -284,6 +307,7 @@ async def run_user_turn(
                     pinned_skills=phase_pinned_skills,
                     **policy_kwargs,
                 )
+                recovery = None
         except asyncio.CancelledError:
             recording_emitter.stop_active_tools("cancelled")
             await sync_compaction_safely(phase_recorder, phase_agent, thread_id)
@@ -310,6 +334,8 @@ async def run_user_turn(
             with suppress(asyncio.CancelledError):
                 await poller
         phase_recorder.ensure_assistant(phase_result.final_text)
+        if persist_graph_state is not None:
+            await persist_graph_state()
         compact_targets.append((phase_recorder, phase_agent, thread_id))
         merge_turn_results(aggregate, phase_result)
         return phase_result
@@ -346,6 +372,8 @@ async def run_user_turn(
             else:
                 mode["plan_runs"] = int(mode.get("plan_runs") or 0) + 1
                 thread_id = plan_thread_id(session, mode["plan_runs"])
+                if persist_graph_state is not None:
+                    await persist_graph_state()
         else:
             authoritative = str((previous_artifact or {}).get("objective") or text)
             proposal = (
@@ -369,9 +397,7 @@ async def run_user_turn(
                 else ""
             ),
         }
-        request_text = with_resume_context(
-            session, proposal, session_root=getattr(store, "root", None)
-        )
+        request_text = proposal
         result = await run_phase(
             phase_agent=plan_agent,
             request_text=request_text,
@@ -398,6 +424,12 @@ async def run_user_turn(
             raise RuntimeError("formal revision requires explicit feedback")
         phase_text = feedback
 
+    if isinstance(result.formal_review, dict) and result.formal_review.get("action") == "implement":
+        mode["goal_staging"] = None
+        mode["goal_revision"] = None
+        if persist_graph_state is not None:
+            await persist_graph_state()
+
     if not using_planning_agent or (
         isinstance(result.formal_review, dict)
         and result.formal_review.get("action") == "implement"
@@ -417,12 +449,7 @@ async def run_user_turn(
             retained_goal=retained_goal,
             retained_plan=retained_plan,
         )
-        request_text = with_resume_context(
-            session,
-            action_text,
-            exclude_current_goal=retained_goal is not None,
-            session_root=getattr(store, "root", None),
-        )
+        request_text = action_text
         result = await run_phase(
             phase_agent=agent,
             request_text=request_text,

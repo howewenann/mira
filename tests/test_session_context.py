@@ -267,7 +267,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Session history:", resume)
         self.assertNotIn("external_sessions", resume)
 
-    async def test_completed_workflow_marks_next_turn_in_same_process(self) -> None:
+    async def test_completed_workflow_does_not_inject_json_context_into_next_turn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             store = SessionStore(workspace / ".mira" / "_sessions")
@@ -299,10 +299,8 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(len(requests), 1)
-        self.assertIn("demo [DONE]", requests[0])
-        self.assertIn("Session history: /.mira/_sessions/thread-1.json", requests[0])
+        self.assertEqual(requests[0], "What happened?")
         self.assertNotIn("secret", requests[0])
-        self.assertFalse(record.get("resume_context_pending"))
         self.assertEqual(record["turns"], 1)
 
     def test_new_session_id_is_timestamped(self) -> None:
@@ -1941,7 +1939,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recent request", first)
         self.assertEqual(second, "another request")
 
-    async def test_resumed_tui_turn_keeps_context_through_initial_session_save(self) -> None:
+    async def test_resumed_tui_turn_uses_only_current_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SessionStore(Path(directory))
             record = store.new(session_id="thread-1", workspace=Path("workspace"))
@@ -1974,11 +1972,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(len(requests), 1)
-        self.assertIn("Previous MIRA session context:", requests[0])
-        self.assertIn("Write a story about Elara.", requests[0])
-        self.assertIn("Elara protected the archive.", requests[0])
-        self.assertIn("Current user request:\nWhat were we talking about?", requests[0])
-        self.assertFalse(record.get("resume_context_pending"))
+        self.assertEqual(requests[0], "What were we talking about?")
 
     def test_old_historical_plan_events_are_discarded(self) -> None:
         record = {

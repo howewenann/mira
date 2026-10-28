@@ -79,7 +79,11 @@ async def handle_command(
         return True
 
     if text == "/plan" or (text.startswith("/plan ") and not text[len("/plan"):].strip()):
-        select_mode(session, mode, "plan")
+        core_session = getattr(renderer, "core_session", None)
+        if core_session is not None:
+            await core_session.set_mode("plan")
+        else:
+            select_mode(session, mode, "plan")
         write_line(
             renderer,
             f"Plan mode: {plan_disabled_tools_text()} disabled; use /act to leave",
@@ -148,7 +152,11 @@ async def handle_command(
         return True
 
     if text == "/act":
-        select_mode(session, mode, "act")
+        core_session = getattr(renderer, "core_session", None)
+        if core_session is not None:
+            await core_session.set_mode("act")
+        else:
+            select_mode(session, mode, "act")
         write_line(renderer, "action mode", kind="status")
         return True
 

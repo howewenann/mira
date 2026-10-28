@@ -130,11 +130,12 @@ class SessionStore:
             return path.stat().st_mtime
 
     def delete(self, session_id: str) -> bool:
-        """Delete one saved session JSON file."""
+        """Delete one saved session and its checkpoint database files."""
         path = self.path(session_id)
         if not path.exists():
             return False
         path.unlink()
+        self._delete_database_files(session_id)
         return True
 
     def clear_all(self) -> int:
@@ -142,8 +143,18 @@ class SessionStore:
         count = 0
         for path in list(self.root.glob("*.json")):
             path.unlink()
+            self._delete_database_files(path.stem)
             count += 1
         return count
+
+    def database_path(self, session_id: str) -> Path:
+        """Return the SQLite checkpoint path beside a session's JSON file."""
+        return self.root / f"{session_id}.db"
+
+    def _delete_database_files(self, session_id: str) -> None:
+        database = self.database_path(session_id)
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            (self.root / f"{database.name}{suffix}").unlink(missing_ok=True)
 
     def clear_compactions(self) -> int:
         """Delete saved DeepAgents conversation-history files for this workspace."""

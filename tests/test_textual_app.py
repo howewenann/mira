@@ -1968,7 +1968,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = True
             await pilot.pause()
 
-            handled = app._handle_new_chat()
+            handled = await app._handle_new_chat()
             await pilot.pause()
 
             self.assertTrue(handled)

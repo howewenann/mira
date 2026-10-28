@@ -8,6 +8,7 @@ from typing import Any
 
 from langchain_core.messages import BaseMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from pydantic import BaseModel
@@ -56,6 +57,24 @@ class MiraMemorySaver(MemorySaver):
 def make_checkpointer() -> MemorySaver:
     """Create an in-memory LangGraph checkpointer for agents or Workflows."""
     return MiraMemorySaver(serde=MiraJsonPlusSerializer())
+
+
+class MiraAsyncSqliteSaver(AsyncSqliteSaver):
+    """Durable saver with the same boundary normalization as MiraMemorySaver."""
+
+    async def aput(self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
+        return await super().aput(
+            config,
+            normalize_checkpoint_value(checkpoint),
+            normalize_checkpoint_value(metadata),
+            new_versions,
+        )
+
+    async def aput_writes(
+        self, config: Any, writes: Any, task_id: str, task_path: str = ""
+    ) -> None:
+        normalized = [(channel, normalize_checkpoint_value(value)) for channel, value in writes]
+        await super().aput_writes(config, normalized, task_id, task_path)
 
 
 def normalize_checkpoint_value(value: Any) -> Any:

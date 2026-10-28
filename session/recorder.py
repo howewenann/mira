@@ -617,12 +617,30 @@ class SessionEventEmitter:
             callback = getattr(self.renderer, f"finalize_{kind}")
             outcome = callback(interrupt)
             return await outcome if hasattr(outcome, "__await__") else outcome
-        artifact, event = prepare_artifact_review(
-            kind,  # type: ignore[arg-type]
-            interrupt,
-            self.recorder.record,
-            self.semantic_state,
-        )
+        pending = self.semantic_state.get("pending_artifact")
+        if isinstance(pending, dict) and pending.get("kind") == kind:
+            artifact = pending["artifact"]
+            event = next(
+                (
+                    event for event in self.recorder.record.get("events", ())
+                    if event.get("type") == kind and event.get(kind, {}).get("id") == artifact["id"]
+                ),
+                None,
+            )
+            if event is None:
+                event = append_event(
+                    self.recorder.record,
+                    {"type": kind, "mode": "planning", kind: artifact, "status": "proposed"},
+                )
+        else:
+            artifact, event = prepare_artifact_review(
+                kind,  # type: ignore[arg-type]
+                interrupt,
+                self.recorder.record,
+                self.semantic_state,
+            )
+            self.semantic_state["pending_artifact"] = {"kind": kind, "artifact": artifact}
+            await self._persist_artifact_graph_state()
         self.recorder.save()
         self.renderer.artifact(
             kind,
@@ -652,6 +670,8 @@ class SessionEventEmitter:
             self.recorder.record,
             self.semantic_state,
         )
+        self.semantic_state["pending_artifact"] = None
+        await self._persist_artifact_graph_state()
         self.recorder.save()
         self.renderer.artifact(
             kind,
@@ -660,6 +680,11 @@ class SessionEventEmitter:
             {**resolved, **detail},
         )
         return resolved
+
+    async def _persist_artifact_graph_state(self) -> None:
+        callback = self.semantic_state.get("_persist_graph_state") if self.semantic_state else None
+        if callable(callback):
+            await callback()
 
     def reasoning_delta(self, delta: str, **frontend_identity: Any) -> None:
         event = self.recorder.reasoning_delta(delta)

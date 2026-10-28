@@ -921,8 +921,8 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(mode["planning"])
         self.assertIn("action mode", renderer.console.lines[-1])
 
-    async def test_plan_command_primes_resume_context_for_current_plan(self) -> None:
-        """Plan mode should carry only the authoritative retained Plan."""
+    async def test_plan_command_uses_native_history_without_resume_context(self) -> None:
+        """Plan mode must not inject a JSON-derived retained artifact summary."""
         renderer = RecordingRenderer()
         mode: dict[str, Any] = {"planning": False}
         session = {
@@ -957,7 +957,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         handled = await repl.handle_command("/plan", renderer, session, "model", mode)
         self.assertTrue(handled)
-        self.assertTrue(session["resume_context_pending"])
+        self.assertNotIn("resume_context_pending", session)
 
         with patch("tests.support.turns.run_turn", fake_run_turn):
             await run_user_turn(
@@ -970,10 +970,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
                 text="show me the previous plan",
             )
 
-        self.assertIn("Authoritative current Plan:", calls[0])
-        self.assertIn("Title: Palindrome Plan", calls[0])
-        self.assertIn("Current user request:", calls[0])
-        self.assertFalse(session.get("resume_context_pending"))
+        self.assertIn("show me the previous plan", calls[0])
+        self.assertNotIn("Authoritative current Plan:", calls[0])
+        self.assertNotIn("Title: Palindrome Plan", calls[0])
+        self.assertNotIn("resume_context_pending", session)
 
     async def test_act_does_not_queue_current_plan(self) -> None:
         """Leaving planning mode should not queue plan execution."""

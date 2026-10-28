@@ -96,14 +96,15 @@ blocking requests, snapshots, and minimal and full runnable frontends.
 | Show commands and usage | `/help` |
 | Change settings / models | `/settings` / `/models` |
 | Enter Plan mode / return to Act | `/plan` / `/act` |
+| Continue an interrupted operation after reviewing possible side effects | `/continue` |
 | Create an outcome-focused Goal | `/goal <prompt>` |
 | Reload agents / full runtime | `/reload` / `/reload-runtime` |
 | View configuration problems | `/issues` |
 | Open MCP status and controls | `/mcp` |
 
 Type `/` to autocomplete commands and `@` to autocomplete local files, tools,
-subagents, and MCP resources. Sessions are saved automatically; start with
-`--resume` to reopen the latest one.
+subagents, and MCP resources. Sessions save chat and execution state
+automatically; start with `--resume` to reopen the latest one.
 
 For desktop tasks on Windows, select a vision-capable Main model and set
 `image_inputs: true` in its `.mira/models.yml` profile. MIRA can inspect the

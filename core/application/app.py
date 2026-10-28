@@ -24,7 +24,6 @@ from agent.tools.specs import mira_environment_label
 from config.settings import rubric_enabled, rubric_max_iterations
 from core.interface import Frontend, FrontendEmitter, MCPApprovalRequest, NullFrontend
 from core.execution.turns import plan_thread_id
-from session.context import mark_resume_context_pending
 from session.dashboard import ensure_dashboard
 from session.goals import current_goal
 from session.plans import current_plan
@@ -168,6 +167,7 @@ class MiraApplication:
         )
         agent = None
         plan_agent = None
+        action_resources = None
         if not blocking:
             action_resources = configure_subagents(resources, config)
             inspect_model = get_llm(config, metadata=ModelMetadata())
@@ -205,6 +205,8 @@ class MiraApplication:
             resource_metadata=resources.metadata,
             project_backend=resources.project_backend,
             agent_unavailable_message=model_unavailable_message(config) if blocking else "",
+            action_resources=action_resources,
+            agent_metadata=metadata,
         )
 
     @staticmethod
@@ -216,19 +218,61 @@ class MiraApplication:
 
     async def open_session(self, session_id: str | None = None, resume: bool = False) -> MiraSession:
         """Load one MIRA session; its ID remains distinct from graph thread IDs."""
+        import aiosqlite
+
         from core.application.session import MiraSession
+        from session.checkpoint import MiraAsyncSqliteSaver, MiraJsonPlusSerializer
+        from session.graph_state import make_session_graph
 
         if self._closed:
             raise RuntimeError("MIRA application is shut down")
         record = self.store.load(session_id, resume=resume, workspace=self.workspace)
-        mark_resume_context_pending(record, resumed=bool(session_id or resume))
+        original_artifacts = (record.get("current_plan"), record.get("current_goal"))
+        previous = self._sessions.get(str(record["id"]))
+        if previous is not None:
+            await previous.close()
         ensure_dashboard(
             record,
             model_name=self.model_name,
             context_limit_tokens=self.context_limit_tokens,
             context_limit_source=self.context_limit_source,
         )
-        session = MiraSession(self, record)
+        if not hasattr(self.store, "database_path"):
+            session = MiraSession(self, record)
+            FrontendEmitter(self.frontend, session_id=session.id).session_state(
+                "opened", {"resume": bool(session_id or resume)}
+            )
+            return session
+        connection = await aiosqlite.connect(str(self.store.database_path(str(record["id"]))))
+        checkpointer = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+        try:
+            if self.agent is not None and getattr(self, "action_resources", None) is not None:
+                agent, plan_agent = build_agent_pair(
+                    config=self.config,
+                    workspace=self.workspace,
+                    checkpointer=checkpointer,
+                    metadata=self.agent_metadata,
+                    mcp_manager=self.mcp_manager,
+                    action_resources=self.action_resources,
+                )
+            else:
+                agent, plan_agent = self.agent, self.plan_agent
+        except BaseException:
+            await connection.close()
+            raise
+        session = MiraSession(
+            self, record, agent=agent, plan_agent=plan_agent,
+            checkpointer=checkpointer, semantic_graph=make_session_graph(checkpointer),
+        )
+        try:
+            await session.restore_graph_state()
+        except BaseException:
+            await session.close(persist=False)
+            self._sessions.pop(session.id, None)
+            raise
+        self.agent, self.plan_agent, self.checkpointer = agent, plan_agent, checkpointer
+        if (record.get("current_plan"), record.get("current_goal")) != original_artifacts:
+            self.store.save_metadata(record)
         FrontendEmitter(self.frontend, session_id=session.id).session_state(
             "opened",
             {"resume": bool(session_id or resume)},
@@ -294,21 +338,32 @@ class MiraApplication:
                 config=None,
             )
             action_resources = configure_subagents(resources, self.config)
-            agent, plan_agent = build_agent_pair(
-                config=self.config,
-                workspace=self.workspace,
-                checkpointer=self.checkpointer,
-                metadata=metadata,
-                mcp_manager=self.mcp_manager,
-                action_resources=action_resources,
-            )
-            self.agent, self.plan_agent = agent, plan_agent
+            self.action_resources = action_resources
+            self.agent_metadata = metadata
             self.tool_failures = resources.tool_failures
             self.resource_metadata = resources.metadata
             self.project_backend = resources.project_backend
             for session in self._sessions.values():
+                if session.runtime_state == "closed":
+                    continue
+                previous_agent, previous_plan_agent = session.agent, session.plan_agent
+                agent, plan_agent = build_agent_pair(
+                    config=self.config,
+                    workspace=self.workspace,
+                    checkpointer=session.checkpointer,
+                    metadata=metadata,
+                    mcp_manager=self.mcp_manager,
+                    action_resources=action_resources,
+                )
+                session.agent, session.plan_agent = agent, plan_agent
+                if session.recovery is not None:
+                    if session.recovery["agent"] is previous_agent:
+                        session.recovery["agent"] = agent
+                    elif session.recovery["agent"] is previous_plan_agent:
+                        session.recovery["agent"] = plan_agent
                 refresh_agent_specs(session.mode, agent, plan_agent)
                 session.mode["resources"] = resources.metadata
+                self.agent, self.plan_agent, self.checkpointer = agent, plan_agent, session.checkpointer
             self._policy_refreshed_generation = generation
 
     async def shutdown(self, *, persist_sessions: bool = True) -> None:
@@ -400,7 +455,6 @@ def select_mode(
     mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
     if planning:
         mode["plan_thread_id"] = plan_thread_id(session)
-        mark_resume_context_pending(session, resumed=True)
 
 
 def refresh_agent_specs(mode: dict[str, Any], agent: Any, plan_agent: Any) -> None:

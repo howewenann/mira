@@ -324,6 +324,8 @@ class MiraApp(App[None]):
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
             self._notify_startup_issues()
+            if self.core_session is not None and self.core_session.recovery is not None:
+                self.run_worker(self._recover_open_session(), name="recover-session")
             return
         self.query_one(ChatLog).startup_loading(workspace=str(self.workspace), state="starting...")
         self.call_after_refresh(self._start_startup_worker)
@@ -348,6 +350,7 @@ class MiraApp(App[None]):
             )
             self._install_state(state)
             self._notify_startup_issues()
+            await self._recover_open_session()
         except Exception as exc:
             error_path = self._write_error_report(exc, source="tui.startup")
             self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
@@ -643,6 +646,28 @@ class MiraApp(App[None]):
                 return
 
         plan_prompt = plan_command_prompt(text)
+        if text == "/continue":
+            if (
+                self.core_session is None
+                or self.core_session.recovery is None
+                or not self.core_session.recovery["incomplete"]
+            ):
+                self.system_message("no interrupted operation to continue", kind="muted")
+            else:
+                self.system_message(
+                    "Continuing the saved operation; an external side effect may repeat.",
+                    kind="warning",
+                )
+                self.busy = True
+                self._main_stream_active = False
+                self._set_status(state="running")
+                prompt.disabled = True
+                self.turn_worker = self.run_worker(
+                    self._run_incomplete_continuation(), name="continue", exclusive=True
+                )
+                return
+            self.action_focus_prompt()
+            return
         if plan_prompt is not None:
             await handle_command("/plan", self, self.session, self.model_name, self.mode)
             if not plan_prompt:
@@ -659,7 +684,7 @@ class MiraApp(App[None]):
             return
 
         if text == "/goal-clear":
-            self.clear_goal()
+            await self.clear_goal()
             self.action_focus_prompt()
             return
 
@@ -728,6 +753,27 @@ class MiraApp(App[None]):
             name="turn",
             exclusive=True,
         )
+
+    async def _run_incomplete_continuation(self) -> None:
+        """Run an explicitly retried checkpoint through the normal turn UI."""
+        try:
+            await self.core_session.continue_incomplete()
+            self._refresh_sessions()
+            self._set_status(state="ready")
+        except asyncio.CancelledError:
+            self.finish_turn(cancelled=True)
+            raise
+        except Exception as exc:
+            self.finish_turn(cancelled=True, tool_status="interrupted")
+            error_path = self._write_error_report(exc, source="tui.continue")
+            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
+            self._set_status(state="error")
+        finally:
+            self.finish_turn()
+            self.turn_worker = None
+            self.busy = False
+            self.query_one(PromptBox).disabled = False
+            self.action_focus_prompt()
 
     async def _run_turn(
         self,
@@ -1267,12 +1313,15 @@ class MiraApp(App[None]):
         if answer != "o" or self.store is None:
             return
         delete = getattr(self.store, "delete", None)
+        target = self.application._sessions.get(item.session_id) if self.application is not None else None
+        if target is not None:
+            await target.close()
         if not callable(delete) or not delete(item.session_id):
             self.notify("The saved chat no longer exists.", title="History")
             self._refresh_sessions()
             return
         if item.session_id == str(self.session.get("id") or ""):
-            self._handle_new_chat()
+            await self._handle_new_chat()
         else:
             self._refresh_sessions()
 
@@ -1280,7 +1329,7 @@ class MiraApp(App[None]):
         """Create and switch to a fresh session outside event handlers."""
         try:
             previous_session = self.session
-            if self._handle_new_chat() and self.session is not previous_session:
+            if await self._handle_new_chat() and self.session is not previous_session:
                 self._set_status(state="ready")
         except Exception as exc:
             self.system_message(f"new chat error: {exc}", kind="error")
@@ -1288,7 +1337,7 @@ class MiraApp(App[None]):
         finally:
             self.action_focus_prompt()
 
-    def _handle_new_chat(self) -> bool:
+    async def _handle_new_chat(self) -> bool:
         """Create a fresh saved session while preserving the current one."""
         if self.busy:
             self._notify_busy_action("starting a new chat")
@@ -1297,30 +1346,17 @@ class MiraApp(App[None]):
             self.system_message("new chat needs the normal session store", kind="warning")
             return True
 
-        load = getattr(self.store, "load", None)
-        if callable(load):
-            session = load(None, resume=False, workspace=self.workspace)
-        else:
-            new = getattr(self.store, "new", None)
-            if not callable(new):
-                self.system_message("new chat needs the normal session store", kind="warning")
-                return True
-            session = new(session_id=None, workspace=self.workspace)
-            save = getattr(self.store, "save", None)
-            if callable(save):
-                save(session)
-
-        self._switch_to_session(session)
+        core_session = await self.application.open_session()
+        self._activate_core_session(core_session)
         self.system_message("started new chat", kind="info")
         return True
-
-    def _switch_to_session(self, session: dict[str, Any]) -> None:
-        """Install a new active session without rebuilding agents."""
-        self._activate_core_session(MiraSession(self.application, session))
 
     def _activate_core_session(self, core_session: MiraSession) -> None:
         """Install one headless session projection into the existing UI shell."""
         self.core_session = core_session
+        self.agent = core_session.agent
+        self.plan_agent = core_session.plan_agent
+        self.checkpointer = core_session.checkpointer
         self.session = core_session.record
         self.mode = self.core_session.mode
         self.query_one(SubagentsPanel).reset()
@@ -1331,6 +1367,27 @@ class MiraApp(App[None]):
             context_limit_source=self.context_limit_source,
         )
         self._render_current_session()
+
+    async def _recover_open_session(self) -> None:
+        """Surface saved approvals automatically; leave uncertain work stopped."""
+        recovery = self.core_session.recovery if self.core_session is not None else None
+        if recovery is None:
+            return
+        if recovery["incomplete"]:
+            self.system_message(
+                "The previous operation stopped before its result was checkpointed. "
+                "External side effects may already have occurred. Review them before continuing.",
+                kind="warning",
+            )
+            return
+        self.busy = True
+        self.query_one(PromptBox).disabled = True
+        try:
+            await self.core_session.resume_pending()
+        finally:
+            self.busy = False
+            self.query_one(PromptBox).disabled = False
+            self.action_focus_prompt()
 
     async def _run_prompts_command(self) -> None:
         """List the exact shared prompt registry after lazy MCP discovery."""
@@ -1384,7 +1441,7 @@ class MiraApp(App[None]):
             return
 
         if action == "clear":
-            self.clear_plan()
+            await self.clear_plan()
             self.action_focus_prompt()
             return
 
@@ -1398,7 +1455,7 @@ class MiraApp(App[None]):
                 self.system_message(f"kept plan \"{plan_title(plan)}\" active", kind="muted")
                 self.action_focus_prompt()
                 return
-            self.core_session.begin_artifact_revision("plan", plan, feedback)
+            await self.core_session.begin_artifact_revision("plan", plan, feedback)
             self.system_message(f"revising plan \"{plan_title(plan)}\"", kind="status")
             self.busy = True
             self._main_stream_active = False
@@ -1412,7 +1469,7 @@ class MiraApp(App[None]):
             return
 
         if action == "implement":
-            started = self.core_session.start_artifact("plan")
+            started = await self.core_session.start_artifact("plan")
             if started is None:
                 self.system_message("no current Plan", kind="muted")
                 return
@@ -1434,7 +1491,7 @@ class MiraApp(App[None]):
                 self.system_message("kept the current formal work", kind="muted")
                 return
             await self._refresh_model_metadata()
-            self.core_session.begin_goal(objective)
+            await self.core_session.begin_goal(objective)
             await self.core_session.prompt(
                 text=objective,
                 display_text=f"/goal {objective}",
@@ -1453,8 +1510,11 @@ class MiraApp(App[None]):
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.mode["goal_staging"] = None
-            self.mode["goal_revision"] = None
+            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
+                self.mode["goal_staging"] = None
+                self.mode["goal_revision"] = None
+            await self.core_session.persist_graph_state()
+            self._sync_active_agent_pair()
             self.waiting_finished()
             self._waiting_label = "working..."
             self.turn_worker = None
@@ -1488,7 +1548,7 @@ class MiraApp(App[None]):
             return
 
         if action == "clear":
-            self.clear_goal()
+            await self.clear_goal()
             self.action_focus_prompt()
             return
 
@@ -1514,7 +1574,7 @@ class MiraApp(App[None]):
             return
 
         if action == "implement":
-            started = self.core_session.start_artifact("goal")
+            started = await self.core_session.start_artifact("goal")
             if started is None:
                 self.system_message("no current Goal", kind="muted")
                 return
@@ -1710,7 +1770,7 @@ class MiraApp(App[None]):
         """Run feedback through the same read-only Goal pipeline."""
         try:
             await self._refresh_model_metadata()
-            self.core_session.begin_artifact_revision("goal", value, feedback)
+            await self.core_session.begin_artifact_revision("goal", value, feedback)
             await self.core_session.prompt(
                 text=goal_revision_text(value, feedback),
                 display_text=f"Revise Goal: {feedback}",
@@ -1731,8 +1791,10 @@ class MiraApp(App[None]):
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.mode["goal_staging"] = None
-            self.mode["goal_revision"] = None
+            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
+                self.mode["goal_staging"] = None
+                self.mode["goal_revision"] = None
+            await self.core_session.persist_graph_state()
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
@@ -1818,6 +1880,9 @@ class MiraApp(App[None]):
             self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
+            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
+                self.mode["plan_revision"] = None
+            await self.core_session.persist_graph_state()
             self.turn_worker = None
             self.busy = False
             self.finish_turn()
@@ -1990,9 +2055,9 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).present_plan(value, active=True, status=value["status"])
         return "Current Plan rendered."
 
-    def clear_plan(self) -> None:
+    async def clear_plan(self) -> None:
         """Clear current_plan without deleting historical transcript events."""
-        value = self.core_session.clear_artifact("plan")
+        value = await self.core_session.clear_artifact("plan")
         if value is None:
             if current_goal(self.session) is not None:
                 self.system_message("There is no current Plan. Use /goal-clear to clear the current Goal.", kind="info")
@@ -2019,7 +2084,7 @@ class MiraApp(App[None]):
         if value["status"] not in RESUMABLE_PLAN_STATUSES:
             self.system_message("the current Plan is not resumable", kind="warning")
             return
-        started = self.core_session.start_artifact("plan")
+        started = await self.core_session.start_artifact("plan")
         if started is None:
             return
         self.system_message(f'resuming Plan "{plan_title(started)}"', kind="status")
@@ -2047,9 +2112,9 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).present_goal(value, active=True, status=value["status"])
         return "Current Goal rendered."
 
-    def clear_goal(self) -> None:
+    async def clear_goal(self) -> None:
         """Clear current_goal without deleting historical transcript events."""
-        value = self.core_session.clear_artifact("goal")
+        value = await self.core_session.clear_artifact("goal")
         if value is None:
             if current_plan(self.session) is not None:
                 self.system_message("There is no current Goal. Use /plan-clear to clear the current Plan.", kind="info")
@@ -2079,7 +2144,7 @@ class MiraApp(App[None]):
         if value["status"] not in RESUMABLE_GOAL_STATUSES:
             self.system_message("the current Goal is not resumable", kind="warning")
             return
-        started = self.core_session.start_artifact("goal")
+        started = await self.core_session.start_artifact("goal")
         if started is None:
             return
         self.system_message(f'resuming Goal "{goal_title(started)}"', kind="status")
@@ -2176,7 +2241,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear chat cancelled", kind="muted")
                 return True
-            self._clear_current_chat()
+            await self._clear_current_chat()
             self.system_message("current chat history cleared", kind="info")
             return True
 
@@ -2190,7 +2255,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear all chats cancelled", kind="muted")
                 return True
-            sessions, compactions = self._clear_all_chats()
+            sessions, compactions = await self._clear_all_chats()
             session_suffix = "s" if sessions != 1 else ""
             compaction_suffix = "s" if compactions != 1 else ""
             self.system_message(
@@ -2722,8 +2787,15 @@ class MiraApp(App[None]):
         self._settings_panel = None
         self.action_focus_prompt()
 
-    def _clear_current_chat(self) -> None:
+    async def _clear_current_chat(self) -> None:
         """Reset the active persisted transcript while keeping the same session id."""
+        if self.core_session is not None and self.core_session.checkpointer is not None:
+            for thread_id in (
+                self.core_session.id,
+                f"{self.core_session.id}:plan",
+                *(f"{self.core_session.id}:plan:{run_id}" for run_id in range(1, int(self.mode.get("plan_runs") or 0) + 1)),
+            ):
+                await self.core_session.checkpointer.adelete_thread(thread_id)
         self.session["title"] = "Untitled session"
         self.session["turns"] = 0
         self.session["events"] = []
@@ -2737,12 +2809,18 @@ class MiraApp(App[None]):
         )
         if self.store is not None:
             self.store.save(self.session)
+        if self.core_session is not None:
+            await self.core_session.persist_graph_state()
         self._render_current_session()
 
-    def _clear_all_chats(self) -> tuple[int, int]:
+    async def _clear_all_chats(self) -> tuple[int, int]:
         """Delete saved session files and keep the active session usable."""
         sessions = 0
         compactions = 0
+        active_id = str(self.session.get("id") or "")
+        if self.application is not None:
+            for core_session in tuple(self.application._sessions.values()):
+                await core_session.close()
         if self.store is not None:
             clear_all = getattr(self.store, "clear_all", None)
             if callable(clear_all):
@@ -2750,7 +2828,8 @@ class MiraApp(App[None]):
             clear_compactions = getattr(self.store, "clear_compactions", None)
             if callable(clear_compactions):
                 compactions = int(clear_compactions())
-        self._clear_current_chat()
+        if self.application is not None:
+            self._activate_core_session(await self.application.open_session(active_id))
         return sessions, compactions
 
     def _clear_prompt_history(self) -> None:
@@ -3600,6 +3679,7 @@ class MiraApp(App[None]):
 
     def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled") -> None:
         """Close live turn widgets without clearing visible transcript history."""
+        self._sync_active_agent_pair()
         self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
@@ -3608,6 +3688,15 @@ class MiraApp(App[None]):
         if cancelled:
             self.query_one(SubagentsPanel).cancel_running()
             self._subagent_live_active = False
+
+    def _sync_active_agent_pair(self) -> None:
+        """Use a policy-refreshed pair installed for the active session."""
+        if self.core_session is None:
+            return
+        self.agent = self.core_session.agent
+        self.plan_agent = self.core_session.plan_agent
+        if self.core_session.checkpointer is not None:
+            self.checkpointer = self.core_session.checkpointer
 
     def usage_updated(self) -> None:
         """Refresh the status bar after token usage is committed."""
@@ -4363,6 +4452,7 @@ class MiraApp(App[None]):
         try:
             core_session = await self.application.open_session(session_id, resume=True)
             self._activate_core_session(core_session)
+            await self._recover_open_session()
             self._set_status(state="ready")
         except Exception as exc:
             error_path = self._write_error_report(
@@ -4531,6 +4621,7 @@ class MiraApp(App[None]):
         config: dict[str, Any],
         metadata: Any | None,
         action_resources: Any | None = None,
+        checkpointer: Any | None = None,
     ) -> tuple[Any, Any]:
         """Build both agents without replacing the active pair."""
         from agent.factory import build_agent, build_plan_agent
@@ -4541,6 +4632,7 @@ class MiraApp(App[None]):
             settings=config.get("settings"),
             config=config,
         )
+        self._last_action_resources = action_resources
         plan_resources = build_resources(
             self.workspace,
             create_examples=False,
@@ -4553,7 +4645,7 @@ class MiraApp(App[None]):
         agent = build_agent(
             config=config,
             workspace=self.workspace,
-            checkpointer=self.checkpointer,
+            checkpointer=checkpointer or self.checkpointer,
             metadata=metadata,
             mcp_manager=self.mcp_manager,
             resources=action_resources,
@@ -4561,7 +4653,7 @@ class MiraApp(App[None]):
         plan_agent = build_plan_agent(
             config=config,
             workspace=self.workspace,
-            checkpointer=self.checkpointer,
+            checkpointer=checkpointer or self.checkpointer,
             metadata=metadata,
             mcp_manager=self.mcp_manager,
             resources=plan_resources,
@@ -4616,6 +4708,22 @@ class MiraApp(App[None]):
             return
         self.application.agent = self.agent
         self.application.plan_agent = self.plan_agent
+        self.application.checkpointer = self.checkpointer
+        if self.core_session is not None:
+            self.core_session.agent = self.agent
+            self.core_session.plan_agent = self.plan_agent
+        action_resources = getattr(self, "_last_action_resources", None)
+        if action_resources is not None:
+            self.application.action_resources = action_resources
+            for session in self.application._sessions.values():
+                if session is self.core_session or session.runtime_state == "closed" or session.checkpointer is None:
+                    continue
+                session.agent, session.plan_agent = self._build_agent_pair(
+                    config=self.config,
+                    metadata=self._current_model_metadata(),
+                    action_resources=action_resources,
+                    checkpointer=session.checkpointer,
+                )
         self.application.config = self.config
         self.application.model_name = self.model_name
         self.application.context_limit_tokens = self.context_limit_tokens

@@ -650,6 +650,8 @@ async def run_turn(
     pinned_skills: list[str] | None = None,
     always_allowed_tools: set[str] | None = None,
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
+    resume_interrupts: list[Any] | None = None,
+    resume_incomplete: bool = False,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -660,20 +662,22 @@ async def run_turn(
     prompt, this function asks the renderer for the needed input and resumes
     the same thread with a ``Command`` payload.
     """
-    payload: dict[str, Any] | Command = {
+    payload: dict[str, Any] | Command | None = {
         "messages": list(messages) if messages is not None else [{"role": "user", "content": text}]
     }
-    if pinned_skills:
+    if resume_incomplete:
+        payload = None
+    if pinned_skills and isinstance(payload, dict):
         payload["pinned_skills"] = pinned_skills
     refreshed_threads = getattr(agent, "mira_skills_refreshed_threads", None)
-    if isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
+    if isinstance(payload, dict) and isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
         payload["skills_metadata"] = None
     rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
-    if include_rubric_state:
+    if isinstance(payload, dict) and include_rubric_state:
         payload["rubric"] = rubric
-    if planning_stage in PLANNING_STAGES:
+    if isinstance(payload, dict) and planning_stage in PLANNING_STAGES:
         payload["planning_stage"] = planning_stage
-    if planning_state:
+    if isinstance(payload, dict) and planning_state:
         payload.update(planning_state)
     config = {"configurable": {"thread_id": thread_id}}
     result = TurnResult()
@@ -689,6 +693,36 @@ async def run_turn(
     )
     eval_renderer = EvalSubagentRenderer(event_renderer, inspection)
     always_allowed_tools = always_allowed_tools if always_allowed_tools is not None else set()
+
+    if resume_interrupts:
+        # The saved interrupt has already suspended the graph. Ask through the
+        # normal renderer before invoking any node, then resume that checkpoint.
+        finalize_goal = first_typed_interrupt(resume_interrupts, "finalize_goal")
+        finalize_plan = first_typed_interrupt(resume_interrupts, "finalize_plan")
+        ask_user = first_typed_interrupt(resume_interrupts, "ask_user")
+        mcp_elicitation = first_typed_interrupt(resume_interrupts, "mcp_elicitation")
+        show_goal = first_typed_interrupt(resume_interrupts, "show_goal")
+        show_plan = first_typed_interrupt(resume_interrupts, "show_plan")
+        if finalize_goal is not None or finalize_plan is not None:
+            kind = "finalize_goal" if finalize_goal is not None else "finalize_plan"
+            interrupt = finalize_goal if finalize_goal is not None else finalize_plan
+            decision = await getattr(renderer, kind)(interrupt)
+            result.formal_review = decision if isinstance(decision, dict) else {"action": str(decision)}
+            payload = Command(resume=decision)
+        elif show_goal is not None or show_plan is not None:
+            kind = "show_goal" if show_goal is not None else "show_plan"
+            await getattr(renderer, kind)(show_goal if show_goal is not None else show_plan)
+            return result
+        elif ask_user is not None:
+            payload = Command(resume=await renderer.ask_user(ask_user))
+        elif mcp_elicitation is not None:
+            payload = Command(resume=await renderer.answer_mcp_elicitation(mcp_elicitation))
+        else:
+            annotate_filesystem_approvals(resume_interrupts, getattr(agent, "mira_backend", None))
+            decisions = await resolve_approval_decisions(
+                renderer, resume_interrupts, agent, always_allowed_tools, persist_always_allow
+            )
+            payload = Command(resume=approval_resume_value(resume_interrupts, decisions))
 
     while True:
         inspection.begin_pass()

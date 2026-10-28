@@ -1911,16 +1911,40 @@ model.
 ## Workflow History Awareness
 
 1. Run a discovered Workflow containing a nested agent and wait for completion.
-   Without opening an Inspector, ask: "What happened in the workflow I just ran?"
-   Expected: MIRA knows the Workflow exists and uses `grep`/`read_file` on the
-   current `.mira/_sessions/<session-id>.json` when details are needed.
+   Ask MIRA to inspect `.mira/_sessions/<session-id>.json` for the Workflow run.
+   Expected: MIRA uses `grep`/`read_file` when details are needed.
 2. Ask: "What did the researcher subagent do?" Expected: MIRA finds the Workflow
    event in `events[]`, follows the agent's `inspection_id` into `runs[]`, and
    answers from that persisted history.
 3. Switch to another chat and back, then ask about the Workflow again. Restart
    MIRA, reopen the same session, and ask again. Expected: the same history is
-   discoverable without Inspector clicks, duplicate Workflow files, or a custom
-   Workflow inspection tool; normal model context contains only a breadcrumb.
+   discoverable from the same JSON file without Inspector clicks, duplicate
+   Workflow files, or a custom Workflow inspection tool. Reopening the session
+   does not inject a JSON-derived Workflow breadcrumb into model context.
+
+## SQLite Session Checkpoints
+
+1. In a disposable workspace, start a chat, exchange two messages, enter `/plan`,
+   and ask for a Plan. Exit MIRA, then reopen the same session. Expected: a
+   `<session-id>.db` sits beside `<session-id>.json`; Act and Plan conversations
+   continue from their saved graph messages without repeating old user messages
+   or inserting a "Previous MIRA session context" block.
+2. Approve a Plan or Goal, exit, reopen, and use `/plan-show` or `/goal-show`.
+   Expected: the exact artifact, criteria, status, and attempts return. Resume
+   it, interrupt the attempt, reopen again, then clear it. Expected: the
+   lifecycle and clear action survive another restart.
+3. Request a harmless file write and exit while its approval is visible.
+   Reopen the session. Expected: the same approval appears automatically;
+   rejecting leaves the file absent, and approving a repeat run writes it once.
+   Repeat with `ask_user` and formal Plan/Goal review when available.
+4. Stop MIRA during a tool that may have external effects, before its completion
+   is checkpointed. Reopen the session. Expected: MIRA warns that the effect is
+   uncertain and does not run the tool on open. `/continue` explicitly retries
+   the saved operation and warns that the effect may repeat.
+5. Run `/compact`, exit, reopen, and ask a follow-up. Expected: DeepAgents'
+   summary remains in the graph and the follow-up works. Delete the chat from
+   history. Expected: its JSON, DB, and SQLite sidecars disappear; another chat
+   remains usable.
 
 ## Primary-Monitor Computer Use
 

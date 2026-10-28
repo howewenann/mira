@@ -251,6 +251,7 @@ async def _run_one_shot_core(
         prepared = await manager.prompt_registry.resolve(prompt)
     attachments = manager.attachments_from_text(prompt) if manager is not None else []
     try:
+        await app["core_session"].resume_pending()
         result = await app["core_session"].prompt(
             prompt,
             prepared_messages=list(prepared.messages) if prepared is not None else None,
