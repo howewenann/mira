@@ -14,7 +14,8 @@ from langchain_core.messages import HumanMessage
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import interrupt
-from pydantic import BaseModel
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 from langchain.agents.middleware import HumanInTheLoopMiddleware
@@ -30,7 +31,6 @@ from tests.test_workflows import WorkflowModel
 from tests.test_checkpoint import BindableFakeMessagesListChatModel, Finding
 from tests.test_runner import RunTurnRenderer
 from core.execution.runner import run_turn
-from session.checkpoint import MiraAsyncSqliteSaver, MiraJsonPlusSerializer
 
 
 class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -75,6 +75,8 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             workspace = Path(directory)
             first = await self.start(workspace)
             session = await first.open_session("one")
+            self.assertIs(type(session.checkpointer), AsyncSqliteSaver)
+            self.assertIs(type(session.checkpointer.serde), JsonPlusSerializer)
             await session.prompt("first message")
             await session.set_mode("plan")
             await session.prompt("plan something")
@@ -234,7 +236,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             database = str(Path(directory) / "hitl.db")
             config = {"configurable": {"thread_id": "hitl"}}
             connection = await aiosqlite.connect(database)
-            saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+            saver = AsyncSqliteSaver(connection)
             first = create_agent(
                 model=BindableFakeMessagesListChatModel(responses=[AIMessage(
                     content="", tool_calls=[{"name": "side_effect", "args": {"value": "x"}, "id": "call-1"}]
@@ -252,7 +254,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
 
             connection = await aiosqlite.connect(database)
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
                 second = create_agent(
                     model=BindableFakeMessagesListChatModel(responses=[AIMessage(content="finished")]),
                     tools=[side_effect],
@@ -272,7 +274,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             approved_config = {"configurable": {"thread_id": "hitl-approved"}}
             connection = await aiosqlite.connect(database)
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
                 approving_first = create_agent(
                     model=BindableFakeMessagesListChatModel(responses=[AIMessage(
                         content="", tool_calls=[{"name": "side_effect", "args": {"value": "x"}, "id": "call-2"}]
@@ -292,7 +294,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
 
             connection = await aiosqlite.connect(database)
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
                 approving_second = create_agent(
                     model=BindableFakeMessagesListChatModel(responses=[AIMessage(content="finished")]),
                     tools=[side_effect],
@@ -310,31 +312,36 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await connection.close()
 
-    async def test_sqlite_serializer_normalizes_checkpoint_and_pending_writes(self) -> None:
+    async def test_sqlite_stock_serializer_restores_checkpoint_and_pending_writes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             connection = await aiosqlite.connect(str(Path(directory) / "serde.db"))
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
+                self.assertIs(type(saver), AsyncSqliteSaver)
+                self.assertIs(type(saver.serde), JsonPlusSerializer)
                 config = {"configurable": {"thread_id": "serde", "checkpoint_ns": ""}}
                 checkpoint = {
                     "v": 4, "ts": "2026-01-01T00:00:00+00:00", "id": "checkpoint-1",
                     "channel_values": {
                         "messages": [AIMessage(content="stored")],
-                        "state": _DeltaSnapshot({"schema": AIMessage, "finding": Finding,
-                                                 "serializer": BaseModel.__pydantic_serializer__}),
+                        "state": _DeltaSnapshot({"finding": Finding(summary="saved"),
+                                                 "flags": {"enabled": True}}),
                     },
                     "channel_versions": {"messages": "1", "state": "1"},
                     "versions_seen": {}, "pending_sends": [],
                 }
                 saved = await saver.aput(config, checkpoint, {}, {"messages": "1", "state": "1"})
-                await saver.aput_writes(saved, [("state", {"schema": AIMessage})], "task-1")
+                await saver.aput_writes(saved, [("state", {"finding": Finding(summary="queued")})], "task-1")
                 loaded = await saver.aget_tuple(saved)
                 self.assertEqual(loaded.checkpoint["channel_values"]["messages"][0].content, "stored")
                 state = loaded.checkpoint["channel_values"]["state"]
                 self.assertIsInstance(state, _DeltaSnapshot)
-                self.assertEqual(state.value["schema"], {"__mira_type__": "langchain_core.messages.ai.AIMessage"})
-                self.assertEqual(loaded.pending_writes[0][2]["schema"], state.value["schema"])
-                self.assertIn("__mira_pydantic_internal__", state.value["serializer"])
+                self.assertIsInstance(state.value["finding"], Finding)
+                self.assertEqual(state.value["finding"].summary, "saved")
+                self.assertEqual(state.value["flags"], {"enabled": True})
+                self.assertEqual(loaded.pending_writes, [
+                    ("task-1", "state", {"finding": Finding(summary="queued")}),
+                ])
             finally:
                 await connection.close()
 
@@ -452,7 +459,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
             config = {"configurable": {"thread_id": "ask"}}
             connection = await aiosqlite.connect(database)
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
                 first = create_agent(
                     model=BindableFakeMessagesListChatModel(responses=[AIMessage(
                         content="", tool_calls=[{"name": "ask_user", "args": {}, "id": "ask-1"}]
@@ -470,7 +477,7 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
 
             connection = await aiosqlite.connect(database)
             try:
-                saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+                saver = AsyncSqliteSaver(connection)
                 second = create_agent(
                     model=BindableFakeMessagesListChatModel(responses=[AIMessage(content="done")]),
                     tools=[ask_user], checkpointer=saver,

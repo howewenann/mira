@@ -96,7 +96,7 @@ from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
 from tracing.stream import TraceStream
 from session.goals import current_goal, goal_artifact
-from session.checkpoint import MiraAsyncSqliteSaver, MiraJsonPlusSerializer
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from session.plans import current_plan, plan_artifact
 from session.recorder import SessionEventEmitter
 from session.recorder import SessionRecorder
@@ -7599,7 +7599,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             record["events"] = [{"type": "user", "text": "clear me"}]
             store.save(record)
             connection = await aiosqlite.connect(str(store.database_path("current")))
-            saver = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+            saver = AsyncSqliteSaver(connection)
             app = make_app(workspace=workspace, session=record, store=store)
 
             async with app.run_test(size=(100, 30)) as pilot:

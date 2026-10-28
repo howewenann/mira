@@ -221,7 +221,7 @@ class MiraApplication:
         import aiosqlite
 
         from core.application.session import MiraSession
-        from session.checkpoint import MiraAsyncSqliteSaver, MiraJsonPlusSerializer
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         from session.graph_state import make_session_graph
 
         if self._closed:
@@ -244,7 +244,7 @@ class MiraApplication:
             )
             return session
         connection = await aiosqlite.connect(str(self.store.database_path(str(record["id"]))))
-        checkpointer = MiraAsyncSqliteSaver(connection, serde=MiraJsonPlusSerializer())
+        checkpointer = AsyncSqliteSaver(connection)
         try:
             if self.agent is not None and getattr(self, "action_resources", None) is not None:
                 agent, plan_agent = build_agent_pair(

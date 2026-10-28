@@ -1,43 +1,29 @@
-"""Tests for MIRA's LangGraph checkpointer wiring."""
+"""Tests for MIRA's stock LangGraph checkpointer wiring."""
 
 from __future__ import annotations
 
 import unittest
 
+from deepagents._messages_reducer import _messages_delta_reducer
 from langchain.agents import create_agent
 from langchain.agents.middleware.human_in_the_loop import HumanInTheLoopMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_messages
 from langgraph.channels.delta import DeltaChannel
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.types import Command
 from pydantic import BaseModel
-from pydantic_core import SchemaSerializer, SchemaValidator
+from pydantic_core import SchemaSerializer
 
-from deepagents._messages_reducer import _messages_delta_reducer
-
-from session.checkpoint import make_checkpointer, sanitize_checkpoint_value
+from session.checkpoint import make_checkpointer
 
 
 class Finding(BaseModel):
-    """Small Pydantic model used to exercise schema-class checkpoint values."""
+    """Small Pydantic model shared with SQLite and probe tests."""
 
     summary: str
-
-
-class BrokenDump:
-    """Object shaped like Pydantic but failing during model_dump."""
-
-    def model_dump(self) -> dict[str, object]:
-        raise TypeError("'MockValSer' object is not an instance of 'SchemaSerializer'")
-
-
-class BrokenAIMessage(AIMessage):
-    """AIMessage test double whose model_dump path fails."""
-
-    def model_dump(self, *args: object, **kwargs: object) -> dict[str, object]:
-        raise TypeError("broken message dump")
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -53,7 +39,12 @@ def toy(command: str) -> str:
 
 
 class CheckpointTests(unittest.TestCase):
-    """Tests for checkpoint serialization fallbacks."""
+    """Tests for stock checkpoint serialization and replay."""
+
+    def test_memory_saver_uses_stock_default_serializer(self) -> None:
+        saver = make_checkpointer()
+        self.assertIs(type(saver), InMemorySaver)
+        self.assertIs(type(saver.serde), JsonPlusSerializer)
 
     def test_message_instances_round_trip_as_messages(self) -> None:
         serde = make_checkpointer().serde
@@ -67,28 +58,6 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(value.content, "hello")
         self.assertEqual(convert_to_messages([value])[0].content, "hello")
 
-    def test_raw_jsonplus_preserves_delta_snapshots(self) -> None:
-        serde = JsonPlusSerializer()
-        snapshot = _DeltaSnapshot([HumanMessage(content="hello")])
-
-        kind, payload = serde.dumps_typed(snapshot)
-        value = serde.loads_typed((kind, payload))
-
-        self.assertEqual(kind, "msgpack")
-        self.assertIsInstance(value, _DeltaSnapshot)
-        self.assertEqual(value.value[0].content, "hello")
-
-    def test_mira_jsonplus_preserves_delta_snapshots(self) -> None:
-        serde = make_checkpointer().serde
-        snapshot = _DeltaSnapshot([HumanMessage(content="hello")])
-
-        kind, payload = serde.dumps_typed(snapshot)
-        value = serde.loads_typed((kind, payload))
-
-        self.assertEqual(kind, "msgpack")
-        self.assertIsInstance(value, _DeltaSnapshot)
-        self.assertEqual(value.value[0].content, "hello")
-
     def test_delta_snapshot_round_trip_replays_as_message_state(self) -> None:
         serde = make_checkpointer().serde
         snapshot = _DeltaSnapshot([
@@ -99,180 +68,55 @@ class CheckpointTests(unittest.TestCase):
 
         kind, payload = serde.dumps_typed(snapshot)
         loaded = serde.loads_typed((kind, payload))
+        self.assertEqual(kind, "msgpack")
+        self.assertIsInstance(loaded, _DeltaSnapshot)
+        self.assertEqual([message.content for message in loaded.value], ["user", "assistant", "tool"])
+
         channel = DeltaChannel(_messages_delta_reducer, list, snapshot_frequency=50).from_checkpoint(loaded)
-
         channel.update([[HumanMessage(content="next")]])
-
         self.assertEqual([message.__class__.__name__ for message in channel.get()], [
-            "HumanMessage",
-            "AIMessage",
-            "ToolMessage",
-            "HumanMessage",
+            "HumanMessage", "AIMessage", "ToolMessage", "HumanMessage",
         ])
 
-    def test_checkpointer_serializes_message_type_markers(self) -> None:
-        serde = make_checkpointer().serde
-
-        kind, payload = serde.dumps_typed({"schema": AIMessage, "finding": Finding})
-        value = serde.loads_typed((kind, payload))
-
-        self.assertEqual(kind, "msgpack")
-        self.assertEqual(
-            value,
-            {
-                "schema": {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                "finding": {"__mira_type__": f"{Finding.__module__}.Finding"},
-            },
-        )
-
-    def test_checkpointer_round_trips_writes_with_nested_risky_values(self) -> None:
-        checkpointer = make_checkpointer()
-        config = {
-            "configurable": {
-                "thread_id": "thread-1",
-                "checkpoint_ns": "",
-            }
-        }
+    def test_memory_saver_restores_plain_state_messages_and_pending_writes(self) -> None:
+        saver = make_checkpointer()
+        config = {"configurable": {"thread_id": "thread-1", "checkpoint_ns": ""}}
+        state = {"nested": {"items": [1, "two"], "enabled": True}}
         checkpoint = {
             "v": 4,
             "ts": "2026-01-01T00:00:00+00:00",
             "id": "checkpoint-1",
-            "channel_values": {
-                "messages": [AIMessage(content="stored")],
-                "state": {"nested": [AIMessage, Finding]},
-            },
+            "channel_values": {"messages": [AIMessage(content="stored")], "state": state},
             "channel_versions": {"messages": "1", "state": "1"},
             "versions_seen": {},
             "pending_sends": [],
         }
-        saved_config = checkpointer.put(config, checkpoint, {}, {"messages": "1", "state": "1"})
+        saved = saver.put(config, checkpoint, {}, {"messages": "1", "state": "1"})
+        saver.put_writes(saved, [("state", {"finding": Finding(summary="queued")})], "task-1")
 
-        checkpointer.put_writes(saved_config, [("state", {"nested": [AIMessage, Finding]})], "task-1")
-
-        loaded = checkpointer.get_tuple(saved_config)
+        loaded = saver.get_tuple(saved)
         self.assertIsNotNone(loaded)
         assert loaded is not None
-        message = convert_to_messages(loaded.checkpoint["channel_values"]["messages"])[0]
-        self.assertEqual(message.content, "stored")
-        self.assertEqual(
-            loaded.checkpoint["channel_values"]["state"],
-            {
-                "nested": [
-                    {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                    {"__mira_type__": f"{Finding.__module__}.Finding"},
-                ]
-            },
-        )
-        self.assertEqual(
-            loaded.pending_writes,
-            [
-                (
-                    "task-1",
-                    "state",
-                    {
-                        "nested": [
-                            {"__mira_type__": "langchain_core.messages.ai.AIMessage"},
-                            {"__mira_type__": f"{Finding.__module__}.Finding"},
-                        ]
-                    },
-                )
-            ],
-        )
+        self.assertIsInstance(loaded.checkpoint["channel_values"]["messages"][0], AIMessage)
+        self.assertEqual(loaded.checkpoint["channel_values"]["messages"][0].content, "stored")
+        self.assertEqual(loaded.checkpoint["channel_values"]["state"], state)
+        self.assertEqual(loaded.pending_writes, [("task-1", "state", {"finding": Finding(summary="queued")})])
 
-    def test_pydantic_model_instances_serialize_as_plain_dicts(self) -> None:
+    def test_pydantic_model_round_trips_as_model(self) -> None:
         serde = make_checkpointer().serde
-
-        kind, payload = serde.dumps_typed({"finding": Finding(summary="ok")})
+        kind, payload = serde.dumps_typed(Finding(summary="ok"))
         value = serde.loads_typed((kind, payload))
 
         self.assertEqual(kind, "msgpack")
-        self.assertEqual(value, {"finding": {"summary": "ok"}})
+        self.assertIsInstance(value, Finding)
+        self.assertEqual(value.summary, "ok")
 
-    def test_checkpointer_survives_pydantic_mock_serializer_values(self) -> None:
-        checkpointer = make_checkpointer()
-        config = {
-            "configurable": {
-                "thread_id": "thread-mock",
-                "checkpoint_ns": "",
-            }
-        }
-        checkpoint = {
-            "v": 4,
-            "ts": "2026-01-01T00:00:00+00:00",
-            "id": "checkpoint-mock",
-            "channel_values": {
-                "state": {"serializer": BaseModel.__pydantic_serializer__},
-            },
-            "channel_versions": {"state": "1"},
-            "versions_seen": {},
-            "pending_sends": [],
-        }
-
-        saved_config = checkpointer.put(config, checkpoint, {}, {"state": "1"})
-        checkpointer.put_writes(
-            saved_config,
-            [("state", {"serializer": BaseModel.__pydantic_serializer__})],
-            "task-mock",
-        )
-
-        loaded = checkpointer.get_tuple(saved_config)
-        self.assertIsNotNone(loaded)
-        assert loaded is not None
-        expected = {
-            "__mira_pydantic_internal__": "pydantic._internal._mock_val_ser.MockValSer",
-        }
-        self.assertEqual(loaded.checkpoint["channel_values"]["state"]["serializer"], expected)
-        self.assertEqual(loaded.pending_writes[0][2]["serializer"], expected)
-
-    def test_pydantic_serializer_internals_become_stable_markers(self) -> None:
+    def test_unsupported_runtime_objects_raise(self) -> None:
         serde = make_checkpointer().serde
-
-        kind, payload = serde.dumps_typed(
-            {
-                "mock": BaseModel.__pydantic_serializer__,
-                "serializer": SchemaSerializer({"type": "any"}),
-                "validator": SchemaValidator({"type": "any"}),
-            }
-        )
-        value = serde.loads_typed((kind, payload))
-
-        self.assertEqual(kind, "msgpack")
-        self.assertEqual(
-            value,
-            {
-                "mock": {
-                    "__mira_pydantic_internal__": "pydantic._internal._mock_val_ser.MockValSer",
-                },
-                "serializer": {
-                    "__mira_pydantic_internal__": "pydantic_core._pydantic_core.SchemaSerializer",
-                },
-                "validator": {
-                    "__mira_pydantic_internal__": "pydantic_core._pydantic_core.SchemaValidator",
-                },
-            },
-        )
-
-    def test_model_dump_schema_serializer_error_is_sanitized(self) -> None:
-        serde = make_checkpointer().serde
-
-        kind, payload = serde.dumps_typed({"broken": BrokenDump()})
-        value = serde.loads_typed((kind, payload))
-
-        self.assertEqual(kind, "msgpack")
-        self.assertIn("BrokenDump", value["broken"])
-
-    def test_message_sanitize_fallback_stays_structured(self) -> None:
-        message = BrokenAIMessage(
-            content="hello",
-            tool_calls=[{"name": "toy", "args": {"command": "x"}, "id": "call-1"}],
-        )
-
-        value = sanitize_checkpoint_value(message)
-
-        self.assertEqual(value["type"], "ai")
-        self.assertEqual(value["content"], "hello")
-        self.assertEqual(value["tool_calls"][0]["name"], "toy")
-        self.assertNotIn("AIMessage(content=", str(value))
+        for value in (AIMessage, BaseModel.__pydantic_serializer__, SchemaSerializer({"type": "any"})):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaises((TypeError, ValueError)):
+                    serde.dumps_typed({"value": value})
 
 
 class CheckpointHitlTests(unittest.IsolatedAsyncioTestCase):
