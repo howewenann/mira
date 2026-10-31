@@ -14,6 +14,8 @@ from unittest.mock import patch
 from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent import factory
+from agent.tools.skill_validation import VALIDATE_SKILL_METADATA
+from agent.tools.groups import builtin_tool_groups
 from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware import (
     ExecuteToolDescriptionRewriteMiddleware,
@@ -36,12 +38,75 @@ from agent.resources.project_setup import (
     MCP_CONFIGURATION_SCHEMA,
     ensure_project_examples,
 )
-from config.settings import READ_ONLY_BUILTIN_TOOLS, load_settings, set_subagent_enabled
+from agent.tools.discovery import BUILT_IN_TOOL_NAMES, load_tools
+from config.settings import DEFAULT_SETTINGS, INBUILT_TOOLS, READ_ONLY_BUILTIN_TOOLS, load_settings, set_subagent_enabled, set_tool_enabled
 from core.application import DEFAULT_TOOL_SPECS, resource_specs
 
 
 class ResourceDiscoveryTests(unittest.TestCase):
     """Tests for default and project resource layering."""
+
+    def test_removed_desktop_feature_is_not_packaged_or_discovered(self) -> None:
+        removed = {"screenshot", "click", "click_cell", "type_text", "press_key", "scroll"}
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+        self.assertFalse(removed & {tool.name for tool in resources.tools})
+        self.assertFalse(removed & set(BUILT_IN_TOOL_NAMES))
+        self.assertFalse(removed & set(INBUILT_TOOLS))
+        self.assertFalse(removed & DEFAULT_SETTINGS["hitl"]["tools"].keys())
+        self.assertNotIn("computer-use", {item["name"] for item in resources.metadata["skills"]})
+        self.assertFalse(Path("agent/resources/defaults/tools/computer.py").exists())
+        self.assertFalse(Path("agent/resources/defaults/skills/computer-use/SKILL.md").exists())
+        dependencies = Path("pyproject.toml").read_text(encoding="utf-8").lower()
+        self.assertNotIn("pyautogui", dependencies)
+        self.assertNotIn("pillow", dependencies)
+
+    def test_bundled_groups_are_discovered_and_disabled_features_retain_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            bundled = workspace / "bundled"
+            bundled.mkdir()
+            for filename, group, names in (("z.py", "Zeta", ("zebra",)), ("a.py", "alpha", ("second", "first"))):
+                (bundled / filename).write_text(
+                    "from langchain_core.tools import tool\nTOOL_GROUP = " + repr(group) + "\n" + "".join(
+                        f'@tool\ndef {name}() -> str:\n    """A configurable feature."""\n    return "ok"\n'
+                        for name in names
+                    ), encoding="utf-8",
+                )
+            (bundled / "more.py").write_text(
+                'from langchain_core.tools import tool\nTOOL_GROUP = "alpha"\n'
+                '@tool\ndef third() -> str:\n    """Another tool in the same group."""\n    return "ok"\n', encoding="utf-8",
+            )
+            configured = set_tool_enabled(DEFAULT_SETTINGS, "first", False)
+            with patch("agent.tools.discovery.default_dir", return_value=bundled):
+                resources = build_resources(workspace, create_examples=False, settings=configured)
+            groups = builtin_tool_groups(resources.metadata["tools"])
+            self.assertEqual(groups[0], ("Core Tools", [
+                ("Read-only", ("ls", "read_file", "glob", "grep")),
+                ("Actions", ("write_file", "edit_file", "delete", "execute", "eval", "task")),
+            ]))
+            self.assertEqual(groups[1], ("MIRA Tools", [
+                ("alpha", ("first", "second", "third")),
+                ("Skill Validation", ("validate_skill",)), ("Zeta", ("zebra",)),
+            ]))
+            self.assertNotIn("first", {tool.name for tool in resources.tools})
+            self.assertIn("first", {item["name"] for item in resources.metadata["tools"]})
+            # Settings keeps the bundled feature identity if a project replaces its implementation.
+            project = workspace / ".mira/tools"
+            project.mkdir(parents=True)
+            (project / "override.py").write_text(
+                'from langchain_core.tools import tool\nTOOL_GROUP = "Untrusted group"\n'
+                '@tool\ndef first() -> str:\n    """A project override."""\n    return "project"\n', encoding="utf-8",
+            )
+            with patch("agent.tools.discovery.default_dir", return_value=bundled):
+                _, metadata, _ = load_tools(workspace, resources.project_backend)
+            self.assertEqual(next(item for item in metadata if item["name"] == "first")["group"], "alpha")
+
+    def test_internal_control_tools_are_not_configurable_features(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            resources = build_resources(Path(directory), create_examples=False)
+        grouped = {name for _, groups in builtin_tool_groups(resources.metadata["tools"]) for _, names in groups for name in names}
+        self.assertFalse({"ask_user", "prepare_plan", "finalize_plan", "prepare_goal", "finalize_goal", "show_plan", "show_goal"} & grouped)
 
     def test_launch_creates_inert_project_kit_and_keeps_active_directories_empty(self) -> None:
         """A fresh launch should create complete guidance without activating it."""
@@ -130,7 +195,7 @@ class ResourceDiscoveryTests(unittest.TestCase):
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
             self.assertEqual(
                 {item["name"] for item in resources.metadata["skills"]},
-                {"skill-creator", "workflow-creator", "workflow-exporter", "computer-use"},
+                {"skill-creator", "workflow-creator", "workflow-exporter"},
             )
             self.assertEqual(
                 resources.memory[:2],
@@ -464,7 +529,7 @@ description: Project-specific workflow.
             self.assertEqual(resources.skills, ["/mira-defaults/skills"])
             self.assertEqual(
                 {item["name"] for item in resources.metadata["skills"]},
-                {"skill-creator", "workflow-creator", "workflow-exporter", "computer-use"},
+                {"skill-creator", "workflow-creator", "workflow-exporter"},
             )
             self.assertEqual(resources.subagents, [])
             self.assertEqual(resources.metadata["subagents"][0]["name"], "general-purpose")
@@ -485,16 +550,13 @@ description: Project-specific workflow.
             self.assertEqual(
                 resources.metadata["tools"],
                 [
+                    dict(VALIDATE_SKILL_METADATA),
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
                         "source": "default",
                         "replaces": "",
                     },
-                    *[
-                        {"name": name, "path": "/mira-defaults/tools/computer.py", "source": "default", "replaces": "built-in"}
-                        for name in ("screenshot", "click", "click_cell", "type_text", "press_key", "scroll")
-                    ],
                     {
                         "name": "finalize_goal",
                         "path": "/mira-defaults/tools/finalize_goal.py",
@@ -641,12 +703,6 @@ def project_status() -> str:
                 [
                     "validate_skill",
                     "ask_user",
-                    "screenshot",
-                    "click",
-                    "click_cell",
-                    "type_text",
-                    "press_key",
-                    "scroll",
                     "finalize_goal",
                     "finalize_plan",
                     "prepare_goal",
@@ -662,16 +718,13 @@ def project_status() -> str:
             self.assertEqual(
                 resources.metadata["tools"],
                 [
+                    dict(VALIDATE_SKILL_METADATA),
                     {
                         "name": "ask_user",
                         "path": "/mira-defaults/tools/ask_user.py",
                         "source": "default",
                         "replaces": "",
                     },
-                    *[
-                        {"name": name, "path": "/mira-defaults/tools/computer.py", "source": "default", "replaces": "built-in"}
-                        for name in ("screenshot", "click", "click_cell", "type_text", "press_key", "scroll")
-                    ],
                     {
                         "name": "finalize_goal",
                         "path": "/mira-defaults/tools/finalize_goal.py",
@@ -1053,7 +1106,7 @@ def read_file_as_bytes(path: str) -> str:
         ptc_tools = set(QUICKJS_PTC_TOOLS)
 
         self.assertEqual(ptc_tools, {"ls", "read_file", "glob", "grep", "validate_skill"})
-        self.assertEqual(QUICKJS_PTC_TOOLS, tuple(name for name in READ_ONLY_BUILTIN_TOOLS if name != "screenshot"))
+        self.assertEqual(QUICKJS_PTC_TOOLS, READ_ONLY_BUILTIN_TOOLS)
         self.assertFalse({"task", "write_file", "edit_file", "execute", "ask_user", "finalize_plan"} & ptc_tools)
 
     def test_effective_ptc_tools_exclude_globally_disabled_reads(self) -> None:

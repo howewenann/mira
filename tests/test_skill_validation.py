@@ -11,7 +11,7 @@ from deepagents.middleware.skills import MAX_SKILL_FILE_SIZE
 
 from agent import factory
 from agent.resources import build_resources
-from agent.tools.skill_validation import build_validate_skill_tool
+from agent.tools.skill_validation import VALIDATE_SKILL_METADATA, build_validate_skill_tool
 from config.settings import READ_ONLY_BUILTIN_TOOLS, load_settings
 
 
@@ -254,3 +254,11 @@ class SkillValidationTests(unittest.TestCase):
         self.assertNotIn("validate_skill", factory._write_interrupts({"settings": settings}))
         self.assertIn("validate_skill", [tool.name for tool in rubric_tools])
         self.assertNotIn("validate_skill", rubric_interrupts)
+        info = [item for item in resources.metadata["tools"] if item["name"] == "validate_skill"]
+        self.assertEqual(info, [VALIDATE_SKILL_METADATA])
+        self.assertIn("validate_skill", factory.effective_ptc_tool_names(
+            {"settings": settings}, resources.tools, resources.metadata["tools"],
+        ))
+        self.assertTrue(factory._local_tool_available_in_plan(
+            {"settings": settings}, resources.metadata["tools"], "validate_skill",
+        ))

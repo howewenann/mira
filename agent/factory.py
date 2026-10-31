@@ -510,7 +510,9 @@ def _write_interrupts(
         interrupts[name] = {"allowed_decisions": ["approve", "edit", "reject"]}
     for item in tool_metadata or []:
         name = item.get("name")
-        if not name or item.get("source") not in {"project", "mcp"}:
+        if not name or (item.get("source") not in {"project", "mcp"} and not item.get("group")):
+            continue
+        if name in READ_ONLY_BUILTIN_TOOLS:
             continue
         if item.get("source") == "mcp":
             policy = mcp_tool_policy(config, item.get("server", ""), item.get("original_name", ""))
@@ -532,7 +534,7 @@ def _local_tool_available_in_plan(
     name: str,
 ) -> bool:
     info = next((item for item in metadata if item.get("name") == name), None)
-    if info is None or info.get("source") != "project":
+    if info is None or (info.get("source") != "project" and not info.get("group")):
         return True
     return tool_enabled(config, name) and tool_plan_access(config, name)
 
@@ -572,7 +574,7 @@ def effective_ptc_tool_names(
             continue
         item = metadata_by_name.get(name, {})
         source = item.get("source")
-        if source == "project" and tool_enabled(config, name) and tool_ptc(config, name):
+        if (source == "project" or item.get("group")) and tool_enabled(config, name) and tool_ptc(config, name):
             names.append(name)
         elif source == "mcp":
             policy = mcp_tool_policy(
@@ -597,7 +599,7 @@ def effective_rubric_tools(
     filesystem_names = [
         name
         for name in READ_ONLY_BUILTIN_TOOLS
-        if name not in {VALIDATE_SKILL_TOOL, "screenshot"}
+        if name != VALIDATE_SKILL_TOOL
         and name not in excluded
         and tool_enabled(config, name)
         and tool_rubric_access(config, name)
@@ -625,9 +627,6 @@ def effective_rubric_tools(
         name = tool_name(tool)
         item = metadata_by_name.get(name, {})
         source = item.get("source")
-        if name == "screenshot" and name not in excluded and tool_rubric_access(config, name):
-            resolved.append(tool)
-            continue
         if name == VALIDATE_SKILL_TOOL:
             if (
                 name not in excluded
@@ -636,7 +635,7 @@ def effective_rubric_tools(
             ):
                 resolved.append(tool)
             continue
-        if name in excluded or source not in {"project", "mcp"}:
+        if name in excluded or (source not in {"project", "mcp"} and not item.get("group")):
             continue
         policy = tool_policy(config, name)
         enabled = policy.enabled

@@ -272,7 +272,8 @@ configuration, model profile fields change, or `/settings` changes ownership.
 **Decision:** MIRA loads bundled defaults first, then project `.mira/` resources.
 Bundled defaults stay minimal: default memories plus MIRA's built-in project
 tools. Project resources replace defaults by memory filename, skill name,
-subagent name, or tool name.
+subagent name, or tool name, except for the protected `validate_skill` checker
+described under [Runtime policies and built-in tools](#runtime-policies-and-built-in-tools).
 
 **Why:** Defaults make MIRA useful immediately without prescribing a skill or
 subagent style. Project resources let a workspace customize behavior without
@@ -408,6 +409,46 @@ library or provider edge case is confirmed.
 LangGraph used to handle, or when a workaround becomes part of the normal path.
 
 ### Runtime policies and built-in tools
+
+General Settings and Access share the hierarchy in
+[agent/tools/groups.py](agent/tools/groups.py): Core Tools keeps Read-only before
+Actions using existing policy definitions (`grep` and `eval` remain Core).
+MIRA Tools groups only explicitly configurable bundled features. A bundled tool
+module declares `TOOL_GROUP = "Feature name"`; discovery carries this metadata
+through resource display items, including disabled tools and project overrides.
+Groups and tools sort alphabetically without ordering configuration. Internal
+Plan/Goal tools have no group declaration and stay out of these settings.
+
+Settings presents a flat sequence of Core Read-only, Core Actions, and MIRA
+feature groups with individual toggles. The shared footer resets only the active
+tab after one confirmation. `reset_tab_settings()` in
+[config/settings.py](config/settings.py) restores owned fields from canonical
+defaults and removes dynamic policy overrides to use existing default behavior;
+Enable/Allow and Access remain separate owners. Models may reset Main to unset,
+using the ordinary unavailable-agent path without selecting a fallback profile.
+
+Reset submits one settings application and refreshes controls without firing
+change callbacks. MCP reset uses `MCPManager.reset_policy()` as one lifecycle
+batch: clear session trust, stop connections, and leave enabled servers awaiting
+normal approval. It neither reconnects nor saves approval during a successful
+reset. A failed rebuild reconnects only previously running, approved servers and
+restores prior session grants; the old agent registration is then rebuilt against
+the reopened clients. Server definitions stay untouched. Atomic file
+replacement and the existing settings rollback retain previous settings on
+save/rebuild failure. Tracing-only resets request a manual runtime reload;
+combined General resets also rebuild changed tool policies immediately.
+
+`validate_skill` intentionally bypasses ordinary project override resolution.
+[agent/resources/builder.py](agent/resources/builder.py) removes every discovered
+tool and metadata item with that name, then registers the trusted implementation
+and its Skill Validation metadata from
+[agent/tools/skill_validation.py](agent/tools/skill_validation.py). Arbitrary
+project code must not inherit the validator's intrinsic read-only approval or
+its permitted Plan, PTC, and Rubric access. The validator only reads skill files
+through the combined backend and reports validation results; it does not execute
+or edit skills. Group metadata changes its presentation without changing these
+privileges. The override and safe-access regression lives in
+[tests/test_skill_validation.py](tests/test_skill_validation.py).
 
 **Decision:** MIRA pins DeepAgents 0.7.32, LangChain 1.4.7, and
 `langchain-quickjs` 0.3.7, with the LangGraph and LangSmith minimums required

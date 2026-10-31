@@ -6,7 +6,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -2632,6 +2632,7 @@ class MiraApp(App[None]):
             settings,
             tool_metadata=self._settings_tool_metadata(),
             apply_change=self._apply_settings,
+            reset_change=self._reset_settings,
             configure_git=self._configure_git,
             reload_runtime=self._run_reload_runtime_command,
             close_panel=self._close_settings_panel,
@@ -2644,35 +2645,57 @@ class MiraApp(App[None]):
         self._settings_panel = panel
         return self.mount(panel)
 
-    async def _apply_settings(self, settings: dict[str, Any]) -> tuple[bool, str]:
+    async def _reset_settings(self, tab: str, settings: dict[str, Any]) -> tuple[bool, str]:
+        from ui.textual.widgets.settings_panel import SETTINGS_TAB_LABELS
+
+        label = SETTINGS_TAB_LABELS[tab]
+        answer = await self.foreground_interrupt(lambda: self._prompt_choice(
+            f"Reset {label}?",
+            f"Restore the default settings for {label}? Other tabs will not be changed.",
+            [("r", "Reset"), ("c", "Cancel")],
+        ))
+        if answer != "r":
+            return False, "reset cancelled"
+        ok, message = await self._apply_settings(settings, reset_mcp=tab == "mcp")
+        if ok and tab == "mcp" and message != "settings unchanged":
+            message += "; enabled MCP servers await approval through Connect/Restart"
+        return ok, message
+
+    async def _apply_settings(self, settings: dict[str, Any], *, reset_mcp: bool = False) -> tuple[bool, str]:
         """Persist settings and apply any needed runtime changes."""
         old_settings = (self.config or {}).get("settings") or load_settings(self.workspace)
-        if old_settings == settings:
+        changed = old_settings != settings
+        if not changed and not reset_mcp:
             return True, "settings unchanged"
         if await self._execute_enable_cancelled(old_settings, settings):
             return False, "execute remains disabled"
-        if not save_settings(self.workspace, settings):
+        if changed and not save_settings(self.workspace, settings):
             return False, "could not save .mira/settings.yml"
 
         old_config = self.config
         self.config = dict(old_config or {})
         self.config["settings"] = settings
-        if not self.ready:
-            return True, "settings saved; MIRA is not ready; Reload Runtime required"
         old_tracing = old_settings.get("tracing") or {}
         new_tracing = settings.get("tracing") or {}
-        if (
+        tracing_reload = (
             old_tracing.get("enabled") != new_tracing.get("enabled")
             or old_tracing.get("profile") != new_tracing.get("profile")
-        ):
-            return True, "tracing settings saved; Reload Runtime required"
+        )
         middleware_spans_changed = middleware_span_mode(old_settings) != middleware_span_mode(settings)
 
         try:
-            if old_settings.get("models") != settings.get("models"):
-                await self._rebuild_model_agents(old_settings)
-            else:
-                await self._rebuild_agents()
+            policy_reset = self.mcp_manager.reset_policy() if reset_mcp and self.mcp_manager is not None else nullcontext(False)
+            async with policy_reset as mcp_changed:
+                if not changed and not mcp_changed:
+                    return True, "settings unchanged"
+                if not self.ready:
+                    return True, "settings saved; MIRA is not ready; Reload Runtime required"
+                if tracing_reload and all(old_settings.get(key) == value for key, value in settings.items() if key != "tracing"):
+                    return True, "tracing settings saved; Reload Runtime required"
+                if old_settings.get("models") != settings.get("models"):
+                    await self._rebuild_model_agents(old_settings)
+                else:
+                    await self._rebuild_agents()
         except Exception as error:
             from config.llm import ConfigError
 
@@ -2685,8 +2708,18 @@ class MiraApp(App[None]):
                 message = f"settings not saved; agent rebuild failed: {error}; error report: {error_path}"
             if not restored:
                 message += "; could not restore .mira/settings.yml"
+            if reset_mcp and self.mcp_manager is not None:
+                # Rollback reopened clients; old agent tools still reference closed clients.
+                try:
+                    await self._rebuild_agents()
+                except Exception:
+                    message += "; could not restore MCP agent registration; Reload Runtime required"
             return False, message
         self._set_status(state="ready")
+        if tracing_reload:
+            return True, "settings saved; agents rebuilt; tracing requires Reload Runtime"
+        if old_settings.get("models") != settings.get("models") and settings["models"].get("main") is None:
+            return True, "settings saved; agents rebuilt; Main is unset; select a model with /models"
         if middleware_spans_changed:
             return True, "middleware span setting saved; agents rebuilt; no reload required"
         return True, "settings saved; agents rebuilt; no reload required"
@@ -3417,8 +3450,16 @@ class MiraApp(App[None]):
         inspector.stop_inspection()
         switcher.current = "chat-log"
 
-    def on_key(self, event: Key) -> None:
+    async def on_key(self, event: Key) -> None:
         """Apply Escape to the currently focused transcript or prompt."""
+        settings = self._settings_panel
+        if (
+            settings is not None and settings.is_mounted and settings.display
+            and self.screen.focused is None and event.key in {"escape", "q"}
+        ):
+            event.prevent_default()
+            await settings.on_key(event)
+            return
         if event.key != "escape":
             return
         try:

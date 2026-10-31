@@ -18,7 +18,7 @@ from agent.resources.skills import load_skills
 from agent.subagents.discovery import SubagentDiscovery, discover_subagents, effective_subagent_specs
 from agent.tools.discovery import load_tools, tool_name
 from agent.tools.failures import ToolLoadFailure, tool_failure_issues
-from agent.tools.skill_validation import VALIDATE_SKILL_TOOL, build_validate_skill_tool
+from agent.tools.skill_validation import VALIDATE_SKILL_METADATA, VALIDATE_SKILL_TOOL, build_validate_skill_tool
 from core.diagnostics.issues import Issue
 from config.settings import EXECUTE_TOOL, execute_env_settings, tool_enabled
 
@@ -92,6 +92,8 @@ def build_resources(
         *(tool for tool in tools if tool_name(tool) != VALIDATE_SKILL_TOOL),
     ]
     tool_info = [item for item in tool_info if item["name"] != VALIDATE_SKILL_TOOL]
+    # Never inherit a project's implementation or metadata for this trusted tool.
+    tool_info.insert(0, dict(VALIDATE_SKILL_METADATA))
     active_tools = enabled_tools(tools, tool_info, settings)
     for tool in active_tools:
         info = next((item for item in tool_info if item["name"] == tool_name(tool)), None)
@@ -141,7 +143,7 @@ def enabled_tools(
     for tool in tools:
         name = tool_name(tool)
         info = metadata_by_name.get(name, {})
-        if info.get("source") == "project" and not tool_enabled(settings, name):
+        if (info.get("source") == "project" or info.get("group")) and not tool_enabled(settings, name):
             continue
         active.append(tool)
     return active

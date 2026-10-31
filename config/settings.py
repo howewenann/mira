@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 import yaml
@@ -36,13 +37,13 @@ RUBRIC_MODEL = "rubric"
 SUMMARIZATION_MODEL = "summarization"
 SUBAGENT_MODELS = "subagents"
 EXECUTE_ENV_MODES = ("system", "conda_name", "conda_prefix", "venv")
-READ_ONLY_BUILTIN_TOOLS = ("ls", "read_file", "glob", "grep", "validate_skill", "screenshot")
+CORE_READ_ONLY_TOOLS = ("ls", "read_file", "glob", "grep")
+READ_ONLY_BUILTIN_TOOLS = (*CORE_READ_ONLY_TOOLS, "validate_skill")
 INBUILT_DANGEROUS_TOOLS = (
     "write_file", "edit_file", DELETE_TOOL, EXECUTE_TOOL, "eval", "task",
-    "click", "click_cell", "type_text", "press_key", "scroll",
 )
 INBUILT_TOOLS = (*READ_ONLY_BUILTIN_TOOLS, *INBUILT_DANGEROUS_TOOLS)
-PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task", "screenshot"})
+PTC_INAPPLICABLE_TOOLS = frozenset({"eval", "task"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,18 +110,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "glob": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "grep": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
             "validate_skill": {"enabled": True, "plan_access": True, "ptc": True, "rubric": True},
-            "screenshot": {"enabled": True, "plan_access": True, "ptc": False, "rubric": False},
             "write_file": {"enabled": True, "always_allow": False, "ptc": False},
             "edit_file": {"enabled": True, "always_allow": False, "ptc": False},
             DELETE_TOOL: {"enabled": True, "always_allow": False, "ptc": False},
             "execute": {"enabled": False, "always_allow": False, "ptc": False, "rubric": False},
             "eval": {"enabled": True, "always_allow": False},
             "task": {"enabled": True, "always_allow": False},
-            "click": {"enabled": True, "always_allow": False, "ptc": False},
-            "click_cell": {"enabled": True, "always_allow": False, "ptc": False},
-            "type_text": {"enabled": True, "always_allow": False, "ptc": False},
-            "press_key": {"enabled": True, "always_allow": False, "ptc": False},
-            "scroll": {"enabled": True, "always_allow": False, "ptc": False},
         },
     }
 }
@@ -129,6 +124,61 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 def settings_path(workspace: Path) -> Path:
     """Return the workspace-local settings path."""
     return workspace.expanduser().resolve() / ".mira" / SETTINGS_FILE
+
+
+def reset_tab_settings(
+    settings: dict[str, Any],
+    tab: str,
+    *,
+    builtin_tools: tuple[str, ...] = INBUILT_TOOLS,
+    custom_tools: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Restore one Settings tab's fields, retaining policies owned by other tabs."""
+    updated = normalize_settings(settings)
+    if tab == "general":
+        for key in ("system", TRACING):
+            updated[key] = deepcopy(DEFAULT_SETTINGS[key])
+        for key, value in DEFAULT_SETTINGS["hitl"].items():
+            if key != "tools":
+                updated["hitl"][key] = deepcopy(value)
+    elif tab == "models":
+        updated[MODELS] = deepcopy(DEFAULT_SETTINGS[MODELS])
+    elif tab not in {"custom", "mcp", "access"}:
+        raise ValueError(f"Unknown Settings tab: {tab}")
+
+    keys = ("plan_access", "ptc", "rubric") if tab == "access" else ("enabled", "always_allow")
+    if tab == "general":
+        names = builtin_tools
+    elif tab == "custom":
+        names = custom_tools
+    elif tab == "access":
+        names = tuple(set(builtin_tools) | set(custom_tools) | set(updated["hitl"]["tools"]))
+    else:
+        names = ()
+    tools = updated["hitl"]["tools"]
+    for name in names:
+        if name not in tools:
+            continue  # An absent dynamic-tool policy already has fresh-workspace defaults.
+        defaults = DEFAULT_SETTINGS["hitl"]["tools"].get(name, {})
+        for key in keys:
+            tools[name].pop(key, None)
+            if key in defaults:
+                tools[name][key] = deepcopy(defaults[key])
+        if not tools[name]:
+            tools.pop(name)
+
+    if tab in {"mcp", "access"}:
+        for server in updated.get("mcp", {}).get("servers", {}).values():
+            if tab == "mcp":
+                for key in ("enabled", "always_allow", "approved_fingerprint"):
+                    server.pop(key, None)
+            for spec in server.get("tools", {}).values():
+                for key in keys:
+                    spec.pop(key, None)
+            server["tools"] = {name: spec for name, spec in server.get("tools", {}).items() if spec}
+            if not server["tools"]:
+                server.pop("tools")
+    return normalize_settings(updated)
 
 
 def load_settings_result(workspace: Path) -> SettingsLoadResult:
@@ -158,16 +208,23 @@ def load_settings(workspace: Path) -> dict[str, Any]:
 
 
 def save_settings(workspace: Path, settings: dict[str, Any]) -> bool:
-    """Persist normalized workspace settings."""
+    """Replace settings atomically so a failed save leaves the previous file intact."""
     path = settings_path(workspace)
+    temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            yaml.safe_dump(normalize_settings(settings), sort_keys=False),
-            encoding="utf-8",
-        )
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(yaml.safe_dump(normalize_settings(settings), sort_keys=False))
+        temporary.replace(path)
     except OSError:
         return False
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return True
 
 

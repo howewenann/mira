@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
@@ -253,6 +254,49 @@ class MCPManager:
             return False
         await self._notify_changed()
         return True
+
+    @asynccontextmanager
+    async def reset_policy(self) -> AsyncIterator[bool]:
+        """Revoke MCP trust as one batch; the caller owns saving and rebuilding.
+
+        Enabled servers wait for normal user approval through Connect/Restart.
+        Keeping startup out of reset also avoids extra prompts and trust saves.
+        If the caller fails, reconnect only servers that were already approved
+        and running before the reset, then restore the original session grants.
+        """
+        async with self._operation_lock:
+            approvals = set(self._session_approvals)
+            states = {name: (state.status, state.error) for name, state in self.servers.items()}
+            running = {name for name, state in self.servers.items() if state.usable}
+            changed = bool(approvals)
+            try:
+                self._session_approvals.clear()
+                settings = load_settings(self.workspace)
+                for state in self.servers.values():
+                    if state.status == "Failed" and state.error:
+                        continue
+                    status = "Approval required" if mcp_server_enabled(settings, state.name) else "Disabled"
+                    runtime = self._runtimes.get(state.name)
+                    if state.status != status or (runtime is not None and runtime.open):
+                        changed = True
+                        await self._stop_server(state, final_status=status)
+                yield changed
+            except BaseException as error:
+                self._session_approvals = approvals | {
+                    (name, self.servers[name].fingerprint) for name in running
+                }
+                try:
+                    for name, (status, message) in states.items():
+                        state = self.servers[name]
+                        if name in running:
+                            await self._start_server(state, restarting=False)
+                            if not state.usable:
+                                raise RuntimeError(f"MCP rollback could not reconnect {name}") from error
+                        else:
+                            state.status, state.error = status, message
+                finally:
+                    self._session_approvals = approvals
+                raise
 
     async def _start_server(
         self,

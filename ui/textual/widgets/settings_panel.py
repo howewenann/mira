@@ -15,13 +15,13 @@ from textual.events import Key
 from textual.widgets import Button, ContentSwitcher, Input, Select, Static
 
 from agent.planning.policy import PLAN_DISABLED_TOOLS
+from agent.tools.groups import builtin_tool_groups
 from config.settings import (
     DYNAMIC_SUBAGENTS,
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
     EXECUTE_TOOL,
     EXECUTE_ENV_MODES,
     INBUILT_DANGEROUS_TOOLS,
-    INBUILT_TOOLS,
     PTC_INAPPLICABLE_TOOLS,
     READ_ONLY_BUILTIN_TOOLS,
     PLANNING_RESPONSE_STATUS_MAX_RETRIES_LIMIT,
@@ -45,6 +45,7 @@ from config.settings import (
     set_planning_response_status_max_retries,
     set_rubric_enabled,
     set_rubric_max_iterations,
+    reset_tab_settings,
     set_tool_always_allow,
     set_tool_enabled,
     set_tool_plan_access,
@@ -98,6 +99,7 @@ EXECUTE_ENV_FIELDS = {
 }
 ToggleCallback = Callable[[dict[str, Any]], Awaitable[tuple[bool, str]]]
 GitCallback = Callable[[bool | None], Awaitable[tuple[bool, str, dict[str, Any]]]]
+ResetCallback = Callable[[str, dict[str, Any]], Awaitable[tuple[bool, str]]]
 ReloadCallback = Callable[[], Awaitable[bool]]
 CloseCallback = Callable[[], None]
 INHERIT_VALUE = "__mira_default__"
@@ -108,6 +110,7 @@ SETTINGS_TAB_PAGES = {
     "mcp": "settings-mcp-body",
     "access": "settings-access-body",
 }
+SETTINGS_TAB_LABELS = {"general": "General", "models": "Models", "custom": "Custom Tools", "mcp": "MCP", "access": "Access"}
 ACCESS_POLICIES = ("plan", "ptc", "rubric")
 ACCESS_POLICY_LABELS = {"plan": "Plan", "ptc": "PTC", "rubric": "Rubric"}
 ACCESS_POLICY_LABEL_WIDTH = 52
@@ -139,6 +142,7 @@ class SettingsPanel(Vertical):
         *,
         tool_metadata: list[dict[str, str]] | None = None,
         apply_change: ToggleCallback,
+        reset_change: ResetCallback | None = None,
         configure_git: GitCallback | None = None,
         reload_runtime: ReloadCallback | None = None,
         close_panel: CloseCallback | None = None,
@@ -153,6 +157,7 @@ class SettingsPanel(Vertical):
         self.settings = settings
         self.tool_metadata = tool_metadata or []
         self.apply_change = apply_change
+        self.reset_change = reset_change
         self.configure_git = configure_git
         self.reload_runtime = reload_runtime
         self.close_panel = close_panel
@@ -270,24 +275,21 @@ class SettingsPanel(Vertical):
                             disabled=not rubric_enabled(self.settings),
                         )
 
-                    yield Static("Inbuilt Tools", classes="settings-section inbuilt")
-                    yield SettingsHeaderRow("")
-                    for tool_name in INBUILT_TOOLS:
-                        enabled = tool_enabled(self.settings, tool_name)
-                        with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
-                            yield Static(tool_name, classes="settings-label")
-                            yield self._toggle_button(
-                                ToggleCell("enabled", tool_name),
-                                enabled,
-                            )
-                            yield self._toggle_button(
-                                ToggleCell(
-                                    "always_allow",
-                                    tool_name,
-                                    locked=tool_name in READ_ONLY_BUILTIN_TOOLS,
-                                ),
-                                tool_always_allow(self.settings, tool_name),
-                            )
+                    for section, groups in builtin_tool_groups(self.tool_metadata):
+                        for group, names in groups:
+                            title = f"{section} ({group})" if section == "Core Tools" else group
+                            yield Static(title, classes="settings-section inbuilt")
+                            yield SettingsHeaderRow("")
+                            for tool_name in names:
+                                with Horizontal(classes="settings-row settings-policy-row settings-inbuilt-tool-row"):
+                                    yield Static(tool_name, classes="settings-label")
+                                    yield self._toggle_button(
+                                        ToggleCell("enabled", tool_name), tool_enabled(self.settings, tool_name),
+                                    )
+                                    yield self._toggle_button(
+                                        ToggleCell("always_allow", tool_name, locked=tool_name in READ_ONLY_BUILTIN_TOOLS),
+                                        tool_always_allow(self.settings, tool_name),
+                                    )
 
                     yield Static("Execute Environment", classes="settings-section execute-env")
                     execute_env = execute_env_settings(self.settings)
@@ -465,15 +467,14 @@ class SettingsPanel(Vertical):
                                 ):
                                     yield Static(original, classes="settings-label")
                                     yield self._toggle_button(
-                                        ToggleCell("mcp_tool_enabled", original, not enabled, state.name),
+                                        ToggleCell("mcp_tool_enabled", original, server=state.name),
                                         policy.enabled,
                                     )
                                     yield self._toggle_button(
                                         ToggleCell(
                                             "mcp_tool_allow",
                                             original,
-                                            not enabled or not policy.enabled,
-                                            state.name,
+                                            server=state.name,
                                         ),
                                         policy.always_allow,
                                     )
@@ -500,13 +501,18 @@ class SettingsPanel(Vertical):
             with Horizontal(id="settings-footer"):
                 yield Static("", id="settings-status", classes="settings-status")
                 yield Button(
+                    "Reset to default",
+                    id="settings-reset-default",
+                    classes="settings-config-action settings-reload-button settings-footer-reload",
+                )
+                yield Button(
                     "Reload runtime",
                     id="settings-reload-runtime",
                     classes="settings-config-action settings-reload-button settings-footer-reload",
                 )
 
     def on_mount(self) -> None:
-        """Focus the first editable toggle when the panel appears."""
+        """Finish mounting without choosing an initial keyboard target."""
         sync_interactivity = getattr(self.app, "_sync_interactivity", None)
         if callable(sync_interactivity):
             sync_interactivity()
@@ -514,12 +520,7 @@ class SettingsPanel(Vertical):
 
     def _finish_mount(self) -> None:
         self._model_controls_ready = True
-        switcher = self.query_one("#settings-switcher", ContentSwitcher)
-        if switcher.current == SETTINGS_TAB_PAGES["access"]:
-            self.screen.set_focus(None)
-            return
-        if not any(widget.has_focus for widget in self.query("Button, Input, Select")):
-            self._focus_first_toggle()
+        self.screen.set_focus(None)
 
     @on(Button.Pressed, ".settings-tab")
     def press_tab(self, event: Button.Pressed) -> None:
@@ -547,7 +548,7 @@ class SettingsPanel(Vertical):
         await detail.remove_children()
         await detail.mount(*self._access_widgets(policy))
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-detail"
-        self.call_after_refresh(detail.query_one("#settings-access-back", Button).focus)
+        self.call_after_refresh(self.screen.set_focus, None)
 
     @on(Button.Pressed, "#settings-tracing-config")
     async def press_tracing_config(self, event: Button.Pressed) -> None:
@@ -643,6 +644,8 @@ class SettingsPanel(Vertical):
 
     async def _activate_cell(self, cell: ToggleCell, requested: bool | None = None) -> None:
         """Activate one settings cell, including undecided Git configuration."""
+        if self._runtime_busy or self._cell_locked(cell):
+            return
         current = selected_value(self.settings, cell)
         if cell.kind == "git" and current is None:
             await self._set_cell(cell, None)
@@ -799,6 +802,70 @@ class SettingsPanel(Vertical):
         event.stop()
         await self._reload_from_settings("runtime reloaded")
 
+    @on(Button.Pressed, "#settings-reset-default")
+    async def press_reset_default(self, event: Button.Pressed) -> None:
+        """Confirm and submit one factory reset for the currently selected tab."""
+        event.stop()
+        if self._runtime_busy or self.reset_change is None:
+            return
+        page = self.query_one("#settings-switcher", ContentSwitcher).current
+        tab = next((tab for tab, body in SETTINGS_TAB_PAGES.items() if body == page), "general")
+        names = tuple(name for _, groups in builtin_tool_groups(self.tool_metadata) for _, tools in groups for name in tools)
+        updated = reset_tab_settings(
+            self.settings, tab, builtin_tools=names,
+            custom_tools=tuple(custom_tool_names(self.tool_metadata)),
+        )
+        focused = self.screen.focused
+        self.set_runtime_busy(True)
+        try:
+            ok, message = await self.reset_change(tab, updated)
+            if ok:
+                self.settings = updated
+        finally:
+            self.set_runtime_busy(False)
+            if focused is not None and focused.is_mounted and not focused.disabled:
+                focused.focus()
+        if ok:
+            self._refresh_reset_controls(tab)
+        self._set_status(message)
+
+    def _refresh_reset_controls(self, tab: str) -> None:
+        """Repaint reset values without triggering user-change callbacks or recomposing."""
+        self._refresh_buttons()
+        self._refresh_access_counts()
+        if tab == "general":
+            self._refresh_rubric_control()
+            self._refresh_tracing_control()
+            env = execute_env_settings(self.settings)
+            self._restore_select_value(self.query_one("#settings-execute-env-mode", Select), env["mode"])
+            self.query_one("#settings-execute-env-switcher", ContentSwitcher).current = f"settings-execute-env-page-{env['mode']}"
+            for key in ("name", "prefix", "path", "allow"):
+                value = ", ".join(env[key]) if key == "allow" else str(env[key])
+                self.query_one(f"#settings-execute-env-{key}", Input).value = value
+            self.query_one("#settings-planning-response-status-max-retries", Input).value = str(planning_response_status_max_retries(self.settings))
+            profiles = list(self.query("#settings-tracing-profile"))
+            if profiles:
+                profile = tracing_settings(self.settings)["profile"]
+                select = profiles[0]
+                with select.prevent(Select.Changed):
+                    select.allow_blank = profile not in self.tracing_registry.profiles
+                    select.value = profile if not select.allow_blank else Select.NULL
+                self._restore_select_value(self.query_one("#settings-middleware-spans", Select), tracing_settings(self.settings)["middleware_spans"])
+                self._refresh_tracing_preview()
+        elif tab == "models":
+            self.query_one("#settings-model-context-limit", Input).value = str(context_limit_tokens(self.settings))
+            for role in (MAIN_MODEL, RUBRIC_MODEL, SUMMARIZATION_MODEL):
+                self._replace_model_select_options(
+                    self.query_one(f"#settings-model-{role}", Select), self._role_options(role),
+                    model_assignment(self.settings, role) or INHERIT_VALUE,
+                )
+            for item in self.subagent_metadata:
+                name = item["name"]
+                self._replace_model_select_options(
+                    self.query_one(f"#settings-subagent-model-{safe_id(name)}", Select), self._subagent_options(item),
+                    subagent_model_assignment(self.settings, name) or INHERIT_VALUE,
+                )
+
     async def _set_focused(self, value: bool) -> None:
         button = self._focused_toggle()
         if button is None:
@@ -809,6 +876,8 @@ class SettingsPanel(Vertical):
         await self._set_cell(cell, value)
 
     async def _set_cell(self, cell: ToggleCell, value: bool | None) -> None:
+        if self._runtime_busy:
+            return
         if cell.kind == "git":
             if self.configure_git is None:
                 self._set_status("Git configuration unavailable")
@@ -879,7 +948,14 @@ class SettingsPanel(Vertical):
             updated = set_mcp_tool_policy_value(self.settings, cell.server, cell.name, key, value)
         else:
             updated = set_tool_always_allow(self.settings, cell.name, value)
-        ok, message = await self.apply_change(updated)
+        focused = self._focused_toggle()
+        self.set_runtime_busy(True)
+        try:
+            ok, message = await self.apply_change(updated)
+        finally:
+            self.set_runtime_busy(False)
+            if focused is not None and focused.is_mounted and not focused.disabled:
+                focused.focus()
         self._set_status(message)
         if not ok:
             return
@@ -950,7 +1026,7 @@ class SettingsPanel(Vertical):
             locked = self._cell_locked(cell)
             value = selected_value(self.settings, cell)
             button.label = button_label(cell, value)
-            button.disabled = locked
+            button.disabled = locked or self._runtime_busy
             button.set_classes(toggle_classes(value, locked=locked))
 
     def set_runtime_busy(self, busy: bool) -> None:
@@ -961,6 +1037,7 @@ class SettingsPanel(Vertical):
             *self.query(".settings-input"),
             *self.query(".settings-select"),
             *self.query("#settings-reload-runtime"),
+            *self.query("#settings-reset-default"),
         ]
         if busy:
             if not self._runtime_busy:
@@ -1100,7 +1177,7 @@ class SettingsPanel(Vertical):
 
     def _access_policy_label(self, policy: str) -> str:
         count = sum(
-            value for _title, rows in self._access_groups(policy) for _name, _cell, value in rows
+            value for _title, _subgroup, rows in self._access_groups(policy) for _name, _cell, value in rows
         )
         suffix = f"{count} allowed      >"
         label = ACCESS_POLICY_LABELS[policy]
@@ -1202,6 +1279,7 @@ class SettingsPanel(Vertical):
     def _show_access_landing(self) -> None:
         self.query_one("#settings-access-switcher", ContentSwitcher).current = "settings-access-landing"
         self.screen.set_focus(None)
+        self.call_after_refresh(self.screen.set_focus, None)
 
     def _refresh_access_counts(self) -> None:
         for policy in ACCESS_POLICIES:
@@ -1209,11 +1287,11 @@ class SettingsPanel(Vertical):
             if buttons:
                 buttons[0].label = self._access_policy_label(policy)
 
-    def _access_groups(self, policy: str) -> list[tuple[str, list[tuple[str, ToggleCell, bool]]]]:
+    def _access_groups(self, policy: str) -> list[tuple[str, str, list[tuple[str, ToggleCell, bool]]]]:
         """Discover enabled rows once for both Access counts and the shared body."""
         local_kind = {"plan": "plan_access", "ptc": "ptc", "rubric": "rubric_access"}[policy]
         mcp_kind = {"plan": "mcp_tool_plan", "ptc": "mcp_tool_ptc", "rubric": "mcp_tool_rubric"}[policy]
-        groups: list[tuple[str, list[tuple[str, ToggleCell, bool]]]] = []
+        groups: list[tuple[str, str, list[tuple[str, ToggleCell, bool]]]] = []
 
         def build_rows(
             names: list[str],
@@ -1223,21 +1301,21 @@ class SettingsPanel(Vertical):
             cells = [ToggleCell(kind, name, server=server) for name in names]
             return [(cell.name, cell, selected_value(self.settings, cell)) for cell in cells]
 
-        builtin_rows = []
-        for name in INBUILT_TOOLS:
-            if not tool_enabled(self.settings, name):
-                continue
-            locked = fixed_builtin_access_value(policy, name) is not None
-            cell = ToggleCell(local_kind, name, locked=locked)
-            builtin_rows.append((name, cell, selected_value(self.settings, cell)))
-        if builtin_rows:
-            groups.append(("Inbuilt Tools", builtin_rows))
+        for section, subgroups in builtin_tool_groups(self.tool_metadata):
+            for group, names in subgroups:
+                rows = []
+                for name in names:
+                    if tool_enabled(self.settings, name):
+                        cell = ToggleCell(local_kind, name, locked=fixed_builtin_access_value(policy, name) is not None)
+                        rows.append((name, cell, selected_value(self.settings, cell)))
+                if rows:
+                    groups.append((section, group, rows))
 
         custom_rows = build_rows(
             [name for name in custom_tool_names(self.tool_metadata) if tool_enabled(self.settings, name)]
         )
         if custom_rows:
-            groups.append(("Custom Tools", custom_rows))
+            groups.append(("Custom Tools", "", custom_rows))
         for state in getattr(self.mcp_manager, "servers", {}).values():
             if not mcp_server_enabled(self.settings, state.name):
                 continue
@@ -1248,7 +1326,7 @@ class SettingsPanel(Vertical):
                 if tool_policy.enabled:
                     access_rows.extend(build_rows([original], mcp_kind, state.name))
             if access_rows:
-                groups.append((f"MCP · {state.name} [{state.transport.upper()}]", access_rows))
+                groups.append((f"MCP · {state.name} [{state.transport.upper()}]", "", access_rows))
         return groups
 
     def _access_widgets(self, policy: str) -> list[Any]:
@@ -1275,8 +1353,10 @@ class SettingsPanel(Vertical):
                 Static(f"No enabled tools available for {label}.", classes="settings-empty")
             )
             return widgets
-        for index, (title, rows) in enumerate(groups):
-            if title == "Inbuilt Tools":
+        for index, (title, subgroup, rows) in enumerate(groups):
+            builtin = bool(subgroup)
+            if builtin:
+                title = f"{title} ({subgroup})" if title == "Core Tools" else subgroup
                 title_classes = "settings-section inbuilt settings-access-section"
             elif title == "Custom Tools":
                 title_classes = "settings-section custom settings-access-section"
@@ -1294,7 +1374,7 @@ class SettingsPanel(Vertical):
                 )
             )
             for name, cell, value in rows:
-                fixed = fixed_builtin_access_value(policy, name) if title == "Inbuilt Tools" else None
+                fixed = fixed_builtin_access_value(policy, name) if builtin else None
                 value_widget: Button | Static
                 if fixed is None:
                     value_widget = self._toggle_button(cell, value)
@@ -1462,6 +1542,8 @@ def toggle_classes(value: bool | None, *, locked: bool = False) -> str:
 
 class SettingsToggleButton(Button):
     """Toggle button that forwards settings shortcuts to its panel."""
+
+    BINDINGS = [("space", "press", "Toggle")]
 
     def __init__(self, *args: Any, panel: SettingsPanel, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

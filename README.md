@@ -106,13 +106,6 @@ Type `/` to autocomplete commands and `@` to autocomplete local files, tools,
 subagents, and MCP resources. Sessions save chat and execution state
 automatically; start with `--resume` to reopen the latest one.
 
-For desktop tasks on Windows, select a vision-capable Main model and set
-`image_inputs: true` in its `.mira/models.yml` profile. MIRA can inspect the
-primary monitor with `screenshot` and target its labeled grid cells with
-`click_cell`. `click`, `type_text`, `press_key`, and `scroll` are also available.
-Input actions use the normal approval flow; `/settings` controls
-their Always Allow preferences.
-
 ## Optional local tracing
 
 MIRA preserves LangChain/DeepAgents trace topology with LangSmith and enriches

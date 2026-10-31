@@ -66,6 +66,7 @@ from config.settings import (
     set_mcp_server_enabled,
     set_mcp_tool_policy_value,
     set_tool_plan_access,
+    reset_tab_settings,
     tool_plan_access,
 )
 from config.interpolation import resolve_environment
@@ -1140,6 +1141,53 @@ class FakeIntegration:
         return list((await self.session.read_resource(uri)).contents)
 
 class MCPManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_policy_reset_revokes_trust_without_starting_or_saving_per_server(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sessions = {name: FakeSession(["search"]) for name in ("one", "two")}
+            manager = await self.make_manager(root, {name: {"command": "fake"} for name in sessions}, sessions)
+            await manager.set_server_enabled("two", False)
+            original = load_settings(root)
+            original = set_mcp_server_always_allow(original, "one", True)
+            original = set_mcp_server_approved_fingerprint(original, "one", manager.servers["one"].fingerprint)
+            save_settings(root, original)
+            reset = reset_tab_settings(original, "mcp")
+            save_settings(root, reset)
+            notify = AsyncMock()
+            manager.set_change_handler(notify)
+            with patch("agent.mcp.manager.save_settings", wraps=save_settings) as save:
+                async with manager.reset_policy() as changed:
+                    self.assertTrue(changed)
+            save.assert_not_called()
+            notify.assert_not_awaited()
+            self.assertEqual(set(manager.client.closed), {"one", "two"})
+            self.assertFalse(manager._session_approvals)
+            self.assertTrue(all(state.status == "Approval required" for state in manager.servers.values()))
+            self.assertEqual(manager.tools_for_mode(reset, planning=False)[1], [])
+            manager._approval_handler = AsyncMock(return_value="deny")
+            self.assertFalse(await manager.restart_server("one"))
+            manager._approval_handler.assert_awaited_once()
+            self.assertEqual(manager.client.opened, ["one", "two"])
+            async with manager.reset_policy() as changed:
+                self.assertFalse(changed)
+            await manager.shutdown()
+
+    async def test_policy_reset_rolls_back_previously_running_approved_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = await self.make_manager(root, {"docs": {"command": "fake"}}, {"docs": FakeSession(["search"])})
+            original_approvals = set(manager._session_approvals)
+            manager._approval_handler = AsyncMock(side_effect=AssertionError("rollback must reuse prior approval"))
+            with self.assertRaisesRegex(RuntimeError, "rebuild failed"):
+                async with manager.reset_policy():
+                    self.assertFalse(manager.servers["docs"].usable)
+                    raise RuntimeError("rebuild failed")
+            self.assertTrue(manager.servers["docs"].usable)
+            self.assertEqual(manager._session_approvals, original_approvals)
+            self.assertEqual([tool.name for tool in manager.servers["docs"].tools], ["mcp__docs__search"])
+            self.assertEqual(manager.client.opened, ["docs", "docs"])
+            await manager.shutdown()
+
     async def make_manager(self, root: Path, servers: dict[str, dict], sessions: dict[str, FakeSession]) -> MCPManager:
         write_config(root, servers)
         manager = MCPManager(root)

@@ -28,7 +28,7 @@ def display_item(item: dict[str, Any]) -> dict[str, str]:
         "source": str(item["source"]),
         "replaces": str(item.get("replaces") or ""),
     }
-    for key in ("runtime", "environment"):
+    for key in ("runtime", "environment", "group"):
         if item.get(key):
             displayed[key] = str(item[key])
     return displayed

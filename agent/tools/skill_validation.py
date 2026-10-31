@@ -11,6 +11,14 @@ from deepagents.middleware.skills import MAX_SKILL_FILE_SIZE
 from langchain_core.tools import BaseTool, tool
 
 VALIDATE_SKILL_TOOL = "validate_skill"
+TOOL_GROUP = "Skill Validation"
+VALIDATE_SKILL_METADATA = {
+    "name": VALIDATE_SKILL_TOOL,
+    "path": "agent/tools/skill_validation.py",
+    "source": "default",
+    "replaces": "",
+    "group": TOOL_GROUP,
+}
 ALLOWED_FRONTMATTER = {
     "name",
     "description",

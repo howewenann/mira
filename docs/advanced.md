@@ -62,7 +62,9 @@ errors. Neither inspection command asks the model a question.
 ## Project resources
 
 MIRA loads bundled defaults and then active project resources. A project memory,
-skill, subagent, or tool with the same name replaces its bundled counterpart.
+skill, subagent, or tool with the same name replaces its bundled counterpart,
+except for the protected `validate_skill` checker described under
+[Tools and execution environments](#tools-and-execution-environments).
 Examples under `.mira/examples/` are inert until you copy them into an active
 resource directory.
 
@@ -161,6 +163,28 @@ prompt commands. Some tools can request a form or URL decision during use;
 answering that request resumes the same interrupted turn.
 
 ## Tools and execution environments
+
+General Settings lists **Core Tools (Read-only)**, **Core Tools (Actions)**,
+and configurable MIRA feature groups such as **Skill Validation**. Feature
+groups and tools sort alphabetically; internal Plan/Goal lifecycle tools are
+not settings options. Access uses the same layout for individual Plan, PTC,
+and Rubric permissions.
+
+**Reset to default**, beside Reload runtime, asks for confirmation and resets
+only the active tab. General resets system, tracing, Git preference, execution
+environment, and built-in Enable/Allow values while preserving Access. Models
+clears assignments and subagent overrides; Main becomes unset until selected
+again, without changing model profiles. Custom Tools resets discovered tools'
+Enable/Allow values. MCP resets server/tool Enable/Allow preferences and saved
+trust; connections stop and enabled servers wait for normal approval through
+Connect/Restart. Access resets Plan/PTC/Rubric grants without changing Enable,
+Allow, or server approval. Project files and server definitions are retained.
+Tracing changes may still require Reload Runtime, as the status message explains.
+
+You can edit your own skills and create custom tools, but a custom tool named
+`validate_skill` cannot replace MIRA's trusted validator. MIRA registers this
+read-only checker separately so its safe access in Plan, PTC, and Rubric cannot
+be given to arbitrary project code.
 
 MIRA distinguishes a tool's Python runtime, the project file backend, and the
 human approval policy. Enabling one capability does not automatically allow

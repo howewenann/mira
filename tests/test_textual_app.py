@@ -61,6 +61,7 @@ from config.settings import (
     execute_env_settings,
     git_protection_preference,
     load_settings,
+    mcp_tool_policy,
     planning_response_status_max_retries,
     planning_todos_enabled,
     rubric_enabled,
@@ -7204,6 +7205,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
             settings = app.query_one(SettingsPanel)
             focused = settings.query_one("#settings-toggle-system-dynamic_subagents", Button)
+            await pilot.pause()
 
             async def resolve(task: asyncio.Task[Any], key: str) -> Any:
                 await wait_until(lambda: app.query_one(PromptPanel).active)
@@ -7912,7 +7914,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(app, "_rebuild_agents", rebuild):
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/settings"))
                     await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
-                    await wait_until(lambda: len(app.query_one(SettingsPanel).query(Button)) >= 8)
+                    await wait_until(lambda: len(app.query("#settings-toggle-always_allow-edit_file")) == 1)
+                    await pilot.pause()
                     self.assertFalse(app.query_one(PromptPanel).display)
                     app.query_one("#settings-toggle-always_allow-edit_file", Button).focus()
                     await pilot.press("y")
@@ -8134,6 +8137,268 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(git_dir.exists())
             self.assertFalse(load_settings(workspace)["hitl"]["git_protection"]["enabled"])
 
+    async def test_settings_reset_footer_matches_reload_and_is_disabled_while_busy(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(110, 35)) as pilot:
+            await pilot.pause()
+            app._handle_settings_command()
+            await pilot.pause()
+            panel = app.query_one(SettingsPanel)
+            reset = panel.query_one("#settings-reset-default", Button)
+            reload = panel.query_one("#settings-reload-runtime", Button)
+            self.assertEqual(str(reset.label), "Reset to default")
+            self.assertIsNone(app.screen.focused)
+            for tab in ("general", "models", "custom", "mcp", "access"):
+                panel.query_one(f"#settings-tab-{tab}", Button).press()
+                await pilot.pause()
+                self.assertEqual(reset.region.right + 1, reload.region.x)
+                self.assertEqual(reset.region.y, reload.region.y)
+                self.assertEqual(reset.region.height, reload.region.height)
+                for attribute in ("background", "color", "border", "padding", "margin", "width"):
+                    self.assertEqual(getattr(reset.styles, attribute), getattr(reload.styles, attribute))
+                self.assertTrue(reset.visible and reload.visible)
+            reload.focus()
+            await pilot.press("shift+tab")
+            self.assertTrue(reset.has_focus)
+            app.busy = True
+            await pilot.pause()
+            self.assertTrue(reset.disabled)
+            panel.reset_change = AsyncMock()
+            reset.press()
+            await pilot.pause()
+            panel.reset_change.assert_not_awaited()
+            app.busy = False
+            await pilot.pause()
+            self.assertFalse(reset.disabled)
+
+    async def test_settings_reset_general_confirmation_cancellation_refresh_and_noop(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_tool_enabled(load_settings(workspace), "read_file", False)
+            configured = set_tool_plan_access(configured, "read_file", False)
+            configured = set_tool_rubric_access(configured, "read_file", False)
+            configured["hitl"]["execute_env"].update(mode="conda_name", name="before")
+            configured["tracing"]["enabled"] = True
+            configured["system"]["planning_response_status"]["max_retries"] = 6
+            configured["system"]["rubric"].update(enabled=True, max_iterations=8)
+            save_settings(workspace, configured)
+            app = make_app(workspace=workspace, config={"settings": configured})
+            async with app.run_test(size=(110, 35)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = AsyncMock(return_value="c")
+                app._rebuild_agents = AsyncMock()
+                app._handle_settings_command()
+                await pilot.pause()
+                panel = app.query_one(SettingsPanel)
+                reset = panel.query_one("#settings-reset-default", Button)
+                body = panel.query_one("#settings-body", VerticalScroll)
+                body.scroll_end(animate=False)
+                await pilot.pause()
+                scroll = body.scroll_y
+                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                    reset.press()
+                    await pilot.pause()
+                save.assert_not_called()
+                app._rebuild_agents.assert_not_awaited()
+                self.assertEqual(panel.settings, configured)
+                app._prompt_choice.assert_awaited_once_with(
+                    "Reset General?", "Restore the default settings for General? Other tabs will not be changed.",
+                    [("r", "Reset"), ("c", "Cancel")],
+                )
+                app._prompt_choice.return_value = "r"
+                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                    reset.press()
+                    await pilot.pause()
+                self.assertEqual(save.call_count, 1)
+                app._rebuild_agents.assert_awaited_once()
+                self.assertEqual(panel.query_one("#settings-switcher", ContentSwitcher).current, "settings-body")
+                self.assertEqual(body.scroll_y, min(scroll, body.max_scroll_y))
+                self.assertTrue(tool_enabled(panel.settings, "read_file"))
+                self.assertFalse(tool_plan_access(panel.settings, "read_file"))
+                self.assertFalse(tool_rubric_access(panel.settings, "read_file"))
+                self.assertEqual(str(panel.query_one("#settings-toggle-enabled-read_file", Button).label), "yes")
+                self.assertEqual(panel.query_one("#settings-execute-env-mode", Select).value, "system")
+                self.assertEqual(panel.query_one("#settings-execute-env-name", Input).value, "")
+                self.assertEqual(panel.query_one("#settings-planning-response-status-max-retries", Input).value, "2")
+                self.assertEqual(panel.query_one("#settings-rubric-max-iterations", Input).value, "3")
+                self.assertFalse(rubric_enabled(panel.settings))
+                self.assertIn("tracing requires Reload Runtime", renderable_plain(panel.query_one("#settings-status", Static)))
+                self.assertEqual(load_settings(workspace), panel.settings)
+                app._rebuild_agents.reset_mock()
+                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                    reset.press()
+                    await pilot.pause()
+                save.assert_not_called()
+                app._rebuild_agents.assert_not_awaited()
+
+    async def test_settings_reset_custom_and_access_keep_other_policies(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            configured = set_tool_enabled(load_settings(workspace), "custom", False)
+            configured = set_tool_plan_access(configured, "custom", True)
+            configured = set_tool_ptc(configured, "custom", True)
+            configured["hitl"]["tools"]["custom"]["always_allow"] = True
+            configured = set_tool_plan_access(configured, "read_file", False)
+            save_settings(workspace, configured)
+            app = make_app(workspace=workspace, config={"settings": configured})
+            async with app.run_test(size=(110, 35)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = AsyncMock(return_value="r")
+                app._rebuild_agents = AsyncMock()
+                app.mode.setdefault("resources", {})["tools"] = [{"name": "custom", "source": "project"}]
+                app._handle_settings_command("custom")
+                await pilot.pause()
+                panel = app.query_one(SettingsPanel)
+                reset = panel.query_one("#settings-reset-default", Button)
+                reset.press()
+                await pilot.pause()
+                self.assertTrue(tool_enabled(panel.settings, "custom"))
+                self.assertFalse(tool_always_allow(panel.settings, "custom"))
+                self.assertTrue(tool_plan_access(panel.settings, "custom"))
+                self.assertTrue(tool_ptc(panel.settings, "custom"))
+                self.assertFalse(tool_plan_access(panel.settings, "read_file"))
+                self.assertEqual(str(panel.query_one("#settings-toggle-enabled-custom", Button).label), "yes")
+                panel.query_one("#settings-tab-access", Button).press()
+                await pilot.pause()
+                panel.query_one("#settings-access-policy-plan", Button).press()
+                await pilot.pause()
+                before = {name: (tool_enabled(panel.settings, name), tool_always_allow(panel.settings, name)) for name in panel.settings["hitl"]["tools"]}
+                reset.press()
+                await pilot.pause()
+                self.assertEqual(before, {name: (tool_enabled(panel.settings, name), tool_always_allow(panel.settings, name)) for name in before})
+                self.assertFalse(tool_plan_access(panel.settings, "custom"))
+                self.assertTrue(tool_plan_access(panel.settings, "read_file"))
+                self.assertEqual(str(panel.query_one("#settings-toggle-plan_access-custom", Button).label), "no")
+                self.assertEqual(str(panel.query_one("#settings-toggle-plan_access-read_file", Button).label), "yes")
+                self.assertEqual(panel.query_one("#settings-access-switcher", ContentSwitcher).current, "settings-access-detail")
+                self.assertEqual(str(panel.query_one("#settings-access-policy-plan", Button).label), panel._access_policy_label("plan"))
+                self.assertEqual([call.args[0] for call in app._prompt_choice.await_args_list], ["Reset Custom Tools?", "Reset Access?"])
+
+    async def test_settings_reset_models_installs_unset_defaults_and_refreshes_selects(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            config = managed_model_config()
+            config["settings"]["models"]["rubric"] = "test"
+            config["settings"]["models"]["subagents"] = {"worker": {"enabled": True, "model": "test"}}
+            save_settings(workspace, config["settings"])
+            profiles = workspace / ".mira/models.yml"
+            profiles.write_text("model definitions stay here", encoding="utf-8")
+            app = make_app(workspace=workspace, config=config)
+            async with app.run_test(size=(110, 35)) as pilot:
+                await pilot.pause()
+                app._prompt_choice = AsyncMock(return_value="r")
+                app.mode.setdefault("resources", {})["subagents"] = [{"name": "worker", "kind": "raw"}]
+                app._handle_settings_command("models")
+                await pilot.pause()
+                panel = app.query_one(SettingsPanel)
+                with patch("agent.llm.get_llm", side_effect=AssertionError("unset defaults must not select a model")):
+                    panel.query_one("#settings-reset-default", Button).press()
+                    await pilot.pause()
+                self.assertEqual(panel.settings["models"], DEFAULT_SETTINGS["models"])
+                self.assertEqual(load_settings(workspace)["models"], DEFAULT_SETTINGS["models"])
+                self.assertIsNone(app.agent)
+                self.assertIsNone(app.plan_agent)
+                self.assertEqual(app.model_name, "unset")
+                for role in ("main", "rubric", "summarization"):
+                    self.assertEqual(panel.query_one(f"#settings-model-{role}", Select).value, "__mira_default__")
+                self.assertEqual(panel.query_one("#settings-subagent-model-worker", Select).value, "__mira_default__")
+                self.assertEqual(str(panel.query_one("#settings-toggle-subagent_enabled-worker", Button).label), "no")
+                self.assertEqual(panel.query_one("#settings-model-context-limit", Input).value, str(DEFAULT_SETTINGS["models"]["context_limit_tokens"]))
+                self.assertEqual(profiles.read_text(encoding="utf-8"), "model definitions stay here")
+                self.assertIn("Main is unset", renderable_plain(panel.query_one("#settings-status", Static)))
+
+    async def test_settings_reset_save_and_rebuild_failures_restore_settings_and_controls(self) -> None:
+        for tab, failure in (("general", "save"), ("general", "rebuild"), ("models", "rebuild")):
+            with self.subTest(tab=tab, failure=failure), tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+                workspace = Path(directory)
+                original = set_tool_enabled(load_settings(workspace), "read_file", False)
+                if tab == "models":
+                    original = set_model_assignment(original, "main", "test")
+                save_settings(workspace, original)
+                original = load_settings(workspace)
+                before = (workspace / ".mira/settings.yml").read_bytes()
+                app = make_app(workspace=workspace, config={"settings": original})
+                async with app.run_test(size=(110, 35)) as pilot:
+                    await pilot.pause()
+                    app._prompt_choice = AsyncMock(return_value="r")
+                    app._rebuild_agents = AsyncMock(side_effect=RuntimeError("rebuild failed") if failure == "rebuild" else None)
+                    app._rebuild_model_agents = AsyncMock(side_effect=RuntimeError("rebuild failed"))
+                    app._write_error_report = Mock(return_value="error.txt")
+                    app._handle_settings_command(tab)
+                    await pilot.pause()
+                    panel = app.query_one(SettingsPanel)
+                    with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                        if failure == "save":
+                            save.return_value = False
+                            save.side_effect = lambda *args: False
+                        panel.query_one("#settings-reset-default", Button).press()
+                        await pilot.pause()
+                    self.assertEqual(save.call_count, 1 if failure == "save" else 2)
+                    self.assertEqual(panel.settings, original)
+                    self.assertEqual(app.config["settings"], original)
+                    self.assertEqual((workspace / ".mira/settings.yml").read_bytes(), before)
+                    self.assertEqual(str(panel.query_one("#settings-toggle-enabled-read_file", Button).label), "no")
+                    if tab == "models":
+                        self.assertEqual(panel.query_one("#settings-model-main", Select).value, "test")
+                    self.assertFalse(panel.query_one("#settings-reset-default", Button).disabled)
+
+    async def test_settings_reset_mcp_reconciles_once_and_rolls_back_runtime_on_failure(self) -> None:
+        from tests.test_mcp import MCPManagerTests, FakeSession
+
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+                workspace = Path(directory)
+                helper = MCPManagerTests()
+                manager = await helper.make_manager(workspace, {"docs": {"command": "fake"}}, {"docs": FakeSession(["search"])})
+                configured = load_settings(workspace)
+                configured["mcp"] = {"servers": {"docs": {"enabled": True, "always_allow": True, "approved_fingerprint": manager.servers["docs"].fingerprint, "tools": {"search": {"enabled": False, "always_allow": True, "ptc": True}}}}}
+                if fail:
+                    configured["mcp"]["servers"]["docs"]["tools"]["search"]["enabled"] = True
+                save_settings(workspace, configured)
+                definitions = (workspace / ".mira/mcp/mcp.json").read_bytes()
+                app = make_app(workspace=workspace, config={"settings": configured})
+                async with app.run_test(size=(110, 35)) as pilot:
+                    await pilot.pause()
+                    app.mcp_manager = manager
+                    app._prompt_choice = AsyncMock(return_value="r")
+                    registrations = []
+
+                    async def rebuild() -> None:
+                        registrations.append(manager.tools_for_mode(app.config["settings"], planning=False)[1])
+                        if fail and len(registrations) == 1:
+                            raise RuntimeError("rebuild failed")
+
+                    app._rebuild_agents = AsyncMock(side_effect=rebuild)
+                    app._write_error_report = Mock(return_value="error.txt")
+                    app._handle_settings_command("mcp")
+                    await pilot.pause()
+                    panel = app.query_one(SettingsPanel)
+                    with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                        panel.query_one("#settings-reset-default", Button).press()
+                        await pilot.pause()
+                        await wait_until(lambda: not panel._runtime_busy and bool(renderable_plain(panel.query_one("#settings-status", Static))))
+                    self.assertEqual(save.call_count, 2 if fail else 1, (
+                        registrations, app._rebuild_agents.await_count,
+                        renderable_plain(panel.query_one("#settings-status", Static)),
+                    ))
+                    self.assertEqual(app._rebuild_agents.await_count, 2 if fail else 1)
+                    self.assertEqual((workspace / ".mira/mcp/mcp.json").read_bytes(), definitions)
+                    if fail:
+                        self.assertEqual(load_settings(workspace), configured)
+                        self.assertEqual(panel.settings, configured)
+                        self.assertTrue(manager.servers["docs"].usable)
+                        self.assertEqual(registrations[-1][0]["name"], "mcp__docs__search")
+                    else:
+                        self.assertEqual(manager.servers["docs"].status, "Approval required")
+                        self.assertFalse(manager._session_approvals)
+                        self.assertEqual(manager.tools_for_mode(panel.settings, planning=False)[1], [])
+                        self.assertTrue(mcp_tool_policy(panel.settings, "docs", "search").ptc)
+                        self.assertEqual(str(panel.query_one("#settings-toggle-mcp_server_enabled-docs-docs", Button).label), "yes")
+                        self.assertEqual(str(panel.query_one("#settings-toggle-mcp_tool_allow-docs-search", Button).label), "no")
+                        self.assertTrue(panel.query_one("#settings-toggle-mcp_tool_allow-docs-search", Button).disabled)
+                    app.mcp_manager = None
+                await manager.shutdown()
+
     async def test_settings_panel_renders_default_rows_and_closes(self) -> None:
         """The settings panel should include default rows and close with q."""
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -8149,6 +8414,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     lambda: "settings-access-policy-plan"
                     in {candidate.id for candidate in panel.query(Button)}
                 )
+                await pilot.pause()
                 rendered = "\n".join(renderable_plain(child) for child in panel.query(Static))
                 static_labels = {renderable_plain(child).strip() for child in panel.query(Static)}
                 buttons = {button.id: button for button in panel.query(Button)}
@@ -8159,7 +8425,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("enable", rendered)
                 self.assertIn("always allow", rendered)
                 self.assertIn("System Settings", rendered)
-                self.assertIn("Inbuilt Tools", rendered)
+                self.assertNotIn("Inbuilt Tools", rendered)
+                self.assertIn("Core Tools (Read-only)", rendered)
+                self.assertIn("Core Tools (Actions)", rendered)
+                self.assertIn("Skill Validation", rendered)
+                self.assertIsNone(app.screen.focused)
+                self.assertFalse(panel.query_one("#settings-close", Button).has_focus)
                 self.assertIn("Execute Environment", rendered)
                 self.assertIn("Run commands in", rendered)
                 self.assertIn("Additional env var names", rendered)
@@ -8188,29 +8459,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
-                        "validate_skill",
-                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "execute",
                         "eval",
                         "task",
-                        "click",
-                        "click_cell",
-                        "type_text",
-                        "press_key",
-                        "scroll",
+                        "validate_skill",
                     ],
                 )
-                general_children = list(panel.query_one("#settings-body").children)
-                builtin_rows = list(panel.query(".settings-inbuilt-tool-row"))
-                builtin_positions = [general_children.index(row) for row in builtin_rows]
                 self.assertEqual(
-                    builtin_positions,
-                    list(range(builtin_positions[0], builtin_positions[0] + len(builtin_rows))),
+                    [renderable_plain(widget) for widget in panel.query(".settings-section.inbuilt")],
+                    ["Core Tools (Read-only)", "Core Tools (Actions)", "Skill Validation"],
                 )
-                self.assertEqual(len(panel.query("#settings-body > .settings-section.inbuilt")), 1)
                 self.assertIn("settings-toggle-git-git_protection", buttons)
                 self.assertIn("settings-toggle-system-dynamic_subagents", buttons)
                 self.assertIn("settings-toggle-response_schema-response_schema", buttons)
@@ -8310,7 +8571,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(buttons["settings-toggle-always_allow-delete"].label), "no")
                 self.assertFalse(buttons["settings-toggle-always_allow-delete"].disabled)
                 self.assertTrue(
-                    str(buttons["settings-access-policy-plan"].label).endswith("6 allowed      >")
+                    str(buttons["settings-access-policy-plan"].label).endswith("5 allowed      >")
                 )
                 self.assertTrue(
                     str(buttons["settings-access-policy-ptc"].label).endswith("5 allowed      >")
@@ -8445,7 +8706,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
-                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 4)
+                await wait_until(lambda: len(panel.query(SettingsHeaderRow)) == 6)
                 await pilot.pause()
 
                 labels = {
@@ -8455,7 +8716,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 }
                 tabs = panel.query_one("#settings-tabs", Horizontal)
                 headers = list(panel.query(SettingsHeaderRow))
-                system_header, inbuilt_header, custom_header = headers[0], headers[1], headers[3]
+                system_header, custom_header = headers[0], headers[5]
                 self.assertEqual(
                     labels["System Settings"].region.y,
                     tabs.region.y + tabs.region.height + 2,
@@ -8463,7 +8724,6 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 for section_name, header, first_row in (
                     ("System Settings", system_header, labels["Git Protection"]),
-                    ("Inbuilt Tools", inbuilt_header, labels["ls"]),
                 ):
                     section = labels[section_name]
                     self.assertEqual(header.region.y, section.region.y + section.region.height)
@@ -8489,9 +8749,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-tab-general", Button).press()
                 await pilot.pause()
                 execute_section = labels["Execute Environment"]
-                inbuilt_section = labels["Inbuilt Tools"]
+                inbuilt_section = labels["Core Tools (Read-only)"]
                 last_system_row = labels["Maximum iterations"]
-                last_inbuilt_row = labels["task"]
+                last_inbuilt_row = labels["validate_skill"]
                 run_commands = labels["Run commands in"]
                 last_execute_row = labels["Additional env var names"]
                 git_protection = labels["Git Protection"]
@@ -8622,7 +8882,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 labels = {button.id: str(button.label) for button in panel.query(".settings-access-policy")}
                 self.assertTrue(labels["settings-access-policy-plan"].startswith("Plan"))
-                self.assertTrue(labels["settings-access-policy-plan"].endswith("7 allowed      >"))
+                self.assertTrue(labels["settings-access-policy-plan"].endswith("6 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-ptc"].startswith("PTC"))
                 self.assertTrue(labels["settings-access-policy-ptc"].endswith("5 allowed      >"))
                 self.assertTrue(labels["settings-access-policy-rubric"].startswith("Rubric"))
@@ -8676,7 +8936,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(guidance.styles.border_left, ("solid", Color.parse("#5bb8b1")))
                 self.assertEqual(guidance.styles.margin.bottom, 2)
                 headers = list(detail.query(".settings-access-header"))
-                self.assertEqual(len(headers), 3)
+                self.assertEqual(len(headers), 5)
                 for header in headers:
                     self.assertEqual(
                         [renderable_plain(item).strip() for item in header.query(Static)],
@@ -8686,10 +8946,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 sections = list(detail.query(".settings-access-section"))
                 self.assertEqual(
                     [renderable_plain(item).strip() for item in sections],
-                    ["Inbuilt Tools", "Custom Tools", "MCP · docs [HTTP]"],
+                    ["Core Tools (Read-only)", "Core Tools (Actions)", "Skill Validation", "Custom Tools", "MCP · docs [HTTP]"],
                 )
                 self.assertEqual(sections[0].styles.margin.top, 0)
-                self.assertEqual(sections[1].styles.margin.top, 1)
+                self.assertEqual(sections[3].styles.margin.top, 1)
                 self.assertEqual(
                     [
                         renderable_plain(item)
@@ -8700,27 +8960,21 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
-                        "validate_skill",
-                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "eval",
                         "task",
-                        "click",
-                        "click_cell",
-                        "type_text",
-                        "press_key",
-                        "scroll",
+                        "validate_skill",
                         "custom_search",
                         "search",
                     ],
                 )
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
                     editable = panel.query_one(f"#settings-toggle-rubric_access-{read_tool}", Button)
-                    self.assertEqual(str(editable.label), "no" if read_tool == "screenshot" else "yes")
+                    self.assertEqual(str(editable.label), "yes")
                     self.assertFalse(editable.disabled)
-                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task", "click", "click_cell", "type_text", "press_key", "scroll"):
+                for blocked_tool in ("write_file", "edit_file", "delete", "eval", "task"):
                     fixed = panel.query_one(
                         f"#settings-access-fixed-rubric-{blocked_tool}", Static
                     )
@@ -8755,11 +9009,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 panel.query_one("#settings-access-policy-rubric", Button).press()
                 await wait_until(lambda: switcher.current == "settings-access-detail")
-                await wait_until(
-                    lambda: panel.query_one("#settings-access-back", Button).has_focus
-                )
+                await pilot.pause()
+                self.assertIsNone(app.screen.focused)
+                self.assertFalse(panel.query_one("#settings-access-back", Button).has_focus)
                 await pilot.press("escape")
                 await wait_until(lambda: switcher.current == "settings-access-landing")
+                await pilot.pause()
                 self.assertEqual(len(app.query(SettingsPanel)), 1)
                 self.assertIsNone(app.screen.focused)
 
@@ -8793,7 +9048,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     "Only enabled tools are shown. Read-only access can be changed; action tools "
                     "are blocked in Plan mode.",
                 )
-                self.assertEqual(len(detail.query(".settings-access-header")), 1)
+                self.assertEqual(len(detail.query(".settings-access-header")), 3)
                 self.assertEqual(len(detail.query(".settings-empty")), 0)
                 rows = list(detail.query(".settings-access-tool-row"))
                 detail_labels = [
@@ -8807,31 +9062,23 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         "read_file",
                         "glob",
                         "grep",
-                        "validate_skill",
-                        "screenshot",
                         "write_file",
                         "edit_file",
                         "delete",
                         "execute",
                         "eval",
                         "task",
-                        "click",
-                        "click_cell",
-                        "type_text",
-                        "press_key",
-                        "scroll",
+                        "validate_skill",
                     ],
                 )
-                self.assertEqual(
-                    [row.region.y for row in rows],
-                    list(range(rows[0].region.y, rows[0].region.y + len(rows) * 2, 2)),
-                )
+                self.assertTrue(all(right.region.y >= left.region.bottom for left, right in zip(rows, rows[1:])))
+                self.assertTrue(all(row.query_one(".settings-label").region.width == 44 for row in rows))
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
                     editable = detail.query_one(f"#settings-toggle-plan_access-{read_tool}", Button)
                     self.assertEqual(str(editable.label), "no" if read_tool == "read_file" else "yes")
                     self.assertFalse(editable.disabled)
                 first_editable = detail.query_one("#settings-toggle-plan_access-ls", Button)
-                for blocked_tool in ("write_file", "edit_file", "delete", "execute", "eval", "task", "click", "click_cell", "type_text", "press_key", "scroll"):
+                for blocked_tool in ("write_file", "edit_file", "delete", "execute", "eval", "task"):
                     fixed = detail.query_one(f"#settings-access-fixed-plan-{blocked_tool}", Static)
                     self.assertEqual(renderable_plain(fixed), "blocked")
                     self.assertEqual(fixed.region.x, first_editable.region.x)
@@ -9242,12 +9489,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: len(panel.query("#settings-toggle-ptc-write_file")) == 1)
 
                 for read_tool in READ_ONLY_BUILTIN_TOOLS:
-                    if read_tool == "screenshot":
-                        continue
                     editable = panel.query_one(f"#settings-toggle-ptc-{read_tool}", Button)
                     self.assertEqual(str(editable.label), "no" if read_tool == "grep" else "yes")
                     self.assertFalse(editable.disabled)
-                for gateway in ("eval", "task", "screenshot"):
+                for gateway in ("eval", "task"):
                     inapplicable = panel.query_one(f"#settings-access-fixed-ptc-{gateway}", Static)
                     self.assertEqual(renderable_plain(inapplicable), "-")
                     self.assertEqual(len(panel.query(f"#settings-toggle-ptc-{gateway}")), 0)

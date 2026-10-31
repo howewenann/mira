@@ -32,12 +32,6 @@ BUILT_IN_TOOL_NAMES = {
     "eval",
     "task",
     "validate_skill",
-    "screenshot",
-    "click",
-    "click_cell",
-    "type_text",
-    "press_key",
-    "scroll",
 }
 
 
@@ -104,6 +98,8 @@ def tool_files(
                 "replaces": "",
                 "tool": tool,
             }
+            if source == "default" and (group := (getattr(tool, "metadata", None) or {}).get("group")):
+                item["group"] = group
             if getattr(tool, "__mira_project_runtime__", False):
                 item["runtime"] = "Project"
                 item["environment"] = getattr(tool, "__mira_project_environment__", "")
@@ -144,7 +140,13 @@ def tools_from_file(
             raise TypeError(f"{path} get_tools() must return a list")
         tools.extend(tool for tool in created if not is_project_tool_callable(tool))
 
-    return deduplicate_tools(tools)
+    tools = deduplicate_tools(tools)
+    # Only grouped bundled features opt in; internal control tools have no group.
+    group = getattr(module, "TOOL_GROUP", None)
+    if not discover_project_tools and isinstance(group, str) and group.strip():
+        for tool in tools:
+            tool.metadata = {**(tool.metadata or {}), "group": group.strip()}
+    return tools
 
 
 def module_tools(module: Any) -> list[Any]:
@@ -201,5 +203,7 @@ def merge_tool_items(defaults: list[dict[str, Any]], projects: list[dict[str, An
         else:
             replaces = ""
         merged[item["name"]] = {**item, "replaces": replaces}
+        if current and current.get("group"):
+            merged[item["name"]]["group"] = current["group"]
 
     return list(merged.values())

@@ -2,6 +2,30 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## Settings tab resets
+
+Open `/settings`. Expected: no initial keyboard focus; General has the flat
+Core Tools (Read-only), Core Tools (Actions), and Skill Validation headings,
+individual toggles, and no bulk controls. Reset to default sits immediately left
+of Reload runtime with matching style and a consistent gap on all five tabs.
+
+Customize values on every tab, including Access for a disabled tool. On each
+tab, choose Reset to default and Cancel: nothing changes. Repeat and confirm.
+Expected: only that tab returns to fresh-workspace defaults, without closing or
+switching tabs. General and Custom Tools preserve access grants; Access
+preserves disabled/Allow preferences. Inputs, Selects, toggles, and counts update
+immediately. Reset again: no unnecessary rebuild. Check Tab/Shift+Tab and Enter,
+scroll position, and that reset is disabled during an active runtime operation.
+
+For Models, Main becomes unset and execution asks for a model; profiles and
+credentials remain intact. Select Main again to continue. For MCP, connections
+stop, server/tool preferences reset, and enabled servers require normal approval
+through Connect/Restart. Cancel that approval to verify no connection starts.
+Server definitions, environment configuration, and Access grants remain intact.
+A tracing reset reports when Reload Runtime is needed. Ordinary image messages,
+workflow tools, protected skill validation, Custom Tools, and MCP controls still
+work. `/tools` and `/skills` expose no bundled desktop automation feature.
+
 ## Stock ACP stdio integration
 
 Install `mira[acp]` and run
@@ -1950,44 +1974,3 @@ model.
    directory and checkpoint database remain usable. Run `/clear-all-chats`.
    Expected: saved session directories are removed and the active chat is
    recreated cleanly.
-
-## Primary-Monitor Computer Use
-
-1. On Windows, configure a vision-capable Main model with `image_inputs: true`.
-   Open a disposable application window with a visible, harmless control such
-   as a button or tab. Keep the pointer away from the upper-left corner.
-2. Run `/skill__computer-use Take a screenshot, tell me its pixel dimensions,
-   and identify the visible button or tab I can click. Do not click yet.`
-   Expected: MIRA loads the bundled computer-use skill, calls
-   `screenshot` without approval, receives the actual image, and reports a
-   cell containing the control's centre. The full-screen image shows subtle
-   100-pixel grid lines over the captured pixels, with column letters and row
-   numbers in ruler margins above and to the left, never over buttons or text.
-   Confirm MIRA reports the captured desktop dimensions separately from the
-   larger annotated image dimensions. Ask MIRA to capture a smaller
-   `region=[left, top, width, height]` around the control. Expected: the crop
-   has 50-pixel grid spacing by default, reports its absolute origin, crop
-   dimensions, full screen dimensions, and annotated image dimensions, and
-   labels cells from A1 at the crop's top-left. Ask for `grid_spacing=25`, then
-   `grid=False`. Confirm the unannotated crop matches the captured desktop
-   dimensions without ruler margins.
-   In a separate MIRA process launched with `MIRA_SCREENSHOT_DEBUG=1`, ask for
-   another cropped screenshot without invoking the skill. Expected: MIRA
-   reports a unique PNG path under `.mira/_debug/screenshots/` in the selected
-   workspace, and that file matches the image returned to the model. Without
-   that environment variable, screenshots create no debug PNGs.
-3. Ask MIRA to click that element. Expected: it calls `click_cell` with the
-   selected cell and matching screenshot region and spacing, without estimating
-   coordinates. The normal HITL prompt names `click_cell`; approving it clicks
-   the centre of that cell. Ask for another screenshot to verify the result.
-   Rejecting it leaves the desktop unchanged. Repeat after enabling Always
-   Allow for `click_cell` in `/settings`; the same action then runs without a prompt.
-4. In a text field, ask MIRA to type a short ASCII phrase, press `enter`, then
-   scroll down. Expected: each action has its own normal HITL prompt unless
-   Always Allow is enabled. Move the pointer to the upper-left corner during
-   an action to confirm PyAutoGUI's fail-safe stops it. Use Alt+Q to interrupt
-   MIRA when needed.
-5. With a text-only Main model (`image_inputs: false`), ask for a screenshot.
-   Expected: MIRA receives a clear unsupported-image notice rather than
-   unusable Base64. If Windows reports different screenshot and mouse sizes,
-   `screenshot` and `click_cell` return a DPI scaling error and do not click.
