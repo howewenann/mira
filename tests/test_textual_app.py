@@ -3967,7 +3967,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             app.mode["rubric_enabled"] = True
-            with patch("core.application.session.run_user_turn", side_effect=run_goal) as run:
+            with (
+                patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
+                patch("core.application.session.run_user_turn", side_effect=run_goal) as run,
+            ):
                 await app._run_goal_command("Write a professional announcement.")
 
         self.assertFalse(app.mode["planning"])
@@ -3984,7 +3987,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def cancel_goal(**_kwargs: Any) -> None:
             raise asyncio.CancelledError
 
-        with patch("core.application.session.run_user_turn", side_effect=cancel_goal):
+        with (
+            patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
+            patch("core.application.session.run_user_turn", side_effect=cancel_goal),
+        ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.busy = True
@@ -6290,7 +6296,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_command_runs_with_rubrics_disabled(self) -> None:
         app = make_app()
         app.mode["rubric_enabled"] = False
-        with patch("core.application.session.run_user_turn", new=AsyncMock()) as run:
+        with (
+            patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
+            patch("core.application.session.run_user_turn", new=AsyncMock()) as run,
+        ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 await app._run_goal_command("add search")
@@ -6304,7 +6313,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async def fake_run_user_turn(**kwargs: Any) -> None:
             captured.update(kwargs)
 
-        with patch("core.application.session.run_user_turn", fake_run_user_turn):
+        with (
+            patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
+            patch("core.application.session.run_user_turn", fake_run_user_turn),
+        ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)

@@ -197,14 +197,16 @@ def normalize_summarization_event(event: Any) -> Any:
 def normalize_summary_message(message: Any) -> HumanMessage:
     """Convert checkpointed summary messages into provider-safe HumanMessages."""
     if isinstance(message, str):
-        normalized = HumanMessage(content=message)
+        normalized = HumanMessage(content=message, response_metadata={"mira_summary": True})
         object.__setattr__(normalized, "_mira_summary", True)
         return normalized
     try:
         converted = convert_to_messages([message])[0]
     except Exception:
         converted = message
-    normalized = HumanMessage(content=visible_text(converted))
+    normalized = HumanMessage(
+        content=visible_text(converted), response_metadata={"mira_summary": True},
+    )
     object.__setattr__(normalized, "_mira_summary", True)
     return normalized
 
@@ -240,6 +242,9 @@ def sanitized_tool_facts(message: Any) -> str:
 
 def is_summary_message(message: Any) -> bool:
     if getattr(message, "_mira_summary", False):
+        return True
+    metadata = field(message, "response_metadata")
+    if isinstance(metadata, dict) and metadata.get("mira_summary") is True:
         return True
     kwargs = field(message, "additional_kwargs")
     return isinstance(kwargs, dict) and kwargs.get("lc_source") == "summarization"

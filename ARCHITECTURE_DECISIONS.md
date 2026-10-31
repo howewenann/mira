@@ -1101,6 +1101,17 @@ interrupts are displayed before graph continuation; incomplete operations
 without an interrupt require an explicit `/continue` because an external side
 effect may have occurred. Closing a session closes its SQLite connection before
 deletion removes that session's directory, including SQLite sidecars.
+
+Act/Plan transitions copy the source checkpoint's effective DeepAgents
+conversation into the destination message channel and clear obsolete destination
+summary metadata. Each graph retains its own todos and other non-message state.
+Goal preparation uses an isolated staging thread seeded from the current mode;
+approved execution transfers that completed preparation conversation into Act.
+MIRA refuses a handoff while either graph has pending work, and commits mode or
+artifact execution state only after the transfer succeeds. See
+`core/execution/handoff.py`, `core/application/session.py`, and
+`core/execution/turns.py`.
+
 Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
 replaces DeepAgents' default `SummarizationMiddleware` by its native name with
 one instance built from Main's model-aware defaults. The model-triggered

@@ -34,9 +34,9 @@ from core.execution.runner import run_turn
 
 
 class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
-    async def start(self, workspace: Path, *, model=None, frontend=None, rubric=False) -> MiraApplication:
+    async def start(self, workspace: Path, *, model=None, frontend=None, rubric=False, todos=False) -> MiraApplication:
         model = model or WorkflowModel()
-        settings = normalize_settings({})
+        settings = normalize_settings({"system": {"planning_todos": {"enabled": True}}} if todos else {})
         if rubric:
             settings = set_rubric_enabled(settings, True)
         config = {
@@ -435,6 +435,10 @@ class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(reopened.recovery)
                 self.assertEqual(len(reopened.recovery["interrupts"]), 1)
                 self.assertEqual(frontend.approvals, 0)
+                with self.assertRaisesRegex(RuntimeError, "pending checkpoint request"):
+                    await reopened.set_mode("plan")
+                with self.assertRaisesRegex(RuntimeError, "pending checkpoint request"):
+                    await reopened.begin_goal("Another Goal")
                 await reopened.resume_pending()
                 self.assertEqual(frontend.approvals, 1)
                 self.assertEqual(effects, [])

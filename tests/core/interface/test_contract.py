@@ -9,7 +9,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from langchain_core.messages import AIMessage
 
@@ -443,7 +443,8 @@ class FrontendContractTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         _application, plan_session = application_for(plan_frontend, plan_agent)
-        await plan_session.set_mode("plan")
+        with patch("core.application.session.synchronize_conversation", new_callable=AsyncMock):
+            await plan_session.set_mode("plan")
 
         await plan_session.prompt("Create a separation plan")
 

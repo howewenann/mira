@@ -8,8 +8,9 @@ from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from agent.planning.policy import PLANNING_STAGE_GOAL_RESEARCH, PLANNING_STAGE_PLAN_RESEARCH
-from core.interface import FrontendEmitter, SessionSnapshot
+from core.execution.handoff import synchronize_conversation
 from core.execution.turns import plan_thread_id, run_user_turn
+from core.interface import FrontendEmitter, SessionSnapshot
 from session.dashboard import normalize_dashboard, update_duration
 from session.goals import clear_current_goal, current_goal, pause_current_goal, start_goal_attempt
 from session.plans import clear_current_plan, current_plan, pause_current_plan, start_plan_attempt
@@ -26,6 +27,7 @@ class MiraSession:
         "goal_staging", "goal_revision", "plan_counter",
         "plan_runs", "plan_thread_id", "rubric_enabled", "rubric_max_iterations",
         "pending_artifact",
+        "goal_context_thread_id",
     )
 
     def __init__(
@@ -49,6 +51,7 @@ class MiraSession:
         )
         self.runtime_state = "ready"
         self._active_task: asyncio.Task[Any] | None = None
+        self._transitioning = False
         self.recovery: dict[str, Any] | None = None
         application._sessions[self.id] = self
 
@@ -122,6 +125,8 @@ class MiraSession:
         """Execute one complete ACT/PLAN/Goal workflow through the MIRA API."""
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
+        if self._transitioning:
+            raise RuntimeError("MIRA session is changing modes; retry after the transition")
         if self._active_task is not None and not self._active_task.done():
             raise RuntimeError("MIRA session already has an active turn")
         if self.recovery is not None:
@@ -161,6 +166,7 @@ class MiraSession:
                 context_limit_source=context_limit_source,
                 persist_always_allow=self.application.persist_tool_always_allow,
                 persist_graph_state=self.persist_graph_state,
+                synchronize_conversation=synchronize_conversation,
                 **kwargs,
             )
         except (Exception, asyncio.CancelledError) as exc:
@@ -220,35 +226,94 @@ class MiraSession:
         """Select ACT or PLAN without conflating the session and graph thread."""
         from core.application.app import select_mode
 
-        select_mode(self.record, self.mode, mode)
-        await self.persist_graph_state()
-        self.application.store.save(self.record)
+        self._begin_transition()
+        try:
+            proposed = dict(self.mode)
+            select_mode(self.record, proposed, mode)
+            if proposed["planning"] != self.mode["planning"]:
+                if self.agent is None or self.plan_agent is None:
+                    raise RuntimeError("Both Act and Plan agents are required for a mode switch")
+                source_agent, source_id = (
+                    (self.plan_agent, plan_thread_id(self.record)) if self.mode["planning"]
+                    else (self.agent, self.id)
+                )
+                target_agent, target_id = (
+                    (self.plan_agent, plan_thread_id(self.record)) if proposed["planning"]
+                    else (self.agent, self.id)
+                )
+                await synchronize_conversation(source_agent, source_id, target_agent, target_id)
+            self.mode.update(proposed)
+            await self.persist_graph_state()
+            self.application.store.save(self.record)
+        finally:
+            self._transitioning = False
+
+    def _begin_transition(self) -> None:
+        if self.runtime_state == "closed":
+            raise RuntimeError("MIRA session is closed")
+        if self._transitioning or (self._active_task is not None and not self._active_task.done()):
+            raise RuntimeError("MIRA session already has an active operation")
+        if self.recovery is not None:
+            raise RuntimeError("Answer the pending checkpoint request before changing modes")
+        self._transitioning = True
 
     async def begin_goal(self, objective: str) -> None:
         """Stage an explicit Goal request on an isolated planning thread."""
-        self.mode["plan_runs"] = int(self.mode.get("plan_runs") or 0) + 1
-        self.mode["goal_staging"] = {
-            "authoritative_objective": objective,
-            "objective": objective,
-            "context_and_constraints": "",
-            "research_evidence": "",
-            "success_criteria": "",
-            "stage": PLANNING_STAGE_GOAL_RESEARCH,
-            "thread_id": plan_thread_id(self.record, self.mode["plan_runs"]),
-            "replacement_confirmed": True,
-        }
-        await self.persist_graph_state()
+        self._begin_transition()
+        try:
+            if self.mode.get("goal_staging"):
+                raise RuntimeError("Finish or clear the current Goal preparation before starting another")
+            if self.agent is None or self.plan_agent is None:
+                raise RuntimeError("Both Act and Plan agents are required for Goal preparation")
+            run_id = int(self.mode.get("plan_runs") or 0) + 1
+            thread_id = plan_thread_id(self.record, run_id)
+            source_agent = self.plan_agent if self.mode["planning"] else self.agent
+            source_id = plan_thread_id(self.record) if self.mode["planning"] else self.id
+            await synchronize_conversation(source_agent, source_id, self.plan_agent, thread_id)
+            self.mode["plan_runs"] = run_id
+            self.mode["goal_staging"] = {
+                "authoritative_objective": objective,
+                "objective": objective,
+                "context_and_constraints": "",
+                "research_evidence": "",
+                "success_criteria": "",
+                "stage": PLANNING_STAGE_GOAL_RESEARCH,
+                "thread_id": thread_id,
+                "replacement_confirmed": True,
+            }
+            await self.persist_graph_state()
+        finally:
+            self._transitioning = False
 
     async def begin_artifact_revision(self, kind: str, artifact: dict[str, Any], feedback: str) -> None:
         """Stage revision of the exact retained formal artifact."""
+        self._begin_transition()
+        try:
+            await self._begin_artifact_revision(kind, artifact, feedback)
+        finally:
+            self._transitioning = False
+
+    async def _begin_artifact_revision(self, kind: str, artifact: dict[str, Any], feedback: str) -> None:
         if kind == "plan":
+            if not self.mode["planning"]:
+                await synchronize_conversation(self.agent, self.id, self.plan_agent, plan_thread_id(self.record))
             self.mode["planning"] = True
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.mode["plan_thread_id"] = plan_thread_id(self.record)
             self.mode["plan_revision"] = {"previous_plan": artifact, "feedback": feedback}
             await self.persist_graph_state()
             return
-        self.mode["plan_runs"] = int(self.mode.get("plan_runs") or 0) + 1
+        run_id = int(self.mode.get("plan_runs") or 0) + 1
+        source_id = str(self.mode.get("goal_context_thread_id") or "")
+        if source_id:
+            source_agent = self.plan_agent
+        elif self.mode["planning"]:
+            source_agent, source_id = self.plan_agent, plan_thread_id(self.record)
+        else:
+            source_agent, source_id = self.agent, self.id
+        thread_id = plan_thread_id(self.record, run_id)
+        await synchronize_conversation(source_agent, source_id, self.plan_agent, thread_id)
+        self.mode["plan_runs"] = run_id
         self.mode["goal_revision"] = {"previous_goal": artifact, "feedback": feedback}
         self.mode["goal_staging"] = {
             "authoritative_objective": str(artifact.get("objective") or ""),
@@ -257,13 +322,28 @@ class MiraSession:
             "research_evidence": "",
             "success_criteria": "",
             "stage": PLANNING_STAGE_GOAL_RESEARCH,
-            "thread_id": plan_thread_id(self.record, self.mode["plan_runs"]),
+            "thread_id": thread_id,
             "replacement_confirmed": True,
         }
         await self.persist_graph_state()
 
     async def start_artifact(self, kind: str) -> dict[str, Any] | None:
         """Start one explicit retained Goal/Plan execution attempt."""
+        self._begin_transition()
+        try:
+            return await self._start_artifact(kind)
+        finally:
+            self._transitioning = False
+
+    async def _start_artifact(self, kind: str) -> dict[str, Any] | None:
+        if (current_plan(self.record) if kind == "plan" else current_goal(self.record)) is None:
+            return None
+        if kind == "plan" and self.mode["planning"]:
+            await synchronize_conversation(self.plan_agent, plan_thread_id(self.record), self.agent, self.id)
+        if kind == "goal" and self.mode.get("goal_context_thread_id"):
+            await synchronize_conversation(
+                self.plan_agent, str(self.mode["goal_context_thread_id"]), self.agent, self.id,
+            )
         started = start_plan_attempt(self.record) if kind == "plan" else start_goal_attempt(self.record)
         self.mode[f"current_{kind}"] = started
         if started is None:
@@ -280,8 +360,17 @@ class MiraSession:
 
     async def clear_artifact(self, kind: str) -> dict[str, Any] | None:
         """Clear only the authoritative current artifact, retaining history."""
+        self._begin_transition()
+        try:
+            return await self._clear_artifact(kind)
+        finally:
+            self._transitioning = False
+
+    async def _clear_artifact(self, kind: str) -> dict[str, Any] | None:
         value = clear_current_plan(self.record) if kind == "plan" else clear_current_goal(self.record)
         self.mode[f"current_{kind}"] = None
+        if kind == "goal":
+            self.mode["goal_context_thread_id"] = None
         await self.persist_graph_state()
         self.application.store.save(self.record)
         if value is not None:

@@ -663,6 +663,11 @@ class SessionEventEmitter:
         if not isinstance(decision, dict):
             raise RuntimeError(f"{kind} review must return a decision mapping")
         resolved = {**decision, "artifact": artifact}
+        if resolved.get("action") == "implement" and self.semantic_state.get("_synchronize_conversation") is not None:
+            # The planning graph is still resuming its finalizer interrupt.
+            # The turn orchestrator transfers its completed checkpoint before
+            # committing execution semantics or starting Act.
+            return resolved
         detail = resolve_artifact_review(
             kind,  # type: ignore[arg-type]
             artifact,

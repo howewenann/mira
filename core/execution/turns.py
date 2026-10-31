@@ -21,6 +21,7 @@ from agent.planning.policy import (
     PLANNING_STAGE_PLAN_RESEARCH,
     plan_disabled_tools_text,
 )
+from core.application.artifacts import resolve_artifact_review
 from core.context.observation import context_usage_scope
 from core.interface import Frontend, FrontendEmitter
 from core.execution.runner import TurnResult, run_turn, supported_kwargs
@@ -133,6 +134,7 @@ async def run_user_turn(
     rubric_override: str | None = None,
     persist_always_allow: Any | None = None,
     persist_graph_state: Any | None = None,
+    synchronize_conversation: Any | None = None,
     recovery: dict[str, Any] | None = None,
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
@@ -188,6 +190,8 @@ async def run_user_turn(
         mode["goal_revision"] = None
     if persist_graph_state is not None:
         mode["_persist_graph_state"] = persist_graph_state
+    if synchronize_conversation is not None:
+        mode["_synchronize_conversation"] = synchronize_conversation
     using_planning_agent = bool(mode["planning"] or goal_staging is not None)
     ensure_dashboard(
         session,
@@ -370,10 +374,8 @@ async def run_user_turn(
             if first_phase:
                 thread_id = str((goal_staging or {}).get("thread_id") or mode.get("plan_thread_id"))
             else:
-                mode["plan_runs"] = int(mode.get("plan_runs") or 0) + 1
-                thread_id = plan_thread_id(session, mode["plan_runs"])
-                if persist_graph_state is not None:
-                    await persist_graph_state()
+                next_run = int(mode.get("plan_runs") or 0) + 1
+                thread_id = plan_thread_id(session, next_run)
         else:
             authoritative = str((previous_artifact or {}).get("objective") or text)
             proposal = (
@@ -383,6 +385,13 @@ async def run_user_turn(
             )
             stage = PLANNING_STAGE_PLAN_RESEARCH
             thread_id = str(mode.get("plan_thread_id") or plan_thread_id(session))
+
+        if not first_phase and workflow == "goal" and synchronize_conversation is not None:
+            await synchronize_conversation(plan_agent, previous_thread_id, plan_agent, thread_id)
+        if not first_phase and workflow == "goal":
+            mode["plan_runs"] = next_run
+            if persist_graph_state is not None:
+                await persist_graph_state()
 
         mode["planning_stage"] = stage
         planning_state = {
@@ -408,11 +417,31 @@ async def run_user_turn(
             supplied_messages=prepared_messages if first_phase else None,
             phase_pinned_skills=pinned_skills if first_phase else None,
         )
+        previous_thread_id = thread_id
         first_phase = False
         review = result.formal_review
         if not isinstance(review, dict):
             break
         action = str(review.get("action") or "")
+        if action == "implement" and synchronize_conversation is not None:
+            await synchronize_conversation(plan_agent, thread_id, agent, str(session["id"]))
+            artifact = review.get("artifact")
+            if not isinstance(artifact, dict):
+                raise RuntimeError("formal implementation requires the reviewed artifact")
+            detail = resolve_artifact_review(
+                workflow, artifact, review, session, mode,
+            )
+            mode["pending_artifact"] = None
+            if workflow == "goal":
+                mode["goal_context_thread_id"] = thread_id
+            if persist_graph_state is not None:
+                await persist_graph_state()
+            store.save(session)
+            emitter.artifact(workflow, "implement", detail.get("accepted") or artifact, {**review, **detail})
+        elif action == "close" and workflow == "goal":
+            mode["goal_context_thread_id"] = thread_id
+            if persist_graph_state is not None:
+                await persist_graph_state()
         if action != "revise":
             break
         candidate = review.get("artifact")
@@ -424,7 +453,7 @@ async def run_user_turn(
             raise RuntimeError("formal revision requires explicit feedback")
         phase_text = feedback
 
-    if isinstance(result.formal_review, dict) and result.formal_review.get("action") == "implement":
+    if workflow == "goal" and isinstance(result.formal_review, dict) and result.formal_review.get("action") in {"implement", "close", "clear"}:
         mode["goal_staging"] = None
         mode["goal_revision"] = None
         if persist_graph_state is not None:
