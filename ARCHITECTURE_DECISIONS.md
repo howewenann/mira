@@ -1,11 +1,168 @@
 # MIRA Architecture Decisions
 
-This is MIRA's living design-rationale document. When answering a question about
-why MIRA behaves a certain way, read this file first, then verify the current
-code. When code changes alter one of these decisions, update this file in the
-same change.
+This is MIRA's living explanation of how the system works and why its main
+boundaries exist. For commands and configuration examples, see the
+[advanced guide](docs/advanced.md). The source code remains authoritative when
+behavior changes; update this document when a change alters a decision.
 
-## Stock ACP Adapter Boundary
+## Table of Contents
+
+- [Architecture overview](#architecture-overview)
+  - [Project shape and package ownership](#project-shape-and-package-ownership)
+  - [Startup and Git protection](#startup-and-git-protection)
+- [Application, Core, and frontend boundaries](#application-core-and-frontend-boundaries)
+  - [Headless application and public API](#headless-application-and-public-api)
+  - [ACP protocol adapter](#acp-protocol-adapter)
+- [Configuration and project resources](#configuration-and-project-resources)
+  - [Models, settings, and reloads](#models-settings-and-reloads)
+  - [Resource discovery and replacement](#resource-discovery-and-replacement)
+- [Agents, models, and runtime](#agents-models-and-runtime)
+  - [DeepAgents and LangGraph ownership](#deepagents-and-langgraph-ownership)
+  - [Model correction and control-tool recovery](#model-correction-and-control-tool-recovery)
+- [Tools, permissions, and execution](#tools-permissions-and-execution)
+  - [Execute backend and environment](#execute-backend-and-environment)
+  - [Tool approval and human review](#tool-approval-and-human-review)
+- [Plan and Goal architecture](#plan-and-goal-architecture)
+  - [Read-only Plan conversation](#read-only-plan-conversation)
+  - [Plan construction and review boundary](#plan-construction-and-review-boundary)
+  - [Goal construction and criteria](#goal-construction-and-criteria)
+  - [Formal artifact review and execution](#formal-artifact-review-and-execution)
+  - [Rubric verification and streaming](#rubric-verification-and-streaming)
+- [Sessions and persistence](#sessions-and-persistence)
+  - [Session files and graph checkpoints](#session-files-and-graph-checkpoints)
+  - [Durable transcript and subagent history](#durable-transcript-and-subagent-history)
+- [Conversation handoff](#conversation-handoff)
+  - [Why Act and Plan have separate conversations](#why-act-and-plan-have-separate-conversations)
+  - [What a handoff copies](#what-a-handoff-copies)
+  - [When transfer is allowed](#when-transfer-is-allowed)
+- [Context management and compaction](#context-management-and-compaction)
+  - [DeepAgents summarization and archives](#deepagents-summarization-and-archives)
+  - [Context limits and observed pressure](#context-limits-and-observed-pressure)
+- [Workflows and subagents](#workflows-and-subagents)
+  - [Dynamic eval subagents](#dynamic-eval-subagents)
+  - [Workflow execution and durable history](#workflow-execution-and-durable-history)
+- [MCP integration](#mcp-integration)
+  - [Server lifecycle and capabilities](#server-lifecycle-and-capabilities)
+  - [Authentication, configuration, and elicitation](#authentication-configuration-and-elicitation)
+- [Tracing and diagnostics](#tracing-and-diagnostics)
+  - [Error reports and the diagnostic sidecar](#error-reports-and-the-diagnostic-sidecar)
+  - [OTLP trace export](#otlp-trace-export)
+- [UI architecture](#ui-architecture)
+  - [Textual and one-shot presentation](#textual-and-one-shot-presentation)
+  - [Tool and interrupt lifecycle](#tool-and-interrupt-lifecycle)
+  - [Status, commands, and inspection](#status-commands-and-inspection)
+  - [Live subagent panel](#live-subagent-panel)
+  - [Windows input and rendering](#windows-input-and-rendering)
+
+## Architecture overview
+
+MIRA keeps its own application and presentation code small while letting DeepAgents and LangGraph run the agent graphs. The package layout shows who owns each responsibility.
+
+### Project shape and package ownership
+
+**Decision:** MIRA stays small, direct, and educational.
+
+**Why:** The project is meant to be readable by people learning how a coding
+agent is assembled. Small modules and plain control flow are preferred over
+clever abstractions.
+
+**Where to check:** [AGENTS.md](AGENTS.md), [cli/](cli/), [agent/factory.py](agent/factory.py),
+[core/execution/runner.py](core/execution/runner.py), [ui/textual/app.py](ui/textual/app.py).
+
+**Update this when:** A new abstraction, framework layer, or package boundary
+changes how a reader should trace the system.
+
+### Repository ownership
+
+**Decision:** The source tree expresses ownership directly: [agent/](agent/) contains
+DeepAgents-native machinery; [core/application/](core/application/) contains the headless MIRA
+application; [core/execution/](core/execution/) interprets native turns; [core/interface/](core/interface/) is the
+internal Core Interface; [mira/](mira/) is the supported MIRA API facade; [session/](session/)
+persists durable state; [ui/textual/](ui/textual/) and [ui/terminal/](ui/terminal/) are MIRA-owned
+consumers; [protocols/](protocols/) is reserved for external interoperability; and
+[tracing/](tracing/) remains an independent concern. The former miscellaneous `runtime/`
+package does not exist.
+
+**Why:** Directory ownership should be understandable to a person or a simple
+documentation generator without requiring a registry or reverse-engineering
+class names. [core/](core/) is an organizational namespace, not a replacement agent
+framework: native DeepAgents, LangChain, and LangGraph objects remain native.
+
+**Where to check:** Package `README.md` files, [core/](core/), [ui/](ui/), [protocols/](protocols/),
+[pyproject.toml](pyproject.toml), and [tests/core/interface/test_contract.py](tests/core/interface/test_contract.py).
+
+**Update this when:** A responsibility crosses package ownership or a new
+owned interface or external protocol adapter is introduced.
+
+### Startup and Git protection
+
+**Decision:** Startup builds runtime state in one path: CLI command, config,
+headless `MiraApplication`, and headless `MiraSession`, followed by a Textual
+or one-shot frontend adapter.
+
+**Why:** A single startup shape keeps TUI and one-shot mode consistent. Git is
+diagnostic rather than a startup gate, so a missing repository never prevents
+MIRA from starting or running a one-shot prompt.
+
+**Git protection behavior:** The setting is tri-state: enabled, declined, or
+undecided. An undecided workspace outside a Git worktree receives a startup
+Issue while startup continues. Settings offers Configure; accepting runs
+`git init <workspace>` and persists enabled only after success, while declining
+persists disabled. Worktree detection and initialization live in
+[core/workspace.py](core/workspace.py); the initializer only creates the repository and does not
+stage files or create an initial commit.
+
+**Where to check:** [cli/main.py](cli/main.py), [cli/commands.py](cli/commands.py), [core/workspace.py](core/workspace.py),
+[core/application/app.py](core/application/app.py), [core/application/session.py](core/application/session.py), [config/loader.py](config/loader.py), [config/metadata.py](config/metadata.py).
+
+**Update this when:** Startup order changes, a new runtime mode is added, or Git
+protection again becomes more than a non-blocking diagnostic and Settings action.
+
+## Application, Core, and frontend boundaries
+
+A frontend talks to a headless MIRA session through one event and interaction contract. It does not own agent state or graph execution.
+
+### Headless application and public API
+
+**Decision:** MIRA's application lifecycle and complete turn orchestration are
+headless. `MiraApplication` owns shared resources, MCP, and shutdown; each
+`MiraSession` owns its Act/Plan agents, SQLite checkpointer, and durable projection and
+offers prompt, cancellation, mode, snapshot, and close operations. The Core
+Interface under [core/interface/](core/interface/) implements ordered event emission plus
+blocking interaction requests. The thin `mira` and `mira.api` facades expose
+those exact classes and types as the one supported MIRA API. Textual and
+one-shot terminal output consume that same public surface.
+
+**Why:** A frontend should render state and collect choices without owning
+agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,
+or resource lifecycle. Contract events retain native LangChain content blocks,
+structured tool arguments, message/tool identifiers, namespaces, and graph
+provenance. Interaction requests carry native LangGraph interrupts and return
+native decisions; MIRA does not translate them into a second execution model.
+MIRA-only Goal, Plan, Rubric, session, and MCP lifecycle data are explicit
+contract values and snapshots remain read-only projections of authoritative
+session/runtime state. A MIRA session id is not a generic graph thread id;
+planning continues to use its deliberately separate thread identity.
+
+**Dependency rule:** [agent/](agent/), [core/](core/), and [session/](session/) never import [ui/](ui/);
+[core/](core/) never imports [protocols/](protocols/). The Core Interface under [core/interface/](core/interface/)
+imports no consumer framework. `mira.api` re-exports selected Interface types
+without copying or wrapping them. UI, protocol, and external consumers depend
+on `mira.api`; Core implementation modules continue to use the Interface
+directly to avoid an inward dependency on their public facade. Future
+consumers must not change event or interaction semantics merely to fit a
+transport.
+
+**Where to check:** [core/application/app.py](core/application/app.py), [core/application/session.py](core/application/session.py),
+[core/execution/turns.py](core/execution/turns.py), [core/interface/](core/interface/), [mira/api.py](mira/api.py),
+[session/recorder.py](session/recorder.py), [ui/shared/adapter.py](ui/shared/adapter.py), [ui/textual/app.py](ui/textual/app.py), and
+[cli/commands.py](cli/commands.py).
+
+**Update this when:** Core lifecycle ownership changes, a new frontend-facing
+event or interaction family is added, or a frontend needs data not represented
+by the snapshot or native event projections.
+
+### ACP protocol adapter
 
 **Decision:** MIRA's optional stdio and experimental Streamable HTTP ACP
 integrations implement the public `agent-client-protocol` Agent interface
@@ -39,154 +196,11 @@ questions stay on their permission surface rather than becoming adjacent
 agent-message content. Only the DeepAgents `write_todos` tool maps to an ACP
 plan update.
 
-## Project Shape
+## Configuration and project resources
 
-**Decision:** MIRA stays small, direct, and educational.
+Workspace configuration chooses models and policies; project resources contribute memories, tools, skills, subagents, and prompts to the agents built from those settings.
 
-**Why:** The project is meant to be readable by people learning how a coding
-agent is assembled. Small modules and plain control flow are preferred over
-clever abstractions.
-
-**Where to check:** `AGENTS.md`, `cli/`, `agent/factory.py`,
-`core/execution/runner.py`, `ui/textual/app.py`.
-
-**Update this when:** A new abstraction, framework layer, or package boundary
-changes how a reader should trace the system.
-
-## Repository Hierarchy
-
-**Decision:** The source tree expresses ownership directly: `agent/` contains
-DeepAgents-native machinery; `core/application/` contains the headless MIRA
-application; `core/execution/` interprets native turns; `core/interface/` is the
-internal Core Interface; `mira/` is the supported MIRA API facade; `session/`
-persists durable state; `ui/textual/` and `ui/terminal/` are MIRA-owned
-consumers; `protocols/` is reserved for external interoperability; and
-`tracing/` remains an independent concern. The former miscellaneous `runtime/`
-package does not exist.
-
-**Why:** Directory ownership should be understandable to a person or a simple
-documentation generator without requiring a registry or reverse-engineering
-class names. `core/` is an organizational namespace, not a replacement agent
-framework: native DeepAgents, LangChain, and LangGraph objects remain native.
-
-**Where to check:** Package `README.md` files, `core/`, `ui/`, `protocols/`,
-`pyproject.toml`, and `tests/core/interface/test_contract.py`.
-
-**Update this when:** A responsibility crosses package ownership or a new
-owned interface or external protocol adapter is introduced.
-
-## Core, MIRA API, And Consumer Boundary
-
-**Decision:** MIRA's application lifecycle and complete turn orchestration are
-headless. `MiraApplication` owns shared resources, MCP, and shutdown; each
-`MiraSession` owns its Act/Plan agents, SQLite checkpointer, and durable projection and
-offers prompt, cancellation, mode, snapshot, and close operations. The Core
-Interface under `core/interface/` implements ordered event emission plus
-blocking interaction requests. The thin `mira` and `mira.api` facades expose
-those exact classes and types as the one supported MIRA API. Textual and
-one-shot terminal output consume that same public surface.
-
-**Why:** A frontend should render state and collect choices without owning
-agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,
-or resource lifecycle. Contract events retain native LangChain content blocks,
-structured tool arguments, message/tool identifiers, namespaces, and graph
-provenance. Interaction requests carry native LangGraph interrupts and return
-native decisions; MIRA does not translate them into a second execution model.
-MIRA-only Goal, Plan, Rubric, session, and MCP lifecycle data are explicit
-contract values and snapshots remain read-only projections of authoritative
-session/runtime state. A MIRA session id is not a generic graph thread id;
-planning continues to use its deliberately separate thread identity.
-
-**Dependency rule:** `agent/`, `core/`, and `session/` never import `ui/`;
-`core/` never imports `protocols/`. The Core Interface under `core/interface/`
-imports no consumer framework. `mira.api` re-exports selected Interface types
-without copying or wrapping them. UI, protocol, and external consumers depend
-on `mira.api`; Core implementation modules continue to use the Interface
-directly to avoid an inward dependency on their public facade. Future
-consumers must not change event or interaction semantics merely to fit a
-transport.
-
-**Where to check:** `core/application/app.py`, `core/application/session.py`,
-`core/execution/turns.py`, `core/interface/`, `mira/api.py`,
-`session/recorder.py`, `ui/shared/adapter.py`, `ui/textual/app.py`, and
-`cli/commands.py`.
-
-**Update this when:** Core lifecycle ownership changes, a new frontend-facing
-event or interaction family is added, or a frontend needs data not represented
-by the snapshot or native event projections.
-
-## DeepAgents And LangGraph Ownership
-
-**Decision:** MIRA uses DeepAgents and LangGraph native behavior for agent
-construction, tool calls, subagents, HITL resume, backend routing, permissions,
-and runtime context compaction.
-
-**Why:** MIRA should show how the underlying agent stack works instead of
-reimplementing it. Local workarounds are kept narrow and tested when a real
-library or provider edge case is confirmed.
-
-**Where to check:** `agent/factory.py`, `agent/middleware/compaction.py`,
-`agent/middleware/context_overflow.py`, `core/execution/runner.py`, `session/checkpoint.py`.
-
-**Update this when:** MIRA takes ownership of behavior that DeepAgents or
-LangGraph used to handle, or when a workaround becomes part of the normal path.
-
-## Startup Flow
-
-**Decision:** Startup builds runtime state in one path: CLI command, config,
-headless `MiraApplication`, and headless `MiraSession`, followed by a Textual
-or one-shot frontend adapter.
-
-**Why:** A single startup shape keeps TUI and one-shot mode consistent. Git is
-diagnostic rather than a startup gate, so a missing repository never prevents
-MIRA from starting or running a one-shot prompt.
-
-**Git protection behavior:** The setting is tri-state: enabled, declined, or
-undecided. An undecided workspace outside a Git worktree receives a startup
-Issue while startup continues. Settings offers Configure; accepting runs
-`git init <workspace>` and persists enabled only after success, while declining
-persists disabled. Worktree detection and initialization live in
-`core/workspace.py`; the initializer only creates the repository and does not
-stage files or create an initial commit.
-
-**Where to check:** `cli/main.py`, `cli/commands.py`, `core/workspace.py`,
-`core/application/app.py`, `core/application/session.py`, `config/loader.py`, `config/metadata.py`.
-
-**Update this when:** Startup order changes, a new runtime mode is added, or Git
-protection again becomes more than a non-blocking diagnostic and Settings action.
-
-## Error Reports And Trace Diagnostics
-
-**Decision:** MIRA treats the TUI as a friendly display layer, the trace
-sidecar as an optional live plain-text stream, and automatic error reports as
-durable failure artifacts.
-
-**Why:** Some TUI exceptions are intentionally caught and rendered as concise
-messages, so uncaught-exception hooks are not enough. Reports are written at
-the boundaries that already catch one-shot and TUI turn failures, with a small
-top-level backup for unexpected escaping exceptions. Reports use the current
-session id whenever one exists and are only created when an exception happens.
-They are durable diagnostics, not chat history, so `/clear-chat` and
-`/clear-all-chats` leave them in place; `/clear-errors` is the explicit TUI
-command for deleting `.mira/_errors/`.
-The trace sidecar mirrors visible TUI activity such as startup progress, user
-prompts, coalesced assistant text, tool calls, tool results, subagent
-lifecycle, and system messages through a bounded current-session diagnostics
-log. Trace transcript formatting is shared with one-shot terminal output, while
-sidecar color remains display-only in the log tailer. The trace sidecar is not
-the authoritative ordered transcript; saved session JSON is. It remains
-optional, so MIRA keeps running if that window cannot open or is closed, and
-normal non-trace TUI runs do not create live trace logs solely for successful
-activity.
-
-**Where to check:** `core/diagnostics/error_report.py`, `core/diagnostics/logging.py`,
-`tracing/stream.py`, `ui/shared/terminal/transcript.py`, `cli/commands.py`,
-`ui/textual/app.py`.
-
-**Update this when:** Error artifact layout, reporting boundaries, diagnostic
-log behavior, or trace-window behavior changes.
-
-## Configuration And Settings
+### Models, settings, and reloads
 
 **Decision:** Ordered model profiles live in `.mira/models.yml`; assignments and
 the usable context cap live in `.mira/settings.yml`. Profiles contain only
@@ -199,12 +213,18 @@ recursively and rejects alternate, escaped, malformed, or unresolved forms.
 The shared model-import boundary defaults `DEFER_PYDANTIC_BUILD=false` without
 overwriting an explicit environment value so streamed OpenAI-compatible model
 objects remain serializable by LangSmith.
+
+### Launch options and reload behavior
+
 Immutable launch options are process-local and overlay freshly loaded values to
 form the effective runtime configuration. `/reload` reloads environment and
 workspace configuration, then reapplies the same launch options. Launch options
 are never recovered from the previous effective config or persisted in settings
 or sessions. `--direct` is currently the only launch option in this layer;
 trace-window state remains separate.
+
+### Runtime inspection and model rebuilds
+
 The active runtime state is derived from effective configuration: model
 metadata, model identity, action/planning agents, normalized resource
 projections, and a sanitized runtime snapshot. Focused read-only commands expose
@@ -232,68 +252,22 @@ explicit boundary for also restarting MCP runtimes.
 
 **Why:** Named profiles make provider configuration ordered, inspectable, and
 reusable without duplicating secrets. Keeping null inheritance makes Main
-changes propagate without rewriting dependent settings. Dynamic eval subagents are also
-workspace behavior: they let JavaScript eval spawn subagents through
-QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
-requires an explicit System Settings toggle. Dynamic response schemas default
-on for compatibility, but can be disabled independently for models that do not
-reliably complete the synthetic structured-output tool protocol. In that mode,
-MIRA materializes every raw synchronous isolated subagent with its inherited
-model, tools, middleware, skills, permissions, and interrupts, then passes it
-to DeepAgents as a `CompiledSubAgent`. A raw subagent with `mode="fork"` stays
-declarative so DeepAgents can apply its native parent-message, prompt,
-middleware, and state inheritance; forking is opt-in and an omitted mode stays
-isolated. A compiled `general-purpose` replaces the auto-added raw one by name.
-DeepAgents therefore rejects a dynamic
-`responseSchema` before starting the child while ordinary text delegation and
-static response formats continue to work. Keeping these choices in workspace
-settings makes them inspectable without changing QuickJS or installed packages.
-The always-on Plan/Goal response-status protocol has one workspace System Setting,
-`system.planning_response_status.max_retries` (default `2`, range `1`-`20`). It
-counts recovery calls after the first rejected response. Changing it follows
-the normal settings application path and rebuilds both agents; it is a bound,
-not a feature toggle.
+changes propagate without rewriting dependent settings.
+
 A missing `.mira/settings.yml` uses defaults in memory. Unknown fixed keys and
 invalid shapes become STARTUP Issues; valid omitted known fields retain current
 defaults. Secrets are absent from persisted settings, model fingerprints, and
 Issue details.
 
-**Where to check:** `config/loader.py`, `config/runtime.py`, `config/llm.py`,
-`agent/llm.py`, `config/settings.py`, `cli/commands.py`, `ui/textual/app.py`,
-`ui/textual/runtime_report.py`, `agent/subagents/compilation.py`,
-`ui/textual/widgets/settings_panel.py`.
+**Where to check:** [config/loader.py](config/loader.py), [config/runtime.py](config/runtime.py), [config/llm.py](config/llm.py),
+[agent/llm.py](agent/llm.py), [config/settings.py](config/settings.py), [cli/commands.py](cli/commands.py), [ui/textual/app.py](ui/textual/app.py),
+[ui/textual/runtime_report.py](ui/textual/runtime_report.py), [agent/subagents/compilation.py](agent/subagents/compilation.py),
+[ui/textual/widgets/settings_panel.py](ui/textual/widgets/settings_panel.py).
 
 **Update this when:** A value moves between reloadable and launch-scoped
 configuration, model profile fields change, or `/settings` changes ownership.
 
-## Execute Backend
-
-**Decision:** `execute` is special. When enabled, MIRA switches the project
-backend from `FilesystemBackend` to `LocalShellBackend`; when disabled, MIRA
-uses the filesystem backend. MIRA keeps `inherit_env=False` and provides a small
-allowlisted host environment. Project settings can select the system shell, a
-Conda env name, a Conda env prefix, or a venv for `execute` commands without
-persisting host env values.
-
-**Why:** Shell execution changes the capability surface of the project backend.
-Keeping it behind a setting and HITL approval preserves the normal safer path
-while allowing trusted local workflows. The allowlist gives Windows tools enough
-path context for standard locations such as `%SystemDrive%`, `%ProgramData%`,
-`%AppData%`, and `%LocalAppData%`, but avoids exposing the full user environment
-or secrets. Extra variables in `.mira/settings.yml` are names only; values are
-read from the current process environment at runtime. Conda modes wrap commands
-with `conda run`, and venv mode prepares `PATH` and `VIRTUAL_ENV` for the local
-shell backend. MIRA adds custom execute-tool prompt guidance so file-tool
-virtual paths such as `/tmp.py` are run from the project shell as
-workspace-relative paths instead of host-root absolute paths.
-
-**Where to check:** `agent/resources/__init__.py`, `config/settings.py`,
-`agent/factory.py`, `agent/middleware/`, `ui/textual/app.py`.
-
-**Update this when:** `execute` is exposed by a different backend, default
-approval behavior changes, or shell environment inheritance changes.
-
-## Project Resources
+### Resource discovery and replacement
 
 **Decision:** MIRA loads bundled defaults first, then project `.mira/` resources.
 Bundled defaults stay minimal: default memories plus MIRA's built-in project
@@ -307,7 +281,7 @@ to inspect.
 
 **How it works at a high level:**
 
-- Defaults live under `agent/resources/defaults/` and are mounted read-only at
+- Defaults live under [agent/resources/defaults/](agent/resources/defaults/) and are mounted read-only at
   `/mira-defaults/...`; default memories, skills, and built-in tools are shipped
   there.
 - Project resources live under the workspace's `.mira/` folder and are mounted
@@ -322,6 +296,8 @@ to inspect.
   `/skills`, `/subagents`, and `/settings` can show what happened. Tool
   projections also retain their MIRA-or-Project runtime boundary and the
   concrete Python environment used for execution.
+
+### Replacement and bootstrap rules
 
 **Overwrite rules:**
 
@@ -367,6 +343,9 @@ to inspect.
   unresolved failures behind its persistent Issues entry point. Tool failures
   become generic TOOL Issues with either `@project_tool` guidance or an exact
   quoted interpreter install command; MIRA never installs from the Issues UI.
+
+### Project tool execution and failures
+
 - Standard LangChain `@tool` runs in MIRA's interpreter. The dependency-free
   `mira_tool_api.project_tool` decorator is an explicit alternative: it leaves
   the original callable unchanged and adds versioned metadata. The loader
@@ -385,7 +364,7 @@ to inspect.
   process's stdin and stdout, redirects project-tool prints to stderr so they
   cannot corrupt the response, and uses Conda's no-capture mode so stdin reaches
   Conda-hosted runners. The runner uses the workspace as cwd and import root and
-  loads the exact standalone `mira_tool_api.py` bridge file as `mira_tool_api`
+  loads the exact standalone [mira_tool_api.py](mira_tool_api.py) bridge file as `mira_tool_api`
   before importing the source. This exposes neither MIRA's site-packages nor a
   second environment setting. JSON-compatible results are preserved; other
   values fall back to `repr`, and child exceptions become normal project-runtime
@@ -399,350 +378,86 @@ to inspect.
 - Disabled project tools stay in metadata for the settings UI but are not
   exposed to the agent.
 
-**Where to check:** `mira_tool_api.py`, `agent/tools/discovery.py`,
-`agent/tools/failures.py`, `agent/tools/project.py`,
-`agent/tools/project_runner.py`, `agent/resources/defaults/`,
-`agent/resources/project_setup.py`, `agent/resources/project_kit/`,
-`tests/test_resources.py`, `tests/test_project_tools.py`.
+**Where to check:** [mira_tool_api.py](mira_tool_api.py), [agent/tools/discovery.py](agent/tools/discovery.py),
+[agent/tools/failures.py](agent/tools/failures.py), [agent/tools/project.py](agent/tools/project.py),
+[agent/tools/project_runner.py](agent/tools/project_runner.py), [agent/resources/defaults/](agent/resources/defaults/),
+[agent/resources/project_setup.py](agent/resources/project_setup.py), [agent/resources/project_kit/](agent/resources/project_kit/),
+[tests/test_resources.py](tests/test_resources.py), [tests/test_project_tools.py](tests/test_project_tools.py).
 
 **Update this when:** Resource locations, overwrite rules, display metadata, or
 supported export shapes change.
 
-## Tools And HITL
+## Agents, models, and runtime
 
-**Decision:** Dangerous built-in tools require approval by default. Built-in
-dangerous tools and project tools can be enabled or disabled through settings;
-disabled project tools remain visible in metadata even when they are not
-exposed to the agent. Newly discovered project tools are enabled by default but
-require approval unless explicitly configured as always allowed. QuickJS
-programmatic tool calling is limited to
-`ls`, `read_file`, `glob`, and `grep`; dynamic subagent delegation uses
-QuickJS' top-level `task()` helper only when the System Settings toggle is
-enabled, while destructive file tools, shell execution, and interrupt/control
-flow tools stay outside that bridge.
-MIRA also owns display of `ask_user` interrupts: the interrupt payload keeps
-`question` and `options` separate, the TUI shows the question once, and options
-render as vertical choice buttons with the open-ended fallback last. Larger
-choice sets are allowed for compatibility and explicit user requests, but the
-default tool prompt asks the agent to prefer 1-3 concise options. Prompt-panel
-keyboard focus styles the selected button itself, not a parent row; ask_user
-option buttons fill their row to provide a full-row selection feel without
-extra focus bookkeeping.
-Across every LangGraph human-review surface, Escape or a nested Cancel means no
-decision: the caller reopens the same approval or question and does not issue
-`Command(resume=...)`. Cancelling an approval JSON editor returns to the same
-approval, and cancelling ask_user freeform input returns to its choices. Alt+Q
-instead cancels the whole outer MIRA turn and clears any pending review waiter.
+The agent factory assembles native DeepAgents components. MIRA adds narrow middleware for its formal controls, presentation, and confirmed integration edges.
 
-**Why:** Approval prompts make file edits, eval, subagent delegation, and shell
-execution transcript-compatible and user-controlled. Keeping disabled project
-tools in metadata lets the settings UI manage them without exposing them to the
-model, while disabled built-ins are hidden through the same excluded-tools path
-MIRA uses for mode-specific tool visibility. `ask_user` stays a normal
-LangGraph interrupt/resume path; MIRA only formats the prompt surface so user
-decisions remain readable in narrow terminals.
+### DeepAgents and LangGraph ownership
 
-**Where to check:** `config/settings.py`, `agent/factory.py`,
-`agent/middleware/`, `agent/resources/__init__.py`, `ui/interrupts.py`,
-`core/execution/runner.py`.
+**Decision:** MIRA uses DeepAgents and LangGraph native behavior for agent
+construction, tool calls, subagents, HITL resume, backend routing, permissions,
+and runtime context compaction.
 
-**Update this when:** Approval defaults, interrupt payload handling, or
-settings-panel tool behavior changes.
+**Why:** MIRA should show how the underlying agent stack works instead of
+reimplementing it. Local workarounds are kept narrow and tested when a real
+library or provider edge case is confirmed.
 
-## Planning Mode
+**Where to check:** [agent/factory.py](agent/factory.py), [agent/middleware/compaction.py](agent/middleware/compaction.py),
+[agent/middleware/context_overflow.py](agent/middleware/context_overflow.py), [core/execution/runner.py](core/execution/runner.py), [session/checkpoint.py](session/checkpoint.py).
 
-**Decision:** `/plan` enters one persistent read-only Plan conversation;
-`/plan <prompt>` enters that same mode and submits the suffix through the normal
-Plan message path. Imperative language never enables execution. The Plan prompt
-uses four non-persisted outcomes: `DISPLAY_RETAINED` immediately calls the
-applicable `show_plan` or `show_goal` control, `DISCUSSION` returns ordinary
-read-only prose, `NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls
-`prepare_plan`. Display requests do not research, reproduce retained work in
-prose, prepare a replacement, or enter finalisation first. There
-is no classifier model, structured response format, prose regex, or semantic
-grader.
+**Update this when:** MIRA takes ownership of behavior that DeepAgents or
+LangGraph used to handle, or when a workaround becomes part of the normal path.
 
-Both Plan and Act compose one shared question policy: discover facts from
-available context first and use `ask_user` whenever user input is required.
-Plan mode additionally hides write, delete, execute, evaluation, and delegation
-tools and denies filesystem writes as a backstop.
+### Runtime policies and built-in tools
 
-Formal construction is always criteria-first:
+**Decision:** MIRA pins DeepAgents 0.7.32, LangChain 1.4.7, and
+`langchain-quickjs` 0.3.7, with the LangGraph and LangSmith minimums required
+by DeepAgents. MIRA
+owns a small general-purpose action prompt and its existing planning prompt;
+DeepAgents owns the filesystem, delegation, streaming, and middleware
+execution. Project and bundled memory files remain opaque Markdown resources,
+resolved by the same deterministic resolver and passed identically to action
+and planning agents. Existing bundled-resource slots retain their precedence;
+new project files retain the resolver's deterministic order.
 
-```text
-prepare_plan
--> SuccessCriteriaService
--> forced finalize_plan
--> Plan bubble
-```
+Planning todos are optional and disabled by default because the upstream
+DeepAgents [evaluation](https://github.com/langchain-ai/deepagents/pull/4929)
+found no statistically significant accuracy improvement.
+Enabling the workspace setting adds one `TodoListMiddleware` to action and
+planning agents and to compiled dynamic subagents. `/tools` is derived from the
+actual middleware stack, so toggling or reloading cannot retain a stale or
+duplicate `write_todos` entry.
 
-The staging middleware exposes `prepare_plan` during conversation and only
-`finalize_plan` during finalisation, with required tool choice. The generated
-Success Criteria are binding context. The model supplies Title, Key Changes,
-Test Plan, and Assumptions around the staged Objective and Context and
-Constraints; no Summary field exists. This path and its model inputs are
-identical whether automatic rubric evaluation is enabled or disabled.
-`prepare_plan` is a normal async tool: `ToolRuntime` injects the per-agent
-`SuccessCriteriaService`, and the tool returns a state-updating `Command` that
-sets `planning_stage=plan_finalize` and preserves the exact generated criteria.
-It does not interrupt. The following model inference constructs the Plan and is
-constrained to the sole required finalizer. `finalize_plan` remains the real
-human-review interrupt and is `return_direct`, so its resumed result ends that
-PLAN graph without another model call.
+DeepAgents 0.7 defines `write_file` as create-or-complete-replacement and
+`edit_file` as targeted replacement. MIRA keeps both behind the normal HITL
+policy, labels their different consequences in the approval surface, and
+exposes recursive `delete` only where the selected backend implements it.
+Delete is action-only and destructive; like other consequential tools, it uses
+the workspace's configurable HITL policy. Filesystem backends use explicit
+virtual paths rooted in the selected workspace.
 
-The user's request is authoritative for meaning, while `prepare_plan` may
-rewrite the visible Objective for clarity. That rewrite is wording-only: it
-must not add, remove, or materially change the intended outcome, scope,
-deliverables, or constraints. The preparation handoff is trusted without a
-second semantic grader or model call; the original request remains in the Plan
-conversation as binding context.
+Rubric terminal events are accepted directly from DeepAgents, including
+`max_iterations_reached`. MIRA preserves the explanation and available grader
+diagnostics instead of synthesizing another iteration. QuickJS runs with
+explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
+not receive ambient filesystem, network, process, or clock access. Inner PTC
+calls use QuickJS' native tool lifecycle callbacks and therefore appear on the
+same LangGraph v3 tool-call stream MIRA already consumes; MIRA does not maintain
+a parallel PTC event bridge.
 
-Plan research also uses a deterministic terminal response-status contract. The
-generic `CorrectionMiddleware` appends the Plan-owned rule's contract
-transiently to every model request, including requests after tool results,
-because a reminder stored only on the initial user message becomes stale as the
-tool loop grows. Research keeps optional tool choice. A response with any tool
-call bypasses correction. At a natural no-tool stop, the final non-empty textual
-line must be exactly one stage-valid `RESPONSE_STATUS` line; only
-`RESPONSE_STATUS: COMPLETE` may terminate. `NEEDS_RESEARCH`,
-`NEEDS_USER_INPUT`, and `READY_TO_PREPARE_PLAN` retain the rejected assistant
-response, append a named correction prompt, and use LangGraph's native jump to
-the model node without replaying completed tools. Missing, duplicated,
-malformed, non-terminal, empty, reasoning-only, or Goal-only statuses take the
-same bounded recovery path with general feedback. Finalisation is isolated from
-this contract and remains a forced single `finalize_plan` call.
+**Where to check:** [agent/factory.py](agent/factory.py), [agent/middleware/](agent/middleware/),
+[agent/subagents/compilation.py](agent/subagents/compilation.py), [agent/tools/specs.py](agent/tools/specs.py), [core/execution/runner.py](core/execution/runner.py),
+[core/execution/streams/rubric.py](core/execution/streams/rubric.py), [config/settings.py](config/settings.py).
 
-The retry cap counts retries after the initial rejected candidate. Rejected
-prose and its correction prompt remain paired in checkpoint and durable visible
-history so neither the user nor the model sees a hanging correction. A generic
-`Response check` bubble shows the workflow, failed check, exact retry prompt,
-and retry count. Its rule-owned display name keeps the middleware free of
-Plan/Goal vocabulary.
-Exhaustion retains the last candidate, shows the failed check and exhausted
-limit, then appends an explicit incomplete response. The exact status line is
-ordinary assistant text: it remains visible and byte-identical in model state,
-checkpoints, sessions, reload context, one-shot output, TUI output, and traces.
-There is no separate accepted-status event or bubble. This reliability check is
-always active and does not call or mutate user rubrics. It deliberately trusts
-an exact `COMPLETE` classification: a dishonest model can still label unfinished
-prose as complete. Provider-specific channels, English false-progress
-heuristics, and always-on semantic grading were rejected because they are less
-portable or would add a second model judgment.
+**Update this when:** DeepAgents or QuickJS versions change, prompt ownership
+moves, todo defaults change, or filesystem/rubric semantics change.
 
-When a Plan is current, `current_plan` stores its stable id, Plan fields,
-separate Success Criteria, status, rubric policy and cap, latest overall rubric
-result, completion source, attempts, and timestamps while `current_goal` is
-null. Supported
-statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
-`completed`. Dedicated Plan events remain durable history, while their chat
-projection may be hidden after an explicit Close or Clear. A session-level
-LangGraph checkpoint owns the current artifact; JSON retains its visible copy.
-Session normalization requires the exact current `current_plan` fields and
-types. A populated malformed or retired Plan artifact rejects the session;
-retired Summary, generic-stage, and pre-staging transcript event shapes are
-not projected as Plan events.
-
-The Plan bubble uses Plan colours for Plan content, rubric colours for Success
-Criteria, and muted text for automatic-evaluation policy and status. A newly
-finalized Plan is provisional while its exact identity-bound review waiter is
-pending; rendering it does not replace durable current work. Implement and
-Close accept it and only then supersede the previous artifact. Implement starts
-the attempt and the same outer MIRA turn runs the separate ACT graph and rubric.
-Revise rejects the draft, runs another PLAN phase inside that same outer turn,
-and calls `SuccessCriteriaService.revise()`; approach-only feedback preserves
-criteria exactly. Clear rejects the draft and leaves any older retained formal
-artifact untouched. Later retained-artifact actions keep their deliberate
-new-turn behavior. Close and Clear remove the resolved bubble from live and
-replayed chat without deleting its durable event. Explicit Show reopens a
-retained artifact, and repeated Show calls replace the same identity-bound
-bubble rather than appending duplicates.
-
-`/plan-show` and the read-only `show_plan` control tool call the same renderer
-and make no Plan-generating model call. `/plan-clear` removes only
-`current_plan`. `/plan-resume` accepts every incomplete state, including a
-never-run `proposed` Plan, switches to Act, and continues immediately; completed
-Plans must be deliberately reopened and implemented again.
-
-Rubric-disabled successful attempts complete as `agent-declared`. Rubric-enabled
-attempts pass the exact Success Criteria to DeepAgents: `satisfied` completes as
-`rubric-verified`, `needs_revision` continues upstream iteration,
-`max_iterations_reached` remains resumable, and runtime, grader, or cancellation
-failures pause the Plan. Detailed evaluations remain separate rubric events.
-
-**Why:** This preserves safe conversational planning while making the final
-artifact exact, durable, criteria-led, and independently recallable after
-compaction or reload. Rubrics evaluate execution rather than changing what Plan
-MIRA constructs.
-
-**Where to check:** `agent/planning/policy.py`,
-`agent/planning/criteria.py`, `agent/middleware/`, `session/plans.py`,
-`core/execution/runner.py`, `core/execution/turns.py`, `core/application/artifacts.py`,
-`ui/textual/app.py`, and
-`ui/textual/widgets/chat_log.py`.
-
-**Update this when:** Plan tools, construction stages, `current_plan` schema,
-review actions, recall commands, or execution completion rules change.
-
-## Durable Criteria-Only Goals
-
-**Decision:** Plan and Goal are alternative forms of formal work. A Plan stores
-an Objective, prescribed approach, and Success Criteria. A Goal stores only an
-Objective and Success Criteria, leaving the approach to the Act agent. Sessions
-have explicit `current_plan` and `current_goal` fields and normalization rejects
-a record when both are populated; timestamps never pick a winner.
-
-`/goal <prompt>` uses a dedicated read-only planning thread without changing
-the current Plan/Act mode: optional investigation and `ask_user`, then
-`prepare_goal` -> `SuccessCriteriaService` -> forced `finalize_goal` ->
-`GoalBubble`.
-
-Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `show_plan`,
-and `show_goal`. Finalization exposes only `finalize_goal` with required tool
-choice. The raw `/goal` request remains authoritative for meaning in transient
-staging. `prepare_goal` may provide a concise, user-facing Objective rewrite,
-but may not add, remove, or materially change the request's intended outcome,
-scope, deliverables, or constraints; a blank Objective falls back to the raw
-request. Both texts are passed as binding context to criteria generation and
-finalization, while only the polished Objective is persisted in the existing
-Goal artifact. Bounded evidence may clarify but not enlarge either. Failed or
-cancelled generation leaves current formal work unchanged. Goal construction
-never calls `finalize_plan` and never produces a hidden implementation Plan.
-Like Plan preparation, `prepare_goal` is a normal async `ToolRuntime`-injected
-tool that generates or revises exact criteria and updates the graph to
-`goal_finalize`. `finalize_goal` alone interrupts for review and its
-`return_direct` result terminates the resumed Goal graph.
-
-Goal research uses the same transient natural-stop protocol and bounded retry
-state as Plan research, but its only preparation marker and tool are
-`RESPONSE_STATUS: READY_TO_PREPARE_GOAL` and `prepare_goal`. Plan preparation is
-not exposed and a Plan-only status is malformed. Conversely, Goal preparation
-is absent from Plan research. Goal finalisation remains outside validation and
-retains the single required `finalize_goal` call.
-
-`SuccessCriteriaService` receives the raw authoritative request alongside the
-polished Objective for initial Goal construction, plus optional research
-context. It receives the effective Objective, previous criteria, feedback, and
-optional research context during revision, never a previous Plan. There is no
-semantic grading call between preparation and finalization; a material
-Objective change during revision is permitted only when explicit feedback
-changes the desired outcome. Criteria describe required final state rather than
-diagnostic mechanics or instructions controlling how execution gathers
-evidence, unless that execution behavior is itself part of the required result.
-
-The durable `GoalArtifact` stores id, title, objective, Success Criteria,
-status, snapshotted rubric policy and cap, latest overall rubric result,
-completion source, attempts, and timestamps. Its statuses are `proposed`,
-`active`, `paused`, `max_iterations_reached`, and `completed`. Dedicated `goal`
-events preserve exact artifacts. Session normalization requires the exact
-current `current_goal` fields and types; a populated malformed or retired Goal
-artifact rejects the session. Retired proposal events are not projected as
-Goal events.
-
-`GoalBubble` shows Objective and Success Criteria with the same status-aware
-primary action, Revise, Close, and Clear controls as a Plan. Newly finalized
-Goals follow the same provisional review contract: only Implement or Close
-commits them, Revise creates another provisional draft in the same outer turn,
-and Clear discards them without disturbing older retained work. The primary
-action starts or restarts one explicit Act attempt. Later retained revisions use
-the read-only Goal pipeline and `SuccessCriteriaService.revise()` in a new turn.
-Close and Clear hide the resolved Goal bubble from live and replayed chat while
-retaining its event for audit; explicit recall remains duplicate-free by Goal
-identity.
-`/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
-incomplete states, and `/goal-clear` removes only the current Goal.
-Explicit Goal recall always reopens the retained artifact for review, including
-`paused`, `max_iterations_reached`, and `completed` Goals. Ordinary model-turn
-cleanup must not resolve that newly rendered bubble. Only the dedicated Goal
-execution path resolves its execution bubble after completion, pausing,
-cancellation, failure, or rubric exhaustion.
-
-MIRA replaces current formal work only after the new Plan or Goal is presented
-and explicitly accepted. Acceptance does not clear the old artifact early.
-Successful replacement marks the old transcript event `superseded`, clears the
-opposite current field, and stores the new artifact. Rejected, revised, cleared,
-failed, or cancelled provisional work never becomes current.
-
-Goal construction is identical with rubrics on or off. A non-rubric successful
-attempt completes as `agent-declared`. A rubric-enabled attempt passes exact
-Success Criteria to DeepAgents: `needs_revision` continues, `satisfied`
-completes as `rubric-verified`, and `max_iterations_reached` remains resumable.
-Runtime, grader, or cancellation failures pause the Goal.
-
-**Streaming and persistence:** One custom-event dispatcher independently
-routes QuickJS Eval subagent events and DeepAgents Rubric events. Rubric passes
-are displayed one-based in one non-collapsible Rubric bubble. Stock evaluation
-start/end events bracket explicit verifier and grader phases. The isolated
-verifier is consumed through LangGraph's nested `messages` and `values` stream
-modes: tool-call chunks reuse MIRA's `ToolCallDrafts` partial-JSON projection,
-while a verifier-only tool middleware emits authoritative call starts and real
-results with their LangChain call IDs. These custom events are Rubric-scoped and
-never enter the root `ChatLog.tool_call*()` path.
-
-Compact verifier rows reuse the normal tool argument editor, state colors,
-spinner, elapsed/final duration vocabulary, draft promotion, ID correlation,
-and pending-result behavior without mounting bordered transcript ToolBubbles.
-The verifier phase itself keeps a live `Verifying · elapsed` row visible until
-it transitions to `Verifier · Complete` or `Failed`.
-Only their one-line output preview is width-truncated. Full arguments and raw
-outputs remain in verifier ToolMessages, the private final-grader evidence, and
-the completed Rubric evaluation. Starts, chunks, and animation ticks are
-transient; completed evaluations are durable Rubric events, never root tools.
-The final bubble retains `Verifier · Complete` or `Failed`, `Grader · Complete`
-or `Failed`, and the existing criteria, gaps, explanation, and verdict.
-
-MIRA reads completed checkpoint `_rubric_status` because the final streamed
-event can still say `needs_revision` when the cap was reached; newer terminal
-statuses are accepted directly. MIRA does not rename criteria to match Goal
-Success Criteria or introduce a second grading call. Rubric colors are
-centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
-isolated to Rubric UI.
-
-Each DeepAgents 0.7.23 per-grader call runs two separate static nested agents
-with the configured Rubric model. MIRA owns the verifier's effective Rubric
-tools and normal HITL middleware; the verifier has no response format and may
-naturally finish without calling a tool. DeepAgents' grader-owned tool and
-middleware fields truthfully describe MIRA's final grader, which is tool-free
-and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
-sanitized DeepAgents transcript view. The verifier receives that material in a
-dedicated evidence-only payload with no grading or structured-response
-instructions. Only the final grader receives the stock DeepAgents grading
-payload and any coverage correction. Matched verifier `AIMessage` tool calls
-and their real `ToolMessage` results are copied without truncation into a
-private evidence channel for that final grader call. Verifier prose and all
-verifier messages remain outside the main agent state and transcript.
-
-DeepAgents 0.7.23 continues to own grading iterations, frozen criteria,
-coverage retry, revision injection, caps, and terminal status. MIRA inserts its
-isolated verifier before each final grader call without replacing that stock
-lifecycle. Transcript and verifier evidence are independently valid; verifier
-evidence supplements rather than gates transcript evidence. MIRA does not
-summarize, truncate, or separately budget verifier tool results. Consequently a
-very large tool result can exceed the final grader provider's context window;
-that failure is surfaced through the stock grader-error lifecycle rather than
-silently making verification evidence lossy.
-
-**Why:** Outcome-focused work should not force users to approve an approach.
-Keeping Goals criteria-only makes execution flexible while retaining the same
-durability, review, recall, replacement, and evaluation guarantees as Plans.
-
-**Where to check:** `agent/planning/criteria.py`, `agent/factory.py`,
-`agent/middleware/`, `agent/resources/defaults/tools/prepare_goal.py`,
-`agent/resources/defaults/tools/finalize_goal.py`, `core/execution/runner.py`,
-`core/execution/streams/rubric.py`, `core/execution/streams/subagents.py`, `session/goals.py`,
-`session/context.py`, `core/execution/turns.py`, `core/application/artifacts.py`,
-`ui/textual/app.py`, `ui/textual/widgets/chat_log.py`, and
-`ui/textual/widgets/rubric_bubble.py`.
-
-**Update this when:** Goal construction, persistence, replacement, review,
-recall, migration, or execution completion rules change.
-
-## Model Correction And Control-Tool Recovery
+### Model correction and control-tool recovery
 
 **Decision:** MIRA treats deterministic response correction and semantic Rubric
 grading as separate harness capabilities. `CorrectionMiddleware` owns only the
 generic no-tool natural-stop lifecycle: transient reminders, rule selection,
 bounded counters, correction events, model feedback, retry jumps, acceptance,
-and exhaustion. Workflow rules under `agent/planning/` define Plan/Goal response
+and exhaustion. Workflow rules under [agent/planning/](agent/planning/) define Plan/Goal response
 statuses, checks, prompts, and terminal failure text. Rubrics remain optional semantic
 review by a grader model and share no implementation with deterministic
 correction.
@@ -789,14 +504,833 @@ the model can choose `show_plan` or `show_goal`, after which the control surface
 reads the artifact directly from the session. `/plan-show` and `/goal-show`
 bypass model interpretation and read the same fields.
 
-**Where to check:** `agent/middleware/`, `agent/planning/response_status.py`,
-`core/execution/streams/corrections.py`, `core/execution/runner.py`, `session/context.py`.
+**Where to check:** [agent/middleware/](agent/middleware/), [agent/planning/response_status.py](agent/planning/response_status.py),
+[core/execution/streams/corrections.py](core/execution/streams/corrections.py), [core/execution/runner.py](core/execution/runner.py), [session/context.py](session/context.py).
 
 **Update this when:** A new correction rule is added, correction visibility or
 persistence changes, a control tool gains a stage precondition, or recoverable
 and fatal control-surface errors are reclassified.
 
-## Textual TUI And One-Shot Output
+## Tools, permissions, and execution
+
+Tool visibility, execution capability, and human approval are separate decisions. A tool exposed to a model still has to pass the applicable execution and review boundaries.
+
+### Execute backend and environment
+
+**Decision:** `execute` is special. When enabled, MIRA switches the project
+backend from `FilesystemBackend` to `LocalShellBackend`; when disabled, MIRA
+uses the filesystem backend. MIRA keeps `inherit_env=False` and provides a small
+allowlisted host environment. Project settings can select the system shell, a
+Conda env name, a Conda env prefix, or a venv for `execute` commands without
+persisting host env values.
+
+**Why:** Shell execution changes the capability surface of the project backend.
+Keeping it behind a setting and HITL approval preserves the normal safer path
+while allowing trusted local workflows. The allowlist gives Windows tools enough
+path context for standard locations such as `%SystemDrive%`, `%ProgramData%`,
+`%AppData%`, and `%LocalAppData%`, but avoids exposing the full user environment
+or secrets. Extra variables in `.mira/settings.yml` are names only; values are
+read from the current process environment at runtime. Conda modes wrap commands
+with `conda run`, and venv mode prepares `PATH` and `VIRTUAL_ENV` for the local
+shell backend. MIRA adds custom execute-tool prompt guidance so file-tool
+virtual paths such as `/tmp.py` are run from the project shell as
+workspace-relative paths instead of host-root absolute paths.
+
+**Where to check:** [agent/resources/__init__.py](agent/resources/__init__.py), [config/settings.py](config/settings.py),
+[agent/factory.py](agent/factory.py), [agent/middleware/](agent/middleware/), [ui/textual/app.py](ui/textual/app.py).
+
+**Update this when:** `execute` is exposed by a different backend, default
+approval behavior changes, or shell environment inheritance changes.
+
+### Tool approval and human review
+
+**Decision:** Dangerous built-in tools require approval by default. Built-in
+dangerous tools and project tools can be enabled or disabled through settings;
+disabled project tools remain visible in metadata even when they are not
+exposed to the agent. Newly discovered project tools are enabled by default but
+require approval unless explicitly configured as always allowed. QuickJS
+programmatic tool calling is limited to
+`ls`, `read_file`, `glob`, and `grep`; dynamic subagent delegation uses
+QuickJS' top-level `task()` helper only when the System Settings toggle is
+enabled, while destructive file tools, shell execution, and interrupt/control
+flow tools stay outside that bridge.
+MIRA also owns display of `ask_user` interrupts: the interrupt payload keeps
+`question` and `options` separate, the TUI shows the question once, and options
+render as vertical choice buttons with the open-ended fallback last. Larger
+choice sets are allowed for compatibility and explicit user requests, but the
+default tool prompt asks the agent to prefer 1-3 concise options. Prompt-panel
+keyboard focus styles the selected button itself, not a parent row; ask_user
+option buttons fill their row to provide a full-row selection feel without
+extra focus bookkeeping.
+Across every LangGraph human-review surface, Escape or a nested Cancel means no
+decision: the caller reopens the same approval or question and does not issue
+`Command(resume=...)`. Cancelling an approval JSON editor returns to the same
+approval, and cancelling ask_user freeform input returns to its choices. Alt+Q
+instead cancels the whole outer MIRA turn and clears any pending review waiter.
+
+**Why:** Approval prompts make file edits, eval, subagent delegation, and shell
+execution transcript-compatible and user-controlled. Keeping disabled project
+tools in metadata lets the settings UI manage them without exposing them to the
+model, while disabled built-ins are hidden through the same excluded-tools path
+MIRA uses for mode-specific tool visibility. `ask_user` stays a normal
+LangGraph interrupt/resume path; MIRA only formats the prompt surface so user
+decisions remain readable in narrow terminals.
+
+**Where to check:** [config/settings.py](config/settings.py), [agent/factory.py](agent/factory.py),
+[agent/middleware/](agent/middleware/), [agent/resources/__init__.py](agent/resources/__init__.py), `ui/interrupts.py`,
+[core/execution/runner.py](core/execution/runner.py).
+
+**Update this when:** Approval defaults, interrupt payload handling, or
+settings-panel tool behavior changes.
+
+## Plan and Goal architecture
+
+A **Plan** records an Objective, approach, and Success Criteria. A **Goal** records only an Objective and Success Criteria, leaving the approach to Act. Only one can be current in a session. Both use read-only preparation and an explicit review before execution.
+
+### Read-only Plan conversation
+
+**Decision:** `/plan` enters one persistent read-only Plan conversation;
+`/plan <prompt>` enters that same mode and submits the suffix through the normal
+Plan message path. Imperative language never enables execution. The Plan prompt
+uses four non-persisted outcomes: `DISPLAY_RETAINED` immediately calls the
+applicable `show_plan` or `show_goal` control, `DISCUSSION` returns ordinary
+read-only prose, `NEEDS_DECISION` calls `ask_user`, and `PLAN_READY` calls
+`prepare_plan`. Display requests do not research, reproduce retained work in
+prose, prepare a replacement, or enter finalisation first. There
+is no classifier model, structured response format, prose regex, or semantic
+grader.
+
+Both Plan and Act compose one shared question policy: discover facts from
+available context first and use `ask_user` whenever user input is required.
+Plan mode additionally hides write, delete, execute, evaluation, and delegation
+tools and denies filesystem writes as a backstop.
+
+### Plan construction and review boundary
+
+Formal construction is always criteria-first:
+
+```text
+prepare_plan
+-> SuccessCriteriaService
+-> forced finalize_plan
+-> Plan bubble
+```
+
+The staging middleware exposes `prepare_plan` during conversation and only
+`finalize_plan` during finalisation, with required tool choice. The generated
+Success Criteria are binding context. The model supplies Title, Key Changes,
+Test Plan, and Assumptions around the staged Objective and Context and
+Constraints; no Summary field exists. This path and its model inputs are
+identical whether automatic rubric evaluation is enabled or disabled.
+`prepare_plan` is a normal async tool: `ToolRuntime` injects the per-agent
+`SuccessCriteriaService`, and the tool returns a state-updating `Command` that
+sets `planning_stage=plan_finalize` and preserves the exact generated criteria.
+It does not interrupt. The following model inference constructs the Plan and is
+constrained to the sole required finalizer. `finalize_plan` remains the real
+human-review interrupt and is `return_direct`, so its resumed result ends that
+PLAN graph without another model call.
+
+The user's request is authoritative for meaning, while `prepare_plan` may
+rewrite the visible Objective for clarity. That rewrite is wording-only: it
+must not add, remove, or materially change the intended outcome, scope,
+deliverables, or constraints. The preparation handoff is trusted without a
+second semantic grader or model call; the original request remains in the Plan
+conversation as binding context.
+
+### Plan response-status recovery
+
+Plan research also uses a deterministic terminal response-status contract. The
+generic `CorrectionMiddleware` appends the Plan-owned rule's contract
+transiently to every model request, including requests after tool results,
+because a reminder stored only on the initial user message becomes stale as the
+tool loop grows. Research keeps optional tool choice. A response with any tool
+call bypasses correction. At a natural no-tool stop, the final non-empty textual
+line must be exactly one stage-valid `RESPONSE_STATUS` line; only
+`RESPONSE_STATUS: COMPLETE` may terminate. `NEEDS_RESEARCH`,
+`NEEDS_USER_INPUT`, and `READY_TO_PREPARE_PLAN` retain the rejected assistant
+response, append a named correction prompt, and use LangGraph's native jump to
+the model node without replaying completed tools. Missing, duplicated,
+malformed, non-terminal, empty, reasoning-only, or Goal-only statuses take the
+same bounded recovery path with general feedback. Finalisation is isolated from
+this contract and remains a forced single `finalize_plan` call.
+
+The retry cap counts retries after the initial rejected candidate. Rejected
+prose and its correction prompt remain paired in checkpoint and durable visible
+history so neither the user nor the model sees a hanging correction. A generic
+`Response check` bubble shows the workflow, failed check, exact retry prompt,
+and retry count. Its rule-owned display name keeps the middleware free of
+Plan/Goal vocabulary.
+Exhaustion retains the last candidate, shows the failed check and exhausted
+limit, then appends an explicit incomplete response. The exact status line is
+ordinary assistant text: it remains visible and byte-identical in model state,
+checkpoints, sessions, reload context, one-shot output, TUI output, and traces.
+There is no separate accepted-status event or bubble. This reliability check is
+always active and does not call or mutate user rubrics. It deliberately trusts
+an exact `COMPLETE` classification: a dishonest model can still label unfinished
+prose as complete. Provider-specific channels, English false-progress
+heuristics, and always-on semantic grading were rejected because they are less
+portable or would add a second model judgment.
+
+### Plan persistence and review
+
+When a Plan is current, `current_plan` stores its stable id, Plan fields,
+separate Success Criteria, status, rubric policy and cap, latest overall rubric
+result, completion source, attempts, and timestamps while `current_goal` is
+null. Supported
+statuses are `proposed`, `active`, `paused`, `max_iterations_reached`, and
+`completed`. Dedicated Plan events remain durable history, while their chat
+projection may be hidden after an explicit Close or Clear. A session-level
+LangGraph checkpoint owns the current artifact; JSON retains its visible copy.
+Session normalization requires the exact current `current_plan` fields and
+types. A populated malformed or retired Plan artifact rejects the session;
+retired Summary, generic-stage, and pre-staging transcript event shapes are
+not projected as Plan events.
+
+The Plan bubble uses Plan colours for Plan content, rubric colours for Success
+Criteria, and muted text for automatic-evaluation policy and status. A newly
+finalized Plan is provisional while its exact identity-bound review waiter is
+pending; rendering it does not replace durable current work. Implement and
+Close accept it and only then supersede the previous artifact. Implement starts
+the attempt and the same outer MIRA turn runs the separate ACT graph and rubric.
+Revise rejects the draft, runs another PLAN phase inside that same outer turn,
+and calls `SuccessCriteriaService.revise()`; approach-only feedback preserves
+criteria exactly. Clear rejects the draft and leaves any older retained formal
+artifact untouched. Later retained-artifact actions keep their deliberate
+new-turn behavior. Close and Clear remove the resolved bubble from live and
+replayed chat without deleting its durable event. Explicit Show reopens a
+retained artifact, and repeated Show calls replace the same identity-bound
+bubble rather than appending duplicates.
+
+`/plan-show` and the read-only `show_plan` control tool call the same renderer
+and make no Plan-generating model call. `/plan-clear` removes only
+`current_plan`. `/plan-resume` accepts every incomplete state, including a
+never-run `proposed` Plan, switches to Act, and continues immediately; completed
+Plans must be deliberately reopened and implemented again.
+
+### Plan execution and completion
+
+Rubric-disabled successful attempts complete as `agent-declared`. Rubric-enabled
+attempts pass the exact Success Criteria to DeepAgents: `satisfied` completes as
+`rubric-verified`, `needs_revision` continues upstream iteration,
+`max_iterations_reached` remains resumable, and runtime, grader, or cancellation
+failures pause the Plan. Detailed evaluations remain separate rubric events.
+
+**Why:** This preserves safe conversational planning while making the final
+artifact exact, durable, criteria-led, and independently recallable after
+compaction or reload. Rubrics evaluate execution rather than changing what Plan
+MIRA constructs.
+
+**Where to check:** [agent/planning/policy.py](agent/planning/policy.py),
+[agent/planning/criteria.py](agent/planning/criteria.py), [agent/middleware/](agent/middleware/), [session/plans.py](session/plans.py),
+[core/execution/runner.py](core/execution/runner.py), [core/execution/turns.py](core/execution/turns.py), [core/application/artifacts.py](core/application/artifacts.py),
+[ui/textual/app.py](ui/textual/app.py), and
+[ui/textual/widgets/chat_log.py](ui/textual/widgets/chat_log.py).
+
+**Update this when:** Plan tools, construction stages, `current_plan` schema,
+review actions, recall commands, or execution completion rules change.
+
+### Response-status retry setting
+
+The always-on Plan/Goal response-status protocol has one workspace System Setting,
+`system.planning_response_status.max_retries` (default `2`, range `1`-`20`). It
+counts recovery calls after the first rejected response. Changing it follows
+the normal settings application path and rebuilds both agents; it is a bound,
+not a feature toggle.
+
+### Goal construction and criteria
+
+**Decision:** Plan and Goal are alternative forms of formal work. A Plan stores
+an Objective, prescribed approach, and Success Criteria. A Goal stores only an
+Objective and Success Criteria, leaving the approach to the Act agent. Sessions
+have explicit `current_plan` and `current_goal` fields and normalization rejects
+a record when both are populated; timestamps never pick a winner.
+
+### Goal preparation pipeline
+
+`/goal <prompt>` uses a dedicated read-only planning thread without changing
+the current Plan/Act mode: optional investigation and `ask_user`, then
+`prepare_goal` -> `SuccessCriteriaService` -> forced `finalize_goal` ->
+`GoalBubble`.
+
+Goal research exposes discovery tools, `ask_user`, `prepare_goal`, `show_plan`,
+and `show_goal`. Finalization exposes only `finalize_goal` with required tool
+choice. The raw `/goal` request remains authoritative for meaning in transient
+staging. `prepare_goal` may provide a concise, user-facing Objective rewrite,
+but may not add, remove, or materially change the request's intended outcome,
+scope, deliverables, or constraints; a blank Objective falls back to the raw
+request. Both texts are passed as binding context to criteria generation and
+finalization, while only the polished Objective is persisted in the existing
+Goal artifact. Bounded evidence may clarify but not enlarge either. Failed or
+cancelled generation leaves current formal work unchanged. Goal construction
+never calls `finalize_plan` and never produces a hidden implementation Plan.
+Like Plan preparation, `prepare_goal` is a normal async `ToolRuntime`-injected
+tool that generates or revises exact criteria and updates the graph to
+`goal_finalize`. `finalize_goal` alone interrupts for review and its
+`return_direct` result terminates the resumed Goal graph.
+
+Goal research uses the same transient natural-stop protocol and bounded retry
+state as Plan research, but its only preparation marker and tool are
+`RESPONSE_STATUS: READY_TO_PREPARE_GOAL` and `prepare_goal`. Plan preparation is
+not exposed and a Plan-only status is malformed. Conversely, Goal preparation
+is absent from Plan research. Goal finalisation remains outside validation and
+retains the single required `finalize_goal` call.
+
+`SuccessCriteriaService` receives the raw authoritative request alongside the
+polished Objective for initial Goal construction, plus optional research
+context. It receives the effective Objective, previous criteria, feedback, and
+optional research context during revision, never a previous Plan. There is no
+semantic grading call between preparation and finalization; a material
+Objective change during revision is permitted only when explicit feedback
+changes the desired outcome. Criteria describe required final state rather than
+diagnostic mechanics or instructions controlling how execution gathers
+evidence, unless that execution behavior is itself part of the required result.
+
+### Formal artifact review and execution
+
+The durable `GoalArtifact` stores id, title, objective, Success Criteria,
+status, snapshotted rubric policy and cap, latest overall rubric result,
+completion source, attempts, and timestamps. Its statuses are `proposed`,
+`active`, `paused`, `max_iterations_reached`, and `completed`. Dedicated `goal`
+events preserve exact artifacts. Session normalization requires the exact
+current `current_goal` fields and types; a populated malformed or retired Goal
+artifact rejects the session. Retired proposal events are not projected as
+Goal events.
+
+`GoalBubble` shows Objective and Success Criteria with the same status-aware
+primary action, Revise, Close, and Clear controls as a Plan. Newly finalized
+Goals follow the same provisional review contract: only Implement or Close
+commits them, Revise creates another provisional draft in the same outer turn,
+and Clear discards them without disturbing older retained work. The primary
+action starts or restarts one explicit Act attempt. Later retained revisions use
+the read-only Goal pipeline and `SuccessCriteriaService.revise()` in a new turn.
+Close and Clear hide the resolved Goal bubble from live and replayed chat while
+retaining its event for audit; explicit recall remains duplicate-free by Goal
+identity.
+`/goal-show` and `show_goal` share the exact renderer, `/goal-resume` accepts
+incomplete states, and `/goal-clear` removes only the current Goal.
+Explicit Goal recall always reopens the retained artifact for review, including
+`paused`, `max_iterations_reached`, and `completed` Goals. Ordinary model-turn
+cleanup must not resolve that newly rendered bubble. Only the dedicated Goal
+execution path resolves its execution bubble after completion, pausing,
+cancellation, failure, or rubric exhaustion.
+
+MIRA replaces current formal work only after the new Plan or Goal is presented
+and explicitly accepted. Acceptance does not clear the old artifact early.
+Successful replacement marks the old transcript event `superseded`, clears the
+opposite current field, and stores the new artifact. Rejected, revised, cleared,
+failed, or cancelled provisional work never becomes current.
+
+Goal construction is identical with rubrics on or off. A non-rubric successful
+attempt completes as `agent-declared`. A rubric-enabled attempt passes exact
+Success Criteria to DeepAgents: `needs_revision` continues, `satisfied`
+completes as `rubric-verified`, and `max_iterations_reached` remains resumable.
+Runtime, grader, or cancellation failures pause the Goal.
+
+### Rubric verification and streaming
+
+**Streaming and persistence:** One custom-event dispatcher independently
+routes QuickJS Eval subagent events and DeepAgents Rubric events. Rubric passes
+are displayed one-based in one non-collapsible Rubric bubble. Stock evaluation
+start/end events bracket explicit verifier and grader phases. The isolated
+verifier is consumed through LangGraph's nested `messages` and `values` stream
+modes: tool-call chunks reuse MIRA's `ToolCallDrafts` partial-JSON projection,
+while a verifier-only tool middleware emits authoritative call starts and real
+results with their LangChain call IDs. These custom events are Rubric-scoped and
+never enter the root `ChatLog.tool_call*()` path.
+
+Compact verifier rows reuse the normal tool argument editor, state colors,
+spinner, elapsed/final duration vocabulary, draft promotion, ID correlation,
+and pending-result behavior without mounting bordered transcript ToolBubbles.
+The verifier phase itself keeps a live `Verifying · elapsed` row visible until
+it transitions to `Verifier · Complete` or `Failed`.
+Only their one-line output preview is width-truncated. Full arguments and raw
+outputs remain in verifier ToolMessages, the private final-grader evidence, and
+the completed Rubric evaluation. Starts, chunks, and animation ticks are
+transient; completed evaluations are durable Rubric events, never root tools.
+The final bubble retains `Verifier · Complete` or `Failed`, `Grader · Complete`
+or `Failed`, and the existing criteria, gaps, explanation, and verdict.
+
+MIRA reads completed checkpoint `_rubric_status` because the final streamed
+event can still say `needs_revision` when the cap was reached; newer terminal
+statuses are accepted directly. MIRA does not rename criteria to match Goal
+Success Criteria or introduce a second grading call. Rubric colors are
+centralized as `#C58FD6` for headers/borders and `#F1DCF5` for body text and are
+isolated to Rubric UI.
+
+Each Rubric grader pass in the pinned DeepAgents runtime runs two separate static nested agents
+with the configured Rubric model. MIRA owns the verifier's effective Rubric
+tools and normal HITL middleware; the verifier has no response format and may
+naturally finish without calling a tool. DeepAgents' grader-owned tool and
+middleware fields truthfully describe MIRA's final grader, which is tool-free
+and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
+sanitized DeepAgents transcript view. The verifier receives that material in a
+dedicated evidence-only payload with no grading or structured-response
+instructions. Only the final grader receives the stock DeepAgents grading
+payload and any coverage correction. Matched verifier `AIMessage` tool calls
+and their real `ToolMessage` results are copied without truncation into a
+private evidence channel for that final grader call. Verifier prose and all
+verifier messages remain outside the main agent state and transcript.
+
+The pinned DeepAgents runtime continues to own grading iterations, frozen criteria,
+coverage retry, revision injection, caps, and terminal status. MIRA inserts its
+isolated verifier before each final grader call without replacing that stock
+lifecycle. Transcript and verifier evidence are independently valid; verifier
+evidence supplements rather than gates transcript evidence. MIRA does not
+summarize, truncate, or separately budget verifier tool results. Consequently a
+very large tool result can exceed the final grader provider's context window;
+that failure is surfaced through the stock grader-error lifecycle rather than
+silently making verification evidence lossy.
+
+**Why:** Outcome-focused work should not force users to approve an approach.
+Keeping Goals criteria-only makes execution flexible while retaining the same
+durability, review, recall, replacement, and evaluation guarantees as Plans.
+
+**Where to check:** [agent/planning/criteria.py](agent/planning/criteria.py), [agent/factory.py](agent/factory.py),
+[agent/middleware/](agent/middleware/), [agent/resources/defaults/tools/prepare_goal.py](agent/resources/defaults/tools/prepare_goal.py),
+[agent/resources/defaults/tools/finalize_goal.py](agent/resources/defaults/tools/finalize_goal.py), [core/execution/runner.py](core/execution/runner.py),
+[core/execution/streams/rubric.py](core/execution/streams/rubric.py), [core/execution/streams/subagents.py](core/execution/streams/subagents.py), [session/goals.py](session/goals.py),
+[session/context.py](session/context.py), [core/execution/turns.py](core/execution/turns.py), [core/application/artifacts.py](core/application/artifacts.py),
+[ui/textual/app.py](ui/textual/app.py), [ui/textual/widgets/chat_log.py](ui/textual/widgets/chat_log.py), and
+[ui/textual/widgets/rubric_bubble.py](ui/textual/widgets/rubric_bubble.py).
+
+**Update this when:** Goal construction, persistence, replacement, review,
+recall, migration, or execution completion rules change.
+
+## Sessions and persistence
+
+A MIRA session has replayable user-facing history and native graph checkpoints. These serve different purposes.
+
+### Session files and graph checkpoints
+
+**Decision:** MIRA stores JSON for replayable UI history and one SQLite
+checkpoint database per session for native graph restoration. DeepAgents
+handles runtime context counting and compaction.
+
+`SessionStore` keeps each session's `session.json` and `checkpoints.db` under
+`<session_dir>/<session_id>/`; older flat files are ignored.
+
+**Why:** Session files should be stable user-facing history after restart.
+Starting a new chat is therefore non-destructive: MIRA creates another session
+record and makes it active instead of clearing the previous one.
+Session records require the current fields; missing or conflicting formal
+artifacts are rejected rather than repaired. Transient fields are not saved.
+Act uses the session ID as its thread ID. Plan and Goal planning keep their
+existing thread IDs in the same database. A terminal session-state graph owns
+retained artifacts, execution mode, attempts, revision/staging identity, and
+other MIRA-specific semantics. Session reopening reads these checkpoints and
+never injects a JSON-derived transcript summary into a new request. Pending
+interrupts are displayed before graph continuation; incomplete operations
+without an interrupt require an explicit `/continue` because an external side
+effect may have occurred. Closing a session closes its SQLite connection before
+deletion removes that session's directory, including SQLite sidecars.
+
+### Durable transcript and subagent history
+
+Saved session events replay the visible transcript in order. They do not become a synthetic prompt when a session reopens; the graph checkpoint supplies model state. This distinction lets UI history remain readable even after model context is compacted.
+
+Regular subagent completions remain durable `subagent` transcript events so
+past sessions can replay them.
+The live panel's open/collapsed/closed state and row layout are intentionally
+not persisted or replayed. Reopening a session projects those durable subagent
+events back into chat transcript blocks rather than reconstructing the old live
+panel. Eval-created subagent rows are not stored separately; their durable
+history is the surrounding eval tool call/result plus the assistant's summary.
+
+**Where to check:** [session store](session/store.py), [checkpoint handling](session/checkpoint.py), [session recorder](session/recorder.py), and [session restoration](core/application/session.py).
+
+## Conversation handoff
+
+### Why Act and Plan have separate conversations
+
+Act and Plan use separate LangGraph thread IDs in the same session checkpointer:
+Act uses the session ID and the persistent Plan conversation uses
+`<session-id>:plan`. Plan can therefore enforce read-only tools and keep its
+own planning stage, todos, and other graph state without turning the Act graph
+into a planning graph. A Goal uses another isolated planning thread seeded
+from whichever conversation is current. The MIRA session ID identifies the
+durable chat; it is not a universal graph thread ID.
+
+```mermaid
+flowchart LR
+    A1["Act checkpoint"] -->|enter Plan| P["Plan checkpoint"]
+    P -->|return to Act| A2["Act checkpoint after handoff"]
+```
+
+The two Act boxes are the same thread before and after the Plan conversation.
+Each arrow transfers the source's effective conversation, not its whole graph
+state.
+
+### What a handoff copies
+
+When the user switches Act ↔ Plan, `MiraSession.set_mode()` selects the current
+thread as source and the requested mode's thread as destination. Starting a
+Goal selects the current Act or Plan thread and seeds a new Goal staging
+thread. Revising a Plan from Act first transfers Act into the persistent Plan
+thread; revising a Goal prefers its retained Goal context thread, then the
+current Plan or Act thread, and seeds a new Goal staging run. Implementing a
+newly accepted Plan or Goal copies the completed planning conversation into Act
+before the action phase. Resuming a retained Plan transfers Plan to Act when
+the session is in Plan mode; resuming a retained Goal transfers its saved Goal
+context thread when present.
+
+The *effective conversation* is the message sequence DeepAgents would present
+to the model after applying any summarization event. It can differ from the
+raw `messages` channel, which retains pre-compaction messages. If neither
+side has compacted, the effective conversation is simply the source messages.
+If the source has compacted, its projected summary and retained messages are
+copied. When that summary refers to an archive, the destination backend must
+be able to read the archive before MIRA changes the destination.
+
+The destination's message channel is replaced, not appended or merged. Its
+previous messages may represent an earlier branch of the conversation; merging
+would duplicate turns or reintroduce context that compaction removed. MIRA
+compares provider-visible message content and tool linkage while ignoring
+generated message IDs, which are unstable for projected summaries. Identical
+effective conversations need no replacement. A replacement clears the
+destination's `_summarization_event` and `_summarization_session_id` because
+that metadata describes its former messages; leaving it in place could apply
+an obsolete summary over the newly inherited conversation. The source remains
+unchanged, and the destination's todos and all other non-message channels stay
+independent.
+
+### When transfer is allowed
+
+Both checkpoints must be complete: pending execution or an interrupt blocks
+handoff. MIRA rechecks both states before committing, verifies the resulting
+conversation and unrelated destination state, and commits mode or formal
+artifact execution state only after transfer succeeds. Reopened sessions show
+pending interrupts before continuation; incomplete operations without an
+interrupt require explicit `/continue` because an external side effect may
+have happened. A failed or cancelled Goal preparation does not replace the
+current Plan or Goal.
+
+See [handoff.py](core/execution/handoff.py),
+[session.py](core/application/session.py), and
+[turns.py](core/execution/turns.py).
+
+## Context management and compaction
+
+DeepAgents decides when to compact the model's conversation. MIRA uses its native summarization event and archive, then reports the observed context pressure to the UI.
+
+### DeepAgents summarization and archives
+
+Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
+replaces DeepAgents' default `SummarizationMiddleware` by its native name with
+one instance built from Main's model-aware defaults. The model-triggered
+`compact_conversation` tool and TUI `/compact` use that same instance. An
+optional dedicated summarization model occupies only LangChain's summary-call
+slot; Main still determines profile limits, token counting, and triggers. The
+request observer calls the instance's `_count_tokens` on the effective model
+request, after compaction, so the UI can show context pressure without counting
+summary-model calls. MIRA does not run a parallel dashboard counter or compute
+provider prompt tokens.
+
+Automatic and agent-selected eligibility remain
+DeepAgents decisions. The explicit TUI `/compact` command is
+the narrow exception: it applies the shared middleware's retention policy
+immediately without an agent turn. It writes the canonical `_summarization_event`
+and `_summarization_session_id`, preserving raw messages in LangGraph state and
+appending history to the same archive across later compactions and reloads.
+MIRA's tool middleware plans forced compaction with DeepAgents' native cutoff,
+summary, and archive primitives. The TUI coordinates a completed checkpoint:
+it checks for a newer checkpoint, appends the archive, then writes the summary
+event through LangGraph's state update. If the state update fails, it restores
+the prior archive content so a retry cannot duplicate history. Archive read
+errors cannot be mistaken for an empty archive.
+
+Provider
+`In` and `Out` usage are cumulative per-call totals, not current context
+occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
+response metadata required by DeepAgents' reported-token validation. MIRA's
+model-response normalization fills only that missing integration identity and
+leaves DeepAgents' eligibility thresholds unchanged.
+DeepAgents filters tagged prior summaries from archives; MIRA also strips
+reasoning and provider metadata from archive messages and replayed summary
+messages because DeepAgents does not sanitize those fields. MIRA reads
+compaction summary prose only from the canonical
+`_summarization_event.summary_message`; retired raw `summary` and
+`summary_text` aliases are ignored.
+DeepAgents marks summary-model invocations with `lc_source="summarization"`.
+MIRA observes that invocation metadata before LangGraph publishes each message
+stream and drains marked streams without rendering or recording their internal
+reasoning or summary text. Compaction classification never depends on model
+wording, prompt fragments, or task-local flags; unmarked reasoning and replies
+remain visible even when they discuss compaction or summarization.
+
+### Context limits and observed pressure
+
+**Decision:** MIRA resolves model context metadata before turns, sets the
+DeepAgents context profile, and shows observed DeepAgents context pressure in
+the UI.
+
+**Why:** Providers expose context limits differently. MIRA normalizes the
+effective limit so the model profile, dashboard, and overflow handling agree.
+Provider `In` and `Out` usage are cumulative session totals and are not used as
+current-context occupancy; after multiple turns they include repeated
+conversation history and are not expected to add up to the latest `Ctx` value.
+
+**Where to check:** [config/metadata.py](config/metadata.py), [cli/commands.py](cli/commands.py), [ui/textual/app.py](ui/textual/app.py),
+[agent/middleware/context_overflow.py](agent/middleware/context_overflow.py).
+
+**Update this when:** New providers need special metadata handling, context
+fallback rules change, or the dashboard changes how context is reported.
+
+**Where to check:** [compaction middleware](agent/middleware/compaction.py), [execution compaction](core/execution/compaction.py), [context observation](core/context/observation.py), and [session context](session/context.py).
+
+## Workflows and subagents
+
+A Workflow is an ordinary LangGraph graph that may call MIRA-configured agents and tools. The running graph is process-owned; its completed projection is session history. Project subagents and their replacement rules are described under [resource discovery](#resource-discovery-and-replacement).
+
+### Dynamic eval subagents
+
+Dynamic eval subagents are also
+workspace behavior: they let JavaScript eval spawn subagents through
+QuickJS' top-level `task()` helper, so MIRA keeps them disabled by default and
+requires an explicit System Settings toggle. Dynamic response schemas default
+on for compatibility, but can be disabled independently for models that do not
+reliably complete the synthetic structured-output tool protocol. In that mode,
+MIRA materializes every raw synchronous isolated subagent with its inherited
+model, tools, middleware, skills, permissions, and interrupts, then passes it
+to DeepAgents as a `CompiledSubAgent`. A raw subagent with `mode="fork"` stays
+declarative so DeepAgents can apply its native parent-message, prompt,
+middleware, and state inheritance; forking is opt-in and an omitted mode stays
+isolated. A compiled `general-purpose` replaces the auto-added raw one by name.
+
+DeepAgents therefore rejects a dynamic
+`responseSchema` before starting the child while ordinary text delegation and
+static response formats continue to work. Keeping these choices in workspace
+settings makes them inspectable without changing QuickJS or installed packages.
+
+### Workflow execution and durable history
+
+**Decision:** MIRA treats a Workflow invocation as a rich inspectable execution
+record analogous to a compound tool call. Live runtime state is process-owned.
+Durable session history retains the retrospective Workflow projection and its
+associated agent Inspector runs. A process restart freezes unfinished
+invocations as `INTERRUPTED` rather than attempting to resume old LangGraph
+execution.
+
+Ownership remains explicit:
+
+```text
+session events
+    -> Workflow transcript/tree history
+
+session runs
+    -> nested agent Inspector history
+
+LangGraph session checkpoint
+    -> durable Act, Plan, and session semantics
+```
+
+MIRA supplies an in-memory checkpointer to each Workflow execution when its
+compiled graph has none, so native interrupts resume without asking Workflow
+authors to configure checkpoints. This state remains process-owned.
+
+Workflow commands are stored inside their Workflow events so replay can restore
+the visual `you` bubble without adding a conversational user message to the
+Act graph. Historical values are frozen as display and Copy text while the
+live Python objects exist; session JSON never owns arbitrary runtime objects.
+Detailed state stays in that sole durable source and can be retrieved through
+existing filesystem tools; MIRA has no
+duplicate Workflow artifact store or Workflow-specific inspection tool. An agent
+row's `inspection_id` in the Workflow event links to the matching `runs[]` entry
+when nested-agent detail is needed.
+
+**Where to check:** [core/execution/workflows.py](core/execution/workflows.py), [session/context.py](session/context.py),
+[session/workflows.py](session/workflows.py), [session/subagent_runs.py](session/subagent_runs.py), and
+[ui/textual/widgets/workflow_bubble.py](ui/textual/widgets/workflow_bubble.py).
+
+**Update this when:** Workflow transcript ownership, restart reconciliation, or
+historical inspection behavior changes.
+
+## MCP integration
+
+MIRA manages configured server lifecycles and projects each server's tools, prompts, and resources into the current agents and UI. LangChain and FastMCP handle the protocol connection.
+
+### Server lifecycle and capabilities
+
+**Decision:** Bootstrap creates one `MCPManager` outside agent construction.
+It owns one runtime/session and one capability cache per configured server,
+plus the shared prompt and fixed-resource registries. Act and Plan receive
+policy-filtered tool views when the existing agent-pair pathway rebuilds.
+MIRA owns configuration, lifecycle and status, approvals and fingerprints,
+tool policy, UI state, prompts, and resources. A narrow per-server integration
+constructs LangChain's first-party `MCPAdapter`; LangChain and FastMCP own MCP
+transport, protocol negotiation, and low-level client behavior. Stdio uses
+FastMCP's public `StdioTransport.log_file` option pointed at the platform null
+device so server stderr cannot corrupt the TUI.
+
+Each server runtime has one long-lived owner task and command queue. That task
+both enters and exits the adapter session context; UI workers request lifecycle
+transitions but never directly close SDK task groups or cancellation scopes.
+Start and restart discover every capability advertised by the initialized MCP
+session before publishing `Available` or `Partially available`. An absent
+tools, prompts, or resources capability is optional and is cached as an empty
+result without an invalid RPC or degraded server health. A failed advertised
+capability makes the overall projection partially available with its concrete
+error.
+
+Panel expansion reads those completed caches and only changes presentation.
+
+### Authentication, configuration, and elicitation
+
+Every remote HTTP integration enables FastMCP's native OAuth capability. Before
+constructing that provider, MIRA uses the MCP SDK's public authorization-server
+metadata helpers to select the strongest advertised DCR token authentication
+method in this order: `client_secret_basic`, `client_secret_post`, then `none`.
+If metadata is unavailable, MIRA leaves the client metadata unset so FastMCP's
+SDK default remains authoritative. Unauthenticated servers connect without
+user interaction, while protected servers delegate discovery, browser consent,
+PKCE, callback handling, token exchange, and refresh entirely to FastMCP. User
+JSON has no OAuth field, and stdio integrations receive no HTTP
+authentication.
+
+MCP string values may contain explicit `${NAME}` references. Loading keeps
+the normalized template for approval previews and fingerprints while building
+a separate resolved configuration in memory for the connection. Resolution is
+single-pass, never substitutes mapping keys, never writes resolved values, and
+fails only the affected server when a referenced variable is missing.
+`/reload-runtime` loads `.env` before rebuilding MCP connections so updated
+values take effect.
+
+Reusable prompt signatures stay compact as `<required> [optional]`. Prompts
+with only required arguments use positional values; the presence of any
+optional argument switches the whole invocation to `name=value` so omissions
+cannot shift later values onto the wrong MCP argument.
+
+MCP tool elicitation uses the adapter's native LangGraph interrupt payload.
+Core sends that payload through the existing frontend request boundary and
+resumes the same graph thread with the upstream `responses` mapping; terminal,
+Textual, and ACP consumers only collect the requested form or URL decision.
+Textual form mode projects the request's top-level JSON Schema properties into
+native input, checkbox, select, and multi-select controls, validates required
+and numeric values locally, then returns typed content without displaying the
+raw schema in the ordinary prompt surface.
+
+**Why:** The shared agent factory builds project resources twice, once per
+mode. Starting MCP there would duplicate child processes, discovery, and
+mutable health state. Manager-owned lifecycle methods also ensure Settings,
+the MCP panel, autocomplete, reload paths, and shutdown observe and mutate the same
+server registry. Eager advertised-capability discovery prevents a panel action
+from changing server health and gives autocomplete, prompts, and attachments
+the same settled startup view. Persisted user-event attachment metadata is
+projected into LangGraph message metadata, which lets the implicit resource
+reader enforce the attachment boundary without a second session allowlist.
+
+FastMCP owns OAuth credentials and dynamically registered client information;
+MIRA does not add its own token store or authentication state machine. With
+FastMCP's default in-memory storage, credentials do not survive a MIRA restart.
+
+Task-owned entry and exit are required by the AnyIO scopes used by remote HTTP
+sessions. They also keep restart, disable, reload, and
+shutdown deterministic if the requesting panel recomposes or closes.
+
+**Where to check:** [agent/mcp/auth.py](agent/mcp/auth.py), [agent/mcp/configuration.py](agent/mcp/configuration.py), [agent/mcp/errors.py](agent/mcp/errors.py),
+[agent/mcp/integration.py](agent/mcp/integration.py), [agent/mcp/manager.py](agent/mcp/manager.py), [agent/mcp/runtime.py](agent/mcp/runtime.py),
+[agent/factory.py](agent/factory.py),
+[ui/textual/app.py](ui/textual/app.py), [ui/textual/widgets/mcp_panel.py](ui/textual/widgets/mcp_panel.py), [ui/textual/widgets/autocomplete_input.py](ui/textual/widgets/autocomplete_input.py).
+
+**Update this when:** MCP transport ownership, capability caching, attachment
+authorization, or the Act/Plan rebuild boundary changes.
+
+## Tracing and diagnostics
+
+MIRA has two distinct diagnostic paths: local error and transcript artifacts for troubleshooting, and optional OTLP export of agent traces.
+
+### Error reports and the diagnostic sidecar
+
+**Decision:** MIRA treats the TUI as a friendly display layer, the trace
+sidecar as an optional live plain-text stream, and automatic error reports as
+durable failure artifacts.
+
+**Why:** Some TUI exceptions are intentionally caught and rendered as concise
+messages, so uncaught-exception hooks are not enough. Reports are written at
+the boundaries that already catch one-shot and TUI turn failures, with a small
+top-level backup for unexpected escaping exceptions. Reports use the current
+session id whenever one exists and are only created when an exception happens.
+They are durable diagnostics, not chat history, so `/clear-chat` and
+`/clear-all-chats` leave them in place; `/clear-errors` is the explicit TUI
+command for deleting `.mira/_errors/`.
+
+The trace sidecar mirrors visible TUI activity such as startup progress, user
+prompts, coalesced assistant text, tool calls, tool results, subagent
+lifecycle, and system messages through a bounded current-session diagnostics
+log. Trace transcript formatting is shared with one-shot terminal output, while
+sidecar color remains display-only in the log tailer. The trace sidecar is not
+the authoritative ordered transcript; saved session JSON is. It remains
+optional, so MIRA keeps running if that window cannot open or is closed, and
+normal non-trace TUI runs do not create live trace logs solely for successful
+activity.
+
+**Where to check:** [core/diagnostics/error_report.py](core/diagnostics/error_report.py), [core/diagnostics/logging.py](core/diagnostics/logging.py),
+[tracing/stream.py](tracing/stream.py), [ui/shared/terminal/transcript.py](ui/shared/terminal/transcript.py), [cli/commands.py](cli/commands.py),
+[ui/textual/app.py](ui/textual/app.py).
+
+**Update this when:** Error artifact layout, reporting boundaries, diagnostic
+log behavior, or trace-window behavior changes.
+
+### OTLP trace export
+
+**Decision:** LangSmith owns LangChain run collection and trace topology in
+OTel-only mode. MIRA enriches those same LangSmith-created OpenTelemetry spans
+with OpenInference semantic conventions before one standard batch processor and
+OTLP/HTTP exporter. Backend-neutral endpoint, header, and profile-wide span
+attribute templates stay in a bootstrapped `.mira/tracing.yml` profile registry.
+`settings.yml` retains only enablement, the selected profile, and middleware-span
+visibility. Only the selected runtime copy resolves environment references.
+
+[core.execution.turns.run_user_turn()](core/execution/turns.py) defines MIRA's semantic tracing boundary. While the
+MIRA-owned tracing runtime is active, each complete call opens one LangSmith
+`chain` run named `MIRA Turn`; every LangChain invocation in that call inherits
+the run through LangSmith context propagation. MIRA does not parent individual
+graph, model, tool, subagent, or rubric spans. Consecutive calls therefore
+produce separate roots, while all work inside one call shares one trace.
+The root records the submitted visible text, the final visible aggregate
+response, and the existing aggregate `TurnResult` usage through LangSmith's
+RunTree API. OpenInference span kinds follow explicit LangSmith agent metadata
+or the LangSmith run type; middleware names are not classification signals.
+One call may now contain multiple PLAN revision graph runs followed by one ACT
+graph run; these remain internal phases of the same submitted MIRA interaction,
+with one persisted user message and one session turn increment.
+
+**Why:** DeepAgents already emits the LangChain run structure users need.
+LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree
+cannot reliably recover. The small semantic processor only augments attributes;
+it never creates or reparents spans. OTel freezes attributes before processor
+callbacks, so the processor uses the same `ReadableSpan._attributes` replacement
+pattern as OpenInference's upstream conversion processors. That same processor
+adds configured profile attributes to every span before downstream export. A
+fresh LangSmith client, provider, processor chain, exporter, and resource
+identity are installed on each full reload. MIRA temporarily enables LangSmith
+callback collection, restores the user's prior environment on teardown, closes
+the client, then performs a bounded provider flush and shutdown. Missing
+optional dependencies and initialization failures are non-fatal Issues.
+
+AgentMiddleware spans default to `hidden`; `full` preserves native
+LangChain/LangGraph tracing. Suppression happens only while agent graphs are
+constructed, at the two framework boundaries that create the noise:
+`langchain.agents.factory.traceable` for wrap hooks and the outer compiled
+`RunnableSeq` callback lifecycle for before/after nodes. Middleware callables,
+graph writers, useful child work, and their natural surviving parentage remain
+unchanged. Export-time filtering was rejected because it leaves broken parent
+topology or requires rewriting it, and LangGraph's `TAG_HIDDEN` was rejected
+because it does not suppress these raw spans. All private framework coupling,
+shape checks, scoped patching, and construction locking are intentionally
+quarantined in [tracing/middleware_spans.py](tracing/middleware_spans.py).
+
+**Where to check:** [config/tracing.py](config/tracing.py), [tracing/bootstrap.py](tracing/bootstrap.py),
+[tracing/semantic_processor.py](tracing/semantic_processor.py), [tracing/middleware_spans.py](tracing/middleware_spans.py), [core/execution/turns.py](core/execution/turns.py),
+[config/runtime.py](config/runtime.py), [ui/textual/widgets/settings_panel.py](ui/textual/widgets/settings_panel.py), [pyproject.toml](pyproject.toml).
+
+**Update this when:** tracing ownership, OTLP transport, reload behavior, or
+secret-resolution boundaries change.
+
+## UI architecture
+
+The Textual application renders ordered session events and collects decisions; one-shot mode renders the same core lifecycle for terminal use.
+
+### Textual and one-shot presentation
 
 **Decision:** The Textual TUI is the primary interactive experience. One-shot
 terminal output uses a separate renderer. One-shot mode accepts literal prompt
@@ -810,6 +1344,8 @@ change or formal-artifact state.
 progress, settings, and session history in one place. The one-shot renderer
 stays simpler for scripts and quick prompts.
 
+### Tool and interrupt lifecycle
+
 All tools share one underlying lifecycle for call identity, visible start,
 completion or error, persistence, and replay. This includes the control
 tools `ask_user`, `prepare_goal`, `prepare_plan`, `finalize_goal`, `finalize_plan`,
@@ -817,6 +1353,7 @@ tools `ask_user`, `prepare_goal`, `prepare_plan`, `finalize_goal`, `finalize_pla
 no longer suppress the ordinary call/result block. The stable call id associates each surface outcome
 with its original call, so the completed result updates that block in place and
 two calls with identical output remain distinct.
+
 TUI tool bubbles keep a compact, collapsed call preview in the transcript while
 their complete arguments remain available through a native Textual
 `Collapsible` and read-only `TextArea`. Expanded arguments soft-wrap, grow to
@@ -888,9 +1425,28 @@ retires its live matching state, and stores that terminal status and duration
 on the call event. Draft-only calls remain transient. A later authoritative
 result clears the stop marker and becomes the durable terminal outcome.
 
+### Status, commands, and inspection
+
+Context pressure belongs to the top
+operational status row; model identity, cumulative token totals, turn count,
+and elapsed time remain in the bottom passive telemetry row. The operational
+state is a fixed, bold badge with only Starting, Ready, Running, Cancelling, and
+Error. Ready and Error use static terminal symbols; the other states share the
+120 ms spinner. Startup detail remains in the main splash instead of introducing
+a separate Loading state. Transcript bubbles are presentation-only and cannot
+stop the working clock or change lifecycle state. Error remains sticky until a
+real user-initiated recovery succeeds. If initial bootstrap fails, the prompt
+admits a small local recovery command set and `/reload-runtime` retries the full
+bootstrap path. A separate Goal/Plan button projects the retained artifact's
+canonical status and reopens its exact bubble; it is disabled while runtime work
+is busy. The badge and tool lifecycle text share muted semantic colors without
+recoloring the entire header.
+
 Harness response checks use the system/status blue palette in both Textual and
 terminal traces. Warnings use a distinct orange palette rather than the user's
 gold, while errors remain red and formal artifacts retain their own colors.
+
+### Windows input and rendering
 
 On Windows, MIRA pins Textual 8.2.7 and selects a narrow Windows driver adapter.
 Textual's Win32 event monitor normally reduces each `KEY_EVENT_RECORD` to its
@@ -915,7 +1471,9 @@ state; MIRA changes only the renderer's sub-cell glyph table. This avoids tofu
 or mojibake in older console/font combinations without changing non-Windows
 rendering.
 
-TUI-only commands that need live app state stay in `ui/textual/app.py`; for example,
+### Commands and inspection surfaces
+
+TUI-only commands that need live app state stay in [ui/textual/app.py](ui/textual/app.py); for example,
 `/settings` persists workspace settings before rebuilding agents, while
 `/reload` reloads `.env`, current settings, and project resources before
 rebuilding agents without restarting the session or MCP. `/reload-runtime`
@@ -936,6 +1494,9 @@ as STARTUP, MODEL, MCP, and TOOL. `/issues` opens one view-only flat list of
 initially collapsed rows; expansion shows location, details, and guidance.
 Startup and reload emit at most one current-count toast and none when the list
 is empty. Closing the screen never changes settings, resources, or sessions.
+
+### Live subagent panel
+
 The subagents bottom panel is live TUI state only. It opens for running
 subagents and renders task, status, and elapsed time as fixed single-line
 columns; task text yields width first and truncates with `...` when needed.
@@ -946,16 +1507,19 @@ body. The expanded body reserves eight rows: one column header plus seven visibl
 items, then scrolls below fixed group/task headings. The selected group is
 identified only by MIRA's `>` marker; the panel adds no hover, focus, or selection
 backgrounds.
+
 Each row keeps its own reported runtime. Group time is event-observed wall time
 from that group's first row start through its last terminal row, so staggered
 launches remain part of the batch clock while overlapping row runtimes are not
 summed.
+
 While work is active, the native disclosure control collapses the panel to an
 animated summary and the close control is hidden. Runtime updates never override
 the collapse choice of an already-visible panel. Hidden or reset state opens for
 new subagent activity. Once all rows are terminal, `x` becomes available;
 closing it hides but retains the current turn's rows, while the next prompt marks
 completed state for reset by later activity.
+
 While the panel owns live subagent progress, the chat log suppresses separate
 task delegation and subagent bubbles so the running turn has one live progress
 surface. The task rows belong in the panel, and delegation detail stays out of
@@ -968,349 +1532,12 @@ the close control without changing the reported outcome of completed children.
 As the fixed panel opens or collapses, a tail-following transcript reanchors
 after layout while a transcript that the user scrolled upward remains paused.
 
-**Where to check:** `ui/textual/app.py`, `ui/textual/widgets/issues.py`,
-`ui/textual/widgets/context_report.py`, `ui/textual/styles/mira.tcss`, `ui/textual/platform/windows/input.py`,
-`ui/textual/platform/windows/driver.py`, `ui/textual/platform/windows/clipboard.py`, `ui/textual/widgets/`,
-`ui/terminal/renderer.py`, `core/execution/streams/`, `tests/test_context_report.py`,
-`tests/test_textual_app.py`.
+**Where to check:** [ui/textual/app.py](ui/textual/app.py), [ui/textual/widgets/issues.py](ui/textual/widgets/issues.py),
+[ui/textual/widgets/context_report.py](ui/textual/widgets/context_report.py), [ui/textual/styles/mira.tcss](ui/textual/styles/mira.tcss), [ui/textual/platform/windows/input.py](ui/textual/platform/windows/input.py),
+[ui/textual/platform/windows/driver.py](ui/textual/platform/windows/driver.py), [ui/textual/platform/windows/clipboard.py](ui/textual/platform/windows/clipboard.py), [ui/textual/widgets/](ui/textual/widgets/),
+[ui/terminal/renderer.py](ui/terminal/renderer.py), [core/execution/streams/](core/execution/streams/), [tests/test_context_report.py](tests/test_context_report.py),
+[tests/test_textual_app.py](tests/test_textual_app.py).
 
 **Update this when:** Rendering responsibility moves, a new UI mode appears,
 keyboard or clipboard ownership changes, or tool/subagent events are projected
 differently.
-
-## DeepAgents Runtime Ownership
-
-**Decision:** MIRA pins DeepAgents 0.7.32, LangChain 1.4.7, and
-`langchain-quickjs` 0.3.7, with the LangGraph and LangSmith minimums required
-by DeepAgents. MIRA
-owns a small general-purpose action prompt and its existing planning prompt;
-DeepAgents owns the filesystem, delegation, streaming, and middleware
-execution. Project and bundled memory files remain opaque Markdown resources,
-resolved by the same deterministic resolver and passed identically to action
-and planning agents. Existing bundled-resource slots retain their precedence;
-new project files retain the resolver's deterministic order.
-
-Planning todos are optional and disabled by default because the upstream
-DeepAgents [evaluation](https://github.com/langchain-ai/deepagents/pull/4929)
-found no statistically significant accuracy improvement.
-Enabling the workspace setting adds one `TodoListMiddleware` to action and
-planning agents and to compiled dynamic subagents. `/tools` is derived from the
-actual middleware stack, so toggling or reloading cannot retain a stale or
-duplicate `write_todos` entry.
-
-DeepAgents 0.7 defines `write_file` as create-or-complete-replacement and
-`edit_file` as targeted replacement. MIRA keeps both behind the normal HITL
-policy, labels their different consequences in the approval surface, and
-exposes recursive `delete` only where the selected backend implements it.
-Delete is action-only and destructive; like other consequential tools, it uses
-the workspace's configurable HITL policy. Filesystem backends use explicit
-virtual paths rooted in the selected workspace.
-
-Rubric terminal events are accepted directly from DeepAgents, including
-`max_iterations_reached`. MIRA preserves the explanation and available grader
-diagnostics instead of synthesizing another iteration. QuickJS runs with
-explicit memory, timeout, thread-persistence, and read-only PTC limits; it does
-not receive ambient filesystem, network, process, or clock access. Inner PTC
-calls use QuickJS' native tool lifecycle callbacks and therefore appear on the
-same LangGraph v3 tool-call stream MIRA already consumes; MIRA does not maintain
-a parallel PTC event bridge.
-
-**Where to check:** `agent/factory.py`, `agent/middleware/`,
-`agent/subagents/compilation.py`, `agent/tools/specs.py`, `core/execution/runner.py`,
-`core/execution/streams/rubric.py`, `config/settings.py`.
-
-**Update this when:** DeepAgents or QuickJS versions change, prompt ownership
-moves, todo defaults change, or filesystem/rubric semantics change.
-
-## Generic OTLP tracing
-
-**Decision:** LangSmith owns LangChain run collection and trace topology in
-OTel-only mode. MIRA enriches those same LangSmith-created OpenTelemetry spans
-with OpenInference semantic conventions before one standard batch processor and
-OTLP/HTTP exporter. Backend-neutral endpoint, header, and profile-wide span
-attribute templates stay in a bootstrapped `.mira/tracing.yml` profile registry.
-`settings.yml` retains only enablement, the selected profile, and middleware-span
-visibility. Only the selected runtime copy resolves environment references.
-
-`ui.repl.run_user_turn()` defines MIRA's semantic tracing boundary. While the
-MIRA-owned tracing runtime is active, each complete call opens one LangSmith
-`chain` run named `MIRA Turn`; every LangChain invocation in that call inherits
-the run through LangSmith context propagation. MIRA does not parent individual
-graph, model, tool, subagent, or rubric spans. Consecutive calls therefore
-produce separate roots, while all work inside one call shares one trace.
-The root records the submitted visible text, the final visible aggregate
-response, and the existing aggregate `TurnResult` usage through LangSmith's
-RunTree API. OpenInference span kinds follow explicit LangSmith agent metadata
-or the LangSmith run type; middleware names are not classification signals.
-One call may now contain multiple PLAN revision graph runs followed by one ACT
-graph run; these remain internal phases of the same submitted MIRA interaction,
-with one persisted user message and one session turn increment.
-
-**Why:** DeepAgents already emits the LangChain run structure users need.
-LangSmith preserves DeepAgents and QuickJS parentage that a second callback tree
-cannot reliably recover. The small semantic processor only augments attributes;
-it never creates or reparents spans. OTel freezes attributes before processor
-callbacks, so the processor uses the same `ReadableSpan._attributes` replacement
-pattern as OpenInference's upstream conversion processors. That same processor
-adds configured profile attributes to every span before downstream export. A
-fresh LangSmith client, provider, processor chain, exporter, and resource
-identity are installed on each full reload. MIRA temporarily enables LangSmith
-callback collection, restores the user's prior environment on teardown, closes
-the client, then performs a bounded provider flush and shutdown. Missing
-optional dependencies and initialization failures are non-fatal Issues.
-
-AgentMiddleware spans default to `hidden`; `full` preserves native
-LangChain/LangGraph tracing. Suppression happens only while agent graphs are
-constructed, at the two framework boundaries that create the noise:
-`langchain.agents.factory.traceable` for wrap hooks and the outer compiled
-`RunnableSeq` callback lifecycle for before/after nodes. Middleware callables,
-graph writers, useful child work, and their natural surviving parentage remain
-unchanged. Export-time filtering was rejected because it leaves broken parent
-topology or requires rewriting it, and LangGraph's `TAG_HIDDEN` was rejected
-because it does not suppress these raw spans. All private framework coupling,
-shape checks, scoped patching, and construction locking are intentionally
-quarantined in `tracing/middleware_spans.py`.
-
-**Where to check:** `config/tracing.py`, `tracing/bootstrap.py`,
-`tracing/semantic_processor.py`, `tracing/middleware_spans.py`, `core/execution/turns.py`,
-`config/runtime.py`, `ui/textual/widgets/settings_panel.py`, `pyproject.toml`.
-
-**Update this when:** tracing ownership, OTLP transport, reload behavior, or
-secret-resolution boundaries change.
-
-## Sessions And Compaction
-
-**Decision:** MIRA stores JSON for replayable UI history and one SQLite
-checkpoint database per session for native graph restoration. DeepAgents
-handles runtime context counting and compaction.
-
-`SessionStore` keeps each session's `session.json` and `checkpoints.db` under
-`<session_dir>/<session_id>/`; older flat files are ignored.
-
-**Why:** Session files should be stable user-facing history after restart.
-Starting a new chat is therefore non-destructive: MIRA creates another session
-record and makes it active instead of clearing the previous one.
-Session records require the current fields; missing or conflicting formal
-artifacts are rejected rather than repaired. Transient fields are not saved.
-Act uses the session ID as its thread ID. Plan and Goal planning keep their
-existing thread IDs in the same database. A terminal session-state graph owns
-retained artifacts, execution mode, attempts, revision/staging identity, and
-other MIRA-specific semantics. Session reopening reads these checkpoints and
-never injects a JSON-derived transcript summary into a new request. Pending
-interrupts are displayed before graph continuation; incomplete operations
-without an interrupt require an explicit `/continue` because an external side
-effect may have occurred. Closing a session closes its SQLite connection before
-deletion removes that session's directory, including SQLite sidecars.
-
-Act/Plan transitions copy the source checkpoint's effective DeepAgents
-conversation into the destination message channel and clear obsolete destination
-summary metadata. Each graph retains its own todos and other non-message state.
-Goal preparation uses an isolated staging thread seeded from the current mode;
-approved execution transfers that completed preparation conversation into Act.
-MIRA refuses a handoff while either graph has pending work, and commits mode or
-artifact execution state only after the transfer succeeds. See
-`core/execution/handoff.py`, `core/application/session.py`, and
-`core/execution/turns.py`.
-
-Runtime compaction is agent-execution behavior and belongs to DeepAgents. MIRA
-replaces DeepAgents' default `SummarizationMiddleware` by its native name with
-one instance built from Main's model-aware defaults. The model-triggered
-`compact_conversation` tool and TUI `/compact` use that same instance. An
-optional dedicated summarization model occupies only LangChain's summary-call
-slot; Main still determines profile limits, token counting, and triggers. The
-request observer calls the instance's `_count_tokens` on the effective model
-request, after compaction, so the UI can show context pressure without counting
-summary-model calls. MIRA does not run a parallel dashboard counter or compute
-provider prompt tokens. Context pressure belongs to the top
-operational status row; model identity, cumulative token totals, turn count,
-and elapsed time remain in the bottom passive telemetry row. The operational
-state is a fixed, bold badge with only Starting, Ready, Running, Cancelling, and
-Error. Ready and Error use static terminal symbols; the other states share the
-120 ms spinner. Startup detail remains in the main splash instead of introducing
-a separate Loading state. Transcript bubbles are presentation-only and cannot
-stop the working clock or change lifecycle state. Error remains sticky until a
-real user-initiated recovery succeeds. If initial bootstrap fails, the prompt
-admits a small local recovery command set and `/reload-runtime` retries the full
-bootstrap path. A separate Goal/Plan button projects the retained artifact's
-canonical status and reopens its exact bubble; it is disabled while runtime work
-is busy. The badge and tool lifecycle text share muted semantic colors without
-recoloring the entire header. Automatic and agent-selected eligibility remain
-DeepAgents decisions. The explicit TUI `/compact` command is
-the narrow exception: it applies the shared middleware's retention policy
-immediately without an agent turn. It writes the canonical `_summarization_event`
-and `_summarization_session_id`, preserving raw messages in LangGraph state and
-appending history to the same archive across later compactions and reloads.
-MIRA's tool middleware plans forced compaction with DeepAgents' native cutoff,
-summary, and archive primitives. The TUI coordinates a completed checkpoint:
-it checks for a newer checkpoint, appends the archive, then writes the summary
-event through LangGraph's state update. If the state update fails, it restores
-the prior archive content so a retry cannot duplicate history. Archive read
-errors cannot be mistaken for an empty archive. Provider
-`In` and `Out` usage are cumulative per-call totals, not current context
-occupancy. ChatAnyLLM reports usage but omits the matching `model_provider`
-response metadata required by DeepAgents' reported-token validation. MIRA's
-model-response normalization fills only that missing integration identity and
-leaves DeepAgents' eligibility thresholds unchanged.
-DeepAgents filters tagged prior summaries from archives; MIRA also strips
-reasoning and provider metadata from archive messages and replayed summary
-messages because DeepAgents does not sanitize those fields. MIRA reads
-compaction summary prose only from the canonical
-`_summarization_event.summary_message`; retired raw `summary` and
-`summary_text` aliases are ignored.
-DeepAgents marks summary-model invocations with `lc_source="summarization"`.
-MIRA observes that invocation metadata before LangGraph publishes each message
-stream and drains marked streams without rendering or recording their internal
-reasoning or summary text. Compaction classification never depends on model
-wording, prompt fragments, or task-local flags; unmarked reasoning and replies
-remain visible even when they discuss compaction or summarization.
-Regular subagent completions remain durable `subagent` transcript events so
-past sessions can replay them.
-The live panel's open/collapsed/closed state and row layout are intentionally
-not persisted or replayed. Reopening a session projects those durable subagent
-events back into chat transcript blocks rather than reconstructing the old live
-panel. Eval-created subagent rows are not stored separately; their durable
-history is the surrounding eval tool call/result plus the assistant's summary.
-
-**Where to check:** `agent/middleware/compaction.py`, `core/execution/compaction.py`, `agent/middleware/`, `session/store.py`,
-`session/context.py`, `session/recorder.py`, `session/dashboard.py`,
-`core/context/observation.py`, `core/execution/streams/message_metadata.py`.
-
-**Update this when:** Session JSON shape changes, compaction ownership changes,
-or replay context starts depending on a new source of truth.
-
-## Context Metadata
-
-**Decision:** MIRA resolves model context metadata before turns, sets the
-DeepAgents context profile, and shows observed DeepAgents context pressure in
-the UI.
-
-**Why:** Providers expose context limits differently. MIRA normalizes the
-effective limit so the model profile, dashboard, and overflow handling agree.
-Provider `In` and `Out` usage are cumulative session totals and are not used as
-current-context occupancy; after multiple turns they include repeated
-conversation history and are not expected to add up to the latest `Ctx` value.
-
-**Where to check:** `config/metadata.py`, `cli/commands.py`, `ui/textual/app.py`,
-`agent/middleware/context_overflow.py`.
-
-**Update this when:** New providers need special metadata handling, context
-fallback rules change, or the dashboard changes how context is reported.
-
-## MCP ownership and capability projection
-
-**Decision:** Bootstrap creates one `MCPManager` outside agent construction.
-It owns one runtime/session and one capability cache per configured server,
-plus the shared prompt and fixed-resource registries. Act and Plan receive
-policy-filtered tool views when the existing agent-pair pathway rebuilds.
-MIRA owns configuration, lifecycle and status, approvals and fingerprints,
-tool policy, UI state, prompts, and resources. A narrow per-server integration
-constructs LangChain's first-party `MCPAdapter`; LangChain and FastMCP own MCP
-transport, protocol negotiation, and low-level client behavior. Stdio uses
-FastMCP's public `StdioTransport.log_file` option pointed at the platform null
-device so server stderr cannot corrupt the TUI.
-Each server runtime has one long-lived owner task and command queue. That task
-both enters and exits the adapter session context; UI workers request lifecycle
-transitions but never directly close SDK task groups or cancellation scopes.
-Start and restart discover every capability advertised by the initialized MCP
-session before publishing `Available` or `Partially available`. An absent
-tools, prompts, or resources capability is optional and is cached as an empty
-result without an invalid RPC or degraded server health. A failed advertised
-capability makes the overall projection partially available with its concrete
-error.
-Panel expansion reads those completed caches and only changes presentation.
-Every remote HTTP integration enables FastMCP's native OAuth capability. Before
-constructing that provider, MIRA uses the MCP SDK's public authorization-server
-metadata helpers to select the strongest advertised DCR token authentication
-method in this order: `client_secret_basic`, `client_secret_post`, then `none`.
-If metadata is unavailable, MIRA leaves the client metadata unset so FastMCP's
-SDK default remains authoritative. Unauthenticated servers connect without
-user interaction, while protected servers delegate discovery, browser consent,
-PKCE, callback handling, token exchange, and refresh entirely to FastMCP. User
-JSON has no OAuth field, and stdio integrations receive no HTTP
-authentication.
-MCP string values may contain explicit `${NAME}` references. Loading keeps
-the normalized template for approval previews and fingerprints while building
-a separate resolved configuration in memory for the connection. Resolution is
-single-pass, never substitutes mapping keys, never writes resolved values, and
-fails only the affected server when a referenced variable is missing.
-`/reload-runtime` loads `.env` before rebuilding MCP connections so updated
-values take effect.
-Reusable prompt signatures stay compact as `<required> [optional]`. Prompts
-with only required arguments use positional values; the presence of any
-optional argument switches the whole invocation to `name=value` so omissions
-cannot shift later values onto the wrong MCP argument.
-MCP tool elicitation uses the adapter's native LangGraph interrupt payload.
-Core sends that payload through the existing frontend request boundary and
-resumes the same graph thread with the upstream `responses` mapping; terminal,
-Textual, and ACP consumers only collect the requested form or URL decision.
-Textual form mode projects the request's top-level JSON Schema properties into
-native input, checkbox, select, and multi-select controls, validates required
-and numeric values locally, then returns typed content without displaying the
-raw schema in the ordinary prompt surface.
-
-**Why:** The shared agent factory builds project resources twice, once per
-mode. Starting MCP there would duplicate child processes, discovery, and
-mutable health state. Manager-owned lifecycle methods also ensure Settings,
-the MCP panel, autocomplete, reload paths, and shutdown observe and mutate the same
-server registry. Eager advertised-capability discovery prevents a panel action
-from changing server health and gives autocomplete, prompts, and attachments
-the same settled startup view. Persisted user-event attachment metadata is
-projected into LangGraph message metadata, which lets the implicit resource
-reader enforce the attachment boundary without a second session allowlist.
-FastMCP owns OAuth credentials and dynamically registered client information;
-MIRA does not add its own token store or authentication state machine. With
-FastMCP's default in-memory storage, credentials do not survive a MIRA restart.
-Task-owned entry and exit are required by the AnyIO scopes used by remote HTTP
-sessions. They also keep restart, disable, reload, and
-shutdown deterministic if the requesting panel recomposes or closes.
-
-**Where to check:** `agent/mcp/auth.py`, `agent/mcp/configuration.py`, `agent/mcp/errors.py`,
-`agent/mcp/integration.py`, `agent/mcp/manager.py`, `agent/mcp/runtime.py`,
-`agent/factory.py`,
-`ui/textual/app.py`, `ui/textual/widgets/mcp_panel.py`, `ui/textual/widgets/autocomplete_input.py`.
-
-**Update this when:** MCP transport ownership, capability caching, attachment
-authorization, or the Act/Plan rebuild boundary changes.
-
-## Durable Workflow History
-
-**Decision:** MIRA treats a Workflow invocation as a rich inspectable execution
-record analogous to a compound tool call. Live runtime state is process-owned.
-Durable session history retains the retrospective Workflow projection and its
-associated agent Inspector runs. A process restart freezes unfinished
-invocations as `INTERRUPTED` rather than attempting to resume old LangGraph
-execution.
-
-Ownership remains explicit:
-
-```text
-session events
-    -> Workflow transcript/tree history
-
-session runs
-    -> nested agent Inspector history
-
-LangGraph session checkpoint
-    -> durable Act, Plan, and session semantics
-```
-
-MIRA supplies an in-memory checkpointer to each Workflow execution when its
-compiled graph has none, so native interrupts resume without asking Workflow
-authors to configure checkpoints. This state remains process-owned.
-
-Workflow commands are stored inside their Workflow events so replay can restore
-the visual `you` bubble without adding a conversational user message to the
-Act graph. Historical values are frozen as display and Copy text while the
-live Python objects exist; session JSON never owns arbitrary runtime objects.
-Detailed state stays in that sole durable source and can be retrieved through
-existing filesystem tools; MIRA has no
-duplicate Workflow artifact store or Workflow-specific inspection tool. An agent
-row's `inspection_id` in the Workflow event links to the matching `runs[]` entry
-when nested-agent detail is needed.
-
-**Where to check:** `core/execution/workflows.py`, `session/context.py`,
-`session/workflows.py`, `session/subagent_runs.py`, and
-`ui/textual/widgets/workflow_bubble.py`.
-
-**Update this when:** Workflow transcript ownership, restart reconciliation, or
-historical inspection behavior changes.
