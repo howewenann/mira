@@ -138,7 +138,7 @@ class MiraApplication:
                 await mcp_manager.shutdown()
             raise
         emitter.mcp("initialized", detail=mcp_snapshot(mcp_manager))
-        resources = build_resources(workspace, settings=config.get("settings"), config=None)
+        resources = build_resources(workspace, settings=config.get("settings"), config=None, mcp_manager=mcp_manager)
         if resources.subagent_discovery.complete and config.get("settings_valid", True):
             from config.settings import prune_subagent_settings, save_settings
 
@@ -188,7 +188,7 @@ class MiraApplication:
                 *getattr(agent, "mira_resource_issues", []),
             ]
         )
-        return cls(
+        application = cls(
             frontend=frontend,
             workspace=workspace,
             agent=agent,
@@ -208,6 +208,8 @@ class MiraApplication:
             action_resources=action_resources,
             agent_metadata=metadata,
         )
+        mcp_manager.set_change_handler(application.mcp_registry_changed)
+        return application
 
     @staticmethod
     def new_session_id() -> str:
@@ -354,6 +356,7 @@ class MiraApplication:
                 self.workspace,
                 settings=self.config.get("settings"),
                 config=None,
+                mcp_manager=self.mcp_manager,
             )
             action_resources = configure_subagents(resources, self.config)
             self.action_resources = action_resources
@@ -383,6 +386,14 @@ class MiraApplication:
                 session.mode["resources"] = resources.metadata
                 self.agent, self.plan_agent, self.checkpointer = agent, plan_agent, session.checkpointer
             self._policy_refreshed_generation = generation
+
+    async def mcp_registry_changed(self) -> None:
+        """Rebuild resource projections after the shared MCP lifecycle changes."""
+        from config.settings import load_settings
+
+        self.config["settings"] = load_settings(self.workspace)
+        self._policy_refresh_generation += 1
+        await self.refresh_agents_for_policy()
 
     async def shutdown(self, *, persist_sessions: bool = True) -> None:
         """Close sessions and shared external resources."""
@@ -417,6 +428,7 @@ def build_agent_pair(
         enable_execute=False,
         config=config,
         subagent_discovery=action_resources.subagent_discovery,
+        mcp_manager=mcp_manager,
     )
     common = {
         "config": config,
@@ -609,6 +621,7 @@ def mcp_snapshot(manager: Any | None) -> dict[str, Any]:
                 "tool_count": len(getattr(state, "tools", ()) or ()),
                 "prompt_count": len(getattr(state, "prompts", ()) or ()),
                 "resource_count": len(getattr(state, "resources", ()) or ()),
+                "skill_count": len(getattr(state, "skills", ()) or ()),
             }
         )
     return {
@@ -618,6 +631,7 @@ def mcp_snapshot(manager: Any | None) -> dict[str, Any]:
             "tools": sum(server["tool_count"] for server in servers),
             "prompts": sum(server["prompt_count"] for server in servers),
             "resources": sum(server["resource_count"] for server in servers),
+            "skills": sum(server["skill_count"] for server in servers),
         },
     }
 

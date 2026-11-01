@@ -1946,6 +1946,24 @@ model.
    Workflow files, or a custom Workflow inspection tool. Reopening the session
    does not inject a JSON-derived Workflow breadcrumb into model context.
 
+## MCP Skills
+
+1. In a disposable workspace, configure an approved MCP server advertising
+   SEP-2640 skills. Open `/mcp`: Skills names, descriptions, and counts appear
+   alongside the other capabilities. The panel opens without keyboard focus;
+   disclosure titles wrap at narrow widths without changing glyphs on hover.
+2. Open `/skills`, then invoke a listed `/skill__<qualified-name> review this`.
+   Expected: ordinary skill pinning injects its instructions; supporting-file
+   reads use `/mira-mcp/skills/...` through `read_file`. No new reading tool,
+   Settings page, or copied `.mira/skills` files appear.
+3. Disable the server, then continue the same conversation in Act and Plan.
+   Expected: remote skills disappear and their file paths are unavailable;
+   local and bundled skills remain. Enable/restart and repeat: skills return.
+4. Change a server skill, restart it or use `/reload-runtime`, and continue an
+   existing chat. Expected: the next turn discovers the changed metadata and
+   instructions while preserving conversation history. Two servers publishing
+   the same original skill name have distinct commands and MCP sources.
+
 ## SQLite Session Checkpoints
 
 1. In a disposable workspace, start a chat, exchange two messages, enter `/plan`,

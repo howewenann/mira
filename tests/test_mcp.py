@@ -766,6 +766,7 @@ class MCPNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.url, "https://example.test/mcp")
         self.assertEqual(transport.headers, {"X-Project": "mira"})
         self.assertIs(client_type.call_args.kwargs["auth"], oauth)
+        self.assertEqual(client_type.call_args.kwargs["extensions"][0].identifier, "io.modelcontextprotocol/skills")
         adapter_type.return_value.__aenter__.assert_awaited_once_with()
 
     def test_stdio_clients_do_not_receive_http_oauth(self) -> None:
@@ -784,6 +785,7 @@ class MCPNativeIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(client_type.call_args.args[0], StdioTransport)
         self.assertNotIn("auth", client_type.call_args.kwargs)
+        self.assertEqual(client_type.call_args.kwargs["extensions"][0].identifier, "io.modelcontextprotocol/skills")
 
     async def test_manager_starts_executes_and_stops_a_real_stdio_server(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1835,10 +1837,11 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("[STDIO]", str(header.render()))
             self.assertEqual(
                 capability_summary(manager.servers["one"]).plain,
-                "Tools  0   ·   Prompts  0   ·   Resources  0",
+                "Tools  0   ·   Prompts  0   ·   Resources  0   ·   Skills  -",
             )
             self.assertIn("Tools  0", str(title.render()))
-            self.assertEqual(capabilities.region.height, 1)
+            self.assertEqual(capabilities.region.height, title.region.height)
+            self.assertGreaterEqual(title.region.height, 1)
             self.assertEqual(capabilities.region.y, header.region.bottom)
             self.assertEqual(controls.region.height, 1)
             self.assertEqual(controls.region.y, capabilities.region.bottom)

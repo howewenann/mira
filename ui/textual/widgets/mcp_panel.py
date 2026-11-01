@@ -216,6 +216,7 @@ def capability_counts(state: Any) -> tuple[tuple[str, str], ...]:
         ("Tools", str(len(state.tools))),
         ("Prompts", prompts),
         ("Resources", resources),
+        ("Skills", "-" if getattr(state, "skills", None) is None else str(len(state.skills))),
     )
 
 
@@ -224,6 +225,7 @@ def capability_metric(label: str, count: str) -> Text:
         "Tools": "#78d5cf",
         "Prompts": "#8fb9e8",
         "Resources": "#c7a0e8",
+        "Skills": "#b5d797",
     }[label]
     metric = Text()
     metric.append(label, style=label_colour)
@@ -289,6 +291,9 @@ def server_detail_sections(state: Any) -> list[tuple[str, str]]:
         ("Tools", "\n".join(tools) if tools else "  No tools"),
         ("Prompts", _discovery_content(prompts, state.prompts, "prompts")),
         ("Fixed resources", _discovery_content(resources, state.resources, "resources")),
+        ("Skills", _discovery_content(
+            [f"  {item.name}    {item.description}" for item in (getattr(state, "skills", None) or [])],
+            getattr(state, "skills", None), "skills")),
     ]
     stderr_tail = str(getattr(state, "stderr_tail", "") or "")
     if stderr_tail:
@@ -304,7 +309,7 @@ def server_diagnostics(state: Any) -> tuple[str, ...]:
     diagnostics = [state.error] if state.error else []
     diagnostics.extend(
         error
-        for error in (state.prompt_error, state.resource_error)
+        for error in (state.prompt_error, state.resource_error, getattr(state, "skill_error", ""))
         if error and not any(error in diagnostic for diagnostic in diagnostics)
     )
     return tuple(diagnostics)

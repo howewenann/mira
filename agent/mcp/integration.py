@@ -7,6 +7,7 @@ from typing import Any
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.skills import SkillsClientExtension
 from langchain_core._api import suppress_langchain_beta_warning
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
@@ -66,6 +67,7 @@ class MiraMCPIntegration:
         self._client_options: dict[str, Any] = {
             "name": state.name,
             "log_handler": log_message,
+            "extensions": [SkillsClientExtension()],
         }
         self.adapter: MCPAdapter | None = None
         if state.transport == "stdio":
@@ -153,6 +155,19 @@ class MiraMCPIntegration:
 
     async def list_resources(self) -> list[Any]:
         return list(await self.client.list_resources(max_pages=_MAX_PAGES))
+
+    def supports_skills(self) -> bool:
+        capabilities = self.get_server_capabilities()
+        return SkillsClientExtension.identifier in (getattr(capabilities, "extensions", None) or {})
+
+    def is_connected(self) -> bool:
+        return self.client.is_connected()
+
+    async def list_skills(self) -> list[Any]:
+        return list(await self.client.list_skills(max_pages=_MAX_PAGES))
+
+    async def get_skill(self, uri: str) -> Any:
+        return await self.client.get_skill(uri)
 
     async def read_resource(self, uri: str) -> list[Any]:
         return list(await self.client.read_resource(uri))

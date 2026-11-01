@@ -13,17 +13,18 @@ from agent.resources.paths import (
 )
 
 
-def load_skills(backend: Any) -> tuple[list[str], list[dict[str, str]], set[str]]:
+def load_skills(backend: Any, extra_sources: tuple[str, ...] = ()) -> tuple[list[str], list[dict[str, str]], set[str]]:
     """Project DeepAgents' effective skills into MIRA's resource display."""
     default_source = default_virtual_dir(SKILLS_DIR)
     project_source = project_virtual_dir(SKILLS_DIR)
-    middleware = SkillsMiddleware(backend=backend, sources=[default_source, project_source])
+    roots = (default_source, project_source, *extra_sources)
+    middleware = SkillsMiddleware(backend=backend, sources=list(roots))
     loaded = middleware.before_agent({}, None, {})
     effective = loaded["skills_metadata"] if loaded is not None else []
     default_names = {skill["name"] for skill in _list_skills(backend, default_source)}
     sources = [
-        root for root in (default_source, project_source)
-        if any(skill["path"].startswith(f"{root}/") for skill in effective)
+        root for root in roots
+        if root in extra_sources or any(skill["path"].startswith(f"{root}/") for skill in effective)
     ]
     included_tools = {
         name
@@ -33,7 +34,8 @@ def load_skills(backend: Any) -> tuple[list[str], list[dict[str, str]], set[str]
     return sources, [
         skill_item(
             skill,
-            "project" if skill["path"].startswith(f"{project_source}/") else "default",
+            "mcp" if any(skill["path"].startswith(f"{root}/") for root in extra_sources)
+            else "project" if skill["path"].startswith(f"{project_source}/") else "default",
             replaces="default" if skill["name"] in default_names and skill["path"].startswith(f"{project_source}/") else "",
         )
         for skill in effective

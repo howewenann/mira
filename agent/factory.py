@@ -192,6 +192,7 @@ def _build_agent(
         settings=(config or {}).get("settings"),
         enable_execute=enable_execute_backend,
         config=config,
+        mcp_manager=mcp_manager,
     )
     backend = resources.backend
     local_metadata = resources.metadata["tools"]
@@ -387,6 +388,8 @@ def _build_agent(
     # predates /reload. Refresh each thread on its first turn with this graph.
     if hasattr(agent, "astream_events"):
         agent.mira_skills_refreshed_threads = set()
+        agent.mira_mcp_manager = mcp_manager
+        agent.mira_skills_generation = getattr(mcp_manager, "skills_generation", None)
     _attach_summarization(agent, middleware_stack.summarization, middleware_stack.compaction)
     if enable_rubric:
         _attach_rubric_model_name(agent, get_rubric_model_name(config))

@@ -73,6 +73,7 @@ def build_resources(
     enable_execute: bool | None = None,
     config: dict[str, Any] | None = None,
     subagent_discovery: SubagentDiscovery | None = None,
+    mcp_manager: Any | None = None,
 ) -> ResourceBundle:
     """Build the resources passed into create_deep_agent()."""
     workspace = Path(workspace).expanduser().resolve()
@@ -83,6 +84,30 @@ def build_resources(
 
     memories = load_memories(workspace)
     skill_sources, skills, skill_tool_names = load_skills(backends.combined)
+    if mcp_manager is not None:
+        from agent.mcp.skills import MCP_SKILLS_ROUTE, MCPSkillsBackend
+        from core.diagnostics.logging import get_diagnostics_logger
+
+        reserved_names = {item["name"] for item in skills}
+        for state in mcp_manager.servers.values():
+            for skill in state.skills or ():
+                if skill.name in reserved_names:
+                    get_diagnostics_logger().warning("MCP skill %s collides with a local skill; skipped", skill.name)
+        backends = ResourceBackends(
+            backends.project,
+            CompositeBackend(
+                default=backends.project,
+                routes={**backends.combined.routes, MCP_SKILLS_ROUTE: MCPSkillsBackend(mcp_manager, reserved_names)},
+                artifacts_root="/.mira",
+            ),
+        )
+        skill_sources, skills, skill_tool_names = load_skills(backends.combined, (MCP_SKILLS_ROUTE + "skills",))
+        for item in skills:
+            if item["source"] == "mcp":
+                item["server"] = next(
+                    state.name for state in mcp_manager.servers.values()
+                    if any(skill.name == item["name"] for skill in state.skills or ())
+                )
     discovery = subagent_discovery or discover_subagents(workspace)
     subagents = effective_subagent_specs(discovery, config) if config is not None else []
     subagent_info = [item.display_item() for item in discovery.items]

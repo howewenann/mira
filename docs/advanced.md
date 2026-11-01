@@ -162,6 +162,27 @@ supplied values and quote values with spaces. `/prompts` lists the available
 prompt commands. Some tools can request a form or URL decision during use;
 answering that request resumes the same interrupted turn.
 
+Servers advertising the MCP Skills extension (SEP-2640) also expose portable
+`SKILL.md` packages. `/mcp` shows their Skills inventory and diagnostics; `/skills`
+shows effective server-qualified names and MCP sources. Use the corresponding
+`/skill__<qualified-name> [request]` command to pin instructions with the ordinary
+skill workflow. Local and bundled skills remain available.
+
+Skills discovery uses `skills/list` and `skills/get`, so publishing ordinary MCP
+Resources alone does not publish a skill. Skills need no MIRA-specific metadata.
+Their instructions and supporting files use normal `read_file` paths under
+`/mira-mcp/skills/`; they are read-only and require the existing MCP server
+approval. Tool permissions still apply to every tool mentioned by a skill.
+Static file manifests are checked against raw content sizes and SHA-256 hashes;
+dynamic resources are read within their skill directory without hash checks.
+Files over 10 MiB are rejected. Discovery errors appear in the MCP panel while
+working capabilities remain available.
+
+Restart a server or use `/reload-runtime` to refresh its skill instructions and
+metadata. Existing conversations discover the updated inventory on their next
+turn. Supporting files are read on demand; dynamic manifests cannot enumerate
+supporting filenames, so use paths referenced by the skill instructions.
+
 ## Tools and execution environments
 
 General Settings lists **Core Tools (Read-only)**, **Core Tools (Actions)**,

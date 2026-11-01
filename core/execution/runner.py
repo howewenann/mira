@@ -670,6 +670,11 @@ async def run_turn(
     if pinned_skills and isinstance(payload, dict):
         payload["pinned_skills"] = pinned_skills
     refreshed_threads = getattr(agent, "mira_skills_refreshed_threads", None)
+    manager = getattr(agent, "mira_mcp_manager", None)
+    generation = getattr(manager, "skills_generation", None)
+    if isinstance(refreshed_threads, set) and generation != getattr(agent, "mira_skills_generation", None):
+        refreshed_threads.clear()
+        agent.mira_skills_generation = generation
     if isinstance(payload, dict) and isinstance(refreshed_threads, set) and thread_id not in refreshed_threads:
         payload["skills_metadata"] = None
     rubric_model_name = rubric_model_name or str(getattr(agent, "mira_rubric_model_name", "") or "")
@@ -803,7 +808,7 @@ async def run_turn(
             rubric_renderer.cancel()
             raise
 
-        if isinstance(refreshed_threads, set):
+        if isinstance(refreshed_threads, set) and isinstance(payload, dict) and "skills_metadata" in payload:
             refreshed_threads.add(thread_id)
 
         if historical_tool_lifecycle is not None:

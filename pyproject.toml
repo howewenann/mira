@@ -8,6 +8,7 @@ dependencies = [
     "aiosqlite>=0.20,<1",
     "coolname>=5.0.0",
     "deepagents==0.7.32",
+    "fastmcp>=4.1.2,<5",
     "langchain[mcp]==1.4.7",
     "langchain-quickjs==0.3.7",
     "langgraph>=1.2.12",

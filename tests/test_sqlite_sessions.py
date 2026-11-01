@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import asyncio
 import tempfile
+import sys
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -34,6 +35,39 @@ from core.execution.runner import run_turn
 
 
 class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_mcp_skills_follow_headless_lifecycle_in_existing_session(self) -> None:
+        from tests.core.interface.test_contract import RecordingFrontend
+        from tests.test_mcp import write_config
+        from tests.test_mcp_skills import write_skill
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            served = workspace / "served"
+            write_skill(served)
+            write_config(workspace, {"docs": {"command": sys.executable, "args": [
+                str(Path("tests/fixtures/mcp_skills_server.py").resolve()), str(served), "skills",
+            ]}})
+            application = await self.start(workspace, frontend=RecordingFrontend(["allow"]))
+            try:
+                session = await application.open_session("mcp-retained")
+                self.assertTrue(any(s["source"] == "mcp" for s in session.mode["resources"]["skills"]))
+                await session.prompt("First request")
+                database = application.store.database_path(session.id)
+                await application.mcp_manager.set_server_enabled("docs", False)
+                self.assertFalse(any(s["source"] == "mcp" for s in session.mode["resources"]["skills"]))
+                await session.prompt("Second request")
+                await application.mcp_manager.set_server_enabled("docs", True)
+                self.assertTrue(any(s["source"] == "mcp" for s in session.mode["resources"]["skills"]))
+                await application.mcp_manager.reload()
+                await session.prompt("Third request")
+                self.assertEqual(application.store.database_path(session.id), database)
+                state = await session.agent.aget_state({"configurable": {"thread_id": session.id}})
+                self.assertTrue(any(s["name"].startswith("mcp-") for s in state.values["skills_metadata"]))
+                prompts = [m.content for m in state.values["messages"] if isinstance(m, HumanMessage)]
+                self.assertEqual(prompts, ["First request", "Second request", "Third request"])
+            finally:
+                await self.stop(application)
+
     async def start(self, workspace: Path, *, model=None, frontend=None, rubric=False, todos=False) -> MiraApplication:
         model = model or WorkflowModel()
         settings = normalize_settings({"system": {"planning_todos": {"enabled": True}}} if todos else {})

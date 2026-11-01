@@ -85,7 +85,7 @@ def resources_table(title: str, items: Sequence[Mapping[str, str]]) -> Table:
     for item in items:
         table.add_row(
             str(item.get("name") or "-"),
-            str(item.get("source") or "-"),
+            f"mcp: {item['server']}" if item.get("source") == "mcp" and item.get("server") else str(item.get("source") or "-"),
             str(item.get("replaces") or "-"),
             str(item.get("path") or "-"),
         )

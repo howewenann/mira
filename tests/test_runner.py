@@ -751,6 +751,19 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         await runner.run_turn(rebuilt, "After reload", renderer, "thread-1")
         self.assertIsNone(rebuilt.payloads[0]["skills_metadata"])
 
+    async def test_resumed_checkpoint_defers_skill_refresh_until_next_new_turn(self) -> None:
+        agent = FakeAgent([FakeStream(output={"messages": []}), FakeStream(output={"messages": []})])
+        agent.mira_skills_refreshed_threads = set()
+        renderer = RunTurnRenderer()
+
+        await runner.run_turn(agent, "", renderer, "retained", resume_incomplete=True)
+        self.assertNotIn("retained", agent.mira_skills_refreshed_threads)
+        await runner.run_turn(agent, "Next", renderer, "retained")
+
+        self.assertIsNone(agent.payloads[0])
+        self.assertIsNone(agent.payloads[1]["skills_metadata"])
+        self.assertIn("retained", agent.mira_skills_refreshed_threads)
+
     async def test_always_allow_translates_and_skips_same_tool_for_rest_of_turn(self) -> None:
         first = {
             "action_requests": [{"name": "write_file", "args": {"file_path": "one.txt"}}]

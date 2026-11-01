@@ -126,7 +126,7 @@ def _success_text(snapshot: dict[str, Any], counts: dict[str, Any]) -> Text:
         return Text.assemble(
             (f"✓ {name} · Ready", "bold green"),
             "\n  ",
-            (_capability_summary(tools, prompts, resources), "#b8c7cc"),
+            (_capability_summary(tools, prompts, resources, int(row.get("skill_count") or 0)), "#b8c7cc"),
         )
     usable = int(counts.get("usable") or 0)
     configured = int(counts.get("configured") or 0)
@@ -135,17 +135,18 @@ def _success_text(snapshot: dict[str, Any], counts: dict[str, Any]) -> Text:
     resources = int(counts.get("resources") or 0)
     return Text(
         f"✓ MCP {usable}/{configured} available · "
-        f"{_capability_summary(tools, prompts, resources)}",
+        f"{_capability_summary(tools, prompts, resources, int(counts.get('skills') or 0))}",
         style="bold green",
     )
 
 
-def _capability_summary(tools: int, prompts: int, resources: int) -> str:
+def _capability_summary(tools: int, prompts: int, resources: int, skills: int = 0) -> str:
     return " · ".join(
         (
             f"{tools} {_noun(tools, 'tool')}",
             f"{prompts} {_noun(prompts, 'prompt')}",
             f"{resources} {_noun(resources, 'resource')}",
+            f"{skills} {_noun(skills, 'skill')}",
         )
     )
 

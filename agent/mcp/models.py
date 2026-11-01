@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_core.messages import BaseMessage
+
+if TYPE_CHECKING:
+    from agent.mcp.skills import MCPSkill
 
 MCPStatus = Literal[
     "Available",
@@ -87,8 +90,10 @@ class MCPServerState:
     tool_metadata: list[dict[str, str]] = field(default_factory=list)
     prompts: list[PromptSpec] | None = None
     resources: list[MCPResource] | None = None
+    skills: list[MCPSkill] | None = None
     prompt_error: str = ""
     resource_error: str = ""
+    skill_error: str = ""
     session: Any = None
     startup_started_at: float | None = None
     latest_stderr_line: str = ""

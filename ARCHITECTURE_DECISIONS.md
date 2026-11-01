@@ -1187,7 +1187,9 @@ historical inspection behavior changes.
 
 ## MCP integration
 
-MIRA manages configured server lifecycles and projects each server's tools, prompts, and resources into the current agents and UI. LangChain and FastMCP handle the protocol connection.
+MIRA manages configured server lifecycles and projects each server's tools, prompts,
+resources, and skills into the current agents and UI. LangChain and FastMCP handle
+the protocol connection.
 
 ### Server lifecycle and capabilities
 
@@ -1207,12 +1209,49 @@ both enters and exits the adapter session context; UI workers request lifecycle
 transitions but never directly close SDK task groups or cancellation scopes.
 Start and restart discover every capability advertised by the initialized MCP
 session before publishing `Available` or `Partially available`. An absent
-tools, prompts, or resources capability is optional and is cached as an empty
+tools, prompts, resources, or Skills extension capability is optional and is cached as an empty
 result without an invalid RPC or degraded server health. A failed advertised
 capability makes the overall projection partially available with its concrete
 error.
 
 Panel expansion reads those completed caches and only changes presentation.
+
+### MCP-hosted skills
+
+**Decision:** Both transports negotiate FastMCP's native `SkillsClientExtension`
+(SEP-2640). Discovery uses `list_skills()` and `get_skill()` independently of
+ordinary resource discovery. `agent/mcp/skills.py` mounts a read-only backend at
+`/mira-mcp/`; DeepAgents' existing `SkillsMiddleware` remains the only discovery,
+progressive-disclosure, and pinning implementation. Ordinary Resources still
+require explicit user attachments. Skills are server-approved instruction
+packages whose supporting files can be read through normal `read_file` paths.
+They do not require `include_tools` or `allowed-tools`, and confer no tool access.
+
+Connection-time discovery snapshots verified `SKILL.md` bytes in memory, then
+projects only their frontmatter names in the backend view. This lets synchronous
+resource assembly and asynchronous agent discovery use the same native parser
+without nesting event loops. Supporting files are fetched asynchronously on
+demand. Static manifests require exact raw-byte SHA-256 and size matches before
+projection; dynamic manifests use scoped resource reads without invented hashes.
+Files are limited to 10 MiB, discovery snapshots to 16 MiB per server. Malformed
+entries produce diagnostics while other entries and capabilities remain usable.
+
+MCP skill names combine a readable server label, a deterministic digest of the
+server/name pair, and the original skill name, within Agent Skills' 64-character
+limit. This avoids collisions between servers and ordinary local names. An exact
+collision with a local name skips the MCP entry with a diagnostic. Local and
+bundled precedence is unchanged. No remote files are copied into `.mira/skills`.
+The server cache owns the inventory; resource displays and slash commands are
+projections of the same `SkillsMiddleware` discovery used by the agents.
+
+Backend reads check current server availability and connection state, including
+after awaited reads. Disable, restart, trust reset, and reload revoke old access.
+The backend follows the manager's current server cache across reloads. Lifecycle
+changes advance an in-memory generation; the normal turn runner clears native
+`skills_metadata` on each affected thread's next turn. Agent rebuilds also refresh
+each thread once, including restored checkpoints. Histories and checkpoints stay
+intact. Discovery snapshots refresh on reconnect/restart or runtime reload;
+live server skill-list notifications are not subscribed to.
 
 ### Authentication, configuration, and elicitation
 

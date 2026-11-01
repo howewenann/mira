@@ -2433,6 +2433,7 @@ class MiraApp(App[None]):
             self.workspace,
             settings=config.get("settings"),
             config=None,
+            mcp_manager=self.mcp_manager,
         )
         if resources.subagent_discovery.complete and config.get("settings_valid", True):
             from config.settings import prune_subagent_settings, save_settings
@@ -4613,6 +4614,7 @@ class MiraApp(App[None]):
             self.workspace,
             settings=self.config.get("settings"),
             config=None,
+            mcp_manager=self.mcp_manager,
         )
         assignment_issues = [
             *active_model_issues(self.config),
@@ -4666,6 +4668,7 @@ class MiraApp(App[None]):
             self.workspace,
             settings=config.get("settings"),
             config=config,
+            mcp_manager=self.mcp_manager,
         )
         self._last_action_resources = action_resources
         plan_resources = build_resources(
@@ -4675,6 +4678,7 @@ class MiraApp(App[None]):
             enable_execute=False,
             config=config,
             subagent_discovery=action_resources.subagent_discovery,
+            mcp_manager=self.mcp_manager,
         )
 
         agent = build_agent(

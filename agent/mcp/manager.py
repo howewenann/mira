@@ -25,6 +25,7 @@ from agent.mcp.integration import MiraMCPIntegration
 from agent.mcp.models import MCPResource, MCPServerState, PromptArgument, PromptSpec
 from agent.mcp.prompts import PromptRegistry
 from agent.mcp.runtime import MCPServerRuntime
+from agent.mcp.skills import MAX_DISCOVERY_BYTES, discover_skill
 from config.settings import (
     load_settings,
     mcp_server_always_allow,
@@ -77,12 +78,22 @@ class MCPManager:
         self._activity_batch: _LifecycleBatch | None = None
         self._batch_sequence = 0
         self._operation_lock = asyncio.Lock()
+        self._skills_generation = 0
         self._runtimes: dict[str, MCPServerRuntime] = {}
         self.read_tool = self._build_read_tool()
 
     @property
     def issues(self) -> list[Any]:
         return list(self.configuration.issues)
+
+    @property
+    def skills_generation(self) -> tuple[int, tuple[str, ...]]:
+        """Include lost transports so cached checkpoint metadata also expires."""
+        connected = tuple(
+            state.name for state in self.servers.values()
+            if state.skills and state.usable and state.session is not None and state.session.is_connected()
+        )
+        return self._skills_generation, connected
 
     @property
     def configured_count(self) -> int:
@@ -145,6 +156,7 @@ class MCPManager:
     async def reload(self) -> None:
         """Cleanly replace configuration, runtimes, and capability caches."""
         await _complete_lifecycle(self._reload(), name="mcp-reload")
+        await self._notify_changed()
 
     async def _reload(self) -> None:
         async with self._operation_lock:
@@ -323,6 +335,7 @@ class MCPManager:
             await self._discover_tools(state)
             await self._discover_server_prompts(state)
             await self._discover_server_resources(state)
+            await self._discover_server_skills(state)
             state.status = "Partially available" if state.error else "Available"
             self._emit_active_batch()
         except BaseException as error:
@@ -425,6 +438,39 @@ class MCPManager:
     async def discover_prompts(self, server_name: str | None = None) -> None:
         states = self._discovery_states(server_name)
         await asyncio.gather(*(self._discover_server_prompts(state) for state in states))
+
+    async def _discover_server_skills(self, state: MCPServerState) -> None:
+        self._skills_generation += 1
+        state.skills = []
+        state.skill_error = ""
+        supports = getattr(state.session, "supports_skills", None)
+        try:
+            if not callable(supports) or not supports():
+                return
+            summaries = await state.session.list_skills()
+            if len(summaries) > 1000:
+                raise ValueError("Too many MCP skills")
+            names: set[str] = set()
+            total_bytes = 0
+            for summary in summaries:
+                try:
+                    skill = await discover_skill(state.session, state.name, summary)
+                    if skill.name in names:
+                        raise ValueError("Duplicate MCP skill identity")
+                    total_bytes += len(skill.instructions)
+                    if total_bytes > MAX_DISCOVERY_BYTES:
+                        raise ValueError("MCP skill discovery exceeds size limit")
+                    names.add(skill.name)
+                    state.skills.append(skill)
+                except Exception as error:
+                    state.skill_error = _join_error(state.skill_error, _concise_error(error))[:_MAX_STARTUP_ERROR]
+                if total_bytes > MAX_DISCOVERY_BYTES:
+                    break
+        except Exception as error:
+            state.skill_error = _concise_error(error)
+        if state.skill_error:
+            self._mark_partial(state, f"skills: {state.skill_error}")
+            get_diagnostics_logger().warning("MCP skills %s: %s", state.name, state.skill_error)
 
     async def _discover_server_prompts(self, state: MCPServerState) -> None:
         lock = self._prompt_locks.setdefault(state.name, asyncio.Lock())
@@ -579,6 +625,7 @@ class MCPManager:
         return read_mcp_resource
 
     def _remove_server_capabilities(self, state: MCPServerState) -> None:
+        self._skills_generation += 1
         for item in state.tool_metadata:
             self._tool_owners.pop(item.get("name", ""), None)
         state.tools = []
@@ -587,8 +634,10 @@ class MCPManager:
             self.resource_registry.pop(token, None)
         state.prompts = None
         state.resources = None
+        state.skills = None
         state.prompt_error = ""
         state.resource_error = ""
+        state.skill_error = ""
 
     def _discovery_states(self, server_name: str | None) -> list[MCPServerState]:
         if server_name is not None:
@@ -711,6 +760,7 @@ class MCPManager:
                     "tool_count": len(state.tools) if state is not None else 0,
                     "prompt_count": len(state.prompts or ()) if state is not None else 0,
                     "resource_count": len(state.resources or ()) if state is not None else 0,
+                    "skill_count": len(state.skills or ()) if state is not None else 0,
                 }
             )
         ready = sum(
@@ -732,6 +782,7 @@ class MCPManager:
         tools = sum(len(state.tools) for state in self.servers.values())
         prompts = sum(len(state.prompts or ()) for state in self.servers.values())
         resources = sum(len(state.resources or ()) for state in self.servers.values())
+        skills = sum(len(state.skills or ()) for state in self.servers.values())
         attempted = len(rows) - disabled
         successful = bool(batch.finished and attempted and ready == attempted)
         return {
@@ -755,6 +806,7 @@ class MCPManager:
                 "tools": tools,
                 "prompts": prompts,
                 "resources": resources,
+                "skills": skills,
             },
         }
 

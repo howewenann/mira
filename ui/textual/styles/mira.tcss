@@ -652,7 +652,7 @@ MCPPanelScreen {
 }
 .mcp-capabilities > CollapsibleTitle {
     width: 1fr;
-    height: 1;
+    height: auto;
     padding: 0;
     color: #eef7f8;
 }
