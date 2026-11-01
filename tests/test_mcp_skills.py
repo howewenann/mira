@@ -29,7 +29,7 @@ from core.application.app import mcp_snapshot
 from core.execution.runner import run_turn
 from tests.test_mcp import write_config
 from tests.test_runner import RunTurnRenderer
-from ui.textual.widgets.mcp_panel import capability_summary, server_detail_sections
+from ui.textual.widgets.mcp_panel import capability_counts, capability_summary, server_detail_sections, visible_fixed_resources
 
 
 def write_skill(root: Path, name: str = "review", description: str = "Review files.") -> bytes:
@@ -76,6 +76,12 @@ class MCPNativeSkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(state.tools), 1)
         self.assertEqual(len(state.prompts), 1)
         self.assertTrue(state.resources)
+        registry = dict(manager.resource_registry)
+        manifest_uris = {resource.uri for skill in state.skills for resource in skill.manifest.resources}
+        self.assertTrue(any(resource.uri in manifest_uris for resource in state.resources))
+        visible = visible_fixed_resources(state)
+        self.assertTrue(all(resource.uri not in manifest_uris for resource in visible))
+        self.assertEqual(dict(capability_counts(state))["Resources"], str(len(visible)))
         self.assertEqual((await state.tools[0].ainvoke({"value": "ok"}))[0]["text"], "ok")
         self.assertIn("Hello Ada", str(await manager.prompt_registry.mcp["/mcp__docs__greeting"].resolver({"name": "Ada"})))
         resources = build_resources(self.workspace, create_examples=False, mcp_manager=manager)
@@ -117,6 +123,7 @@ class MCPNativeSkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Skills  1", capability_summary(state).plain)
         self.assertIn(item["name"], dict(server_detail_sections(state))["Skills"])
         self.assertEqual(mcp_snapshot(manager)["capabilities"]["skills"], 1)
+        self.assertEqual(manager.resource_registry, registry)
 
     async def test_unapproved_and_no_extension_servers(self):
         manager = await self.manager(mode="no-skills", approve=False)

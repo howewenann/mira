@@ -602,10 +602,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
 
     async def test_mcp_skills_inventory_has_native_disclosure_and_no_initial_focus(self) -> None:
+        from agent.mcp.models import MCPResource
         from tests.test_mcp import PanelManager
 
         manager = PanelManager()
-        manager.servers["one"].skills = [SimpleNamespace(name="mcp-docs-review", description="Review remote files.")]
+        entry = "skill://docs/review/SKILL.md"
+        manager.servers["one"].resources = [MCPResource(uri, "one", uri) for uri in (entry, "ui://docs/widget.html")]
+        manager.servers["one"].skills = [SimpleNamespace(
+            name="mcp-docs-review", description="Review remote files.",
+            manifest=SimpleNamespace(uri=entry, resources="dynamic"),
+        )]
         app = make_app(mcp_manager=manager)
         async with app.run_test(size=(62, 30)) as pilot:
             await pilot.click("#mcp-status-button")
@@ -616,6 +622,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             disclosure = screen.query_one("#mcp-details-one", Collapsible)
             title = disclosure.query_one("CollapsibleTitle")
             self.assertIn("Skills  1", str(title.render()))
+            self.assertIn("Resources  1", str(title.render()))
             height = title.region.height
             await pilot.hover("#mcp-details-one > CollapsibleTitle")
             await pilot.pause()
@@ -629,6 +636,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             text = "\n".join(str(section.render()) for section in disclosure.query(".mcp-detail-section"))
             self.assertIn("mcp-docs-review", text)
             self.assertIn("Review remote files.", text)
+            self.assertIn("ui://docs/widget.html", text)
+            self.assertNotIn(entry, text)
 
     async def test_mcp_cards_use_native_disclosure_around_inventories_only(self) -> None:
         from tests.test_mcp import PanelManager

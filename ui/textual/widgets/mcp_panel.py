@@ -15,6 +15,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Collapsible, Static
 
+from agent.mcp.models import MCPResource
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 
 
@@ -209,9 +210,22 @@ class MCPPanelScreen(ModalScreen[None]):
         self.dismiss()
 
 
+def visible_fixed_resources(state: Any) -> list[MCPResource] | None:
+    """Hide only exact URIs owned by successfully discovered skills in this panel."""
+    if not state.resources:
+        return state.resources
+    skill_uris: set[str] = set()
+    for skill in getattr(state, "skills", None) or ():
+        skill_uris.add(skill.manifest.uri)
+        if isinstance(skill.manifest.resources, list):
+            skill_uris.update(resource.uri for resource in skill.manifest.resources)
+    return [resource for resource in state.resources if resource.uri not in skill_uris]
+
+
 def capability_counts(state: Any) -> tuple[tuple[str, str], ...]:
     prompts = "-" if state.prompts is None else str(len(state.prompts))
-    resources = "-" if state.resources is None else str(len(state.resources))
+    fixed_resources = visible_fixed_resources(state)
+    resources = "-" if fixed_resources is None else str(len(fixed_resources))
     return (
         ("Tools", str(len(state.tools))),
         ("Prompts", prompts),
@@ -286,11 +300,12 @@ def mcp_summary_symbol(states: Iterable[Any], *, spinner: int = 0) -> str:
 def server_detail_sections(state: Any) -> list[tuple[str, str]]:
     tools = [f"  {item.get('original_name') or item.get('name')}" for item in state.tool_metadata]
     prompts = [f"  {item.command}    {item.description}" for item in (state.prompts or [])]
-    resources = [f"  {item.uri}    {item.description or item.name}" for item in (state.resources or [])]
+    fixed_resources = visible_fixed_resources(state)
+    resources = [f"  {item.uri}    {item.description or item.name}" for item in (fixed_resources or [])]
     sections = [
         ("Tools", "\n".join(tools) if tools else "  No tools"),
         ("Prompts", _discovery_content(prompts, state.prompts, "prompts")),
-        ("Fixed resources", _discovery_content(resources, state.resources, "resources")),
+        ("Fixed resources", _discovery_content(resources, fixed_resources, "resources")),
         ("Skills", _discovery_content(
             [f"  {item.name}    {item.description}" for item in (getattr(state, "skills", None) or [])],
             getattr(state, "skills", None), "skills")),

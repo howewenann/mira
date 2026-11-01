@@ -74,6 +74,7 @@ from session.context import normalize_events, session_mcp_attachments
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.textual.widgets.mcp_panel import (
     MCPPanelScreen,
+    capability_counts,
     capability_metric,
     capability_summary,
     controls_for,
@@ -81,6 +82,7 @@ from ui.textual.widgets.mcp_panel import (
     server_detail_sections,
     status_badge,
     status_class,
+    visible_fixed_resources,
 )
 from ui.textual.widgets import PromptBox, PromptPanel
 
@@ -1752,6 +1754,61 @@ class PanelApp(App[None]):
 
 
 class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
+    def test_static_skill_resources_are_hidden_only_by_exact_manifest_uri(self) -> None:
+        state = PanelManager().servers["one"]
+        entry = "https://example.test/review/SKILL.md"
+        helper = "https://example.test/review/references/guide.md"
+        ordinary = ["ui://demo/widget.html", "skill://unknown/SKILL.md", helper + "?copy=1"]
+        state.resources = [MCPResource(uri, "one", uri) for uri in [entry, helper, *ordinary]]
+        original = list(state.resources)
+        state.skills = [SimpleNamespace(
+            name="review", description="Review files.",
+            manifest=SimpleNamespace(uri=entry, resources=[SimpleNamespace(uri=entry), SimpleNamespace(uri=helper)]),
+        )]
+        state.skill_error = "Another skill failed discovery."
+
+        self.assertEqual([item.uri for item in visible_fixed_resources(state)], ordinary)
+        sections = dict(server_detail_sections(state))
+        for uri in (entry, helper):
+            self.assertNotIn(f"  {uri}    ", sections["Fixed resources"])
+        for uri in ordinary:
+            self.assertIn(uri, sections["Fixed resources"])
+        self.assertIn("review", sections["Skills"])
+        self.assertEqual(dict(capability_counts(state)), {"Tools": "0", "Prompts": "0", "Resources": "3", "Skills": "1"})
+        self.assertEqual(state.resources, original)
+
+    def test_dynamic_skill_hides_only_its_known_entry(self) -> None:
+        state = PanelManager().servers["one"]
+        entry = "skill://demo/review/SKILL.md"
+        supporting = "skill://demo/review/references/live.md"
+        state.resources = [MCPResource(uri, "one", uri) for uri in (entry, supporting)]
+        state.skills = [SimpleNamespace(
+            name="review", description="Review files.",
+            manifest=SimpleNamespace(uri=entry, resources="dynamic"),
+        )]
+
+        self.assertEqual([item.uri for item in visible_fixed_resources(state)], [supporting])
+        self.assertEqual(dict(capability_counts(state))["Resources"], "1")
+        self.assertIn(supporting, dict(server_detail_sections(state))["Fixed resources"])
+        self.assertNotIn(entry, dict(server_detail_sections(state))["Fixed resources"])
+
+    def test_failed_or_unavailable_skill_discovery_preserves_resources(self) -> None:
+        state = PanelManager().servers["one"]
+        resource = MCPResource("entry", "one", "skill://demo/review/SKILL.md")
+        for skills in (None, []):
+            with self.subTest(skills=skills):
+                state.skills = skills
+                state.skill_error = "Skills discovery failed."
+                state.resources = [resource]
+                self.assertEqual(visible_fixed_resources(state), [resource])
+                self.assertEqual(dict(capability_counts(state))["Resources"], "1")
+                self.assertIn(resource.uri, dict(server_detail_sections(state))["Fixed resources"])
+        for resources, count, content in ((None, "-", "  Not loaded"), ([], "0", "  No resources")):
+            state.resources = resources
+            self.assertEqual(visible_fixed_resources(state), resources)
+            self.assertEqual(dict(capability_counts(state))["Resources"], count)
+            self.assertEqual(dict(server_detail_sections(state))["Fixed resources"], content)
+
     def test_recent_stderr_is_bounded_inside_expanded_detail_sections(self) -> None:
         state = PanelManager().servers["one"]
         state.stderr_tail = "old\n" + ("diagnostic\n" * 1200)
