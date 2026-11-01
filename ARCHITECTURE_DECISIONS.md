@@ -43,6 +43,8 @@ behavior changes; update this document when a change alters a decision.
   - [Workflow execution and durable history](#workflow-execution-and-durable-history)
 - [MCP integration](#mcp-integration)
   - [Server lifecycle and capabilities](#server-lifecycle-and-capabilities)
+  - [MCP-hosted skills](#mcp-hosted-skills)
+  - [MCP skill checkpoint refresh](#mcp-skill-checkpoint-refresh)
   - [Authentication, configuration, and elicitation](#authentication-configuration-and-elicitation)
 - [Tracing and diagnostics](#tracing-and-diagnostics)
   - [Error reports and the diagnostic sidecar](#error-reports-and-the-diagnostic-sidecar)
@@ -1209,10 +1211,10 @@ both enters and exits the adapter session context; UI workers request lifecycle
 transitions but never directly close SDK task groups or cancellation scopes.
 Start and restart discover every capability advertised by the initialized MCP
 session before publishing `Available` or `Partially available`. An absent
-tools, prompts, resources, or Skills extension capability is optional and is cached as an empty
-result without an invalid RPC or degraded server health. A failed advertised
-capability makes the overall projection partially available with its concrete
-error.
+tools, prompts, resources, or Skills extension capability is optional and is
+cached as an empty result without an invalid RPC or degraded server health. A
+failed advertised capability makes the overall projection partially available
+with its concrete error.
 
 Panel expansion reads those completed caches and only changes presentation.
 
@@ -1227,11 +1229,23 @@ require explicit user attachments. Skills are server-approved instruction
 packages whose supporting files can be read through normal `read_file` paths.
 They do not require `include_tools` or `allowed-tools`, and confer no tool access.
 
-Connection-time discovery snapshots verified `SKILL.md` bytes in memory, then
-projects only their frontmatter names in the backend view. This lets synchronous
-resource assembly and asynchronous agent discovery use the same native parser
-without nesting event loops. Supporting files are fetched asynchronously on
-demand. Static manifests require exact raw-byte SHA-256 and size matches before
+The [user-facing lifecycle](docs/advanced.md#mcp-skills-lifecycle) shows the
+connection, assembly, and file-read sequence. `MCPManager` awaits advertised
+skill discovery during connection startup, before resources are constructed.
+`discover_skill()` fetches and validates `SKILL.md` and retains a snapshot in
+the server's capability cache. It projects only the frontmatter name in the
+backend view, after verification; the server's original file is unchanged.
+
+`build_resources()` mounts `MCPSkillsBackend` in `CompositeBackend`, then calls
+`load_skills()` synchronously. The adapter's synchronous `ls()` and
+`download_files()` expose the cached instructions to native `SkillsMiddleware`.
+The agent's asynchronous discovery reads that same cache. This boundary avoids
+`asyncio.run()` or `run_until_complete()` inside the application's event loop
+and keeps UI and agent inventories on the same native parser. Supporting files
+are not prefetched: `adownload_files()` and `aread()` fetch them asynchronously
+through the live MCP session when requested.
+
+Static manifests require exact raw-byte SHA-256 and size matches before
 projection; dynamic manifests use scoped resource reads without invented hashes.
 Files are limited to 10 MiB, discovery snapshots to 16 MiB per server. Malformed
 entries produce diagnostics while other entries and capabilities remain usable.
@@ -1246,12 +1260,52 @@ projections of the same `SkillsMiddleware` discovery used by the agents.
 
 Backend reads check current server availability and connection state, including
 after awaited reads. Disable, restart, trust reset, and reload revoke old access.
-The backend follows the manager's current server cache across reloads. Lifecycle
-changes advance an in-memory generation; the normal turn runner clears native
-`skills_metadata` on each affected thread's next turn. Agent rebuilds also refresh
-each thread once, including restored checkpoints. Histories and checkpoints stay
-intact. Discovery snapshots refresh on reconnect/restart or runtime reload;
-live server skill-list notifications are not subscribed to.
+The backend follows the manager's current server cache across reloads. Instruction
+snapshots refresh on reconnect/restart or runtime reload; live server skill-list
+notifications are not subscribed to.
+
+**Where to check:** [MCP discovery](agent/mcp/manager.py),
+[backend and validation](agent/mcp/skills.py),
+[resource assembly](agent/resources/builder.py), and
+[native skill inventory projection](agent/resources/skills.py).
+
+### MCP skill checkpoint refresh
+
+**Decision:** Invalidate DeepAgents' native `skills_metadata` through ordinary
+new-turn input, preserving checkpoint messages and execution state. The
+[advanced guide's numbered timeline](docs/advanced.md#checkpoint-refresh-for-mcp-skills)
+explain the visible refresh/reuse cycle.
+
+The factory attaches the MCP manager and its current `skills_generation` to
+each constructed agent, and initializes `mira_skills_refreshed_threads` as an
+empty set. A restored conversation therefore refreshes on its first normal
+turn with that agent, even if its checkpoint already contains skill metadata.
+
+At turn entry, the runner compares the manager's generation with the agent's
+last observed value. `skills_generation` combines a lifecycle counter with the
+currently connected servers that have skills, so transport loss also expires
+metadata. A change clears the refreshed-thread set and updates the observed
+value. This is a local availability check, not MCP rediscovery on every turn.
+
+For a new-turn dictionary payload whose thread is absent from that set, the
+runner supplies `skills_metadata = None`. Native `SkillsMiddleware` then loads
+metadata from the current backend view, including cached MCP `SKILL.md` files.
+After a successful stream pass with that refresh input, the runner records the
+thread. Subsequent normal turns reuse checkpointed metadata until the generation
+changes or the agent is rebuilt. Each thread gets its own first-turn refresh.
+
+Incomplete execution resumes keep their native `None` input; HITL resumes keep
+their `Command(resume=...)` input. Neither is replaced by a new discovery input,
+and neither marks a pending metadata refresh as completed. That refresh waits
+for the next normal new turn. Only skill metadata is invalidated: conversation
+messages, checkpoint history, and pending execution semantics are preserved.
+This cache does not prefetch supporting files, which remain remote reads.
+
+**Where to check:** [factory attachments](agent/factory.py),
+[generation calculation](agent/mcp/manager.py),
+[turn input and refresh tracking](core/execution/runner.py),
+[resume coverage](tests/test_runner.py), and
+[protocol and checkpoint coverage](tests/test_mcp_skills.py).
 
 ### Authentication, configuration, and elicitation
 

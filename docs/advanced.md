@@ -15,6 +15,8 @@ the links to [Architecture Decisions](../ARCHITECTURE_DECISIONS.md).
 - [MCP servers, tools, resources, and prompts](#mcp-servers-tools-resources-and-prompts)
   - [Configure and approve a server](#configure-and-approve-a-server)
   - [Use discovered capabilities](#use-discovered-capabilities)
+  - [MCP Skills Lifecycle](#mcp-skills-lifecycle)
+  - [Checkpoint refresh for MCP Skills](#checkpoint-refresh-for-mcp-skills)
 - [Tools and execution environments](#tools-and-execution-environments)
   - [Choose a custom tool runtime](#choose-a-custom-tool-runtime)
   - [Enable shell execution and understand approval](#enable-shell-execution-and-understand-approval)
@@ -107,7 +109,7 @@ prompt templates; it does not load a memory or tool.
 ## MCP servers, tools, resources, and prompts
 
 MCP connects MIRA to separately configured servers. A server can advertise
-tools, reusable prompts, and fixed resources; it need not advertise all three.
+tools, reusable prompts, fixed resources, and skills; each capability is optional.
 MIRA discovers supported capabilities when the connection starts, then exposes
 the allowed results to the current mode. The [MCP architecture](../ARCHITECTURE_DECISIONS.md#mcp-integration)
 explains lifecycle and trust boundaries.
@@ -178,10 +180,69 @@ dynamic resources are read within their skill directory without hash checks.
 Files over 10 MiB are rejected. Discovery errors appear in the MCP panel while
 working capabilities remain available.
 
-Restart a server or use `/reload-runtime` to refresh its skill instructions and
-metadata. Existing conversations discover the updated inventory on their next
-turn. Supporting files are read on demand; dynamic manifests cannot enumerate
-supporting filenames, so use paths referenced by the skill instructions.
+### MCP Skills Lifecycle
+
+MIRA loads MCP skills in two stages: it first fetches their instructions from the
+server, then makes them available through the same skill system as local skills.
+
+1. MIRA connects asynchronously to an approved MCP server.
+2. FastMCP discovers advertised skills through `skills/list` and `skills/get`.
+3. MIRA downloads each `SKILL.md`, validates it, and caches its content in memory.
+4. MIRA synchronously builds its resources and mounts the MCP Skills virtual
+   backend at `/mira-mcp/`.
+5. DeepAgents' existing `SkillsMiddleware` discovers skills from those cached
+   files, alongside local and bundled skills.
+6. The skills become available through `/skills`, `/skill__...`, and ordinary
+   `read_file` paths. Full instructions are disclosed when read or pinned.
+7. Supporting files stay on the server and are fetched asynchronously on demand.
+
+The prefetch bridges two kinds of work: MCP requests are asynchronous, while
+MIRA's DeepAgents resource assembly is synchronous. Caching `SKILL.md` first
+lets assembly read it immediately, without nesting an event loop inside an
+already running loop. Only `SKILL.md` is prefetched; supporting files remain
+remote. For dynamic manifests, use supporting paths referenced by the skill
+instructions because the manifest cannot enumerate their filenames.
+
+Restart a server or use `/reload-runtime` to fetch updated skill instructions
+and manifests. Editing a server skill does not trigger automatic rediscovery.
+See the [implementation decisions](../ARCHITECTURE_DECISIONS.md#mcp-hosted-skills)
+for integrity checks, identities, and ownership.
+
+### Checkpoint refresh for MCP Skills
+
+DeepAgents saves discovered skill metadata in the conversation checkpoint.
+MIRA **checks the generation at the start of each normal turn** to decide
+whether that metadata needs refreshing. It does **not rediscover skills on
+every turn** or request `skills/list` and `skills/get` each time you send a message.
+
+For example, follow one conversation through these steps:
+
+1. **First new turn after agent construction:** MIRA sends
+   `skills_metadata = None`, asking `SkillsMiddleware` to refresh the skill list.
+   MCP entries come from the prefetched `SKILL.md` cache. MIRA then remembers
+   this conversation in `mira_skills_refreshed_threads`, its set of conversations
+   already refreshed for that agent. This also applies when reopening a checkpoint.
+2. **Next turn, nothing changed:** MIRA checks `skills_generation`, the value
+   identifying current MCP skill availability. Since it has not changed and this
+   conversation already refreshed, DeepAgents reuses the checkpointed metadata.
+3. **A server restarts or is disabled:** The generation changes. When MIRA sees
+   the change, it clears the set of refreshed conversations. Rebuilding an agent
+   also starts that set empty. Lost connections can trigger a refresh too.
+4. **First new turn after that change:** MIRA sends `skills_metadata = None`
+   again. The middleware refreshes from the current backend view, picking up
+   updated skills or excluding unavailable servers, then MIRA remembers the
+   conversation as refreshed again.
+5. **Following turns, no further changes:** MIRA keeps checking the generation
+   but reuses the metadata. It does not download `SKILL.md` again just because a
+   new turn starts; server connection/restart or runtime reload performs that work.
+
+Refreshing metadata does not clear conversation messages or checkpoint history.
+An incomplete-turn resume continues its saved execution with the existing
+resume semantics; it does not become a new discovery turn. If a refresh is
+pending, it remains pending until the next normal new turn. Supporting-file
+reads remain asynchronous requests to the server, independent of this metadata
+cache. See [checkpoint refresh details](../ARCHITECTURE_DECISIONS.md#mcp-skill-checkpoint-refresh)
+for the runner and factory code paths.
 
 ## Tools and execution environments
 
