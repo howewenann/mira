@@ -1274,7 +1274,7 @@ notifications are not subscribed to.
 **Decision:** Invalidate DeepAgents' native `skills_metadata` through ordinary
 new-turn input, preserving checkpoint messages and execution state. The
 [advanced guide's numbered timeline](docs/advanced.md#checkpoint-refresh-for-mcp-skills)
-explain the visible refresh/reuse cycle.
+explains the visible refresh/reuse cycle.
 
 The factory attaches the MCP manager and its current `skills_generation` to
 each constructed agent, and initializes `mira_skills_refreshed_threads` as an
