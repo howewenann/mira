@@ -20,6 +20,7 @@ from textual.widgets.option_list import Option
 from agent.middleware.file_references import file_reference_token
 from ui.textual.commands.help import command_help_entries, command_insertion
 from ui.textual.widgets.prompt_box import PromptBox
+from ui.textual.widgets.workspace_surfaces import ComposerActions
 
 
 MAX_VISIBLE_COMPLETIONS = 5
@@ -98,7 +99,7 @@ class PromptResizeHandle(Static):
         prompt = autocomplete.query_one(PromptBox)
         new_height = min(
             autocomplete.safe_prompt_height,
-            max(MIN_PROMPT_HEIGHT, requested_height),
+            max(autocomplete.minimum_prompt_height, requested_height),
         )
         prompt.styles.height = new_height
         event.stop()
@@ -121,6 +122,7 @@ class AutocompleteInput(Vertical):
         self,
         *,
         project_backend: Any = None,
+        compact: bool = False,
         tool_provider: Callable[[], list[dict[str, str]]] | None = None,
         subagent_provider: Callable[[], list[dict[str, str]]] | None = None,
         skill_registry_provider: Callable[[], Any] | None = None,
@@ -128,6 +130,7 @@ class AutocompleteInput(Vertical):
         **kwargs: Any,
     ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
+        self.compact = compact
         self.project_backend = project_backend
         self.tool_provider = tool_provider
         self.subagent_provider = subagent_provider
@@ -159,6 +162,8 @@ class AutocompleteInput(Vertical):
         yield OptionList(id="autocomplete-options", compact=True)
         yield PromptBox()
         yield PromptResizeHandle()
+        if self.compact:
+            yield ComposerActions()
 
     def on_mount(self) -> None:
         self.query_one(OptionList).display = False
@@ -179,27 +184,30 @@ class AutocompleteInput(Vertical):
             self.query_one(PromptResizeHandle).styles.width = max(1, width - 2)
 
     @property
+    def minimum_prompt_height(self) -> int:
+        return 3 if self.compact else MIN_PROMPT_HEIGHT
+
+    @property
     def safe_prompt_height(self) -> int:
         """Return the live prompt ceiling while preserving the main layout."""
         prompt = self.query_one(PromptBox)
         try:
-            chat = self.screen.query_one("#transcript-viewport")
-            main_panel = self.screen.query_one("#main-panel")
-            telemetry = self.screen.query_one("#telemetry-row")
-            inspector = self.screen.query_one("#inspector")
-        except NoMatches:
-            return max(MIN_PROMPT_HEIGHT, prompt.region.height)
-
-        bottom_space = main_panel.content_region.bottom - telemetry.region.bottom
-        # The viewport itself has no border. Preserve enough outer height for
-        # ChatLog's two border rows plus one visible transcript row. Inspector
-        # uses the same slot but collapses to its bordered two-row header.
-        minimum_viewport_height = 4 if inspector.display else 3
-        reclaimable_chat = chat.content_region.height - minimum_viewport_height
-        return max(
-            MIN_PROMPT_HEIGHT,
-            prompt.region.height + reclaimable_chat + bottom_space,
-        )
+            chat = self.parent.query_one("#chat-log")
+        except (NoMatches, AttributeError):
+            return max(self.minimum_prompt_height, prompt.region.height)
+        if self.compact:
+            # Use the pane's actual budget, even when an oversized editor has
+            # already squeezed the flexible transcript down to zero rows.
+            surrounding = sum(
+                child.region.height for child in self.parent.children
+                if child is not self and child is not chat and child.display
+            )
+            controls = sum(
+                child.region.height for child in self.children
+                if child is not prompt and not isinstance(child, PromptResizeHandle) and child.display
+            )
+            return max(3, self.parent.content_region.height - surrounding - controls - 3)
+        return max(self.minimum_prompt_height, prompt.region.height + chat.region.height - 3)
 
     def _shrink_prompt_to_fit(self, _screen: Any) -> None:
         """Shrink an oversized prompt after layout changes, without auto-growing."""
@@ -207,6 +215,7 @@ class AutocompleteInput(Vertical):
         safe_height = self.safe_prompt_height
         if prompt.region.height > safe_height:
             prompt.styles.height = safe_height
+        self._sync_resize_handle_width()
 
     def set_project_backend(self, backend: Any) -> None:
         """Switch discovery to a rebuilt project backend and clear old state."""

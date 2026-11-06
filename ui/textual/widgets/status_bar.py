@@ -6,12 +6,13 @@ from typing import Any
 
 from rich.table import Table
 from rich.text import Text
+from rich.cells import cell_len
 from textual import events
 from textual.app import ComposeResult
 from textual.message import Message
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
-from textual.widgets import Button, Static
+from textual.widgets import Static
 
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.shared.terminal.colors import (
@@ -110,29 +111,57 @@ class StatusBar(Horizontal):
 
 
 class TelemetryBar(Horizontal):
-    """Bottom model shortcut and compact session telemetry."""
-
-    def __init__(self, *, show_add_file: bool = False, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.show_add_file = show_add_file
+    """Passive effective runtime aliases and compact session telemetry."""
 
     def compose(self) -> ComposeResult:
-        if self.show_add_file:
-            yield Button("Add file", id="add-file-button")
-        yield Button("model: unset", id="model-settings-button")
+        with Horizontal(id="effective-models"):
+            yield Static("main: unset", id="effective-model-main", markup=False)
+            yield Static("│", id="effective-model-separator")
+            yield Static("btw: unset", id="effective-model-btw", markup=False)
         yield Static(id="telemetry-values")
 
     def set_state(
         self,
         *,
         model_name: str,
+        btw_name: str | None = None,
         dashboard: dict[str, Any] | None = None,
         turns: int = 0,
     ) -> None:
-        button = self.query_one("#model-settings-button", Button)
-        button.label = Text(f"model: {model_name or 'unset'}")
-        button.refresh(layout=True)
+        self.query_one("#effective-model-main", Static).update(f"main: {model_name or 'unset'}")
+        self.query_one("#effective-model-separator").display = btw_name is not None
+        btw = self.query_one("#effective-model-btw", Static)
+        btw.display = btw_name is not None
+        btw.update(f"btw: {btw_name or 'unset'}")
         self.query_one("#telemetry-values", Static).update(telemetry_values(dashboard, turns))
+        self.call_after_refresh(self._fit_aliases)
+
+    def on_resize(self, _event: events.Resize) -> None:
+        self.call_after_refresh(self._fit_aliases)
+
+    def _fit_aliases(self) -> None:
+        """Keep metrics visible and share remaining width between full aliases."""
+        if not self.is_mounted:
+            return
+        try:
+            main = self.query_one("#effective-model-main", Static)
+            btw = self.query_one("#effective-model-btw", Static)
+            available = self.query_one("#effective-models").content_region.width
+        except NoMatches:
+            # A deferred resize may run during teardown, or in a subclass
+            # which supplies its own telemetry projection (the v34 probe).
+            return
+        main_width = cell_len(str(main.render()))
+        if not btw.display:
+            main.styles.width = min(main_width, max(0, available))
+            return
+        btw_width = cell_len(str(btw.render()))
+        available = max(0, available - 3)
+        if main_width + btw_width > available:
+            main_width = min(main_width, max(0, available - min(btw_width, available // 2)))
+            btw_width = max(0, available - main_width)
+        main.styles.width = main_width
+        btw.styles.width = btw_width
 
 
 def telemetry_values(dashboard: dict[str, Any] | None, turns: int) -> Text:

@@ -18,12 +18,6 @@ from textual.widgets.option_list import Option
 SESSION_ROW_PREVIEW_WIDTH = 27
 
 
-class HistoryToggleButton(Button):
-    """Mouse toggle that never retains keyboard focus."""
-
-    can_focus = False
-
-
 class SessionActionButton(Button):
     """Mouse row action that never retains keyboard focus."""
 
@@ -164,7 +158,7 @@ class SessionActionMenuScreen(ModalScreen[str | None]):
     POPUP_WIDTH = 18
     POPUP_HEIGHT = 6
     BINDINGS = [("escape", "cancel", "Cancel")]
-    AUTO_FOCUS = "#session-action-options"
+    AUTO_FOCUS = ""
 
     def __init__(self, *, pinned: bool, anchor_x: int, anchor_y: int) -> None:
         super().__init__()
@@ -187,6 +181,22 @@ class SessionActionMenuScreen(ModalScreen[str | None]):
         x = max(0, min(self.anchor_x, self.size.width - self.POPUP_WIDTH))
         y = max(0, min(self.anchor_y, self.size.height - self.POPUP_HEIGHT))
         self.query_one("#session-action-popup").styles.offset = (x, y)
+        self.set_focus(None)
+        self.call_after_refresh(self.set_focus, None)
+
+    def on_click(self, event: Click) -> None:
+        if event.widget is self:
+            self.dismiss(None)
+
+    def on_key(self, event: Key) -> None:
+        options = self.query_one("#session-action-options", OptionList)
+        actions = {"up": options.action_cursor_up, "down": options.action_cursor_down,
+                   "enter": options.action_select, "home": options.action_first,
+                   "end": options.action_last}
+        if event.key in actions:
+            event.stop()
+            event.prevent_default()
+            actions[event.key]()
 
     @on(OptionList.OptionSelected, "#session-action-options")
     def choose_action(self, event: OptionList.OptionSelected) -> None:

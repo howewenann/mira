@@ -107,6 +107,7 @@ from ui.textual.commands import dispatcher as repl
 from ui.textual.commands.help import command_help_entries
 from ui.shared.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
 from ui.textual.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
+from ui.textual.widgets.workspace import Workspace
 from ui.textual.adapter import TextualFrontend
 from ui.terminal.renderer import Renderer
 from ui.textual.runtime_report import runtime_report
@@ -137,7 +138,6 @@ from ui.textual.widgets import (
 from ui.textual.widgets.autocomplete_input import (
     CompletionItem,
     MAX_VISIBLE_COMPLETIONS,
-    MIN_PROMPT_HEIGHT,
     file_items,
     native_command_items,
 )
@@ -972,7 +972,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await move_captured_mouse(pilot, x, start_y - 2)
 
-            self.assertEqual(start_height, MIN_PROMPT_HEIGHT)
+            self.assertEqual(start_height, 3)
             self.assertEqual(handle.region.x, prompt.region.x + 1)
             self.assertEqual(handle.region.width, prompt.region.width - 2)
             self.assertIs(app.mouse_captured, handle)
@@ -998,9 +998,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.styles.height = 8
             prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
 
-            await move_captured_mouse(pilot, x, start_y + 4)
+            await move_captured_mouse(pilot, x, start_y + 6)
 
-            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT)
+            self.assertEqual(prompt.region.height, 3)
 
     async def test_dragging_past_prompt_minimum_leaves_height_unchanged(self) -> None:
         app = make_app()
@@ -1009,11 +1009,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt = app.query_one(PromptBox)
             prompt.styles.height = 8
             prompt, handle, x, start_y = await start_prompt_resize(app, pilot)
-            await move_captured_mouse(pilot, x, start_y + 4)
+            await move_captured_mouse(pilot, x, start_y + 6)
 
             await move_captured_mouse(pilot, x, start_y + 6)
 
-            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT)
+            self.assertEqual(prompt.region.height, 3)
             self.assertIs(app.mouse_captured, handle)
 
     async def test_reversing_at_prompt_minimum_grows_during_same_drag(self) -> None:
@@ -1056,9 +1056,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             status = app.query_one("#status-row")
             telemetry = app.query_one("#telemetry-row")
             self.assertEqual(status.region.height, 1)
-            self.assertGreaterEqual(status.region.y, main_panel.content_region.y)
+            self.assertEqual(status.region.y, 0)
             self.assertEqual(telemetry.region.height, 1)
-            self.assertLessEqual(telemetry.region.bottom, main_panel.content_region.bottom)
+            self.assertEqual(telemetry.region.bottom, app.size.height)
             self.assertEqual(prompt.region.height, app.query_one(AutocompleteInput).safe_prompt_height)
 
     async def test_prompt_resize_max_keeps_one_chat_row(self) -> None:
@@ -1126,6 +1126,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             prompt.value = "/"
             await pilot.pause()
+            await wait_until(lambda: prompt.region.height < expanded_height)
             shrunk_height = prompt.region.height
 
             self.assertTrue(completion.active)
@@ -1144,15 +1145,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(80, 30)) as pilot:
             prompt = app.query_one(PromptBox)
-            prompt.styles.height = 20
+            prompt.styles.height = 18
             await pilot.pause()
-            self.assertEqual(prompt.region.height, 20)
+            self.assertEqual(prompt.region.height, 18)
 
             await pilot.resize_terminal(80, 16)
             await pilot.pause()
             shrunk_height = prompt.region.height
 
-            self.assertLess(shrunk_height, 20)
+            self.assertLess(shrunk_height, 18)
             self.assertEqual(shrunk_height, app.query_one(AutocompleteInput).safe_prompt_height)
 
             await pilot.resize_terminal(80, 30)
@@ -1189,7 +1190,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await move_captured_mouse(pilot, x, start_y - 2)
 
             self.assertTrue(prompt.disabled)
-            self.assertEqual(prompt.region.height, MIN_PROMPT_HEIGHT + 2)
+            self.assertEqual(prompt.region.height, 3 + 2)
             self.assertIs(app.mouse_captured, handle)
 
     async def test_prompt_resize_hover_color_matches_when_prompt_is_disabled(self) -> None:
@@ -1846,18 +1847,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     def test_history_styles_keep_original_sidebar_and_add_only_compact_controls(self) -> None:
         styles = Path("ui/textual/styles/mira.tcss").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "#session-sidebar {\n"
-            "    width: 42;\n"
-            "    min-width: 30;\n"
-            "    height: 100%;\n"
-            "    padding: 0 1;\n"
-            "    border: solid #2d5661;\n"
-            "    border-right: heavy #5bb8b1;\n"
-            "    background: #101516;\n"
-            "}",
-            styles,
-        )
+        workspace_styles = Path("ui/textual/styles/workspace.tcss").read_text(encoding="utf-8")
+        self.assertIn("#session-sidebar { display: none; width: 42; min-width: 42;", workspace_styles)
+        self.assertIn("border: solid #51696c;", workspace_styles)
         self.assertIn(
             "#sessions > .session-row {\n"
             "    height: 4;\n"
@@ -1933,7 +1925,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(app.query_one(SessionHistory))
             self.assertEqual(
                 renderable_plain(app.query_one("#session-sidebar-title", Static)),
-                "Chat History",
+                "HISTORY",
             )
             self.assertEqual(app.query_one("#new-chat", Button).label.plain, "+ New")
             self.assertEqual(renderable_plain(app.query_one(StatusBar)).count("MIRA"), 1)
@@ -2017,7 +2009,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.new_sessions, 0)
             self.assertEqual(len(app.query_one(ChatLog).children), before)
             self.assertTrue(app.query_one("#new-chat", Button).disabled)
-            self.assertTrue(app.query_one("#model-settings-button", Button).disabled)
+            self.assertTrue(app.query_one("#model-trigger-main", Button).disabled)
             self.assertTrue(app.query_one(SessionHistory).disabled)
             app.notify.assert_called_once()
 
@@ -2046,7 +2038,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = True
             await pilot.pause()
 
-            await pilot.click("#model-settings-button")
+            await pilot.click("#model-trigger-main")
             await pilot.pause()
 
             app._run_settings_command.assert_not_awaited()
@@ -2112,51 +2104,25 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.runtime_snapshot.direct_effective)
         self.assertTrue(app.runtime_snapshot.direct_requested)
 
-    async def test_history_sidebar_collapses_to_minimal_rail_and_restores(self) -> None:
-        """The original sidebar and minimal rail are the two explicit states."""
+    async def test_history_sidebar_collapses_to_permanent_rail_and_restores(self) -> None:
         app = make_app()
-
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause()
             sidebar = app.query_one("#session-sidebar")
-            rail = app.query_one("#history-rail")
-            collapse = app.query_one("#history-collapse", Button)
-            expand = app.query_one("#history-expand", Button)
-            prompt = app.query_one(PromptBox)
-
+            rail = app.query_one("#navigation-rail")
+            self.assertTrue(app.history_collapsed)
+            self.assertFalse(sidebar.display)
+            self.assertTrue(rail.display)
+            self.assertEqual(rail.region.width, 9)
+            await pilot.click("#rail-chat")
             self.assertFalse(app.history_collapsed)
             self.assertTrue(sidebar.display)
             self.assertEqual(sidebar.region.width, 42)
-            self.assertFalse(rail.display)
-            self.assertEqual(collapse.label.plain, "<|")
-            self.assertEqual(
-                [child.id for child in app.query_one("#session-sidebar-header").children],
-                ["session-sidebar-title", "new-chat", "history-collapse"],
-            )
-            self.assertEqual(
-                collapse.region.right,
-                app.query_one("#session-sidebar-header").content_region.right,
-            )
-
-            collapse.press()
+            app.query_one("#history-collapse", Button).press()
             await pilot.pause()
             self.assertTrue(app.history_collapsed)
             self.assertFalse(sidebar.display)
             self.assertTrue(rail.display)
-            self.assertEqual(rail.region.width, 4)
-            self.assertEqual(list(rail.children), [expand])
-            self.assertEqual(expand.label.plain, "|>")
-            self.assertTrue(prompt.has_focus)
-            self.assertFalse(collapse.has_focus)
-
-            expand.press()
-            await pilot.pause()
-            self.assertFalse(app.history_collapsed)
-            self.assertTrue(sidebar.display)
-            self.assertFalse(rail.display)
-            self.assertTrue(prompt.has_focus)
-            self.assertFalse(expand.has_focus)
-
+            self.assertTrue(app.query_one(PromptBox).has_focus)
     async def test_session_row_actions_keep_three_line_geometry_and_do_not_switch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2183,6 +2149,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app = make_app(workspace=root, session=current, store=store)
 
             async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.click("#rail-chat")
                 await pilot.pause()
                 app._load_session = AsyncMock()  # type: ignore[method-assign]
                 item = next(
@@ -2302,6 +2269,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app = make_app(workspace=root, session=current, store=store)
 
             async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.click("#rail-chat")
                 await pilot.pause()
                 app._load_session = AsyncMock()  # type: ignore[method-assign]
                 item = next(row for row in app.query(SessionItem) if row.session_id == "other")
@@ -2425,7 +2393,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertFalse(app.query_one("#session-sidebar").display)
-            self.assertFalse(app.query_one("#history-rail").display)
+            self.assertTrue(app.query_one("#navigation-rail").display)
             self.assertGreater(app.query_one(PromptBox).region.width, 0)
             goal = goal_artifact(
                 goal_id="goal-narrow",
@@ -3549,19 +3517,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             verifier = app.query_one(RubricVerifierBubble)
-            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
-            self.assertEqual(switcher.current, "chat-log")
+            switcher = app.query_one(Workspace)
+            self.assertEqual(switcher.active["main"], "chat")
             self.assertFalse(verifier.inspect.can_focus)
             await pilot.click(verifier.inspect)
             await pilot.pause()
             inspector = app.query_one(Inspector)
             inspector_log = inspector.query_one("#inspector-log", ChatLog)
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             self.assertEqual(inspector.inspection_id, verifier_id)
             self.assertTrue(inspector_log.has_focus)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
             self.assertEqual(
-                renderable_plain(inspector.query_one("#inspector-title")),
+                inspector.title,
                 "Inspector · Rubrics · Verifier · Pass 1",
             )
             verifier_rendered = "\n".join(
@@ -3589,7 +3557,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await pilot.pause()
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             self.assertEqual(inspector.inspection_id, verifier_id)
             self.assertNotIn(
                 "needs_revision",
@@ -3598,12 +3566,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
             grader = app.query_one(RubricGraderBubble)
             self.assertFalse(grader.inspect.can_focus)
             await pilot.click(grader.inspect)
             await pilot.pause()
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             self.assertEqual(inspector.inspection_id, grader_id)
             grader_rendered = "\n".join(
                 renderable_plain(child) for child in inspector_log.children
@@ -3611,9 +3579,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("grade exact input", grader_rendered)
             self.assertIn('{"result":"needs_revision"}', grader_rendered)
 
-            await pilot.click("#inspector-close")
+            await app.query_one(Workspace).close_view("inspector")
+            app.action_focus_prompt()
             await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
             projection.handle(
                 {
                     "type": "rubric_inspection_delta",
@@ -3626,7 +3595,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             await pilot.click(grader.inspect)
             await pilot.pause()
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             reopened = "\n".join(
                 renderable_plain(child) for child in inspector_log.children
             )
@@ -3700,38 +3669,41 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 verifier = app.query_one(RubricVerifierBubble)
                 grader = app.query_one(RubricGraderBubble)
                 inspector = app.query_one(Inspector)
-                switcher = app.query_one("#transcript-viewport", ContentSwitcher)
-                self.assertEqual(switcher.current, "chat-log")
+                switcher = app.query_one(Workspace)
+                self.assertEqual(switcher.active["main"], "chat")
                 self.assertEqual(verifier.inspection_id, "rubric:grade-history:0:verifier")
                 self.assertEqual(grader.inspection_id, "rubric:grade-history:0:grader")
                 self.assertEqual(app.query_one(SubagentsPanel)._records, {})
                 self.assertEqual(len(list(app.query(ToolBubble))), 0)
 
+                verifier.inspect.scroll_visible(animate=False)
+                await pilot.pause()
                 await pilot.click(verifier.inspect)
                 await pilot.pause()
-                await wait_until(lambda: switcher.current == "inspector")
-                self.assertEqual(switcher.current, "inspector")
+                await wait_until(lambda: switcher.active["main"] == "inspector")
+                self.assertEqual(switcher.active["main"], "inspector")
                 inspector_log = inspector.query_one("#inspector-log", ChatLog)
                 rendered = "\n".join(
                     renderable_plain(child) for child in inspector_log.children
                 )
                 self.assertEqual(inspector.inspection_id, "verifier-run")
                 self.assertEqual(
-                    renderable_plain(inspector.query_one("#inspector-title")),
+                    inspector.title,
                     "Inspector · Rubrics · Verifier · Pass 1",
                 )
                 self.assertIn("persisted verifier input", rendered)
                 self.assertIn("persisted verifier reasoning", rendered)
+                await wait_until(lambda: inspector_log.has_focus)
                 self.assertTrue(inspector_log.has_focus)
-                self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+                self.assertFalse(bool(list(inspector.query("#inspector-close"))))
 
                 await pilot.press("escape")
                 await pilot.pause()
-                self.assertEqual(switcher.current, "chat-log")
+                self.assertEqual(switcher.active["main"], "chat")
                 await pilot.click(grader.inspect)
                 await pilot.pause()
-                await wait_until(lambda: switcher.current == "inspector")
-                self.assertEqual(switcher.current, "inspector")
+                await wait_until(lambda: switcher.active["main"] == "inspector")
+                self.assertEqual(switcher.active["main"], "inspector")
                 rendered = "\n".join(
                     renderable_plain(child) for child in inspector_log.children
                 )
@@ -3741,7 +3713,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 await pilot.press("escape")
                 await pilot.pause()
-                self.assertEqual(switcher.current, "chat-log")
+                self.assertEqual(switcher.active["main"], "chat")
                 changed = store.read(store.path("rubric-history"))
                 changed["runs"] = []
                 store.save_metadata(changed)
@@ -3750,7 +3722,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.click(verifier.inspect)
                 await pilot.pause()
                 chat = app.query_one("#chat-log", ChatLog)
-                self.assertEqual(switcher.current, "chat-log")
+                self.assertEqual(switcher.active["main"], "chat")
                 self.assertIn(
                     "Rubric history unavailable",
                     "\n".join(renderable_plain(child) for child in chat.children),
@@ -3860,8 +3832,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(verifier.inspect.styles.display, "none")
             self.assertEqual(grader.inspect.styles.display, "none")
             self.assertEqual(
-                app.query_one("#transcript-viewport", ContentSwitcher).current,
-                "chat-log",
+                app.query_one(Workspace).active["main"],
+                "chat",
             )
 
     async def test_rubric_inspect_footer_matches_copy_geometry_and_follows_content(self) -> None:
@@ -5435,6 +5407,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("2 tools · 0 prompts · 1 resource", restart_cell.content.plain)
             self.assertNotIn("1 server", restart_cell.content.plain)
             self.assertNotIn("99", restart_cell.content.plain)
+            await wait_until(lambda: "✓ fetch · Ready" in compositor_plain(app))
             self.assertIn("✓ fetch · Ready", compositor_plain(app))
 
     async def test_failed_reload_activity_stays_at_current_chat_position(self) -> None:
@@ -5725,10 +5698,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(str(button.styles.text_style), "none")
 
-            model_button = app.query_one("#model-settings-button", Button)
+            model_button = app.query_one("#model-trigger-main", Button)
             model_button.focus()
             await pilot.pause()
-            self.assertEqual(str(model_button.styles.text_style), "bold")
+            self.assertEqual(str(model_button.styles.text_style), "not reverse")
 
     async def test_correction_bubble_keeps_rejected_prose_and_shows_retry_prompt(self) -> None:
         app = make_app()
@@ -6895,7 +6868,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                     status = renderable_plain(app.query_one(StatusBar))
-                    model_button_label = str(app.query_one("#model-settings-button", Button).label)
+                    model_button_label = app.query_one("#actions-main").alias
                     startup_blocks = [child for child in app.query_one(ChatLog).children if "startup" in child.classes]
                     command_blocks = [
                         child for child in app.query_one(ChatLog).children if "command" in child.classes
@@ -6944,7 +6917,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("model     [visual] lmstudio:visual-model", rendered)
             self.assertNotIn("model     loading", rendered)
             self.assertNotIn("- starting", rendered)
-            self.assertEqual(model_button_label, "model: [visual] lmstudio:visual-model")
+            self.assertEqual(model_button_label, "visual")
             self.assertEqual(len(reload_info_blocks), 1)
             self.assertIn(subagent_issue, app.issues)
             self.assertIn("agent reloaded", renderable_plain(reload_info_blocks[0]))
@@ -10006,7 +9979,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLessEqual(button.region.y + button.region.height, panel_bottom)
 
             await pilot.press("r")
-            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "reject"}])
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "reject_once"}])
 
     async def test_json_edit_flow_returns_edits_and_rejects_invalid_json(self) -> None:
         """Edited approval args should save valid JSON and reject invalid JSON."""
@@ -10056,7 +10029,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(button.styles.content_align_horizontal == "center" for button in buttons))
             self.assertTrue(all(button.styles.content_align_vertical == "middle" for button in buttons))
             app.query_one("#prompt-save", Button).press()
-            self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject"})
+            self.assertEqual(await asyncio.wait_for(invalid_task, timeout=2), {"type": "reject_once"})
 
     async def test_json_edit_flow_preserves_text_area_arrow_navigation(self) -> None:
         """Arrow keys should move the cursor while editing approval args."""
@@ -11164,14 +11137,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 agent_task.agents[0].inspection_id,
             )
             self.assertEqual(
-                renderable_plain(inspector.query_one("#inspector-title")),
+                inspector.title,
                 "Inspector · subagent · workflow-demo-agent",
             )
             inspector.post_message(Inspector.Closed())
             await pilot.pause()
             self.assertEqual(
-                app.query_one("#transcript-viewport", ContentSwitcher).current,
-                "chat-log",
+                app.query_one(Workspace).active["main"],
+                "chat",
             )
 
     async def test_discovered_workflow_lists_runs_once_and_opens_final_state(self) -> None:
@@ -11256,21 +11229,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 bubble.final_button.press()
                 await wait_until(
-                    lambda: app.query_one(
-                        "#transcript-viewport", ContentSwitcher
-                    ).current
+                    lambda: app.query_one(Workspace).active["main"]
                     == "inspector"
                 )
                 await pilot.pause()
                 inspector = app.query_one(Inspector)
-                switcher = app.query_one("#transcript-viewport", ContentSwitcher)
-                self.assertEqual(switcher.current, "inspector")
+                switcher = app.query_one(Workspace)
+                self.assertEqual(switcher.active["main"], "inspector")
                 await wait_until(lambda: app.focused is inspector)
                 self.assertIs(app.focused, inspector)
-                self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+                self.assertFalse(bool(list(inspector.query("#inspector-close"))))
                 self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
                 self.assertEqual(
-                    renderable_plain(inspector.query_one("#inspector-title")),
+                    inspector.title,
                     "Inspector · workflow · demo · Final state",
                 )
 
@@ -11300,11 +11271,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(actions.region.y - body.region.bottom, 1)
 
                 await pilot.press("escape")
-                await wait_until(lambda: switcher.current == "chat-log")
-                self.assertEqual(switcher.current, "chat-log")
+                await wait_until(lambda: switcher.active["main"] == "chat")
+                self.assertEqual(switcher.active["main"], "chat")
 
                 bubble.final_button.press()
-                await wait_until(lambda: switcher.current == "inspector")
+                await wait_until(lambda: switcher.active["main"] == "inspector")
                 await wait_until(lambda: app.focused is inspector)
                 value_bubble = inspector.query_one(WorkflowValueBubble)
                 copy_button = value_bubble.query_one(".workflow-value-copy", Button)
@@ -11319,13 +11290,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(copy_button.label), "Copy")
 
                 inspector.post_message(Inspector.Closed())
-                await wait_until(lambda: switcher.current == "chat-log")
+                await wait_until(lambda: switcher.active["main"] == "chat")
                 await pilot.pause()
-                self.assertEqual(switcher.current, "chat-log")
+                self.assertEqual(switcher.active["main"], "chat")
                 bubble.final_button.press()
-                await wait_until(lambda: switcher.current == "inspector")
+                await wait_until(lambda: switcher.active["main"] == "inspector")
                 await pilot.pause()
-                self.assertEqual(switcher.current, "inspector")
+                self.assertEqual(switcher.active["main"], "inspector")
 
                 inspector.post_message(Inspector.Closed())
                 await pilot.pause()
@@ -11420,7 +11391,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 WorkflowNodeSelected(bubble.task_views["task-history"])
             )
             await wait_until(
-                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                lambda: app.query_one(Workspace).active["main"]
                 == "inspector"
             )
             inspector = app.query_one(Inspector)
@@ -11448,12 +11419,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             inspector.post_message(Inspector.Closed())
             await wait_until(
-                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
-                == "chat-log"
+                lambda: app.query_one(Workspace).active["main"]
+                == "chat"
             )
             bubble.final_button.press()
             await wait_until(
-                lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                lambda: app.query_one(Workspace).active["main"]
                 == "inspector"
             )
             await wait_until(
@@ -11542,7 +11513,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 bubble = app.query_one(WorkflowTreeBubble)
                 bubble.post_message(WorkflowAgentSelected("inspection-history"))
                 await wait_until(
-                    lambda: app.query_one("#transcript-viewport", ContentSwitcher).current
+                    lambda: app.query_one(Workspace).active["main"]
                     == "inspector"
                 )
                 inspector = app.query_one(Inspector)
@@ -11977,16 +11948,16 @@ def workflow(mira):
 
             bubble = app.query_one(WorkflowTreeBubble)
             view = bubble.task_views["task-1"]
-            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+            switcher = app.query_one(Workspace)
             bubble.post_message(WorkflowNodeSelected(view))
             await wait_until(lambda: app.focused is app.query_one(Inspector))
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             inspector = app.query_one(Inspector)
             self.assertIs(app.focused, inspector)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
             self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
             self.assertEqual(
-                renderable_plain(app.query_one("#inspector-title")),
+                app.query_one(Inspector).title,
                 "Inspector · workflow · prepare",
             )
             node_log = inspector.query_one("#inspector-log", ChatLog)
@@ -12015,11 +11986,11 @@ def workflow(mira):
             )
 
             await pilot.press("escape")
-            await wait_until(lambda: switcher.current == "chat-log")
-            self.assertEqual(switcher.current, "chat-log")
+            await wait_until(lambda: switcher.active["main"] == "chat")
+            self.assertEqual(switcher.active["main"], "chat")
 
             bubble.post_message(WorkflowNodeSelected(view))
-            await wait_until(lambda: app.focused is inspector)
+            await wait_until(lambda: app.focused is inspector and inspector.workflow_task_id == view.task_id and switcher.active["main"] == "inspector")
             node_log = inspector.query_one("#inspector-log", ChatLog)
             value_bubbles = list(node_log.query(WorkflowValueBubble))
 
@@ -12042,18 +12013,18 @@ def workflow(mira):
             self.assertIn("5", result_text)
             self.assertEqual(app.copy_to_clipboard.call_count, 2)
             inspector.post_message(Inspector.Closed())
-            await wait_until(lambda: switcher.current == "chat-log")
-            self.assertEqual(switcher.current, "chat-log")
+            await wait_until(lambda: switcher.active["main"] == "chat")
+            self.assertEqual(switcher.active["main"], "chat")
 
             bubble.post_message(WorkflowAgentSelected(inspection_id))
-            await wait_until(lambda: app.focused is inspector)
+            await wait_until(lambda: app.focused is inspector and inspector.inspection_id == inspection_id and switcher.active["main"] == "inspector")
             self.assertEqual(inspector.inspection_id, inspection_id)
             self.assertIs(app.focused, inspector)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
             self.assertFalse(inspector.query_one("#inspector-log", ChatLog).has_focus)
             await pilot.press("escape")
-            await wait_until(lambda: switcher.current == "chat-log")
-            self.assertEqual(switcher.current, "chat-log")
+            await wait_until(lambda: switcher.active["main"] == "chat")
+            self.assertEqual(switcher.active["main"], "chat")
 
             panel = app.query_one(SubagentsPanel)
             app.subagent_started("general-purpose [new]", "inspect README", row_id="subagent-1")
@@ -12289,8 +12260,8 @@ def workflow(mira):
             await pilot.pause()
             self.assertTrue(step_node.is_expanded)
             self.assertEqual(
-                app.query_one("#transcript-viewport", ContentSwitcher).current,
-                "chat-log",
+                app.query_one(Workspace).active["main"],
+                "chat",
             )
 
             await pilot.press("space")
@@ -12306,7 +12277,7 @@ def workflow(mira):
             await pilot.pause()
             self.assertEqual(task_node.is_expanded, was_expanded)
             self.assertEqual(
-                app.query_one("#transcript-viewport", ContentSwitcher).current,
+                app.query_one(Workspace).active["main"],
                 "inspector",
             )
 
@@ -13373,14 +13344,14 @@ def workflow(mira):
             task = asyncio.create_task(app.ask_user(interrupt))
             await pilot.pause()
             panel = app.query_one(PromptPanel)
-            await wait_until(lambda: len(list(panel.query(Button))) == 11)
+            await wait_until(lambda: not panel._reflow_running and len(panel.query(Button)) == 11)
 
             button_area = app.query_one("#prompt-panel-buttons", Vertical)
             rows = list(panel.query(".prompt-panel-button-row"))
             self.assertEqual(len(rows), 11)
             self.assertLessEqual(button_area.region.height, 4)
 
-            await wait_until(lambda: len(list(panel.query(Button))) == 11 and list(panel.query(Button))[0].has_focus)
+            await wait_until(lambda: not panel._reflow_running and len(panel.query(Button)) == 11 and list(panel.query(Button))[0].has_focus)
             for _ in range(9):
                 await pilot.press("down")
                 await pilot.pause()
@@ -13450,6 +13421,8 @@ def workflow(mira):
                 lambda: list(panel.query(Button))[0].styles.background
                 == PROMPT_BUTTON_FOCUS_BACKGROUND
             )
+            await wait_until(lambda: all(button.region.right <= panel.region.right for button in panel.query(Button)))
+            await wait_until(lambda: not panel._reflow_running and len(panel.query(Button)) == len(choices))
             rows = list(panel.query(".prompt-panel-button-row"))
             buttons = list(panel.query(Button))
             row_positions = {row.region.y for row in rows}
@@ -13538,22 +13511,25 @@ def workflow(mira):
             await wait_until(lambda: len(list(panel.query(Button))) == len(choices))
             await wait_until(lambda: any(button.has_focus for button in panel.query(Button)))
             await wait_until(lambda: not panel._reflow_running and len(panel._button_rows) >= 2)
+            await pilot.pause(0.1)
             rows = list(panel.query(Horizontal))
             self.assertGreaterEqual(len(rows), 2)
             first_row_buttons = list(rows[0].query(Button))
             second_row_buttons = list(rows[1].query(Button))
             self.assertTrue(first_row_buttons[0].has_focus)
 
+            target_id = second_row_buttons[0].id
+            expected = str(second_row_buttons[0].label).split()[0]
             await pilot.pause(0.1)
             await pilot.press("down")
             await pilot.pause()
-            await wait_until(lambda: panel.query_one("#prompt-choice-2", Button).has_focus)
+            await wait_until(lambda: panel.query_one("#" + target_id, Button).has_focus)
             rows = list(panel.query(Horizontal))
             second_row_buttons = list(rows[1].query(Button))
             self.assertTrue(second_row_buttons[0].has_focus)
 
             await pilot.press("enter")
-            self.assertEqual(await asyncio.wait_for(task, timeout=2), "c")
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), expected)
     async def test_pending_plan_close_commits_only_after_explicit_review(self) -> None:
         app = make_app()
         app.busy = True
@@ -13670,7 +13646,7 @@ def workflow(mira):
             self.assertFalse(task.done())
             await wait_until(lambda: str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
             await pilot.press("a")
-            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "approve"}])
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "allow_once"}])
 
     async def test_approval_edit_escape_returns_to_same_approval(self) -> None:
         app = make_app()
@@ -13690,7 +13666,7 @@ def workflow(mira):
             await wait_until(lambda: panel.active and str(getattr(app.focused, "id", "")).startswith("prompt-choice"))
             self.assertFalse(task.done())
             await pilot.press("r")
-            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "reject"}])
+            self.assertEqual(await asyncio.wait_for(task, timeout=2), [{"type": "reject_once"}])
 
     async def test_ask_user_escape_and_freeform_escape_keep_question_pending(self) -> None:
         app = make_app()
@@ -14166,7 +14142,7 @@ def workflow(mira):
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
             self.assertEqual(
-                renderable_plain(app.query_one("#inspector-title")),
+                app.query_one(Inspector).title,
                 f"Inspector · subagent · {record.name}",
             )
 
@@ -14188,7 +14164,7 @@ def workflow(mira):
 
             panel = app.query_one(SubagentsPanel)
             table = panel.query_one("#subagents-tasks", DataTable)
-            switcher = app.query_one("#transcript-viewport", ContentSwitcher)
+            switcher = app.query_one(Workspace)
             record = next(iter(panel._records.values()))
             hover = table.get_component_styles("datatable--hover")
             cursor = table.get_component_styles("datatable--cursor")
@@ -14196,7 +14172,7 @@ def workflow(mira):
             self.assertEqual(cursor.background, Color.parse("transparent"))
             self.assertFalse(table.can_focus)
             self.assertFalse(table.show_cursor)
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
 
             await pilot.hover("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
@@ -14210,36 +14186,37 @@ def workflow(mira):
             await pilot.pause()
 
             inspector = app.query_one(Inspector)
-            inspector_header = inspector.query_one("#inspector-header", Horizontal)
+            self.assertFalse(list(inspector.query("#inspector-header")))
             inspector_log = inspector.query_one("#inspector-log", ChatLog)
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
             self.assertTrue(panel.display)
+            await wait_until(lambda: inspector_log.has_focus)
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(app.query_one(PromptBox).has_focus)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
             self.assertFalse(table.has_focus)
             self.assertEqual(
-                renderable_plain(inspector.query_one("#inspector-title")),
+                inspector.title,
                 f"Inspector · subagent · {record.name}",
             )
             self.assertEqual(renderable_plain(inspector_log.children[0]), full_task)
             self.assertIn("Checking the repository.", renderable_plain(inspector_log.children[1]))
-            self.assertEqual(inspector_header.region.height, 2)
-            self.assertEqual(inspector_log.region.y - inspector_header.region.bottom, 1)
+            self.assertGreater(inspector_log.region.height, 0)
 
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
             self.assertTrue(app.query_one(PromptBox).has_focus)
 
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
             await wait_until(
-                lambda: switcher.current == "inspector" and inspector_log.has_focus
+                lambda: switcher.active["main"] == "inspector" and inspector_log.has_focus
             )
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
+            await wait_until(lambda: inspector_log.has_focus)
             self.assertTrue(inspector_log.has_focus)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
 
             app.live_inspections.append_delta(inspection_id, "reasoning", " Still live.")
             app.live_inspections.append(
@@ -14265,9 +14242,10 @@ def workflow(mira):
             self.assertIn("Still live", rendered)
             self.assertIn("README output", rendered)
 
-            await pilot.click("#inspector-close")
+            await app.query_one(Workspace).close_view("inspector")
+            app.action_focus_prompt()
             await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
             self.assertFalse(table.show_cursor)
             self.assertTrue(app.query_one(PromptBox).has_focus)
 
@@ -14275,39 +14253,24 @@ def workflow(mira):
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
             reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "inspector")
+            await wait_until(lambda: inspector_log.has_focus)
             self.assertTrue(inspector_log.has_focus)
-            self.assertFalse(inspector.query_one("#inspector-close", Button).has_focus)
+            self.assertFalse(bool(list(inspector.query("#inspector-close"))))
             self.assertIn(full_task, reopened)
             self.assertIn("Finished while closed.", reopened)
 
-            initial_prompt_height = app.query_one(PromptBox).region.height
-            _prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
-            await move_captured_mouse(pilot, x, start_y - 2)
-            await pilot.mouse_up(offset=(x, start_y - 2))
+            await switcher.move("inspector", "right")
+            switcher.right_width = 28
+            switcher.sync_layout()
             await pilot.pause()
-            self.assertGreater(app.query_one(PromptBox).region.height, initial_prompt_height)
-            self.assertGreaterEqual(inspector.content_region.height, 2)
-
-            _prompt, _handle, x, _start_y = await start_prompt_resize(app, pilot)
-            await move_captured_mouse(pilot, x, 0)
-            await pilot.mouse_up(offset=(x, 0))
-            await pilot.pause()
-            self.assertEqual(inspector.content_region.height, inspector_header.region.height)
-            self.assertEqual(
-                inspector_log.region.intersection(inspector.content_region).height,
-                0,
-            )
-
-            _prompt, _handle, x, start_y = await start_prompt_resize(app, pilot)
-            await move_captured_mouse(pilot, x, start_y + 2)
-            await pilot.mouse_up(offset=(x, start_y + 2))
-            await pilot.pause()
-            self.assertGreater(inspector_log.content_region.height, 0)
-            self.assertEqual(inspector_log.region.y - inspector_header.region.bottom, 1)
+            self.assertGreater(inspector_log.region.height, 0)
             restored = "\n".join(renderable_plain(child) for child in inspector_log.children)
             self.assertIn(full_task, restored)
             self.assertIn("README output", restored)
+            await switcher.move("inspector", "main")
+            switcher.activate("chat")
+            await pilot.pause()
 
             prompt = app.query_one(PromptBox)
             prompt.value = "clear this draft"
@@ -14317,17 +14280,19 @@ def workflow(mira):
             await pilot.press("escape")
             await pilot.pause()
             self.assertEqual(prompt.value, "")
-            self.assertEqual(switcher.current, "inspector")
+            self.assertEqual(switcher.active["main"], "chat")
 
             prompt.value = "preserve this draft"
-            await pilot.click("#inspector-title")
+            switcher.activate("inspector")
             await pilot.pause()
+            await pilot.click(inspector.query_one("#inspector-log"), offset=(1, 1))
+            await wait_until(lambda: inspector.has_focus_within)
             self.assertTrue(inspector.has_focus_within)
             self.assertFalse(prompt.has_focus)
 
             await pilot.press("escape")
             await pilot.pause()
-            self.assertEqual(switcher.current, "chat-log")
+            self.assertEqual(switcher.active["main"], "chat")
             self.assertEqual(prompt.value, "preserve this draft")
             self.assertTrue(prompt.has_focus)
 
@@ -14545,7 +14510,7 @@ def workflow(mira):
                 inspector_log = inspector.query_one("#inspector-log", ChatLog)
                 rendered = "\n".join(renderable_plain(child) for child in inspector_log.children)
                 self.assertEqual(
-                    app.query_one("#transcript-viewport", ContentSwitcher).current,
+                    app.query_one(Workspace).active["main"],
                     "inspector",
                 )
                 self.assertIn("first evaluation task", rendered)

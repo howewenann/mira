@@ -15,9 +15,10 @@ from rich.markup import escape
 from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.dom import NoScreen
 from textual.events import Click, DescendantFocus, Key, Resize
 from textual.geometry import Size
-from textual.widgets import Button, ContentSwitcher, Markdown, Static
+from textual.widgets import Button, ContentSwitcher, Input, Markdown, Static, TextArea
 
 from core.execution.inspection.rubric import rubric_inspection_id
 from core.execution.streams.output import normalize_response_delta
@@ -2386,8 +2387,13 @@ class PlanBubble(Vertical):
     def _focus_implement(self) -> None:
         """Focus Implement after composed children are available."""
         try:
+            focused = self.screen.focused
+            if isinstance(focused, (Input, TextArea)) and focused.id != "prompt":
+                # A Revise/HITL editor may already own input when this deferred
+                # mount callback runs in the tabbed workspace.
+                return
             self.query_one(f"#plan-implement-{self.plan_id}", Button).focus()
-        except NoMatches:
+        except (NoMatches, NoScreen):
             return
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:
@@ -2542,8 +2548,11 @@ class GoalBubble(Vertical):
     def _focus_implement(self) -> None:
         """Focus the primary Goal action after tail layout settles."""
         try:
+            focused = self.screen.focused
+            if isinstance(focused, (Input, TextArea)) and focused.id != "prompt":
+                return
             self.query_one(f"#goal-implement-{self.goal_id}", Button).focus()
-        except NoMatches:
+        except (NoMatches, NoScreen):
             return
 
     def on_descendant_focus(self, event: DescendantFocus) -> None:

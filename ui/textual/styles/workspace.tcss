@@ -1,0 +1,234 @@
+/* Approved v34 workspace geometry and palette. */
+#status-row {
+  width: 100%; height: 1; min-height: 1; max-height: 1;
+  padding: 0 1; margin: 0; border: none; background: #17313a;
+}
+#app-shell { height: 1fr; min-height: 0; width: 100%;
+  layout: horizontal; padding: 0 1; margin: 0;
+  background: #0c0f10; }
+#telemetry-row {
+  width: 100%; height: 1; min-height: 1; max-height: 1;
+  padding: 0 1; margin: 0; border: none; background: #17313a;
+}
+/* Model telemetry is NONCLICKABLE; aliases only, not full provider IDs. */
+/* 1fr is the FLEXIBLE SPACE before telemetry, not a max-width on labels. */
+#effective-models { height: 1; width: 1fr; min-width: 0;
+  layout: horizontal; background: transparent; }
+#effective-model-main { height: 1; width: auto; min-width: 0;
+  text-wrap: nowrap; text-overflow: ellipsis; color: #5bb8b1; }
+#effective-model-separator { height: 1; width: 3; min-width: 3;
+  content-align: center middle; color: #83999e; }
+#effective-model-btw { height: 1; width: auto; min-width: 0;
+  text-wrap: nowrap; text-overflow: ellipsis; color: #e58faa; }
+#telemetry-row #telemetry-values { height: 1; width: auto;
+  min-width: 25; content-align: right middle; }
+/* Side rail is fully bordered, including both horizontal edges. */
+#navigation-rail { width: 9; min-width: 9; max-width: 9; height: 100%;
+  padding: 0; margin: 0; border: solid #51696c;
+  background: #0c0f10; overflow: hidden; }
+/* Textual 8.2.7 Button defaults to min-width: 16 and line-pad: 1.
+   Override only min-width: the default line-pad: 1 is fine for 7 inner
+   columns; specifying line-pad: 0 causes a CSS parse error. */
+#navigation-rail Button { width: 100%; min-width: 0; max-width: 100%;
+  height: 3; min-height: 3;
+  padding: 0; margin: 0; border: none;
+  content-align: center middle; text-align: center;
+  background: transparent; color: #aeb8be;
+  text-style: not reverse; background-tint: transparent; tint: transparent; }
+#navigation-rail Button:hover, #navigation-rail Button:focus,
+#navigation-rail Button.-active { color: #d6fff6;
+  text-style: not reverse; background-tint: transparent; tint: transparent; }
+#navigation-rail Button:hover { background: #21424b; color: #7ce3dc;
+  text-style: not reverse; background-tint: transparent; tint: transparent; }
+#navigation-rail Button.selected, #navigation-rail Button.selected:hover,
+#navigation-rail Button.selected:focus,
+#navigation-rail Button.selected.-active {
+  background: #21424b; color: #7ce3dc; text-style: bold not reverse;
+  background-tint: transparent; tint: transparent; }
+#rail-space { height: 1fr; }
+/* The dark cell after rail is intentional breathing room, not a border. */
+#rail-panel-gap { width: 1; min-width: 1; max-width: 1;
+  height: 100%; padding: 0; margin: 0; background: #0c0f10; }
+
+#session-sidebar { display: none; width: 42; min-width: 42;
+  height: 100%; border: solid #51696c; margin: 0; padding: 0;
+  background: #0c0f10; }
+#session-sidebar-header { height: 2; min-height: 2; max-height: 2;
+  margin: 0; padding: 0 1; background: #0c0f10; border: none; }
+#session-sidebar-title { color: #c2cbd0; text-style: bold; }
+#history-collapse { width: 3; min-width: 3; height: 1; min-height: 1;
+  border: none; padding: 0; background: transparent; color: #7ce3dc; }
+#sidebar-content, #history-panel, #files-panel { height: 1fr; width: 1fr;
+  background: #1e1e1e; }
+#sessions { height: 1fr; width: 1fr; padding: 0 2;
+  background: #1e1e1e; }
+#sessions > .session-row { background: #1e1e1e; }
+#sessions > .session-row.active,
+#sessions > .session-row.--highlight { background: #1b3036; }
+#files-panel DirectoryTree { height: 1fr; width: 1fr; border: none;
+  padding: 0 2; background: #1e1e1e; color: #c4cdd2;
+  scrollbar-color: #5bb8b1; scrollbar-background: #122023; }
+#files-panel DirectoryTree > .tree--cursor { background: #1b3036; }
+#files-panel DirectoryTree:focus > .tree--cursor { background: #21424b; }
+
+/* One 1-cell HIT TARGET between the side-by-side border strokes.
+   It consumes exactly one column in both hover and idle states, so
+   hovering and dragging cannot shift panel positions. No border glyph. */
+.workspace-divider { display: none;
+  width: 1; min-width: 1; max-width: 1;
+  height: 100%; min-height: 100%;
+  padding: 0; margin: 0; border: none;
+  background: #0c0f10; color: #0c0f10;
+  pointer: ew-resize; overflow: hidden; }
+.workspace-divider:hover, .workspace-divider.dragging {
+  background: #5bb8b1; color: #5bb8b1; }
+
+#main-panel { height: 100%; width: 1fr; min-width: 0;
+  padding: 0; margin: 0; border: none; background: #0c0f10; }
+#editor-workspace { height: 1fr; width: 1fr; layout: horizontal;
+  padding: 0; margin: 0; }
+#primary-pane { height: 100%; width: 1fr; min-width: 0;
+  margin: 0; padding: 0; border: solid #51696c;
+  background: #0c0f10; }
+#right-pane { height: 100%; width: 42; min-width: 0; display: none;
+  margin: 0; padding: 0; border: solid #51696c;
+  background: #0c0f10; }
+/* Each panel has its own native tab strip inside its outer border. */
+.workspace-top-actions { width: 1fr; height: 2; min-height: 2; max-height: 2;
+  margin: 0; padding: 0; background: #0c0f10; layout: horizontal; }
+.workspace-header-tabs { width: 1fr; height: 2; min-width: 1;
+  background: #0c0f10; }
+.workspace-header-tabs Tab { background: #0c0f10; color: #aeb8be;
+  height: 1; padding: 0 1; text-align: left; text-style: not reverse; }
+.workspace-header-tabs Tab:hover { background: #1b3036; color: #e8edef; }
+/* Active tab stays part of the tab strip, rather than sharing the
+   STATUS BAR's #17313a background.  The teal underline marks activity. */
+.workspace-header-tabs Tab.-active,
+.workspace-header-tabs:focus Tab.-active { background: #0c0f10;
+  color: #eef7f8; text-style: bold not reverse; }
+/* The inactive underline track is the same colour as the tab strip;
+   only the active tab segment gets a teal accent. */
+.workspace-header-tabs Underline { background: #0c0f10; }
+.workspace-header-tabs Underline > .underline--bar {
+  background: #0c0f10; color: #5bb8b1; }
+.workspace-header-tabs.accent-file Underline > .underline--bar {
+  color: #78a9e8; }
+.workspace-header-tabs.accent-inspector Underline > .underline--bar {
+  color: #b785ff; }
+.workspace-header-tabs.accent-btw Underline > .underline--bar {
+  color: #e58faa; }
+.workspace-header-tabs.accent-chat Underline > .underline--bar {
+  color: #5bb8b1; }
+.workspace-header-scroll { width: 10; min-width: 10; max-width: 10;
+  height: 2; background: #0c0f10; }
+/* The main and dock tab-scroll arrows have ONLY a transient mouse-hover
+   highlight. Keyboard focus, click/pressed state and reachability must
+   NEVER produce a persistent teal block or highlight the sibling arrow.
+   Keep navigation and boundary disabling unchanged. */
+.workspace-header-scroll Button { width: 3; min-width: 3; max-width: 3;
+  height: 1; min-height: 1; border: none; padding: 0;
+  margin: 0; background: #0c0f10; color: #b8c1c7;
+  text-style: not reverse; content-align: center middle;
+  background-tint: transparent; tint: transparent; }
+/* Explicitly neutralise the built-in Button focus / pressed appearance.
+   Focus remains usable for keyboard navigation, but has NO hover glow. */
+.workspace-header-scroll Button:focus,
+.workspace-header-scroll Button.-active,
+.workspace-header-scroll Button:focus.-active {
+  background: #0c0f10; color: #b8c1c7;
+  border: none; text-style: not reverse;
+  background-tint: transparent; tint: transparent; }
+/* A focused button still lights up if (and ONLY if) the pointer is over it. */
+.workspace-header-scroll Button:hover:enabled,
+.workspace-header-scroll Button:focus:hover:enabled {
+  background: #21424b; color: #eef7f8;
+  border: none; text-style: not reverse;
+  background-tint: transparent; tint: transparent; }
+/* Disable state wins over both focus and hover, including at strip edges. */
+.workspace-header-scroll Button:disabled,
+.workspace-header-scroll Button:disabled:focus,
+.workspace-header-scroll Button:disabled:hover {
+  background: #0c0f10; color: #56646a;
+  border: none; text-style: not reverse;
+  background-tint: transparent; tint: transparent; }
+
+Workspace { height: 1fr; width: 1fr; background: #0c0f10; }
+/* ONE owner of each horizontal gutter: the Chat / BTW surface.
+   v14 applied transcript padding and prompt-wrapper margins separately,
+   offsetting their borders, resize handle, and lower corners. Avoid any
+   child margin on layers: base resize / dock: left. */
+Workspace ChatSurface, Workspace BTWSurface {
+  height: 1fr; width: 1fr; padding: 0 1;
+}
+Workspace #chat-log, Workspace #btw-log {
+  width: 1fr; height: 1fr; padding: 0; border: none;
+  scrollbar-color: #5bb8b1; scrollbar-background: #122023;
+}
+Workspace #autocomplete-input {
+  width: 1fr; height: auto; margin: 0; padding: 0;
+}
+.workspace-composer { height: auto; width: 1fr;
+  padding: 0; margin: 0; background: #0c0f10; }
+/* Native prompt owns the TOP and SIDES; the row underneath completes
+   the SAME outline. No extra independent toolbar border or gutter. */
+Workspace #prompt { height: 3; border-top: heavy #5bb8b1;
+  border-left: heavy #5bb8b1; border-right: heavy #5bb8b1;
+  border-bottom: none; padding: 0 1; background: transparent; }
+.workspace-composer-actions { height: 2; min-height: 2; max-height: 2;
+  layout: horizontal; margin: 0; padding: 0;
+  border-left: heavy #5bb8b1; border-right: heavy #5bb8b1;
+  border-bottom: heavy #5bb8b1; border-top: none;
+  background: #0c0f10; }
+.workspace-composer-actions .workspace-add-file {
+  height: 1; min-height: 1; min-width: 9; width: auto;
+  padding: 0 1; margin: 0; border: none;
+  background: transparent; color: #a9d9d5;
+  text-style: not reverse; }
+.workspace-composer-actions .workspace-add-file:hover,
+.workspace-composer-actions .workspace-add-file:focus {
+  background: #183037; color: #eafffc;
+  text-style: not reverse; }
+.workspace-composer-actions .workspace-attached-name {
+  width: 1fr; height: 1; min-width: 0; color: #80cec8;
+  text-wrap: nowrap; text-overflow: ellipsis; }
+/* Fixed-to-content trigger follows the flexible attached-name spacer.
+   No 1fr width / percentage cap: full alias at wide widths; clipped alias
+   plus a persistent arrow at narrow widths via ComposerActions. */
+.workspace-composer-actions .workspace-model-trigger {
+  width: auto; min-width: 0; max-width: 100%; height: 1; min-height: 1;
+  margin: 0; padding: 0; border: none; background: transparent;
+  color: #b8d0e1; content-align: right middle; text-align: right;
+  text-style: not reverse; }
+.workspace-composer-actions .workspace-model-trigger:hover,
+.workspace-composer-actions .workspace-model-trigger:focus {
+  background: #182c31; color: #eef7f8; border: none; }
+
+Workspace #btw-input-shell {
+  height: auto; width: 1fr; margin: 0; padding: 0;
+  layers: base resize;
+}
+#btw-placeholder { height: 1fr; padding: 0 1; }
+#btw-prompt { height: 3; border-top: heavy #5bb8b1;
+  border-left: heavy #5bb8b1; border-right: heavy #5bb8b1;
+  border-bottom: none; padding: 0 1; background: transparent; }
+/* Same full-width [=] resize line as the original MIRA Chat prompt. */
+#btw-resize-handle {
+  layer: resize; dock: left;
+  width: 1; height: 1; offset: 1 0;
+  padding: 0; margin: 0; border: none;
+  background: transparent; color: #5bb8b1;
+  pointer: ns-resize;
+}
+#btw-resize-handle:hover { color: #7ce3dc; }
+
+/* File previews are editor surfaces, not framed dialog boxes. */
+.workspace-file { height: 1fr; width: 1fr; background: #0c0f10;
+  border: none; padding: 0 1; }
+.workspace-file-heading { height: 2; padding: 0 1;
+  color: #b8c1c7; background: #0c0f10; }
+.workspace-file-error { padding: 1 2; color: #d96b66; height: auto; }
+/* The workspace tab supplies the Inspector title and close action. */
+Workspace #inspector { border: none; background: #0c0f10; }
+.workspace-code { height: 1fr; width: 1fr; border: none;
+  padding: 0 1; background: #0c0f10; }
+.workspace-markdown-scroll { height: 1fr; width: 1fr; padding: 1 2; }

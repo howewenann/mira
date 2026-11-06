@@ -106,6 +106,13 @@ Type `/` to autocomplete commands and `@` to autocomplete local files, tools,
 subagents, and MCP resources. Sessions save chat and execution state
 automatically; start with `--resume` to reopen the latest one.
 
+Use the left rail for History, File Explorer, and General settings. File previews
+and Inspector open as tabs; their `›` / `‹` actions move them into or out of the
+right dock, and `×` closes them. Chat stays in the main pane. Drag the gaps beside
+History or the dock to resize them. The prompt contains Add file and a model
+alias dropdown; the footer reports the active model. See the
+[workspace guide](ui/textual/README.md) for navigation and the BTW preview.
+
 ## Optional local tracing
 
 MIRA preserves LangChain/DeepAgents trace topology with LangSmith and enriches

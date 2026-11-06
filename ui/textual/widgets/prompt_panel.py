@@ -93,9 +93,7 @@ class PromptPanel(Vertical):
             button_id = f"prompt-choice-{index}"
             self._button_values[button_id] = value
             self._button_specs.append((button_id, label))
-        await self._start_button_reflow(focus_first=True)
-        if not self._button_rows:
-            self._schedule_button_reflow(focus_first=True)
+        self._schedule_button_reflow(focus_first=True)
         return await self._wait()
 
     async def ask_text(self, title: str, message: str) -> str | None:
@@ -279,10 +277,11 @@ class PromptPanel(Vertical):
 
     async def _reflow_button_rows(self, *, focus_first: bool = False) -> None:
         """Rebuild button rows from the currently measured width."""
+        generation = self._reflow_generation
         self._reflow_running = True
         try:
             await asyncio.sleep(0)
-            if not self.is_mounted or not self._button_specs:
+            if not self.is_mounted or not self._button_specs or generation != self._reflow_generation:
                 return
             available_width = 0
             measured = False
@@ -301,9 +300,18 @@ class PromptPanel(Vertical):
             focused_id = next((button.id for button in self.query(Button) if button.has_focus), None)
             await self._mount_button_rows(self._button_specs, available_width)
             await asyncio.sleep(0)
-            self._restore_button_focus(focused_id, focus_first)
+            if generation == self._reflow_generation:
+                self._restore_button_focus(focused_id, focus_first)
         finally:
             self._reflow_running = False
+            if self.is_mounted and self._button_specs:
+                width, measured = self._available_button_width()
+                if measured and width > 0 and (
+                    width != self._last_button_width or generation != self._reflow_generation
+                ):
+                    # A tab/pane resize can arrive while rows are mounting.
+                    # Reconcile that final measured width after this rebuild.
+                    self._schedule_button_reflow(focus_first=focus_first and generation == self._reflow_generation)
 
     def _restore_button_focus(self, focused_id: str | None, focus_first: bool) -> None:
         """Restore button focus after a row rebuild."""

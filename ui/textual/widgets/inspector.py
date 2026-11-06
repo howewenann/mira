@@ -33,19 +33,23 @@ class Inspector(Vertical):
         store: LiveInspectionStore,
         *,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
+        embedded: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.store = store
         self.tool_output_chars = tool_output_chars
+        self.embedded = embedded
+        self.title = "Inspector"
         self.inspection_id = ""
         self._snapshot: LiveInspection | None = None
         self.workflow_task_id = ""
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="inspector-header"):
-            yield Static("Inspector", id="inspector-title", markup=False)
-            yield Button("x", id="inspector-close", compact=True)
+        if not self.embedded:
+            with Horizontal(id="inspector-header"):
+                yield Static("Inspector", id="inspector-title", markup=False)
+                yield Button("x", id="inspector-close", compact=True)
         yield ChatLog(
             tool_output_chars=self.tool_output_chars,
             id="inspector-log",
@@ -89,7 +93,7 @@ class Inspector(Vertical):
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = ""
-        self.query_one("#inspector-title", Static).update(
+        self._set_title(
             f"Inspector · workflow · {name} · Final state"
         )
         log = self.query_one("#inspector-log", ChatLog)
@@ -102,7 +106,7 @@ class Inspector(Vertical):
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = str(view.task_id)
-        self.query_one("#inspector-title", Static).update(
+        self._set_title(
             f"Inspector · workflow · {view.name}"
         )
         log = self.query_one("#inspector-log", ChatLog)
@@ -189,8 +193,13 @@ class Inspector(Vertical):
             log.system_message(event.text, kind="error")
 
     def _update_header(self, inspection: LiveInspection) -> None:
-        self.query_one("#inspector-title", Static).update(
+        self._set_title(
             f"Inspector · {inspection.inspection_type} · {inspection.title}"
         )
+
+    def _set_title(self, title: str) -> None:
+        self.title = title
+        if not self.embedded:
+            self.query_one("#inspector-title", Static).update(title)
 
 __all__ = ["Inspector"]

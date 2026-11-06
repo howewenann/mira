@@ -22,7 +22,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.events import Key
 from textual.reactive import reactive
-from textual.widgets import Button, ContentSwitcher, ListView, Static
+from textual.widgets import Button, ContentSwitcher, DirectoryTree, ListView, Static
 
 from agent.middleware.compaction import PostTurnCompactionResult
 from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
@@ -129,7 +129,6 @@ from ui.textual.widgets.workflow_bubble import (
 from ui.textual.widgets.mcp_panel import mcp_summary_symbol
 from ui.textual.widgets.chat_log import DEFAULT_TOOL_OUTPUT_CHARS
 from ui.textual.widgets.session_history import (
-    HistoryToggleButton,
     SessionActionMenuScreen,
     SessionItem,
     session_display_title,
@@ -141,6 +140,10 @@ from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_plat
 from ui.textual.file_uploads import clear_local_uploads, ingest_local_files
 from ui.textual.workflow_demo import build_workflow_demo
 from ui.textual.workflow_demo_phase2 import build_workflow_demo_phase2
+
+from ui.textual.widgets.workspace import Workspace
+from ui.textual.widgets.workspace_controls import DragDivider, ModelAliasPopup
+from ui.textual.widgets.workspace_surfaces import ChatSurface, ComposerActions
 
 Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
 DESTRUCTIVE_HISTORY_COMMANDS = {
@@ -167,7 +170,6 @@ BUSY_MUTATING_COMMANDS = {
     "/settings",
     *DESTRUCTIVE_HISTORY_COMMANDS,
 }
-HISTORY_RAIL_WIDTH = 4
 STARTUP_RECOVERY_COMMANDS = {
     "/settings",
     "/models",
@@ -192,7 +194,7 @@ DESTRUCTIVE_CONFIRM_CHOICES = [("o", "OK (o)"), ("c", "Cancel (c)")]
 class MiraApp(App[None]):
     """Textual-first interactive MIRA UI."""
 
-    CSS_PATH = "styles/mira.tcss"
+    CSS_PATH = ["styles/mira.tcss", "styles/workspace.tcss"]
     manages_subagent_animation = True
     busy = reactive(False)
     BINDINGS = [
@@ -257,7 +259,11 @@ class MiraApp(App[None]):
         self._foreground_interrupt_lock = asyncio.Lock()
         self._foreground_interrupt_owner: asyncio.Task[Any] | None = None
         self._artifact_action_disabled: dict[Button, bool] = {}
-        self.history_collapsed = False
+        self.history_collapsed = True
+        self.sidebar_kind = "history"
+        self.sidebar_width = 42
+        self.effective_model_alias = ""
+        self._selection_before_drag = None
         self.mcp_manager: Any | None = None
         self._mcp_spinner = 0
         self._mcp_activity_snapshots: dict[str, dict[str, Any]] = {}
@@ -275,44 +281,46 @@ class MiraApp(App[None]):
 
     def compose(self) -> ComposeResult:
         """Compose the Textual layout."""
+        with Horizontal(id="status-row"):
+            yield StatusBar(id="status")
+            yield Button("Artifact", id="artifact-status-button")
+            yield Button("MCP 0/0", id="mcp-status-button")
+            yield Button("Issues 0", id="issues-button")
         with Horizontal(id="app-shell"):
+            with Vertical(id="navigation-rail"):
+                yield Button("💬", id="rail-chat", tooltip="Chat History")
+                yield Button(DirectoryTree.ICON_NODE.strip(), id="rail-files", tooltip="File Explorer")
+                yield Static("", id="rail-space")
+                yield Button("🔧", id="rail-settings", tooltip="Settings · General")
+            yield Static("", id="rail-panel-gap")
             with Vertical(id="session-sidebar"):
                 with Horizontal(id="session-sidebar-header"):
-                    yield Static("Chat History", id="session-sidebar-title")
+                    yield Static("HISTORY", id="session-sidebar-title")
                     yield Button("+ New", id="new-chat")
-                    yield HistoryToggleButton("<|", id="history-collapse")
-                yield SessionHistory(id="sessions")
-            with Vertical(id="history-rail"):
-                yield HistoryToggleButton("|>", id="history-expand")
+                    yield Button("×", id="history-collapse", tooltip="Collapse sidebar")
+                with ContentSwitcher(initial="history-panel", id="sidebar-content"):
+                    with Vertical(id="history-panel"):
+                        yield SessionHistory(id="sessions")
+                    with Vertical(id="files-panel"):
+                        yield DirectoryTree(self.workspace, id="files-tree")
+            yield DragDivider("sidebar", id="side-divider")
             with Vertical(id="main-panel"):
-                with Horizontal(id="status-row"):
-                    yield StatusBar(id="status")
-                    yield Button("Artifact", id="artifact-status-button")
-                    yield Button("MCP 0/0", id="mcp-status-button")
-                    yield Button("Issues 0", id="issues-button")
-                with ContentSwitcher(initial="chat-log", id="transcript-viewport"):
-                    yield ChatLog(
-                        tool_output_chars=self.tool_output_chars,
-                        subagent_runs_provider=self._current_subagent_runs,
-                        id="chat-log",
-                    )
-                    yield Inspector(
-                        self.live_inspections,
-                        tool_output_chars=self.tool_output_chars,
-                        id="inspector",
-                    )
-                yield PromptPanel()
-                yield SubagentsPanel(id="subagents-panel")
-                yield AutocompleteInput(
-                    tool_provider=self._active_autocomplete_tools,
-                    subagent_provider=self._active_autocomplete_subagents,
-                    skill_registry_provider=self._skill_registry,
-                    workflow_registry_provider=self._workflow_registry,
+                chat = ChatSurface(
+                    ChatLog(tool_output_chars=self.tool_output_chars,
+                            subagent_runs_provider=self._current_subagent_runs, id="chat-log"),
+                    PromptPanel(),
+                    SubagentsPanel(id="subagents-panel"),
+                    AutocompleteInput(
+                        compact=True,
+                        tool_provider=self._active_autocomplete_tools,
+                        subagent_provider=self._active_autocomplete_subagents,
+                        skill_registry_provider=self._skill_registry,
+                        workflow_registry_provider=self._workflow_registry,
+                    ),
                 )
-                yield TelemetryBar(
-                    show_add_file=self.local_file_uploads_enabled,
-                    id="telemetry-row",
-                )
+                yield Workspace(chat, Inspector(self.live_inspections,
+                                tool_output_chars=self.tool_output_chars, embedded=True, id="inspector"))
+        yield TelemetryBar(id="telemetry-row")
 
     def on_mount(self) -> None:
         """Start app initialization."""
@@ -377,6 +385,7 @@ class MiraApp(App[None]):
             getattr(self.agent, "mira_project_backend", None) or state.get("project_backend")
         )
         self.config = state["config"]
+        self._record_effective_model()
         self.store = state["store"]
         self.session = state["session"]
         self.application = state.get("application")
@@ -1153,21 +1162,33 @@ class MiraApp(App[None]):
 
     @on(Button.Pressed, "#history-collapse")
     def press_history_collapse(self, event: Button.Pressed) -> None:
-        """Replace the expanded History sidebar with the minimal rail."""
+        """Collapse the optional sidebar beside the permanent navigation rail."""
         event.stop()
         previous_focus = self.screen.focused
         self.history_collapsed = True
         self._sync_sidebar_visibility()
         self.call_after_refresh(self._restore_focus_after_history_toggle, previous_focus)
 
-    @on(Button.Pressed, "#history-expand")
-    def press_history_expand(self, event: Button.Pressed) -> None:
-        """Restore the original expanded History sidebar."""
+    @on(Button.Pressed, "#rail-chat")
+    @on(Button.Pressed, "#rail-files")
+    def press_sidebar(self, event: Button.Pressed) -> None:
         event.stop()
+        kind = "history" if event.button.id == "rail-chat" else "files"
         previous_focus = self.screen.focused
-        self.history_collapsed = False
+        self.history_collapsed = not self.history_collapsed if self.sidebar_kind == kind else False
+        self.sidebar_kind = kind
         self._sync_sidebar_visibility()
         self.call_after_refresh(self._restore_focus_after_history_toggle, previous_focus)
+
+    @on(Button.Pressed, "#rail-settings")
+    def press_workspace_settings(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(self._run_settings_command("general"), name="workspace-settings")
+
+    @on(DirectoryTree.FileSelected, "#files-tree")
+    async def preview_workspace_file(self, event: DirectoryTree.FileSelected) -> None:
+        event.stop()
+        await self.query_one(Workspace).open_file(event.path)
 
     def _restore_focus_after_history_toggle(self, previous_focus: Any) -> None:
         """Return idle mouse toggles to input without taking interrupt focus."""
@@ -1642,6 +1663,7 @@ class MiraApp(App[None]):
     ) -> dict[str, Any]:
         """Present one serialized artifact review in the foreground."""
         del interrupt
+        self.query_one(Workspace).activate("chat")
         self.waiting_finished()
         self.mode["planning_stage"] = (
             PLANNING_STAGE_PLAN_FINALIZE if kind == "plan" else PLANNING_STAGE_GOAL_FINALIZE
@@ -1983,6 +2005,7 @@ class MiraApp(App[None]):
             return
         self._sync_artifact_button()
         try:
+            self.query_one(Workspace).activate("chat")
             self.query_one(PromptBox).focus()
         except NoMatches:
             return
@@ -2504,6 +2527,7 @@ class MiraApp(App[None]):
         self.context_limit_source = metadata.context_source
         self.agent = agent
         self.plan_agent = plan_agent
+        self._record_effective_model()
         self.agent_unavailable_message = model_unavailable_message(config) if agent is None else ""
         self._set_project_backend(
             getattr(agent, "mira_project_backend", None) or resources.project_backend
@@ -3403,13 +3427,15 @@ class MiraApp(App[None]):
 
     def _show_inspector(self, inspector: Inspector) -> None:
         """Reuse the established viewport and focus transition for live inspection."""
-        self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
-        self.call_after_refresh(inspector.query_one("#inspector-log", ChatLog).focus)
+        self.run_worker(self._open_inspector_tab(inspector.query_one("#inspector-log", ChatLog)), name="open-inspector")
+
+    async def _open_inspector_tab(self, focus_target: Any) -> None:
+        await self.query_one(Workspace).open_inspector()
+        self.call_after_refresh(focus_target.focus)
 
     def _show_workflow_inspector(self, inspector: Inspector) -> None:
-        """Open a Workflow Inspector with focus on its outer container."""
-        self.query_one("#transcript-viewport", ContentSwitcher).current = "inspector"
-        self.call_after_refresh(inspector.focus)
+        """Use the retained workspace tab for Workflow inspection."""
+        self.run_worker(self._open_inspector_tab(inspector), name="open-inspector")
 
     @on(SubagentHistoryAnchor.Requested)
     def open_subagent_history(self, event: SubagentHistoryAnchor.Requested) -> None:
@@ -3443,13 +3469,15 @@ class MiraApp(App[None]):
 
     def _restore_chat_viewport(self) -> None:
         try:
-            inspector = self.query_one(Inspector)
-            switcher = self.query_one("#transcript-viewport", ContentSwitcher)
+            workspace = self.query_one(Workspace)
         except NoMatches:
             return
-
-        inspector.stop_inspection()
-        switcher.current = "chat-log"
+        workspace.inspector.stop_inspection()
+        workspace.activate("chat")
+        if "inspector" in workspace.views:
+            # The subscription was detached above. A newer inspection may be
+            # opened before this queued tab removal finishes.
+            self.run_worker(workspace.close_view("inspector", stop_inspection=False), name="close-inspector")
 
     async def on_key(self, event: Key) -> None:
         """Apply Escape to the currently focused transcript or prompt."""
@@ -3466,10 +3494,10 @@ class MiraApp(App[None]):
         try:
             inspector = self.query_one(Inspector)
             prompt = self.query_one(PromptBox)
-            switcher = self.query_one("#transcript-viewport", ContentSwitcher)
+            workspace = self.query_one(Workspace)
         except NoMatches:
             return
-        if switcher.current == "inspector" and (
+        if "inspector" in workspace.views and inspector.display and (
             inspector.has_focus or inspector.has_focus_within
         ):
             event.stop()
@@ -3940,6 +3968,7 @@ class MiraApp(App[None]):
         prompt_waiter: Callable[[], Awaitable[Any]],
     ) -> Any:
         """Wait for one prompt while preserving its prior input availability."""
+        self.query_one(Workspace).activate("chat")
         prompt = self.query_one(PromptBox)
         was_disabled = prompt.disabled
         prompt.disabled = True
@@ -4132,10 +4161,13 @@ class MiraApp(App[None]):
             busy=self.busy,
         )
         self.query_one(TelemetryBar).set_state(
-            model_name=self.model_name or "loading",
+            model_name=self.effective_model_alias,
+            btw_name="" if "btw" in self.query_one(Workspace).views else None,
             dashboard=self.session.get("dashboard"),
             turns=int(self.session.get("turns") or 0),
         )
+        from config.settings import MAIN_MODEL, model_assignment
+        self.query_one("#actions-main", ComposerActions).set_alias(model_assignment(self.config, MAIN_MODEL))
         self._sync_artifact_button()
         self._sync_mcp_button()
         self._sync_issues_button()
@@ -4150,7 +4182,7 @@ class MiraApp(App[None]):
         if not self.is_mounted or not self._screen_stack:
             return
         locked = bool(self.busy or getattr(self, "_reload_in_progress", False))
-        for selector in ("#model-settings-button", "#new-chat"):
+        for selector in ("#model-trigger-main", "#new-chat"):
             try:
                 self.query_one(selector, Button).disabled = locked
             except NoMatches:
@@ -4158,6 +4190,7 @@ class MiraApp(App[None]):
         try:
             self.query_one("#add-file-button", Button).disabled = bool(
                 locked
+                or not self.local_file_uploads_enabled
                 or not self.ready
                 or self.project_backend is None
                 or self._file_ingestion_active
@@ -4234,17 +4267,67 @@ class MiraApp(App[None]):
             return
         await self.open_context_report()
 
-    @on(Button.Pressed, "#model-settings-button")
-    def press_model_settings(self, event: Button.Pressed) -> None:
-        """Open the shared Settings panel directly on Models."""
+    @on(Button.Pressed, "#model-trigger-main")
+    def press_model_selector(self, event: Button.Pressed) -> None:
+        """Choose an alias using the same Settings application/rebuild path."""
+        from agent.llm import model_registry
+        from config.settings import MAIN_MODEL, model_assignment
+
         event.stop()
-        self.run_worker(self._run_settings_command("models"), name="models-button", exclusive=False)
+        if self.busy or self._reload_in_progress or not self.ready:
+            return
+        aliases = tuple(model_registry(self.config or {}).profiles)
+        if not aliases:
+            self.notify("No model aliases are available. Configure profiles with /models.")
+            return
+        button = event.button
+        pane = self.query_one("#primary-pane").region
+        self.push_screen(ModelAliasPopup(
+            "main", aliases, model_assignment(self.config, MAIN_MODEL) or "",
+            (button.region.right, button.region.y), (pane.x, pane.y, pane.right, pane.bottom), tuple(self.size),
+        ), self._model_alias_selected)
+
+    def _model_alias_selected(self, alias: str | None) -> None:
+        if alias is not None:
+            self.run_worker(self._activate_model_alias(alias), name="select-main-model")
+
+    async def _activate_model_alias(self, alias: str) -> None:
+        from config.settings import MAIN_MODEL, set_model_assignment
+        if self.busy or self._reload_in_progress or not self.ready:
+            return
+        self._reload_in_progress = True
+        self._sync_interactivity()
+        prompt = self.query_one(PromptBox)
+        disabled = prompt.disabled
+        prompt.disabled = True
+        try:
+            settings = (self.config or {}).get("settings") or load_settings(self.workspace)
+            ok, message = await self._apply_settings(set_model_assignment(settings, MAIN_MODEL, alias))
+            if not ok:
+                self.notify(message, severity="error")
+        finally:
+            self._reload_in_progress = False
+            prompt.disabled = disabled
+            self._sync_interactivity()
+            self._set_status(state=self.status_state)
+            self.action_focus_prompt()
+
+    @on(Workspace.ViewsChanged)
+    def workspace_views_changed(self, event: Workspace.ViewsChanged) -> None:
+        event.stop()
+        self._sync_sidebar_visibility()
+        self._set_status(state=self.status_state)
+
+    def _record_effective_model(self) -> None:
+        """Capture an alias only at a successfully installed runtime boundary."""
+        from config.settings import MAIN_MODEL, model_assignment
+        self.effective_model_alias = (model_assignment(self.config, MAIN_MODEL) or "") if self.agent is not None else ""
 
     @on(Button.Pressed, "#add-file-button")
     def press_add_file(self, event: Button.Pressed) -> None:
         """Open the native multi-file picker without blocking Textual."""
         event.stop()
-        if self._file_ingestion_active or not self.ready or self.project_backend is None:
+        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.project_backend is None:
             return
         self._file_ingestion_active = True
         self._sync_interactivity()
@@ -4258,7 +4341,7 @@ class MiraApp(App[None]):
     def ingest_pasted_local_files(self, event: PromptBox.LocalFilesPasted) -> None:
         """Route Explorer clipboard files through the shared ingestion path."""
         event.stop()
-        if self._file_ingestion_active or not self.ready or self.project_backend is None:
+        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.project_backend is None:
             return
         self._file_ingestion_active = True
         self._sync_interactivity()
@@ -4429,8 +4512,6 @@ class MiraApp(App[None]):
         if not self.is_mounted:
             return
         try:
-            sidebar = self.query_one("#session-sidebar")
-            rail = self.query_one("#history-rail")
             controls = (
                 (
                     self.query_one("#artifact-status-button", Button),
@@ -4444,19 +4525,7 @@ class MiraApp(App[None]):
             )
         except NoMatches:
             return
-        has_controls = (
-            any(wanted for _button, wanted in controls)
-            or self._pending_artifact_review is not None
-        )
-        sidebar.display = bool(
-            not self.history_collapsed
-            and self.size.width >= (90 if has_controls else 72)
-        )
-        rail.display = self.history_collapsed
-        main_width = self.size.width - (
-            HISTORY_RAIL_WIDTH if self.history_collapsed else 42 if sidebar.display else 0
-        )
-        slots = max(0, (main_width - 40) // 13)
+        slots = max(0, (self.size.width - 40) // 13)
         for button, wanted in controls:
             button.display = bool(wanted and slots > 0)
             if wanted and slots > 0:
@@ -4635,6 +4704,7 @@ class MiraApp(App[None]):
         mode_updates["resources"] = resources.metadata
         self.agent = agent
         self.plan_agent = plan_agent
+        self._record_effective_model()
         self.agent_unavailable_message = model_unavailable_message(self.config) if agent is None else ""
         self.tool_failures = resources.tool_failures
         self.issues = unique_issues(
@@ -4846,14 +4916,57 @@ class MiraApp(App[None]):
             return
 
     def on_resize(self, _event: Any = None) -> None:
-        """Keep the main panel usable in very narrow terminals."""
+        if self.is_mounted:
+            self._sync_sidebar_visibility()
+            self.run_worker(self._resize_workspace(), group="workspace-resize", exclusive=False)
+
+    async def _resize_workspace(self) -> None:
+        await self.query_one(Workspace).responsive()
         self._sync_sidebar_visibility()
 
     def _sync_sidebar_visibility(self) -> None:
-        """Hide expanded history before it can squeeze chat to zero width."""
         if not self.is_mounted:
             return
+        workspace = self.query_one(Workspace)
+        show = not self.history_collapsed and self.size.width >= 85
+        if workspace.keys("right") and self.size.width < 145:
+            show = False
+        sidebar = self.query_one("#session-sidebar")
+        sidebar.display = show
+        available = self.size.width - 2 - 10 - 1 - 28
+        reserve = 29 if workspace.keys("right") else 0
+        sidebar.styles.width = min(self.sidebar_width, max(42, available - reserve))
+        self.query_one("#side-divider").display = show
+        self.query_one("#session-sidebar-title", Static).update("HISTORY" if self.sidebar_kind == "history" else "EXPLORER")
+        self.query_one("#sidebar-content", ContentSwitcher).current = "history-panel" if self.sidebar_kind == "history" else "files-panel"
+        self.query_one("#new-chat").display = self.sidebar_kind == "history"
+        for key, kind in (("rail-chat", "history"), ("rail-files", "files")):
+            self.query_one("#" + key).set_class(show and self.sidebar_kind == kind, "selected")
+        workspace.sync_layout()
         self._sync_header_control_visibility()
+
+    def begin_divider_drag(self) -> None:
+        self._selection_before_drag = self.ALLOW_SELECT
+        self.ALLOW_SELECT = False
+        self.clear_selection()
+
+    def end_divider_drag(self) -> None:
+        if self._selection_before_drag is not None:
+            self.ALLOW_SELECT = self._selection_before_drag
+            self._selection_before_drag = None
+        self.clear_selection()
+
+    def drag_width(self, which: str, screen_x: int) -> None:
+        workspace = self.query_one(Workspace)
+        if which == "sidebar":
+            origin = self.query_one("#session-sidebar").region.x
+            reserve = workspace.query_one("#right-pane").region.width + 1 if workspace.dock_visible else 0
+            capacity = self.query_one("#app-shell").content_region.width - 10 - 1 - reserve - 28
+            self.sidebar_width = max(42, min(66, capacity, screen_x - origin))
+        else:
+            capacity = workspace.region.width - 29
+            workspace.right_width = max(28, min(76, capacity, workspace.region.right - screen_x - 1))
+        self._sync_sidebar_visibility()
 
     def _mode_label(self) -> str:
         """Return the compact mode label shown in the status line."""

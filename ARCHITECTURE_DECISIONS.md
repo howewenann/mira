@@ -1466,6 +1466,24 @@ The Textual application renders ordered session events and collects decisions; o
 
 ### Textual and one-shot presentation
 
+The Textual workspace follows the approved v34 probe's separate bordered
+panels, native tab strips, compact composer, and anchored menus. `Workspace`
+owns the tab registry and placement in `ui/textual/widgets/workspace.py`.
+Its views share a stable layout parent: docking moves only native header tabs,
+so live Inspector subscriptions, preview scroll positions, and prompt state
+survive without reconstructing transcripts. Serialized tab mutations select a
+surviving tab before removal and reject queued activation from removed tabs.
+The small custom layout is needed because Textual 8.2.7 has no public operation
+for reparenting a mounted widget between TabPanes.
+
+`workspace_controls.py` owns the v34 interactions and dropdowns;
+`workspace_surfaces.py` owns read-only file previews, composer controls, and the
+disabled BTW placeholder. Production Chat, prompt/HITL, history, uploads, and
+inspection remain the existing widgets and runtime paths. The model dropdown
+uses `_apply_settings`; effective footer aliases are captured at successful
+runtime installation or rebuild boundaries rather than inferred from selections.
+BTW has no runtime or durable conversation state in this release.
+
 **Decision:** The Textual TUI is the primary interactive experience. One-shot
 terminal output uses a separate renderer. One-shot mode accepts literal prompt
 text through `--prompt/-p` or any readable, non-empty UTF-8 text file through
