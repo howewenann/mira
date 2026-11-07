@@ -178,6 +178,7 @@ class PromptBox(TextArea):
 
     def watch_disabled(self, disabled: bool) -> None:
         """Notify the prompt wrapper whenever availability changes."""
+        super().watch_disabled(disabled)
         callback = getattr(self.parent, "prompt_disabled_changed", None)
         if callable(callback):
             callback(disabled)

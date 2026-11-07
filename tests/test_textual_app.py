@@ -794,6 +794,113 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prompt.cursor_location, (2, 0))
             self.assertEqual(app.submissions, [])
 
+    async def test_disabled_prompt_blurs_and_blocks_keyboard_and_mouse_refocus(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            await pilot.press("a")
+            self.assertEqual(prompt.value, "a")
+            self.assertTrue(prompt.has_focus)
+
+            prompt.disabled = True
+            await pilot.pause()
+            self.assertFalse(prompt.has_focus)
+            self.assertIsNot(app.screen.focused, prompt)
+            await pilot.press("b", "shift+enter", "enter")
+            self.assertEqual(prompt.value, "a")
+            self.assertEqual(app.submissions, [])
+
+            await pilot.click(prompt, offset=(3, 1))
+            self.assertFalse(prompt.has_focus)
+            await pilot.press("c", "enter")
+            self.assertEqual(prompt.value, "a")
+            self.assertEqual(app.submissions, [])
+
+            prompt.disabled = False
+            prompt.focus()
+            await pilot.press("d", "enter")
+            self.assertTrue(prompt.has_focus)
+            self.assertEqual(prompt.value, "ad")
+            self.assertEqual(app.submissions, ["ad"])
+
+    async def test_disabled_prompt_blocks_ordinary_text_paste(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "before"
+            # Send terminal paste through the app's normal focused-widget routing.
+            prompt.disabled = True
+            app.post_message(Paste(" blocked\ntext"))
+            await pilot.pause()
+            self.assertEqual(prompt.value, "before")
+            self.assertFalse(prompt.has_focus)
+            self.assertEqual(app.submissions, [])
+
+            await pilot.click(prompt, offset=(3, 1))
+            app.post_message(Paste(" also blocked"))
+            await pilot.pause()
+            self.assertEqual(prompt.value, "before")
+
+            prompt.disabled = False
+            prompt.focus()
+            await pilot.press("a", "enter")
+            self.assertEqual(app.submissions, ["beforea"])
+
+    async def test_reload_scopes_block_disabled_prompt_input_and_restore_editing(self) -> None:
+        for full_runtime in (False, True):
+            for fails in (False, True):
+                with self.subTest(full_runtime=full_runtime, fails=fails):
+                    app = make_app()
+                    entered, release = asyncio.Event(), asyncio.Event()
+
+                    async def reload() -> None:
+                        entered.set()
+                        await release.wait()
+                        if fails:
+                            raise RuntimeError("reload failed")
+
+                    method = "_reload_runtime" if full_runtime else "_reload_agents"
+                    with (
+                        patch.object(app, method, side_effect=reload),
+                        patch.object(app, "_write_error_report", return_value=Path("reload-error.txt")),
+                        patch("core.application.session.run_user_turn", AsyncMock()) as run_turn,
+                    ):
+                        async with app.run_test(size=(100, 30)) as pilot:
+                            prompt = app.query_one(PromptBox)
+                            prompt.value = "draft"
+                            prompt.focus()
+                            command = app._run_reload_runtime_command if full_runtime else app._run_reload_command
+                            task = asyncio.create_task(command())
+                            try:
+                                await asyncio.wait_for(entered.wait(), 2)
+                                await pilot.pause()
+                                self.assertTrue(prompt.disabled)
+                                self.assertFalse(prompt.has_focus)
+                                self.assertIsNot(app.screen.focused, prompt)
+                                self.assertEqual(app.query_one(AutocompleteInput).styles.tint.a, 0.5)
+                                await pilot.press("x", "shift+enter", "enter")
+                                app.post_message(Paste(" blocked\ntext"))
+                                await pilot.click(prompt, offset=(3, 1))
+                                await pilot.pause()
+                                self.assertFalse(prompt.has_focus)
+                                await pilot.press("y", "enter")
+                                app.post_message(Paste(" still blocked"))
+                                await pilot.pause()
+                                self.assertEqual(prompt.value, "draft")
+                                run_turn.assert_not_awaited()
+                            finally:
+                                release.set()
+                                result = await asyncio.wait_for(task, 3)
+                            self.assertEqual(result, not fails)
+                            await wait_until(lambda: prompt.has_focus)
+                            self.assertFalse(prompt.disabled)
+                            self.assertEqual(app.query_one(AutocompleteInput).styles.tint.a, 0)
+                            await pilot.press("z", "enter")
+                            await wait_until(lambda: run_turn.await_count == 1)
+                            self.assertEqual(run_turn.await_args.kwargs["text"], "draftz")
+
     async def test_empty_windows_paste_routes_every_clipboard_file(self) -> None:
         app = PromptBoxTestApp()
         paths = [Path(r"C:\files\one.txt"), Path(r"C:\files\annual report.pdf")]

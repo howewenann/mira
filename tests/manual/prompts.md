@@ -2041,5 +2041,8 @@ Use a disposable workspace and compare with
    Chat's complete composer (all borders, grip, content and controls) dims to
    match BTW during reload and restores afterward. Grips still resize and
    retain hover feedback; BTW's coral tab and explanatory text stay undimmed.
+   While reload is in progress, try typing, ordinary text paste, Enter, and
+   clicking the prompt: no edits, submissions, or prompt focus are allowed.
+   After success or failure, normal editing and Enter submission work again.
 8. Visit Models settings, close Settings, then click the rail wrench.
    Expected: General opens with no initial keyboard focus.
