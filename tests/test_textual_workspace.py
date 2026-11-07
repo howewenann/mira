@@ -1,16 +1,18 @@
 """Rendered production workspace regressions against the approved v34 layout."""
 
 import asyncio
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from rich.console import Console
 from textual.widgets import Button, OptionList, Static, TextArea
 
 from tests.test_textual_app import (
     make_app, compositor_plain, wait_until, renderable_plain, move_captured_mouse,
-    start_artifact_review, final_plan_interrupt,
+    start_artifact_review, final_plan_interrupt, start_prompt_resize,
 )
 from config.llm import ModelProfile, ModelRegistry
 from config.metadata import ModelMetadata
@@ -23,6 +25,154 @@ from ui.textual.widgets.workspace_controls import ActionTab, TabOverflowDropdown
 
 
 class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
+    def composer_border_colors(self, app, prompt, actions, grip):
+        """Sample the final compositor, including inherited opacity and overlays."""
+        strips = app.screen._compositor.render_strips()
+        points = [
+            (prompt.region.x, prompt.region.y + 1),
+            (prompt.region.right - 1, prompt.region.y + 1),
+            (grip.region.x + 2, grip.region.y),
+            (grip.region.x + grip.region.width // 2, grip.region.y),
+            (actions.region.x, actions.region.y),
+            (actions.region.right - 1, actions.region.y),
+            (actions.region.x + 2, actions.region.bottom - 1),
+        ]
+        return [next(iter(strips[y].crop(x, x + 1))).style.color for x, y in points]
+
+    async def test_overflow_marker_tracks_each_pane_independently_of_highlight(self):
+        with patch.dict(os.environ):
+            os.environ.pop("NO_COLOR", None)
+            app = make_app()
+        async with app.run_test(size=(160, 40)) as pilot:
+            workspace = app.query_one(Workspace)
+            for index in range(3):
+                await workspace.open_view(f"file-{index}", "very_long_filename_" * 5,
+                                          "file", Static(str(index)))
+            await workspace.move("file-1", "right")
+            await workspace.move("file-2", "right")
+            for group, key in (("main", "file-0"), ("main", "chat"),
+                               ("right", "file-1"), ("right", "file-2")):
+                workspace.activate(key)
+                await pilot.pause()
+                await pilot.click(f"#{group}-overflow")
+                await pilot.pause()
+                menu = app.screen.query_one(OptionList)
+                options = [menu.get_option_at_index(i) for i in range(menu.option_count)]
+                marked = [o for o in options if o.prompt.plain.startswith("● ")]
+                self.assertEqual([o.id for o in marked], [key])
+                color = marked[0].prompt.get_style_at_offset(Console(), 0).color
+                self.assertEqual(color.get_truecolor(), (91, 184, 177))
+                index = next(i for i, option in enumerate(options) if option.id == key)
+                marker = app.screen._compositor.render_strips()[menu.region.y + 1 + index].crop(
+                    menu.region.x + 2, menu.region.x + 3,
+                )
+                self.assertEqual(marker.text, "●")
+                self.assertEqual(next(iter(marker)).style.color.get_truecolor(), (91, 184, 177))
+                for option in options:
+                    self.assertEqual(option.prompt.plain[:2], "● " if option.id == key else "  ")
+                    if option.id.startswith("file-"):
+                        self.assertTrue(option.prompt.plain.endswith("…"))
+                self.assertEqual(len(menu._lines), menu.option_count)
+                before = [o.prompt.plain for o in options]
+                await pilot.press("down", "end", "home")
+                self.assertEqual([menu.get_option_at_index(i).prompt.plain
+                                  for i in range(menu.option_count)], before)
+                self.assertIsNone(app.screen.focused)
+                await pilot.press("escape")
+
+    async def test_composers_share_rendered_disabled_style_through_both_reload_scopes(self):
+        with patch.dict(os.environ):
+            os.environ.pop("NO_COLOR", None)
+            app = make_app()
+        async with app.run_test(size=(160, 40)) as pilot:
+            workspace = app.query_one(Workspace)
+            await workspace.open_btw()
+            await workspace.move("btw", "right")
+            await pilot.hover("#status-row")
+            await pilot.pause()
+            prompt = app.query_one(PromptBox)
+            shell = app.query_one(AutocompleteInput)
+            actions = app.query_one("#actions-main")
+            grip = app.query_one("#prompt-resize-handle")
+            btw_prompt = app.query_one("#btw-prompt")
+            btw_actions = app.query_one("#actions-btw")
+            btw_grip = app.query_one("#btw-resize-handle")
+            app.local_file_uploads_enabled = True
+            app.project_backend = object()
+            app._sync_interactivity()
+            await pilot.pause()
+            self.assertFalse(app.query_one("#add-file-button").disabled)
+            self.assertFalse(app.query_one("#model-trigger-main").disabled)
+            enabled = self.composer_border_colors(app, prompt, actions, grip)
+            self.assertEqual(len(set(enabled)), 1)
+            self.assertEqual(enabled[0].get_truecolor(), (91, 184, 177))
+            btw = self.composer_border_colors(app, btw_prompt, btw_actions, btw_grip)
+            self.assertEqual(len(set(btw)), 1)
+            self.assertNotEqual(enabled, btw)
+            self.assertEqual(app.query_one("#btw-input-shell").styles.tint.a, 0.5)
+            self.assertEqual(app.query_one("#btw-placeholder").styles.opacity, 1)
+            self.assertEqual(app.query_one("#head-right-btw").styles.opacity, 1)
+            self.assertEqual(app.query_one("#btw-placeholder").styles.tint.a, 0)
+            self.assertEqual(app.query_one("#head-right-btw").styles.tint.a, 0)
+            for full_runtime in (False, True):
+                for fails in (False, True):
+                    with self.subTest(full_runtime=full_runtime, fails=fails):
+                        entered, release = asyncio.Event(), asyncio.Event()
+
+                        async def reload():
+                            entered.set()
+                            await release.wait()
+                            if fails:
+                                raise RuntimeError("reload failed")
+
+                        method = "_reload_runtime" if full_runtime else "_reload_agents"
+                        with patch.object(app, method, side_effect=reload), patch.object(
+                            app, "_write_error_report", return_value=Path("reload-error.txt")
+                        ):
+                            task = asyncio.create_task(app._run_reload(full_runtime=full_runtime))
+                            try:
+                                await asyncio.wait_for(entered.wait(), 2)
+                                await pilot.pause()
+                                self.assertTrue(prompt.disabled)
+                                self.assertEqual(shell.styles.tint.a, 0.5)
+                                self.assertEqual(self.composer_border_colors(app, prompt, actions, grip), btw)
+                                for widget in (prompt, grip, actions, app.query_one("#add-file-button"),
+                                               app.query_one("#model-trigger-main"), btw_prompt, btw_grip,
+                                               btw_actions, app.query_one("#attach-btw"),
+                                               app.query_one("#model-trigger-btw")):
+                                    self.assertEqual(widget.styles.opacity, 1)
+                                    self.assertEqual(widget.opacity, 1)
+                                    self.assertEqual(widget.styles.tint.a, 0.5)
+                                self.assertTrue(app.query_one("#add-file-button").disabled)
+                                self.assertTrue(app.query_one("#model-trigger-main").disabled)
+                                for main_id, btw_id in (("#add-file-button", "#attach-btw"),
+                                                        ("#model-trigger-main", "#model-trigger-btw")):
+                                    main_ink, btw_ink = [
+                                        next(segment.style.color for segment in app.query_one(selector).render_line(0)
+                                             if segment.text.strip())
+                                        for selector in (main_id, btw_id)
+                                    ]
+                                    self.assertEqual(main_ink, btw_ink)
+                                old_width = grip.region.width
+                                _, _, x, y = await start_prompt_resize(app, pilot)
+                                old_height = prompt.region.height
+                                await move_captured_mouse(pilot, x, y - 2)
+                                self.assertEqual(prompt.region.height, old_height + 2)
+                                self.assertEqual(grip.region.width, old_width)
+                                self.assertIn("[=]", grip.render_line(0).text)
+                                await pilot.mouse_up(offset=(x, y - 2))
+                                await pilot.hover("#status-row")
+                            finally:
+                                release.set()
+                                result = await asyncio.wait_for(task, 3)
+                            self.assertEqual(result, not fails)
+                            await pilot.pause()
+                            self.assertFalse(prompt.disabled)
+                            self.assertFalse(app.query_one("#add-file-button").disabled)
+                            self.assertFalse(app.query_one("#model-trigger-main").disabled)
+                            self.assertEqual(shell.styles.tint.a, 0)
+                            self.assertEqual(self.composer_border_colors(app, prompt, actions, grip), enabled)
+
     async def test_initial_layout(self):
         app = make_app()
         async with app.run_test(size=(160, 48)) as pilot:
@@ -64,6 +214,64 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(list(workspace.views), ["chat"])
 
+    async def test_all_dock_surfaces_at_minimum_width_preserve_state_when_folded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "example.py"
+            path.write_text("print('retained')\n" * 120, encoding="utf-8")
+            app = make_app(workspace=Path(directory))
+            async with app.run_test(size=(200, 48)) as pilot:
+                workspace = app.query_one(Workspace)
+                await pilot.click("#rail-chat")
+                sidebar = app.query_one("#session-sidebar")
+                app.drag_width("sidebar", sidebar.region.x)
+                await workspace.open_file(path)
+                file = next(v for v in workspace.views.values() if v.path == path)
+                editor = file.surface.query_one(TextArea)
+                editor.move_cursor((70, 3))
+                await workspace.move(file.key, "right")
+                await pilot.pause()
+                self.assertEqual(app.query_one("#right-pane").region.width, 42)
+                app.drag_width("right", workspace.region.right)
+                await workspace.open_inspector()
+                await workspace.move("inspector", "right")
+                await workspace.open_btw()
+                await workspace.move("btw", "right")
+                await pilot.pause()
+                pane = app.query_one("#right-pane")
+                self.assertEqual(pane.region.width, 36)
+                self.assertEqual(sidebar.region.width, 36)
+                self.assertGreaterEqual(app.query_one("#primary-pane").region.width, 28)
+                surfaces = {key: workspace.views[key].surface for key in workspace.keys("right")}
+                for key, surface in surfaces.items():
+                    workspace.activate(key)
+                    await pilot.pause()
+                    self.assertTrue(surface.display)
+                    self.assertGreater(surface.content_region.width, 0)
+                    self.assertGreaterEqual(surface.region.x, pane.content_region.x)
+                    self.assertLessEqual(surface.region.right, pane.content_region.right)
+                    self.assertEqual(app.query_one("#right-overflow").region.width, 3)
+                for selector in ("#btw-prompt", "#attach-btw", "#model-trigger-btw"):
+                    region = app.query_one(selector).region
+                    self.assertGreaterEqual(region.x, pane.content_region.x)
+                    self.assertLessEqual(region.right, pane.content_region.right)
+                self.assertEqual(app.query_one("#btw-input-shell").parent.styles.padding.left, 1)
+                for width in (110, 80, 200):
+                    await pilot.resize_terminal(width, 48)
+                    await pilot.pause()
+                    for key, surface in surfaces.items():
+                        self.assertIs(workspace.views[key].surface, surface)
+                        self.assertEqual(workspace.views[key].group, "main" if width < 107 else "right")
+                    if width == 110:
+                        self.assertFalse(sidebar.display)
+                        self.assertEqual(pane.region.width, 36)
+                self.assertTrue(sidebar.display)
+                self.assertEqual((sidebar.region.width, pane.region.width), (36, 36))
+                workspace.activate(file.key)
+                await pilot.pause()
+                self.assertIs(file.surface.query_one(TextArea), editor)
+                self.assertEqual(editor.cursor_location, (70, 3))
+                self.assertGreater(editor.scroll_y, 0)
+
     async def test_sidebar_switch_resize_and_full_panel_alignment(self):
         app = make_app()
         async with app.run_test(size=(200, 48)) as pilot:
@@ -76,7 +284,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sidebar.region.width, 66)
             app.drag_width("sidebar", sidebar.region.x)
             await pilot.pause()
-            self.assertEqual(sidebar.region.width, 42)
+            self.assertEqual(sidebar.region.width, 36)
             await pilot.click("#rail-files")
             self.assertEqual(app.sidebar_kind, "files")
             self.assertTrue(sidebar.display)
@@ -98,8 +306,8 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.query_one("#right-pane").region.width, 76)
             app.drag_width("right", workspace.region.right)
             await pilot.pause()
-            self.assertEqual(app.query_one("#right-pane").region.width, 28)
-            self.assertEqual(sidebar.region.width, 42)
+            self.assertEqual(app.query_one("#right-pane").region.width, 36)
+            self.assertEqual(sidebar.region.width, 36)
 
     async def test_resize_handle_is_invisible_except_hover_and_drag(self):
         app = make_app()
@@ -148,6 +356,21 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.query_one("#btw-prompt").disabled)
                 self.assertTrue(app.query_one("#attach-btw").disabled)
                 self.assertTrue(app.query_one("#model-trigger-btw").disabled)
+                grip = app.query_one("#btw-resize-handle")
+                prompt = app.query_one("#btw-prompt")
+                width = grip.region.width
+                x, y = grip.region.x + width // 2, grip.region.y
+                await pilot.hover(grip)
+                self.assertEqual(grip.styles.color.hex, "#7CE3DC")
+                self.assertEqual(grip.styles.tint.a, 0.5)
+                await pilot.mouse_down(grip, offset=(width // 2, 0))
+                await move_captured_mouse(pilot, x, y - 2)
+                await pilot.pause()
+                self.assertEqual(prompt.region.height, 5)
+                self.assertEqual(grip.region.width, width)
+                self.assertEqual(grip.region.x, prompt.region.x + 1)
+                self.assertIn("[=]", grip.render_line(0).text)
+                await pilot.mouse_up(offset=(x, y - 2))
                 await pilot.press("enter")
                 submit.assert_not_awaited()
                 self.assertIn("btw: unset", compositor_plain(app))
@@ -287,7 +510,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             workspace = app.query_one(Workspace)
             await workspace.open_btw()
             await workspace.move("btw", "right")
-            workspace.right_width = 28
+            workspace.right_width = 36
             workspace.sync_layout()
             await pilot.pause()
             trigger = app.query_one("#model-trigger-btw")
@@ -397,6 +620,12 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             app = make_app(workspace=root)
             async with app.run_test(size=(160, 40)) as pilot:
                 await pilot.click("#rail-files")
+                sidebar = app.query_one("#session-sidebar")
+                self.assertEqual(sidebar.region.width, 42)
+                for requested, expected in ((100, 66), (0, 36)):
+                    app.drag_width("sidebar", sidebar.region.x + requested)
+                    await pilot.pause()
+                    self.assertEqual(sidebar.region.width, expected)
                 tree = app.query_one(DirectoryTree)
                 tree.root.expand()
                 await wait_until(lambda: bool(tree.root.children))

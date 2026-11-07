@@ -4934,8 +4934,8 @@ class MiraApp(App[None]):
         sidebar = self.query_one("#session-sidebar")
         sidebar.display = show
         available = self.size.width - 2 - 10 - 1 - 28
-        reserve = 29 if workspace.keys("right") else 0
-        sidebar.styles.width = min(self.sidebar_width, max(42, available - reserve))
+        reserve = 37 if workspace.keys("right") else 0
+        sidebar.styles.width = max(36, min(self.sidebar_width, 66, available - reserve))
         self.query_one("#side-divider").display = show
         self.query_one("#session-sidebar-title", Static).update("HISTORY" if self.sidebar_kind == "history" else "EXPLORER")
         self.query_one("#sidebar-content", ContentSwitcher).current = "history-panel" if self.sidebar_kind == "history" else "files-panel"
@@ -4962,10 +4962,10 @@ class MiraApp(App[None]):
             origin = self.query_one("#session-sidebar").region.x
             reserve = workspace.query_one("#right-pane").region.width + 1 if workspace.dock_visible else 0
             capacity = self.query_one("#app-shell").content_region.width - 10 - 1 - reserve - 28
-            self.sidebar_width = max(42, min(66, capacity, screen_x - origin))
+            self.sidebar_width = max(36, min(66, capacity, screen_x - origin))
         else:
             capacity = workspace.region.width - 29
-            workspace.right_width = max(28, min(76, capacity, workspace.region.right - screen_x - 1))
+            workspace.right_width = max(36, min(76, capacity, workspace.region.right - screen_x - 1))
         self._sync_sidebar_visibility()
 
     def _mode_label(self) -> str:

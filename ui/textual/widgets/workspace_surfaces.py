@@ -128,6 +128,7 @@ class BTWInput(Vertical):
         yield BTWResizeHandle()
 
     def on_mount(self) -> None:
+        self.set_class(self.query_one(TextArea).disabled, "-prompt-disabled")
         self.screen.screen_layout_refresh_signal.subscribe(self, self.sync_geometry)
         self.call_after_refresh(self.sync_geometry)
 

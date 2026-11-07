@@ -2001,17 +2001,23 @@ Use a disposable workspace and compare with
 
 1. Launch MIRA. Expected: full-width teal status/footer, 9-column rail, Chat,
    collapsed History, and closed dock. Open History and Files from the rail.
-   Check independent complete borders and charcoal sidebar bodies. Resize
-   History from 42 to 66 columns and the dock from 28 to 76. The gaps have no
+   Check independent complete borders and charcoal sidebar bodies.
+   Both panels initially measure 42 columns. Resize History/Files from 36 to
+   66 columns and the dock from 36 to 76. The gaps have no
    visible line until hover/drag; releasing then moving away removes teal.
 2. Select, rename, pin/unpin, and delete saved sessions, including cancelling
-   deletion. Expected: existing persistence and confirmation behavior. History
+   deletion, also at 36 columns. Expected: rows reach the sidebar's inner
+   edges, gold active indicator, readable titles/timestamps and usable actions,
+   with existing persistence and confirmation behavior. History
    `...` opens beside the row at its top; click outside or Escape dismisses.
 3. Expand folders and open several files, including long filenames. Move the
    final file tab into the dock, repeatedly return/move/close tabs, and scroll
    both strips. Expected: no crash, no lost preview position, Chat fixed, blue
    file underlines. Each `⋯` menu scrolls and keeps long titles on one row;
-   selecting one opens the correct file. Arrows light only under the pointer.
+   selecting one opens the correct file. Exactly one real tab in each menu has
+   a teal dot; the dot follows the active tab independently of keyboard
+   highlighting. Labels align and menu actions never have dots.
+   Arrows light only under the pointer.
 4. Ask: `Explain the workspace in two short sentences.` Copy the reply and
    switch Markdown view. Type `/` and `@`, use history, add a local file on
    Windows, and resize `[=]`. Expected: existing real submission, streaming,
@@ -2026,9 +2032,14 @@ Use a disposable workspace and compare with
    changes `main:`; a failed rebuild retains the prior effective alias. Unset
    Main through Models and verify `main: unset`. Long aliases fit in wide
    footers; narrower footers keep telemetry and readable alias labels.
-7. Open BTW through main `⋯`, dock it at 28 columns, resize its composer, then
+7. Open BTW through main `⋯`, dock it at 36 columns, resize its composer, then
    narrow/widen the terminal. Expected: coral tab, explicit future-feature
    placeholder, disabled submission/upload/model controls, `btw: unset`, and
    preserved view when folded/restored. Closing BTW removes its footer section.
+   With Chat and BTW side by side, run `/reload` and `/reload-runtime`, including
+   a failed reload with a disposable invalid model configuration. Expected:
+   Chat's complete composer (all borders, grip, content and controls) dims to
+   match BTW during reload and restores afterward. Grips still resize and
+   retain hover feedback; BTW's coral tab and explanatory text stay undimmed.
 8. Visit Models settings, close Settings, then click the rail wrench.
    Expected: General opens with no initial keyboard focus.

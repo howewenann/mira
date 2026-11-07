@@ -65,9 +65,9 @@ Screen {
 .session-content-switcher,
 .session-label,
 .session-rename-editor {
-    width: 27;
-    min-width: 27;
-    max-width: 27;
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
     height: 3;
 }
 
@@ -76,11 +76,7 @@ Screen {
     min-width: 3;
     max-width: 3;
     height: 3;
-    margin-left: 4;
-}
-
-#sessions > .session-row.active .session-actions {
-    margin-left: 3;
+    margin-left: 2;
 }
 
 Button.session-pin-action,
@@ -115,9 +111,9 @@ Button.session-pin-action.pinned:focus {
 }
 
 .session-rename-input {
-    width: 27;
-    min-width: 27;
-    max-width: 27;
+    width: 1fr;
+    min-width: 0;
+    max-width: 100%;
     height: 1;
     min-height: 1;
     padding: 0;
@@ -128,7 +124,7 @@ Button.session-pin-action.pinned:focus {
 
 .session-rename-spacer,
 .session-rename-timestamp {
-    width: 27;
+    width: 1fr;
     height: 1;
 }
 
@@ -663,13 +659,16 @@ MCPPanelScreen {
     pointer: ns-resize;
 }
 
-#prompt-resize-handle.-prompt-disabled {
-    opacity: 50%;
+/* Textual applies opacity twice to CSS borders but once to drawn grip text.
+   Tint each widget once instead, neutralizing native disabled opacity. */
+.workspace-composer.-prompt-disabled,
+.workspace-composer.-prompt-disabled * {
+    tint: #0c0f10 50%;
+    opacity: 100%;
 }
 
 #prompt-resize-handle:hover {
     color: #7ce3dc;
-    opacity: 100%;
 }
 
 #autocomplete-options {

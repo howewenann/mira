@@ -155,7 +155,6 @@ from ui.textual.widgets.subagent_panel import (
 )
 from ui.textual.workflow_demo import build_workflow_demo
 from ui.textual.widgets.session_history import (
-    SESSION_ROW_PREVIEW_WIDTH,
     SessionActionMenuScreen,
     SessionItem,
     session_display_title,
@@ -902,14 +901,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app.local_file_uploads_enabled = True
 
         with (
-            patch("ui.textual.app.choose_local_files", return_value=[]),
+            patch("ui.textual.app.choose_local_files", return_value=[]) as picker,
             patch("ui.textual.app.ingest_local_files", AsyncMock()) as ingest,
         ):
             async with app.run_test(size=(100, 25)) as pilot:
                 prompt = app.query_one(PromptBox)
                 prompt.value = "draft"
                 await pilot.click("#add-file-button")
+                await wait_until(lambda: picker.called)
                 await wait_until(lambda: not app._file_ingestion_active)
+                await wait_until(lambda: prompt.has_focus)
 
                 ingest.assert_not_awaited()
                 self.assertEqual(prompt.value, "draft")
@@ -1206,7 +1207,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.hover("#status-row")
             prompt.disabled = True
             await pilot.pause()
-            self.assertEqual(handle.styles.opacity, 0.5)
+            self.assertEqual(app.query_one(AutocompleteInput).styles.tint.a, 0.5)
+            self.assertEqual(handle.styles.opacity, 1.0)
 
             await pilot.hover(handle)
             await pilot.pause()
@@ -1215,11 +1217,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(enabled_hover, Color.parse("#7ce3dc"))
             self.assertEqual(disabled_hover, enabled_hover)
             self.assertEqual(handle.styles.opacity, 1.0)
+            self.assertEqual(app.query_one(AutocompleteInput).styles.tint.a, 0.5)
 
             await pilot.hover("#status-row")
             prompt.disabled = False
             await pilot.pause()
             self.assertEqual(handle.styles.opacity, 1.0)
+            self.assertEqual(app.query_one(AutocompleteInput).styles.tint.a, 0)
 
     async def test_slash_completion_enter_inserts_without_submitting_and_space_dismisses(self) -> None:
         app = AutocompleteTestApp()
@@ -1848,7 +1852,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         styles = Path("ui/textual/styles/mira.tcss").read_text(encoding="utf-8")
 
         workspace_styles = Path("ui/textual/styles/workspace.tcss").read_text(encoding="utf-8")
-        self.assertIn("#session-sidebar { display: none; width: 42; min-width: 42;", workspace_styles)
+        self.assertIn("#session-sidebar { display: none; width: 42; min-width: 36;", workspace_styles)
         self.assertIn("border: solid #51696c;", workspace_styles)
         self.assertIn(
             "#sessions > .session-row {\n"
@@ -2148,9 +2152,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             original_updated_at = other["updated_at"]
             app = make_app(workspace=root, session=current, store=store)
 
-            async with app.run_test(size=(100, 24)) as pilot:
+            async with app.run_test(size=(120, 24)) as pilot:
                 await pilot.click("#rail-chat")
+                sidebar = app.query_one("#session-sidebar")
+                app.drag_width("sidebar", sidebar.region.x)
                 await pilot.pause()
+                self.assertEqual(sidebar.region.width, 36)
                 app._load_session = AsyncMock()  # type: ignore[method-assign]
                 item = next(
                     row for row in app.query(SessionItem) if row.session_id == "other"
@@ -2165,11 +2172,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 menu = item.query_one(".session-menu-action", Button)
 
                 self.assertEqual(item.region.height, 4)
-                self.assertEqual(content_switcher.region.width, SESSION_ROW_PREVIEW_WIDTH)
+                sessions = app.query_one("#sessions")
+                self.assertEqual(sessions.styles.padding.left, 0)
+                self.assertEqual(sessions.styles.padding.right, 0)
+                self.assertEqual(item.region.x, sessions.content_region.x)
+                self.assertEqual(item.region.right, sessions.scrollable_content_region.right)
+                self.assertEqual(content_switcher.region.width, label.region.width)
                 self.assertEqual(content_switcher.region.height, 3)
-                self.assertEqual(label.region.width, SESSION_ROW_PREVIEW_WIDTH)
+                self.assertEqual(label.region.width, item.content_region.width - 5)
                 self.assertEqual(actions.region.width, 3)
-                self.assertEqual(actions.region.x - label.region.right, 4)
+                self.assertEqual(actions.region.x - label.region.right, 2)
                 self.assertEqual(pin.region.width, 3)
                 self.assertEqual(menu.region.width, 3)
                 self.assertEqual(pin.region.right, menu.region.right)
@@ -2187,8 +2199,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 active_actions = active_item.query_one(".session-actions")
                 active_pin = active_item.query_one(".session-pin-action", Button)
                 active_menu = active_item.query_one(".session-menu-action", Button)
-                self.assertEqual(active_label.region.width, SESSION_ROW_PREVIEW_WIDTH)
-                self.assertEqual(active_actions.region.x - active_label.region.right, 3)
+                self.assertEqual(active_label.region.width, active_item.content_region.width - 5)
+                self.assertEqual(active_actions.region.x - active_label.region.right, 2)
                 self.assertEqual(active_pin.region.right, pin.region.right)
                 self.assertEqual(active_menu.region.right, menu.region.right)
                 self.assertEqual(active_pin.render_line(0).text, "[!]")
@@ -2198,16 +2210,31 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(
                     active_lines[:2],
-                    ["sorry i mean use", "mcp__github..."],
+                    session_label(current, width=active_label.region.width, pad_preview=True).splitlines()[:2],
                 )
                 self.assertTrue(active_lines[2].startswith("Sep 08"))
                 lines = renderable_plain(label).splitlines()
                 self.assertEqual(len(lines), 3)
                 self.assertTrue(lines[2].startswith("Sep 08"))
-                self.assertTrue(all(len(line) <= SESSION_ROW_PREVIEW_WIDTH for line in lines[:2]))
+                self.assertTrue(all(len(line) <= label.region.width for line in lines[:2]))
                 self.assertEqual(pin.label.plain, "[!]")
                 self.assertEqual(menu.label.plain, "...")
                 self.assertEqual(pin.styles.color, Color.parse("#b8c1c7"))
+
+                narrow_width = label.region.width
+                app.drag_width("sidebar", sidebar.region.x + 100)
+                await pilot.pause()
+                self.assertEqual(sidebar.region.width, 66)
+                self.assertGreater(label.region.width, narrow_width)
+                await wait_until(lambda: renderable_plain(label) == session_label(
+                    other, width=label.region.width, pad_preview=True,
+                ))
+                self.assertEqual(renderable_plain(label), session_label(
+                    other, width=label.region.width, pad_preview=True,
+                ))
+                app.drag_width("sidebar", sidebar.region.x)
+                await pilot.pause()
+                self.assertEqual(label.region.width, narrow_width)
 
                 await pilot.click(".session-pin-action")
                 await pilot.pause()
@@ -2248,7 +2275,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(store.read(store.path("other"))["pinned"])
 
                 pinned_button.press()
-                await pilot.pause()
+                await wait_until(lambda: not store.read(store.path("other"))["pinned"])
                 restored = session_records(store)
                 self.assertFalse(store.read(store.path("other"))["pinned"])
                 self.assertEqual(store.read(store.path("other"))["updated_at"], original_updated_at)
@@ -2270,6 +2297,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 24)) as pilot:
                 await pilot.click("#rail-chat")
+                sidebar = app.query_one("#session-sidebar")
+                app.drag_width("sidebar", sidebar.region.x)
                 await pilot.pause()
                 app._load_session = AsyncMock()  # type: ignore[method-assign]
                 item = next(row for row in app.query(SessionItem) if row.session_id == "other")
@@ -2287,6 +2316,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     and app.query(".session-rename-input").first(Input).has_focus
                 )
                 editor = app.query(".session-rename-input").first(Input)
+                self.assertEqual(sidebar.region.width, 36)
+                self.assertLessEqual(editor.region.right, item.query_one(".session-actions").region.x)
                 self.assertEqual(switcher.current, "session-rename")
                 self.assertEqual(editor.value, "automatic fallback title")
                 editor.value = "  My custom chat  "
@@ -14261,7 +14292,7 @@ def workflow(mira):
             self.assertIn("Finished while closed.", reopened)
 
             await switcher.move("inspector", "right")
-            switcher.right_width = 28
+            switcher.right_width = 36
             switcher.sync_layout()
             await pilot.pause()
             self.assertGreater(inspector_log.region.height, 0)

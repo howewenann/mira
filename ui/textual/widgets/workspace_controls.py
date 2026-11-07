@@ -209,7 +209,8 @@ class TabOverflowDropdown(ModalScreen[str | None]):
 
     def __init__(self, group: Literal["main", "right"], options: list[Option],
                  anchor_right: int, anchor_bottom: int,
-                 pane_region: Any, screen_size: tuple[int, int]) -> None:
+                 pane_region: Any, screen_size: tuple[int, int], *,
+                 active_key: str | None = None) -> None:
         super().__init__()
         self.group = group
         screen_w, screen_h = screen_size
@@ -218,14 +219,14 @@ class TabOverflowDropdown(ModalScreen[str | None]):
         # horizontal option-padding cells and may reserve a scrollbar cell.
         # Reserve one further cell rather than relying on OptionList wrapping
         # long filenames into a second row (which broke the menu geometry).
-        self.label_columns = max(1, self.menu_width - 6)
-        self.options = [
-            Option(
-                Text(self._single_line_label(str(option.prompt), self.label_columns)),
-                id=option.id, disabled=option.disabled,
-            )
-            for option in options
-        ]
+        self.label_columns = max(1, self.menu_width - 8)
+        self.options = []
+        for option in options:
+            active = option.id == active_key and option.id not in {"open-inspector", "open-btw"}
+            label = Text()
+            label.append("● " if active else "  ", style="#5bb8b1")
+            label.append(self._single_line_label(str(option.prompt), self.label_columns))
+            self.options.append(Option(label, id=option.id, disabled=option.disabled))
         self.menu_height = min(max(3, len(options) + 2), 15,
                                max(3, pane_region.height - 2), screen_h - 2)
         self.menu_x = max(pane_region.x + 1,
@@ -330,7 +331,7 @@ class ModelAliasPopup(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         # No two-character current marker: it caused names to truncate in a
-        # minimum-width 28-column dock. Highlight the current option instead.
+        # narrow dock. Highlight the current option instead.
         yield OptionList(*[
             Option(alias, id=f"alias-{i}")
             for i, alias in enumerate(self.aliases)

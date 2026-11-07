@@ -9,7 +9,7 @@ from typing import Any
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.events import Click, Key
+from textual.events import Click, Key, Resize
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, ContentSwitcher, Input, ListItem, ListView, OptionList, Static
@@ -47,6 +47,22 @@ class SessionHistory(ListView):
             self.append(ListItem(Static("No sessions yet", classes="session-empty"), disabled=True))
 
 
+class SessionPreview(Static):
+    """Format the two-line title for this text column's actual width."""
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        self.record = record
+        super().__init__(
+            session_label(record, width=SESSION_ROW_PREVIEW_WIDTH, pad_preview=True),
+            id="session-preview", classes="session-label",
+        )
+
+    def on_resize(self, event: Resize) -> None:
+        self.update(session_label(
+            self.record, width=max(4, event.size.width), pad_preview=True,
+        ))
+
+
 class SessionItem(ListItem):
     """List item carrying its session id for selection events."""
 
@@ -80,15 +96,7 @@ class SessionItem(ListItem):
         with Horizontal(classes="session-row-layout"):
             with Vertical(classes="session-text-column"):
                 with ContentSwitcher(initial="session-preview", classes="session-content-switcher"):
-                    yield Static(
-                        session_label(
-                            self.record,
-                            width=SESSION_ROW_PREVIEW_WIDTH,
-                            pad_preview=True,
-                        ),
-                        id="session-preview",
-                        classes="session-label",
-                    )
+                    yield SessionPreview(self.record)
                     with Vertical(id="session-rename", classes="session-rename-editor"):
                         yield Input(classes="session-rename-input")
                         yield Static("", classes="session-rename-spacer")

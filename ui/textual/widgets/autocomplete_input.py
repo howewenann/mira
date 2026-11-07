@@ -130,6 +130,7 @@ class AutocompleteInput(Vertical):
         **kwargs: Any,
     ) -> None:
         super().__init__(id="autocomplete-input", **kwargs)
+        self.add_class("workspace-composer")
         self.compact = compact
         self.project_backend = project_backend
         self.tool_provider = tool_provider
@@ -167,6 +168,7 @@ class AutocompleteInput(Vertical):
 
     def on_mount(self) -> None:
         self.query_one(OptionList).display = False
+        self.prompt_disabled_changed(self.query_one(PromptBox).disabled)
         self.screen.screen_layout_refresh_signal.subscribe(
             self,
             self._shrink_prompt_to_fit,
@@ -228,8 +230,8 @@ class AutocompleteInput(Vertical):
         self.mcp_manager = manager
 
     def prompt_disabled_changed(self, disabled: bool) -> None:
-        """Mirror prompt availability in the handle without disabling resizing."""
-        self.query_one(PromptResizeHandle).set_class(disabled, "-prompt-disabled")
+        """Dim the whole composer without disabling its resize handle."""
+        self.set_class(disabled, "-prompt-disabled")
         if disabled:
             self.dismiss()
 

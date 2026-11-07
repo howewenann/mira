@@ -50,7 +50,7 @@
 #rail-panel-gap { width: 1; min-width: 1; max-width: 1;
   height: 100%; padding: 0; margin: 0; background: #0c0f10; }
 
-#session-sidebar { display: none; width: 42; min-width: 42;
+#session-sidebar { display: none; width: 42; min-width: 36;
   height: 100%; border: solid #51696c; margin: 0; padding: 0;
   background: #0c0f10; }
 #session-sidebar-header { height: 2; min-height: 2; max-height: 2;
@@ -60,7 +60,7 @@
   border: none; padding: 0; background: transparent; color: #7ce3dc; }
 #sidebar-content, #history-panel, #files-panel { height: 1fr; width: 1fr;
   background: #1e1e1e; }
-#sessions { height: 1fr; width: 1fr; padding: 0 2;
+#sessions { height: 1fr; width: 1fr; padding: 0;
   background: #1e1e1e; }
 #sessions > .session-row { background: #1e1e1e; }
 #sessions > .session-row.active,
@@ -90,7 +90,7 @@
 #primary-pane { height: 100%; width: 1fr; min-width: 0;
   margin: 0; padding: 0; border: solid #51696c;
   background: #0c0f10; }
-#right-pane { height: 100%; width: 42; min-width: 0; display: none;
+#right-pane { height: 100%; width: 42; min-width: 36; display: none;
   margin: 0; padding: 0; border: solid #51696c;
   background: #0c0f10; }
 /* Each panel has its own native tab strip inside its outer border. */

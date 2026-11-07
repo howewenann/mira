@@ -46,7 +46,7 @@ class WorkspaceLayout(Layout):
 
     def arrange(self, parent: Workspace, children: list[Widget], size: Size, greedy: bool = True):
         right = parent.dock_visible
-        dock_width = min(parent.right_width, max(28, size.width - 29)) if right else 0
+        dock_width = max(36, min(parent.right_width, size.width - 29)) if right else 0
         main_width = max(0, size.width - dock_width - int(right))
         frames = {
             "main": Region(0, 0, main_width, size.height),
@@ -288,7 +288,8 @@ class Workspace(Widget):
             elif key in self.views and self.views[key].group == group:
                 self.activate(key)
         self.app.push_screen(TabOverflowDropdown(group, options, button.region.right,
-                             button.region.bottom, pane.region, tuple(self.app.size)), picked)
+                             button.region.bottom, pane.region, tuple(self.app.size),
+                             active_key=self.active[group]), picked)
 
     def sync_tab_actions(self) -> None:
         for group in ("main", "right"):
