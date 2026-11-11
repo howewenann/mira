@@ -34,7 +34,7 @@ Hover or select a tab to expose its actions. `›` docks it to the right, `‹`
 returns it to the main pane, and `×` closes it. Chat is permanent. Inspector
 opens from the existing inspection controls and remains live when moved.
 The arrows scroll each tab strip; `⋯` lists its tabs. Escape or a click outside
-closes a dropdown. The main `⋯` menu also opens Inspector and the BTW preview.
+closes a dropdown. The main `⋯` menu also opens the BTW preview.
 
 History/Files starts at 42 columns and resizes between 36 and 66; the dock starts
 at 42 and resizes between 36 and 76. Each has its own border. The one-cell gaps

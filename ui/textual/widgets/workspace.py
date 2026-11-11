@@ -275,15 +275,11 @@ class Workspace(Widget):
     def open_overflow(self, group: Group, button: Button) -> None:
         options = [Option(self.views[k].title, id=k) for k in self.keys(group)]
         if group == "main":
-            if "inspector" not in self.views:
-                options.append(Option("Open Inspector", id="open-inspector"))
             if "btw" not in self.views:
                 options.append(Option("Open BTW", id="open-btw"))
         pane = self.query_one("#primary-pane" if group == "main" else "#right-pane")
         def picked(key: str | None) -> None:
-            if key == "open-inspector":
-                self.run_worker(self.open_inspector())
-            elif key == "open-btw":
+            if key == "open-btw":
                 self.run_worker(self.open_btw())
             elif key in self.views and self.views[key].group == group:
                 self.activate(key)
