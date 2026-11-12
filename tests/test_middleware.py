@@ -231,7 +231,8 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(retry["_correction_retries"], {"review_completion": 1})
         self.assertEqual(events[-1]["check_name"], "Review")
         self.assertEqual(events[-1]["workflow"], "Review")
-        self.assertEqual(retry["messages"][-1].name, CORRECTION_SOURCE)
+        self.assertNotIn("messages", retry)
+        self.assertIn("review_completion", retry["_correction_pending"])
 
     def test_correction_reminders_are_stage_specific_transient_and_skip_finalization(self) -> None:
         middleware = CorrectionMiddleware(
@@ -546,8 +547,8 @@ class MiddlewareTests(unittest.TestCase):
 
         self.assertEqual(retry["jump_to"], "model")
         self.assertEqual(retry["_correction_retries"], {"plan_response_status": 1})
-        self.assertEqual(retry["messages"][-1].additional_kwargs["lc_source"], CORRECTION_SOURCE)
-        self.assertIn("Perform that research now", retry["messages"][-1].content)
+        self.assertNotIn("messages", retry)
+        self.assertIn("Perform that research now", retry["_correction_pending"]["plan_response_status"])
         self.assertEqual(
             events[-1]["failed_check"],
             "RESPONSE_STATUS: NEEDS_RESEARCH was declared, but no research tool was called.",
@@ -555,17 +556,18 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(events[-1]["check_name"], "Response")
         self.assertEqual(events[-1]["workflow"], "Plan")
 
-        correction = retry["messages"][-1].model_copy(update={"id": "correction-1"})
         accepted = AIMessage(id="answer-1", content="Done.\nRESPONSE_STATUS: COMPLETE")
         success = middleware.after_agent(
             {
                 "planning_stage": "plan_research",
-                "messages": [correction, accepted],
+                "messages": [invalid, accepted],
                 "_correction_retries": {"plan_response_status": 1},
+                "_correction_pending": retry["_correction_pending"],
             },
             runtime,
         )
         self.assertEqual(success["_correction_retries"], {})
+        self.assertEqual(success["_correction_pending"], {})
         self.assertNotIn("messages", success)
         self.assertEqual(accepted.content, "Done.\nRESPONSE_STATUS: COMPLETE")
 
@@ -574,6 +576,7 @@ class MiddlewareTests(unittest.TestCase):
                 "planning_stage": "plan_research",
                 "messages": [invalid],
                 "_correction_retries": {"plan_response_status": 1},
+                "_correction_pending": retry["_correction_pending"],
             },
             runtime,
         )
@@ -581,13 +584,10 @@ class MiddlewareTests(unittest.TestCase):
         self.assertIn("may be incomplete", exhausted["messages"][-1].content)
         self.assertTrue(events[-1]["exhausted"])
         self.assertEqual(exhausted["messages"][-1].content, PLANNING_RESPONSE_STATUS_FAILURE)
+        self.assertEqual(exhausted["_correction_pending"], {})
+        self.assertEqual(len(exhausted["messages"]), 1)
 
     def test_tool_call_bypasses_protocol_and_clears_feedback(self) -> None:
-        correction = HumanMessage(
-            id="correction-1",
-            content="retry",
-            additional_kwargs={"lc_source": CORRECTION_SOURCE},
-        )
         tool_call = AIMessage(
             id="tool-1",
             content="I'll inspect.",
@@ -600,14 +600,34 @@ class MiddlewareTests(unittest.TestCase):
         ).after_model(
             {
                 "planning_stage": "goal_research",
-                "messages": [correction, tool_call],
+                "messages": [tool_call],
                 "_correction_retries": {"goal_response_status": 1},
+                "_correction_pending": {"goal_response_status": "retry"},
             },
             None,
         )
 
         self.assertEqual(update["_correction_retries"], {})
+        self.assertEqual(update["_correction_pending"], {})
         self.assertNotIn("messages", update)
+
+    def test_pending_corrections_are_scoped_to_the_active_rule_and_turn(self) -> None:
+        middleware = CorrectionMiddleware(rules=(
+            PlanningResponseStatusRule(workflow="plan"),
+            PlanningResponseStatusRule(workflow="goal"),
+        ))
+        stale = {"_correction_pending": {"plan_response_status": "Old Plan correction"},
+                 "_correction_retries": {"plan_response_status": 1}}
+        for stage in ("goal_research", "plan_finalize", "goal_finalize"):
+            with self.subTest(stage=stage):
+                state = {**stale, "planning_stage": stage,
+                         "messages": [AIMessage(content="Done.\nRESPONSE_STATUS: COMPLETE")]}
+                request = FakeModelRequest([], state=state, system_message=SystemMessage(content="base"))
+                updated = middleware._request_with_reminders(request)
+                self.assertNotIn("Old Plan correction", updated.system_message.text)
+                self.assertEqual(middleware.after_agent(state, None)["_correction_pending"], {})
+        fresh = middleware.before_agent(stale, None)
+        self.assertEqual(fresh, {"_correction_pending": {}, "_correction_retries": {}})
 
     def test_model_compatibility_adds_missing_anyllm_provider(self) -> None:
         """ChatAnyLLM messages should gain the provider identity DeepAgents expects."""

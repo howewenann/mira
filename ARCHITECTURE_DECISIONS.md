@@ -695,16 +695,22 @@ call bypasses correction. At a natural no-tool stop, the final non-empty textual
 line must be exactly one stage-valid `RESPONSE_STATUS` line; only
 `RESPONSE_STATUS: COMPLETE` may terminate. `NEEDS_RESEARCH`,
 `NEEDS_USER_INPUT`, and `READY_TO_PREPARE_PLAN` retain the rejected assistant
-response, append a named correction prompt, and use LangGraph's native jump to
+response, store private pending guidance, and use LangGraph's native jump to
 the model node without replaying completed tools. Missing, duplicated,
 malformed, non-terminal, empty, reasoning-only, or Goal-only statuses take the
 same bounded recovery path with general feedback. Finalisation is isolated from
 this contract and remains a forced single `finalize_plan` call.
 
-The retry cap counts retries after the initial rejected candidate. Rejected
-prose and its correction prompt remain paired in checkpoint and durable visible
-history so neither the user nor the model sees a hanging correction. A generic
-`Response check` bubble shows the workflow, failed check, exact retry prompt,
+The retry cap counts retries after the initial rejected candidate. Plan and Goal
+correction prompts are appended to the existing system message through a model
+request override, never inserted into conversation messages. This preserves the
+original user request and its file-reference guidance on retries, and keeps
+procedural nudges out of conversation handoff. Private pending guidance is keyed
+by rule, retained for checkpoint resume of the intended retry, and cleared on
+acceptance, exhaustion, or a tool call. A new external turn resets both guidance
+and counters, including after cancellation; inactive rules supply no old guidance.
+Correction events still retain the exact feedback in durable visible history.
+A generic `Response check` bubble shows the workflow, failed check, exact retry prompt,
 and retry count. Its rule-owned display name keeps the middleware free of
 Plan/Goal vocabulary.
 Exhaustion retains the last candidate, shows the failed check and exhausted

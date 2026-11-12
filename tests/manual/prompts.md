@@ -1225,7 +1225,11 @@ the scenario requests persistence evidence.
 4. Use a deterministic fake response ending in
    `RESPONSE_STATUS: NEEDS_RESEARCH` without a call, then one with no status.
    Expected: specific then general correction; rejected prose, its exact status,
-   and both correction bubbles remain in visible/model history.
+   and both correction bubbles remain in visible history. Model/checkpoint
+   messages retain the rejected assistant prose but no synthetic correction
+   message; the retry receives the exact prompt once through system guidance.
+   Include an `@file` reference and verify its guidance remains on the retry.
+   Switch to Act after completion: no correction message enters its transcript.
 5. Ask for a session-duplication design while explicitly leaving full-transcript
    versus metadata-only behavior undecided. Expected: `ask_user`; after choosing,
    request an implementation-ready Plan and verify `prepare_plan` followed by

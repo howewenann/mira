@@ -2,24 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import unittest
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.errors import NodeCancelledError
+from langgraph.types import Command, interrupt
+from pydantic import Field
 
 from agent.middleware import (
     CORRECTION_SOURCE,
     CorrectionMiddleware,
     PlanningStageEnforcementMiddleware,
 )
+from agent.middleware.file_references import FileReferenceMiddleware
 from agent.planning.response_status import (
     PLANNING_RESPONSE_STATUS_FAILURE,
     PlanningResponseStatusRule,
 )
 from core.execution import runner
+from core.execution.handoff import synchronize_conversation
 from tests.test_runner import RunTurnRenderer
 
 
@@ -41,6 +49,18 @@ class BindableFakeModel(FakeMessagesListChatModel):
 
     def bind_tools(self, tools: list[Any], *, tool_choice: Any = None, **kwargs: Any) -> Any:
         return self
+
+
+class RecordingModel(BindableFakeModel):
+    requests: list[list[Any]] = Field(default_factory=list)
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.requests.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def system_text(messages: list[Any]) -> str:
+    return "\n".join(m.text for m in messages if isinstance(m, SystemMessage))
 
 
 @tool
@@ -106,6 +126,204 @@ def successful_finalize_goal(title: str) -> str:
 class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Exercise native after_agent revision routing with a real graph."""
 
+    async def test_transient_retry_preserves_requests_checkpoints_events_and_handoff(self) -> None:
+        for workflow in ("plan", "goal"):
+            with self.subTest(workflow=workflow):
+                model = RecordingModel(responses=[
+                    AIMessage(content="Need research.\nRESPONSE_STATUS: NEEDS_RESEARCH"),
+                    AIMessage(content="Done.\nRESPONSE_STATUS: COMPLETE"),
+                    AIMessage(content="New answer.\nRESPONSE_STATUS: COMPLETE"),
+                ])
+                graph = create_agent(
+                    model=model, tools=[], system_prompt=SystemMessage(
+                        content=[{"type": "text", "text": "Original system instructions"}],
+                        additional_kwargs={"original": True},
+                    ),
+                    middleware=[FileReferenceMiddleware(), *correction_middleware()],
+                    checkpointer=InMemorySaver(),
+                )
+                config = {"configurable": {"thread_id": workflow}}
+                user = HumanMessage(
+                    content="Inspect @config.py", id="user", additional_kwargs={"original": True},
+                )
+                events = [event async for event in graph.astream(
+                    {"messages": [user], "planning_stage": f"{workflow}_research"},
+                    config, stream_mode="custom",
+                )]
+                self.assertEqual(len(model.requests), 2)
+                rule = PlanningResponseStatusRule(workflow=workflow)
+                feedback = rule.inspect(model.responses[0], {}).retry_prompt
+                first, retry = model.requests
+                self.assertNotIn(feedback, system_text(first))
+                self.assertEqual(system_text(retry).count(feedback), 1)
+                for request in model.requests:
+                    self.assertIn("Original system instructions", system_text(request))
+                    self.assertIn("/config.py", system_text(request))
+                    self.assertEqual([m for m in request if isinstance(m, HumanMessage)], [user])
+                    self.assertTrue(request[0].additional_kwargs["original"])
+                self.assertEqual([e["attempt"] for e in events], [1])
+                self.assertEqual(events[0]["protocol"], rule.protocol_id)
+                self.assertEqual(events[0]["retry_prompt"], feedback)
+                self.assertFalse(events[0]["exhausted"])
+                state = (await graph.aget_state(config)).values
+                self.assertEqual(len(state["messages"]), 3)
+                self.assertEqual(state["messages"][0], user)
+                self.assertEqual(state["_correction_pending"], {})
+                self.assertEqual(state["_correction_retries"], {})
+                # Inspect all intermediate checkpoints, not only the final one.
+                async for snapshot in graph.aget_state_history(config):
+                    if not snapshot.values.get("messages"):
+                        continue  # The initial input checkpoint precedes message reduction.
+                    self.assertEqual(
+                        [m for m in snapshot.values.get("messages", []) if isinstance(m, HumanMessage)],
+                        [user],
+                    )
+                target = create_agent(
+                    model=RecordingModel(responses=[AIMessage(content="Act")]),
+                    tools=[], checkpointer=InMemorySaver(),
+                )
+                self.assertTrue(await synchronize_conversation(graph, workflow, target, "act"))
+                inherited = (await target.aget_state({"configurable": {"thread_id": "act"}})).values
+                self.assertEqual(inherited["messages"], state["messages"])
+                self.assertNotIn("_correction_pending", inherited)
+                result = await graph.ainvoke(
+                    {"messages": [HumanMessage(content="Independent request")]}, config,
+                )
+                self.assertNotIn(feedback, system_text(model.requests[-1]))
+                self.assertNotIn("_correction_pending", result)
+
+    def test_sync_native_retry_and_exhaustion_events(self) -> None:
+        for workflow in ("plan", "goal"):
+            with self.subTest(workflow=workflow):
+                model = RecordingModel(responses=[AIMessage(content="Invalid") for _ in range(3)])
+                graph = create_agent(
+                    model=model, tools=[], middleware=correction_middleware(), checkpointer=InMemorySaver(),
+                )
+                config = {"configurable": {"thread_id": workflow}}
+                events = list(graph.stream(
+                    {"messages": [HumanMessage(content="Request")], "planning_stage": f"{workflow}_research"},
+                    config, stream_mode="custom",
+                ))
+                self.assertEqual(len(model.requests), 3)
+                self.assertEqual([e["attempt"] for e in events], [1, 2, 2])
+                self.assertEqual([e["exhausted"] for e in events], [False, False, True])
+                self.assertEqual(events[-1]["terminal_text"], PLANNING_RESPONSE_STATUS_FAILURE)
+                feedback = events[0]["retry_prompt"]
+                for request in model.requests[1:]:
+                    self.assertEqual(system_text(request).count(feedback), 1)
+                state = graph.get_state(config).values
+                self.assertEqual(len(state["messages"]), 5)
+                self.assertEqual(state["messages"][-1].content, PLANNING_RESPONSE_STATUS_FAILURE)
+                self.assertEqual(state["_correction_pending"], {})
+                self.assertEqual(state["_correction_retries"], {})
+                self.assertEqual(sum(isinstance(m, HumanMessage) for m in state["messages"]), 1)
+
+    async def test_tool_continuation_clears_pending_and_resets_retry_budget(self) -> None:
+        model = RecordingModel(responses=[
+            AIMessage(content="Need research.\nRESPONSE_STATUS: NEEDS_RESEARCH"),
+            AIMessage(content="", tool_calls=[{
+                "name": "inspect_workspace", "args": {"path": "x"}, "id": "read",
+            }]),
+            AIMessage(content="Need input.\nRESPONSE_STATUS: NEEDS_USER_INPUT"),
+            AIMessage(content="Done.\nRESPONSE_STATUS: COMPLETE"),
+        ])
+        graph = create_agent(
+            model=model, tools=[inspect_workspace], middleware=correction_middleware(1),
+            checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "tools"}}
+        events = [e async for e in graph.astream(
+            {"messages": [HumanMessage(content="Inspect")], "planning_stage": "plan_research"},
+            config, stream_mode="custom",
+        )]
+        self.assertEqual(len(model.requests), 4)
+        self.assertIn("Perform that research now", system_text(model.requests[1]))
+        self.assertNotIn("Your previous response", system_text(model.requests[2]))
+        self.assertIn("Call ask_user now", system_text(model.requests[3]))
+        self.assertNotIn("Perform that research now", system_text(model.requests[3]))
+        self.assertEqual([e["attempt"] for e in events], [1, 1])
+        self.assertEqual((await graph.aget_state(config)).values["_correction_pending"], {})
+
+    async def test_checkpoint_resume_keeps_only_the_intended_retry_guidance(self) -> None:
+        saver = InMemorySaver()
+        model = RecordingModel(responses=[
+            AIMessage(content="Invalid"), AIMessage(content="Done.\nRESPONSE_STATUS: COMPLETE"),
+        ])
+        graph = create_agent(
+            model=model, tools=[], middleware=correction_middleware(), checkpointer=saver,
+            interrupt_after=["CorrectionMiddleware.after_agent"],
+        )
+        config = {"configurable": {"thread_id": "resume"}}
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="Inspect")], "planning_stage": "goal_research"}, config,
+        )
+        paused = await graph.aget_state(config)
+        self.assertTrue(paused.next)
+        self.assertTrue(paused.values["_correction_pending"])
+        self.assertEqual(len(model.requests), 1)
+        # Reconstruct middleware as on process restart: no mutable instance cache.
+        resumed = create_agent(model=model, tools=[], middleware=correction_middleware(), checkpointer=saver)
+        await resumed.ainvoke(None, config)
+        self.assertEqual(len(model.requests), 2)
+        self.assertEqual(system_text(model.requests[-1]).count("Your previous response"), 1)
+        self.assertEqual((await resumed.aget_state(config)).values["_correction_pending"], {})
+
+    async def test_cancelled_retry_does_not_contaminate_a_new_turn(self) -> None:
+        class CancelRetry(AgentMiddleware):
+            async def awrap_model_call(self, request, handler):
+                if request.state.get("_correction_pending"):
+                    raise asyncio.CancelledError
+                return await handler(request)
+
+        saver = InMemorySaver()
+        model = RecordingModel(responses=[
+            AIMessage(content="Invalid"), AIMessage(content="Done.\nRESPONSE_STATUS: COMPLETE"),
+        ])
+        graph = create_agent(
+            model=model, tools=[], middleware=[*correction_middleware(), CancelRetry()], checkpointer=saver,
+        )
+        config = {"configurable": {"thread_id": "cancel"}}
+        with self.assertRaises(NodeCancelledError):
+            await graph.ainvoke(
+                {"messages": [HumanMessage(content="Old request")], "planning_stage": "plan_research"}, config,
+            )
+        self.assertTrue((await graph.aget_state(config)).values["_correction_pending"])
+        # A new input starts before_agent even though the previous invocation stopped.
+        await graph.ainvoke({"messages": [HumanMessage(content="New request")]}, config)
+        self.assertEqual(len(model.requests), 2)
+        self.assertNotIn("Your previous response", system_text(model.requests[-1]))
+        self.assertEqual((await graph.aget_state(config)).values["_correction_pending"], {})
+
+    async def test_native_tool_interrupt_resume_has_no_stale_instruction(self) -> None:
+        @tool("ask_user")
+        def ask_user(question: str) -> str:
+            """Collect a material decision from the user."""
+            return interrupt(question)
+
+        model = RecordingModel(responses=[
+            AIMessage(content="Need input.\nRESPONSE_STATUS: NEEDS_USER_INPUT"),
+            AIMessage(content="", tool_calls=[{
+                "name": "ask_user", "args": {"question": "Which target?"}, "id": "ask",
+            }]),
+            AIMessage(content="Resolved.\nRESPONSE_STATUS: COMPLETE"),
+        ])
+        graph = create_agent(
+            model=model, tools=[ask_user], middleware=correction_middleware(), checkpointer=InMemorySaver(),
+        )
+        config = {"configurable": {"thread_id": "hitl"}}
+        await graph.ainvoke(
+            {"messages": [HumanMessage(content="Prepare a Goal")], "planning_stage": "goal_research"}, config,
+        )
+        paused = await graph.aget_state(config)
+        self.assertTrue(paused.tasks[0].interrupts)
+        self.assertEqual(paused.values["_correction_pending"], {})
+        self.assertEqual(paused.values["_correction_retries"], {})
+        self.assertIn("Call ask_user now", system_text(model.requests[1]))
+        await graph.ainvoke(Command(resume="Target A"), config)
+        self.assertEqual(len(model.requests), 3)
+        self.assertNotIn("Your previous response", system_text(model.requests[2]))
+        self.assertEqual((await graph.aget_state(config)).values["_correction_pending"], {})
+
     async def test_invalid_plan_prose_retries_then_runs_tool_and_accepts_answer(self) -> None:
         model = BindableFakeModel(
             responses=[
@@ -139,15 +357,15 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
         messages = result["messages"]
         self.assertEqual(
             [type(message) for message in messages],
-            [HumanMessage, AIMessage, HumanMessage, AIMessage, ToolMessage, AIMessage],
+            [HumanMessage, AIMessage, AIMessage, ToolMessage, AIMessage],
         )
-        self.assertEqual(messages[3].tool_calls[0]["id"], "call-read")
-        self.assertEqual(messages[4].content, "contents:session/store.py")
+        self.assertEqual(messages[2].tool_calls[0]["id"], "call-read")
+        self.assertEqual(messages[3].content, "contents:session/store.py")
         self.assertEqual(
-            messages[5].content,
+            messages[4].content,
             "Investigation complete.\nRESPONSE_STATUS: COMPLETE",
         )
-        self.assertTrue(
+        self.assertFalse(
             any(
                 getattr(message, "additional_kwargs", {}).get("lc_source")
                 == CORRECTION_SOURCE
@@ -196,7 +414,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("READY_TO_PREPARE_PLAN" in str(message.content) for message in result["messages"])
         )
-        self.assertTrue(
+        self.assertFalse(
             any(
                 getattr(message, "additional_kwargs", {}).get("lc_source") == CORRECTION_SOURCE
                 for message in result["messages"]
@@ -230,7 +448,7 @@ class PlanningResponseStatusIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
 
-                self.assertEqual(len(result["messages"]), 2 * cap + 4)
+                self.assertEqual(len(result["messages"]), cap + 3)
                 self.assertEqual(
                     result["messages"][-1].content,
                     PLANNING_RESPONSE_STATUS_FAILURE,

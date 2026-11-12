@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, NotRequired, Protocol
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 CORRECTION_EVENT = "correction"
 CORRECTION_SOURCE = "mira_correction"
@@ -40,9 +40,10 @@ class CorrectionRule(Protocol):
 
 
 class CorrectionState(AgentState):
-    """Private retry counts keyed by correction protocol identifier."""
+    """Private, turn-scoped correction state keyed by protocol identifier."""
 
     _correction_retries: NotRequired[Annotated[dict[str, int], PrivateStateAttr]]
+    _correction_pending: NotRequired[Annotated[dict[str, str], PrivateStateAttr]]
 
 
 class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
@@ -63,7 +64,7 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
 
     def before_agent(self, state: CorrectionState, runtime: Any) -> dict[str, Any]:  # noqa: ARG002
         """Start every externally invoked turn with fresh retry bookkeeping."""
-        return {"_correction_retries": {}}
+        return {"_correction_retries": {}, "_correction_pending": {}}
 
     async def abefore_agent(
         self,
@@ -71,7 +72,7 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
         runtime: Any,  # noqa: ARG002
     ) -> dict[str, Any]:
         """Async variant of before_agent."""
-        return {"_correction_retries": {}}
+        return self.before_agent(state, runtime)
 
     def wrap_model_call(self, request: Any, handler: Any) -> Any:
         """Inject active correction reminders into synchronous model calls."""
@@ -107,6 +108,8 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
         if not rules:
             return request
         reminders = [rule.reminder(request.state).strip() for rule in rules]
+        pending = request.state.get("_correction_pending") or {}
+        reminders.extend(pending[rule.protocol_id] for rule in rules if pending.get(rule.protocol_id))
         reminder = "\n\n".join(value for value in reminders if value)
         if not reminder:
             return request
@@ -128,30 +131,32 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
         message = _last_ai_message(state.get("messages", []))
         if message is None or not message.tool_calls:
             return None
-        if not state.get("_correction_retries"):
+        if not state.get("_correction_retries") and not state.get("_correction_pending"):
             return None
-        return {"_correction_retries": {}}
+        # The requested tool action fulfilled the correction. Its result starts
+        # the normal model continuation; do not repeat the old action instruction.
+        return {"_correction_retries": {}, "_correction_pending": {}}
 
     def _after_agent_update(self, state: CorrectionState, runtime: Any) -> dict[str, Any] | None:
         rules = self._active_rules(state)
         if not rules:
-            return None
+            return {"_correction_retries": {}, "_correction_pending": {}}
         if len(rules) != 1:
             names = ", ".join(rule.protocol_id for rule in rules)
             raise RuntimeError(f"multiple correction rules matched the same state: {names}")
 
         message = _last_ai_message(state.get("messages", []))
         if message is None:
-            return None
+            return {"_correction_retries": {}, "_correction_pending": {}}
         if message.tool_calls:
-            return {"_correction_retries": {}}
+            return {"_correction_retries": {}, "_correction_pending": {}}
 
         rule = rules[0]
         decision = rule.inspect(message, state)
         retries = dict(state.get("_correction_retries") or {})
         if decision.accepted:
             retries.pop(rule.protocol_id, None)
-            return {"_correction_retries": retries}
+            return {"_correction_retries": retries, "_correction_pending": {}}
 
         used = int(retries.get(rule.protocol_id) or 0)
         if used >= self.max_retries:
@@ -164,30 +169,20 @@ class CorrectionMiddleware(AgentMiddleware[CorrectionState, Any, Any]):
                 terminal_text=rule.failure_text,
             )
             retries.pop(rule.protocol_id, None)
-            exhaustion = HumanMessage(
-                content=(
-                    f"Correction check failed: {decision.failed_check}\n"
-                    f"No further retry will be attempted because the limit of "
-                    f"{self.max_retries} was reached."
-                ),
-                name=CORRECTION_SOURCE,
-                additional_kwargs={"lc_source": CORRECTION_SOURCE},
-            )
             return {
-                "messages": [exhaustion, AIMessage(content=rule.failure_text)],
+                "messages": [AIMessage(content=rule.failure_text)],
                 "_correction_retries": retries,
+                "_correction_pending": {},
             }
 
         attempt = used + 1
         self._emit(runtime, rule=rule, decision=decision, attempt=attempt)
-        feedback = HumanMessage(
-            content=decision.retry_prompt,
-            name=CORRECTION_SOURCE,
-            additional_kwargs={"lc_source": CORRECTION_SOURCE},
-        )
         retries[rule.protocol_id] = attempt
         return {
-            "messages": [feedback],
+            # Keep this in graph state until the correction resolves, including
+            # checkpoint resume of this retry. before_agent resets independent
+            # turns, and request overrides never add guidance to messages.
+            "_correction_pending": {rule.protocol_id: decision.retry_prompt},
             "_correction_retries": retries,
             "jump_to": "model",
         }
