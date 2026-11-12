@@ -1159,6 +1159,14 @@ the successful tool available.
 
 Use one disposable Git-protected workspace.
 
+For a mode-switch regression check (including Gemma 4 12B), enter `/plan` and
+ask `Discuss creating note.txt containing hello; do not create a formal Plan.`
+Switch with `/act` and ask `Write note.txt with the content we discussed.`
+Expected: retained discussion context, ordinary write approval, and a file
+containing `hello`. Return to `/plan` and ask `Write blocked.txt containing hello.`
+Expected: read-only behavior and no new file. Switch between `/act` and `/plan`
+four times without prompts; expected: no added messages or model calls.
+
 1. Enter `/plan`, then `Explain how current session persistence works.`
    Expected: read-only prose discussion; no forced Plan.
 2. Enter `/plan Check the current implementation and design a reliable current

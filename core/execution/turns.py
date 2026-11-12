@@ -14,7 +14,6 @@ from agent.middleware.context_overflow import mark_context_notice_rendered, pop_
 from agent.planning.policy import (
     APPROVED_PLAN_EXECUTION_INSTRUCTIONS,
     OPTIONAL_RESEARCH_POLICY,
-    PLAN_BEHAVIOR_POLICY,
     PLAN_BLOCKED_RESULT_MARKERS,
     PLAN_PROJECT_WRITE_TOOLS,
     PLANNING_STAGE_GOAL_RESEARCH,
@@ -101,15 +100,6 @@ Authoritative Goal objective:
 {text}
 
 Treat that request as authoritative for meaning. For prepare_goal, write a concise user-facing Objective that may improve wording but must not add, remove, or materially change the intended outcome, scope, deliverables, or constraints. If a material user decision is required, call ask_user. Otherwise call prepare_goal as soon as the Goal is decision-complete. MIRA will generate Success Criteria and then require finalize_goal. Never create an implementation Plan."""
-
-PLAN_REQUEST_TEMPLATE = """You are in planning mode (Plan mode).
-The following tools are disabled: {disabled_tools}.
-Do not call a disabled tool or attempt the requested change.
-{behavior_policy}
-
-User request:
-{text}
-"""
 
 
 @trace_user_turn
@@ -578,11 +568,7 @@ def write_was_blocked(result: TurnResult) -> bool:
 
 
 def plan_request_text(text: str) -> str:
-    return PLAN_REQUEST_TEMPLATE.format(
-        disabled_tools=plan_disabled_tools_text(),
-        behavior_policy=PLAN_BEHAVIOR_POLICY,
-        text=text,
-    )
+    return text
 
 
 def plan_revision_text(plan: dict[str, Any], feedback: str) -> str:

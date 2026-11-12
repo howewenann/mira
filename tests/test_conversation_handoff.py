@@ -10,14 +10,15 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.graph import END
 
+from agent.planning.policy import PLAN_BEHAVIOR_POLICY, PLAN_DISABLED_TOOLS
 from core.execution.compaction import commit_forced_compaction
 from core.execution.handoff import effective_conversation
 from core.execution.runner import TurnResult
-from core.interface.requests import ArtifactReviewRequest
+from core.interface.requests import ApprovalRequest, ArtifactReviewRequest
 from tests import test_sqlite_sessions as sqlite_tests
 from tests.test_workflows import WorkflowModel
 from ui.textual.commands.dispatcher import handle_command
@@ -73,7 +74,7 @@ class ScriptedModel(WorkflowModel):
             }
         elif "prepare_goal" in names and ("Goal request" in last or "Revise this complete Goal" in last):
             name, args = "prepare_goal", {"objective": "Complete the requested Goal"}
-        elif "prepare_plan" in names and "User request:" in last and "Build a formal Plan" in last:
+        elif "prepare_plan" in names and "Build a formal Plan" in last:
             name, args = "prepare_plan", {"objective": "Build a formal Plan"}
         else:
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content="- Verified result"))])
@@ -154,6 +155,81 @@ class ConversationHandoffTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(await handle_command("/act", renderer, session.record, "test", session.mode))
                 act = await session.agent.aget_state(config(session.id))
                 self.assertTrue(any("Plan command marker" in text for text in content(act.values["messages"])))
+            finally:
+                await self.stop(app)
+
+    async def test_plan_act_roundtrip_keeps_policy_out_of_history_and_allows_act_writes(self) -> None:
+        requests: list[tuple[list, set[str]]] = []
+        discussion = "Discuss note.txt containing 'roundtrip context'."
+
+        class WriteModel(WorkflowModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                names = set(self._bound_tool_names)
+                requests.append((list(messages), names))
+                if isinstance(messages[-1], ToolMessage):
+                    message = AIMessage(content="Written.\nRESPONSE_STATUS: COMPLETE")
+                elif "write_file" in names:
+                    # Resolve the requested content from inherited Plan context.
+                    original = next(m.content for m in messages if isinstance(m, HumanMessage))
+                    message = AIMessage(content="", tool_calls=[{
+                        "name": "write_file", "id": "write-note", "type": "tool_call",
+                        "args": {"file_path": "/note.txt", "content": original.split("'")[1]},
+                    }])
+                else:
+                    message = AIMessage(content="Read-only discussion; no files changed.\nRESPONSE_STATUS: COMPLETE")
+                return ChatResult(generations=[ChatGeneration(message=message)])
+
+        class ApprovingFrontend(ReviewFrontend):
+            async def request(self, request):
+                if isinstance(request, ApprovalRequest):
+                    return [{"type": "approve"}]
+                raise AssertionError(f"unexpected frontend request: {request}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            app = await self.start(workspace, model=WriteModel(), frontend=ApprovingFrontend())
+            try:
+                session = await app.open_session("roundtrip")
+                await session.set_mode("plan")
+                await session.prompt(discussion)
+                plan_messages, plan_tools = requests[-1]
+                self.assertTrue(set(PLAN_DISABLED_TOOLS).isdisjoint(plan_tools))
+                self.assertEqual([m.content for m in plan_messages if isinstance(m, HumanMessage)], [discussion])
+                self.assertIn(PLAN_BEHAVIOR_POLICY, next(m.text for m in plan_messages if isinstance(m, SystemMessage)))
+                self.assertFalse((workspace / "note.txt").exists())
+
+                source = await session.plan_agent.aget_state(config("roundtrip:plan"))
+                await session.set_mode("act")
+                inherited = await session.agent.aget_state(config(session.id))
+                self.assertEqual(inherited.values["messages"], source.values["messages"])
+                self.assertEqual([m.content for m in inherited.values["messages"] if isinstance(m, HumanMessage)], [discussion])
+                self.assertTrue(all(PLAN_BEHAVIOR_POLICY not in m.text for m in inherited.values["messages"]))
+                result = await session.prompt("Write note.txt with the content we discussed.")
+                self.assertIn("write_file", result.tool_calls)
+                self.assertEqual((workspace / "note.txt").read_text(), "roundtrip context")
+                act_messages, act_tools = requests[-1]
+                self.assertIn("write_file", act_tools)
+                self.assertTrue(all(PLAN_BEHAVIOR_POLICY not in m.text for m in act_messages))
+
+                await session.set_mode("plan")
+                result = await session.prompt("Write blocked.txt containing 'blocked'.")
+                restored_messages, restored_tools = requests[-1]
+                self.assertTrue(set(PLAN_DISABLED_TOOLS).isdisjoint(restored_tools))
+                self.assertIn(PLAN_BEHAVIOR_POLICY, next(m.text for m in restored_messages if isinstance(m, SystemMessage)))
+                self.assertNotIn("write_file", result.tool_calls)
+                self.assertFalse((workspace / "blocked.txt").exists())
+                self.assertEqual((workspace / "note.txt").read_text(), "roundtrip context")
+
+                before = await session.plan_agent.aget_state(config("roundtrip:plan"))
+                calls_before = len(requests)
+                for _ in range(4):
+                    await session.set_mode("act")
+                    act = await session.agent.aget_state(config(session.id))
+                    self.assertEqual(act.values["messages"], before.values["messages"])
+                    await session.set_mode("plan")
+                    plan = await session.plan_agent.aget_state(config("roundtrip:plan"))
+                    self.assertEqual(plan.values["messages"], before.values["messages"])
+                self.assertEqual(len(requests), calls_before)
             finally:
                 await self.stop(app)
 
@@ -599,6 +675,13 @@ class ConversationHandoffTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(session.record["current_plan"]["attempts"], 1)
                 self.assertEqual(session.record["current_plan"]["status"], "completed")
                 act = await session.agent.aget_state(config(session.id))
-                self.assertTrue(any("prepare_plan" in str(message.content) for message in act.values["messages"]))
+                called_tools = {
+                    call["name"] for message in act.values["messages"] if isinstance(message, AIMessage)
+                    for call in message.tool_calls
+                }
+                self.assertTrue({"prepare_plan", "finalize_plan"} <= called_tools)
+                self.assertIn("Build a formal Plan", [
+                    message.content for message in act.values["messages"] if isinstance(message, HumanMessage)
+                ])
             finally:
                 await self.stop(app)

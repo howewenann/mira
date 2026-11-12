@@ -648,6 +648,10 @@ available context first and use `ask_user` whenever user input is required.
 Plan mode additionally hides write, delete, execute, evaluation, and delegation
 tools and denies filesystem writes as a backstop.
 
+Plan user messages retain the exact submitted text. Read-only instructions and
+behavioral policy live in the Plan system prompt, so conversation handoff does
+not carry duplicated Plan instructions into Act through user messages.
+
 ### Plan construction and review boundary
 
 Formal construction is always criteria-first:

@@ -21,7 +21,9 @@ from rich.text import Text
 from agent.middleware.context_overflow import context_overflow_error, set_context_overflow_notice
 from agent import factory
 from agent.middleware import CorrectionMiddleware, ModelToolVisibilityMiddleware, PlanningStageEnforcementMiddleware
-from agent.planning.policy import PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt
+from agent.planning.policy import (
+    PLAN_BEHAVIOR_POLICY, PLAN_DISABLED_TOOLS, plan_disabled_tools_text, plan_system_prompt,
+)
 from agent.tools.specs import mira_environment_label, tool_name
 from config.metadata import ModelMetadata
 from config.llm import ModelProfile, ModelRegistry
@@ -1401,9 +1403,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(calls[0][0], "plan-agent")
-        self.assertIn("You are in planning mode (Plan mode).", calls[0][1])
-        self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", calls[0][1])
-        self.assertIn("User request:\nwrite a file", calls[0][1])
+        self.assertEqual(calls[0][1], "write a file")
         self.assertEqual(calls[0][2], "thread-1:plan")
         self.assertEqual(calls[1], ("action-agent", "write it now", "thread-1"))
         self.assertEqual(session["turns"], 2)
@@ -1515,7 +1515,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(calls[0]["include_rubric_state"])
         self.assertFalse(calls[1]["include_rubric_state"])
         self.assertEqual(calls[1]["planning_stage"], "plan_research")
-        self.assertIn("Call prepare_plan", calls[1]["text"])
+        self.assertEqual(calls[1]["text"], "research a plan")
         self.assertNotIn("prepare_goal", calls[1]["text"])
         self.assertTrue(calls[2]["include_rubric_state"])
         self.assertIsNone(calls[2]["rubric"])
@@ -1899,23 +1899,11 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(has_clean_plan(result))
 
-    def test_plan_request_text_wraps_user_request(self) -> None:
-        """Planning requests should include the non-mutating instructions."""
-        text = plan_request_text("write a file")
-
-        self.assertIn("You are in planning mode (Plan mode).", text)
-        self.assertIn("DISCUSSION", text)
-        self.assertIn("NEEDS_DECISION", text)
-        self.assertIn("PLAN_READY", text)
-        self.assertIn("Imperative wording never authorizes execution", text)
-        self.assertIn("Call ask_user", text)
-        self.assertIn("Call prepare_plan", text)
-        self.assertIn("A prose Plan is not a valid terminal result", text)
-        self.assertIn("research, analysis, writing, communication, data work", text)
-        self.assertNotIn("SAFE_CONVERSATION", text)
-        self.assertNotIn("IMPLEMENTATION", text)
-        self.assertIn(f"The following tools are disabled: {plan_disabled_tools_text()}.", text)
-        self.assertIn("User request:\nwrite a file", text)
+    def test_plan_request_text_preserves_user_input_exactly(self) -> None:
+        """Plan policy belongs in the system prompt, not the user request."""
+        for text in ("", "write a file", "  Keep whitespace.\r\n\n\t", "User request:\n你好 🌍 {text}"):
+            with self.subTest(text=text):
+                self.assertEqual(plan_request_text(text), text)
 
     def test_plan_revision_text_includes_current_plan_and_feedback(self) -> None:
         """Revision requests should not depend on planning-thread memory."""
@@ -2069,6 +2057,10 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
     def test_plan_policy_drives_prompt_and_repl_validation(self) -> None:
         """The policy constants should appear in the planning prompt."""
         prompt = plan_system_prompt()
+
+        self.assertEqual(prompt.count(PLAN_BEHAVIOR_POLICY), 1)
+        self.assertIn("read-only general-purpose environment", prompt)
+        self.assertIn("must not modify files, run commands, delegate work, evaluate programs, or take destructive actions", prompt)
 
         for tool in PLAN_DISABLED_TOOLS:
             self.assertIn(tool, prompt)
