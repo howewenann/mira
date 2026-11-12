@@ -2060,3 +2060,32 @@ Use a disposable workspace and compare with
    After success or failure, normal editing and Enter submission work again.
 8. Visit Models settings, close Settings, then click the rail wrench.
    Expected: General opens with no initial keyboard focus.
+
+## Rubric evidence offloading probes
+
+Run these from the checkout in the shared environment:
+
+1. `conda run -n mira python tests/probes/probe_rubric_offload_read_coverage.py`.
+   Expected: production offloading supplies the manifest; native reads cover both
+   synthetic files after transient nudges; exhausted retries block grading.
+2. Run both `tests/probes/mira_rubric_live_probe_fixed.py --synthetic --dry-run`
+   and `tests/probes/probe_mira_rubric_offload_live.py --synthetic --dry-run`
+   with `conda run -n mira python`. Expected: identical production offloading,
+   successful integrity checks and cleanup, with no saved-session dependency.
+   Both commands share the maintained implementation.
+3. With the configured Rubric model available, run
+   `conda run -n mira python tests/probes/probe_rubric_offload_read_coverage_live.py --grade`.
+   Expected: the production guarded arm either retrieves all source lines after
+   a forced early stop and forwards real evidence, or exhausts its retry cap
+   and fails closed before grading. Recovery depends on the configured model.
+   The unguarded arm is a diagnostic baseline. Add `--natural` to omit forcing.
+   Failed guarded retrieval or grader invocation returns a failing exit status.
+4. `conda run -n mira python tests/probes/mira_rubric_live_probe_fixed.py --synthetic`.
+   Expected: the full production verifier/grader path retrieves complete source
+   text and forwards the exact ToolMessages. The verdict remains model-dependent.
+5. `conda run -n mira python tests/probes/mira_rubric_inspector_probe.py --synthetic`.
+   Use 1/2 to view actual Verifier/Grader requests, streamed text, and tool results;
+   Ctrl+Q exits. Expected: complete retrieval, evidence forwarding, and cleanup.
+   Add `--headless` for an unattended live run of the real Inspector widget.
+   To inspect saved evidence, use `--session-id ID` and optionally `--thread-id ID`;
+   the source SQLite database is backed up read-only and never resumed.

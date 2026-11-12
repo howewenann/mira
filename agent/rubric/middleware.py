@@ -17,6 +17,12 @@ from langchain_core.runnables.config import ensure_config
 from langgraph.errors import GraphBubbleUp
 
 from agent.rubric.graphs import RUBRIC_VERIFIER_GRAPH
+from agent.rubric.offload import (
+    EVIDENCE_TOOL,
+    VerifierReadCoverageGuard,
+    evidence_filesystem,
+    offload_transcript,
+)
 from core.execution.inspection.rubric import (
     inspection_event_values,
     rubric_inspection_id,
@@ -260,6 +266,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         self._verifier_tools = list(verifier_tools)
         self._verifier_middleware = list(verifier_middleware)
         self._verifier: Any = None
+        self._offload_verifier: Any = None
 
     def _resolve_nested_model(self) -> Any:
         if self._resolved_model is None:
@@ -268,7 +275,26 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
             self._resolved_model = resolve_model(self._model)
         return self._resolved_model
 
-    def _ensure_verifier(self) -> Any:
+    def _ensure_verifier(self, *, offloaded: bool = False) -> Any:
+        if offloaded:
+            if self._offload_verifier is None:
+                self._offload_verifier = create_agent(
+                    model=self._resolve_nested_model(),
+                    system_prompt=(
+                        VERIFIER_SYSTEM_PROMPT + "\n\nOversized transcript messages are stored in "
+                        f"evaluation-local files. Use {EVIDENCE_TOOL} to retrieve every source "
+                        "line from every referenced file before finishing verification. "
+                        "Follow pagination until all lines have been retrieved."
+                    ),
+                    tools=self._verifier_tools,
+                    middleware=[
+                        evidence_filesystem(), VerifierReadCoverageGuard(),
+                        *self._verifier_middleware, _VerifierToolObserver(),
+                    ],
+                    name=RUBRIC_VERIFIER_GRAPH,
+                    response_format=None,
+                )
+            return self._offload_verifier
         if self._verifier is None:
             self._verifier = create_agent(
                 model=self._resolve_nested_model(),
@@ -607,8 +633,9 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         """Build evidence-only input from DeepAgents' bounded transcript view."""
         rubric = state.get("rubric", "")
         frozen = state.get("_rubric_criteria") or []
+        messages, files, manifest = offload_transcript(list(state.get("messages", [])))
         transcript = deepagents_rubric._build_grader_transcript(
-            state.get("messages", [])
+            messages
         )
         nonce = secrets.token_hex(8)
         safe_rubric = deepagents_rubric._sanitize_for_payload(rubric.strip())
@@ -639,7 +666,10 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
             "not produce a rubric verdict. When no further useful verification is needed, "
             "return only VERIFICATION_COMPLETE."
         )
-        return {"messages": [HumanMessage(content=payload)]}
+        result: dict[str, Any] = {"messages": [HumanMessage(content=payload)]}
+        if manifest:
+            result.update(files=files, offloaded_message_manifest=manifest)
+        return result
 
     @staticmethod
     def _verification_evidence(result: dict[str, Any]) -> list[AIMessage | ToolMessage]:
@@ -680,7 +710,8 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         correction: str | None,
         evidence: Sequence[AIMessage | ToolMessage],
     ) -> dict[str, Any]:
-        grader_input = self._grader_input(state, iteration, correction)
+        messages, _, _ = offload_transcript(list(state.get("messages", [])))
+        grader_input = self._grader_input({**state, "messages": messages}, iteration, correction)
         if evidence:
             grader_input["messages"].append(HumanMessage(content=VERIFICATION_EVIDENCE_MESSAGE))
             grader_input["messages"].extend(evidence)
@@ -704,7 +735,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         )
         try:
             verifier_result = self._stream_verifier(
-                self._ensure_verifier(),
+                self._ensure_verifier(offloaded=bool(verifier_input.get("offloaded_message_manifest"))),
                 verifier_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,
@@ -783,7 +814,7 @@ class MiraRubricMiddleware(deepagents_rubric.RubricMiddleware):
         )
         try:
             verifier_result = await self._astream_verifier(
-                self._ensure_verifier(),
+                self._ensure_verifier(offloaded=bool(verifier_input.get("offloaded_message_manifest"))),
                 verifier_input,
                 config=self._grader_invocation_config(metadata),
                 context=context,

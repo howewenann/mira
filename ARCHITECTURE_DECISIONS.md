@@ -916,7 +916,22 @@ tools and normal HITL middleware; the verifier has no response format and may
 naturally finish without calling a tool. DeepAgents' grader-owned tool and
 middleware fields truthfully describe MIRA's final grader, which is tool-free
 and uses `ProviderStrategy(GraderResponse)`. Both receive the stock bounded,
-sanitized DeepAgents transcript view. The verifier receives that material in a
+sanitized DeepAgents transcript view, with references replacing oversized selected
+messages. Production offloading preserves the full coerced text in native
+`StateBackend` files local to that verifier invocation, with an authoritative
+path and source-line manifest. The dedicated native `read_rubric_evidence` tool
+reads only those in-memory files; it does not enable project filesystem access
+or change configured project tool/HITL permissions. No evidence files or manifest
+are added to parent state, workspace storage, or saved sessions.
+
+The verifier must retrieve every offloaded source line before grading. A nested
+guard checks linked successful tool results, pagination bounds, and exact page
+bodies against the source. A premature finish triggers at most two native
+`after_agent` retries, using transient system guidance instead of synthetic user
+messages. Exhaustion raises through the stock grader-error lifecycle without
+calling the final grader. This gate establishes retrieval, not comprehension or
+rubric satisfaction; verification without offloaded messages remains optional.
+The verifier receives its transcript material in a
 dedicated evidence-only payload with no grading or structured-response
 instructions. Only the final grader receives the stock DeepAgents grading
 payload and any coverage correction. Matched verifier `AIMessage` tool calls
@@ -927,8 +942,8 @@ verifier messages remain outside the main agent state and transcript.
 The pinned DeepAgents runtime continues to own grading iterations, frozen criteria,
 coverage retry, revision injection, caps, and terminal status. MIRA inserts its
 isolated verifier before each final grader call without replacing that stock
-lifecycle. Transcript and verifier evidence are independently valid; verifier
-evidence supplements rather than gates transcript evidence. MIRA does not
+lifecycle. Transcript and verifier evidence are independently valid; additional
+current-state verification supplements transcript evidence. MIRA does not
 summarize, truncate, or separately budget verifier tool results. Consequently a
 very large tool result can exceed the final grader provider's context window;
 that failure is surfaced through the stock grader-error lifecycle rather than
@@ -945,6 +960,7 @@ durability, review, recall, replacement, and evaluation guarantees as Plans.
 [session/context.py](session/context.py), [core/execution/turns.py](core/execution/turns.py), [core/application/artifacts.py](core/application/artifacts.py),
 [ui/textual/app.py](ui/textual/app.py), [ui/textual/widgets/chat_log.py](ui/textual/widgets/chat_log.py), and
 [ui/textual/widgets/rubric_bubble.py](ui/textual/widgets/rubric_bubble.py).
+Offloading and read recovery live in [agent/rubric/offload.py](agent/rubric/offload.py).
 
 **Update this when:** Goal construction, persistence, replacement, review,
 recall, migration, or execution completion rules change.

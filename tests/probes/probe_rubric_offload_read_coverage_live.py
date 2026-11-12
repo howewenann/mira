@@ -18,11 +18,10 @@ MiraRubricMiddleware._verifier_input(), _astream_verifier(), and
 _verification_evidence(). Does NOT run the main agent or alter its source.
 --grade optionally invokes MIRA's actual structured final grader as well.
 
-This is an INTEGRATION CANDIDATE, not a test of current production offloading:
-MIRA does not yet pass an authoritative offload manifest into the nested
-verifier. This probe supplies an exact synthetic manifest and in-memory files.
-The guard comes from the adjacent deterministic proof-of-concept file. No
-repository files are written or modified; no external file paths are read.
+Uses production offloading and its authoritative evaluation-local manifest.
+The guarded arm runs the production nested verifier and read-coverage guard.
+The unguarded baseline omits only the guard. Native StateBackend reads keep
+synthetic source evidence out of project files and saved sessions.
 
 PASS means the verifier successfully fetched every required line. It does NOT
 prove that the LLM understood the content or that the final rubric passed.
@@ -37,6 +36,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -51,29 +51,23 @@ from agent.llm import (  # noqa: E402
     get_profile_model,
 )
 from agent.rubric.middleware import MiraRubricMiddleware  # noqa: E402
+from agent.rubric.offload import EVIDENCE_TOOL, VerifierReadCoverageGuard  # noqa: E402
 from config.loader import load_config  # noqa: E402
 from probe_rubric_offload_read_coverage import (  # noqa: E402
     FILES,
     MANIFEST,
-    ProbeVerifierReadCoverageGuard,
     coverage_gaps,
-    probe_read_file,
+    PARENT_STATE,
 )
 
-RUBRIC = (
-    "1. The assistant's answer correctly incorporates the source notes from the "
-    "offloaded messages.\n"
-    "2. Every concrete claim about those notes is grounded in the original evidence."
-)
-# This is a historical parent-agent conversation, not a new instruction for the verifier.
-PARENT_STATE: dict[str, Any] = {
-    "rubric": RUBRIC,
-    "messages": [
-        HumanMessage(content="Review the offloaded source notes and produce a concise evidence-backed summary."),
-        AIMessage(content="Prepared a preliminary summary. Source details are stored in offloaded notes."),
-    ],
-}
 FORCED_STOP = "VERIFICATION_COMPLETE"
+
+
+class UnguardedReadCoverageGuard(VerifierReadCoverageGuard):
+    """A/B baseline: disable only the production completion check."""
+
+    def after_agent(self, state: Any, runtime: Any) -> None:
+        return None
 
 
 def text_of(message: Any) -> str:
@@ -148,34 +142,8 @@ class RealVerifierRecorder(AgentMiddleware):
 
 
 def verifier_input() -> dict[str, Any]:
-    """Start with MIRA's production Rubric input format, add offload breadcrumbs.
-
-    In real MIRA the deterministic offload subsystem must supply this manifest;
-    the bounded transcript alone is NOT an authoritative source for it.
-    """
-    payload = MiraRubricMiddleware._verifier_input(PARENT_STATE, iteration=0)
-    messages = list(payload["messages"])
-    assert len(messages) == 1 and isinstance(messages[0], HumanMessage)
-    breadcrumbs = "\n".join(
-        f"- {item['path']} ({item['total_lines']} source lines)"
-        for item in MANIFEST
-    )
-    # Both arms get the identical reference information. The nudge mechanism,
-    # not this starting prompt, determines whether coverage is mandatory.
-    updated = messages[0].model_copy(update={
-        "content": str(messages[0].content) + (
-            "\n\n<deterministic-offload-manifest>\n"
-            "Some source messages were offloaded from the bounded transcript. "
-            "Their contents are NOT in this prompt. The paths below are references "
-            "to extra evidence, not evidence of what the files contain. "
-            "The read_file tool can retrieve them; its offset is zero-based, "
-            "limit is a maximum number of lines, and its result reports the "
-            "returned source-line range.\n"
-            f"{breadcrumbs}\n"
-            "</deterministic-offload-manifest>"
-        )
-    })
-    return {"messages": [updated], "offloaded_message_manifest": [dict(i) for i in MANIFEST]}
+    """Exercise the real deterministic production offloader and manifest."""
+    return MiraRubricMiddleware._verifier_input(PARENT_STATE, iteration=0)
 
 
 def observed_reads(messages: list[Any]) -> list[dict[str, Any]]:
@@ -184,7 +152,7 @@ def observed_reads(messages: list[Any]) -> list[dict[str, Any]]:
         if not isinstance(msg, AIMessage):
             continue
         for call in msg.tool_calls or []:
-            if call.get("name") != "read_file":
+            if call.get("name") != EVIDENCE_TOOL:
                 continue
             id_ = str(call.get("id") or "")
             calls[id_] = {
@@ -207,22 +175,25 @@ def observed_reads(messages: list[Any]) -> list[dict[str, Any]]:
 
 async def run_case(*, cfg: dict[str, Any], profile: str | None,
                    variant: str, round_num: int, forced: bool,
-                   max_nudges: int, max_model_calls: int, grade: bool,
+                   max_model_calls: int, grade: bool,
                    timeout: float, shared_input: dict[str, Any]) -> dict[str, Any]:
     model = get_profile_model(cfg, profile) if profile else get_llm(cfg, role="rubric")
     recorder = RealVerifierRecorder(force_first_stop=forced, max_model_calls=max_model_calls)
-    guard = ProbeVerifierReadCoverageGuard(max_nudges=max_nudges) if variant == "guarded" else None
     middleware = MiraRubricMiddleware(
         model=model,
-        verifier_tools=[probe_read_file],
-        verifier_middleware=([guard] if guard is not None else []) + [recorder],
+        verifier_middleware=[recorder],
         max_iterations=1,
     )
-    nested = middleware._ensure_verifier()
+    if variant == "unguarded":
+        with patch("agent.rubric.middleware.VerifierReadCoverageGuard", UnguardedReadCoverageGuard):
+            nested = middleware._ensure_verifier(offloaded=True)
+    else:
+        nested = middleware._ensure_verifier(offloaded=True)
     # Keep the nonce and entire initial prompt identical in both A/B arms.
     payload = {
         "messages": [msg.model_copy(deep=True) for msg in shared_input["messages"]],
         "offloaded_message_manifest": [dict(i) for i in MANIFEST],
+        "files": shared_input["files"],
     }
     started = time.perf_counter()
     result: dict[str, Any] = {}
@@ -238,12 +209,12 @@ async def run_case(*, cfg: dict[str, Any], profile: str | None,
     elapsed = time.perf_counter() - started
     messages = list(result.get("messages") or [])
     reads = observed_reads(messages)
-    gaps = coverage_gaps(messages, MANIFEST)
+    gaps = coverage_gaps(messages, MANIFEST, FILES)
     complete = not gaps and not error
     evidence = middleware._verification_evidence(result) if result else []
 
     if grade and not error:
-        # The default is verifier-only: the experimental guard is NOT a grader.
+        # The default is verifier-only: the production guard is NOT a grader.
         # Optionally call the actual MIRA structured grader and show that it
         # receives paired verifier tool evidence, as production would.
         grader_payload = middleware._nested_grader_input(
@@ -318,7 +289,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runs", type=int, default=1, help="A/B rounds; default 1")
     parser.add_argument("--profile", default=None, help="Optional named MIRA model profile; default Rubric role (inherits Main)")
-    parser.add_argument("--max-nudges", type=int, default=4, help="Per-verifier correction cap; default 4")
+    parser.add_argument("--max-nudges", type=int, choices=[2], default=2, help="Production correction cap (2)")
     parser.add_argument("--timeout", type=float, default=180, help="Per verifier/grader timeout in seconds")
     parser.add_argument("--max-model-calls", type=int, default=18, help="Prevent runaway verifier loops; default 18")
     parser.add_argument("--natural", action="store_true", help="Do not force the first verifier stop; measure organic model behavior")
@@ -335,7 +306,7 @@ async def main() -> None:
     print(f"Mode                  : {'NATURAL' if args.natural else 'FORCED FIRST STOP'}")
     print("Verifier              : MIRA's real nested Rubric verifier + real model")
     print("Manifest              : deterministic, synthetic; 2 virtual offloaded messages")
-    print("No real project files are read/written. Guard exists in test probe only.")
+    print("No real project files are read/written. Guarded arm uses the production guard.")
     records: list[dict[str, Any]] = []
     for round_num in range(1, args.runs + 1):
         shared_input = verifier_input()  # Same exact prompt for this pair.
@@ -345,7 +316,7 @@ async def main() -> None:
             record = await run_case(
                 cfg=cfg, profile=args.profile, variant=variant,
                 round_num=round_num, forced=not args.natural,
-                max_nudges=args.max_nudges, max_model_calls=args.max_model_calls,
+                max_model_calls=args.max_model_calls,
                 grade=args.grade, timeout=args.timeout, shared_input=shared_input,
             )
             records.append(record)
@@ -365,6 +336,8 @@ async def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"JSON report: {args.output}")
+    if any((not r["covered"] or r["error"] or (r["grader"] and "error" in r["grader"])) for r in records if r["variant"] == "guarded"):
+        raise SystemExit("FAIL: production verifier did not retrieve all required evidence or grading failed")
     print("\nImportant: A forced first stop is synthetic; subsequent recovery actions "
           "are performed by the real LLM. --natural tests organic behavior. "
           "Even full read coverage does not prove model comprehension or rubric satisfaction.")

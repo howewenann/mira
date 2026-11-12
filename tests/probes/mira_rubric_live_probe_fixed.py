@@ -3,11 +3,11 @@
 
 Run from the MIRA repository with its configured Python/Conda environment:
 
-    python tests/probes/probe_mira_rubric_offload_live.py
-    python tests/probes/probe_mira_rubric_offload_live.py --session-id SESSION_ID
-    python tests/probes/probe_mira_rubric_offload_live.py --synthetic
-    python tests/probes/probe_mira_rubric_offload_live.py --session-id SESSION_ID --thread-id THREAD_ID
-    python tests/probes/probe_mira_rubric_offload_live.py --dry-run
+    python tests/probes/mira_rubric_live_probe_fixed.py
+    python tests/probes/mira_rubric_live_probe_fixed.py --session-id SESSION_ID
+    python tests/probes/mira_rubric_live_probe_fixed.py --synthetic
+    python tests/probes/mira_rubric_live_probe_fixed.py --session-id SESSION_ID --thread-id THREAD_ID
+    python tests/probes/mira_rubric_live_probe_fixed.py --dry-run
 
 Alternatively save anywhere and pass --repo D:\\Projects\\mira.
 
@@ -15,8 +15,8 @@ Alternatively save anywhere and pass --repo D:\\Projects\\mira.
   (or specified) saved sessions, reconstructing LangGraph DeltaChannel state.
   Chooses a session/thread with an actual oversized message by default.
 - Uses MIRA's configured real RUBRIC model and its existing verifier and grader.
-- Implements candidate offloading only inside this one probe invocation.
-- Uses DeepAgents FilesystemBackend + FilesystemMiddleware.read_file.
+- Exercises production offloading and its bounded verifier read-coverage guard.
+- Uses the production native StateBackend reader; temporary disk copies verify integrity independently.
 - Requires the verifier to retrieve EVERY line of EVERY offloaded file, proving
   the source text, not just the header or last-line marker, reached ToolMessages.
 - Proves those exact ToolMessages are in the ACTUAL grader invocation.
@@ -28,9 +28,8 @@ WARNING: Live mode transmits the selected saved conversation, rubric, and
 retrieved evidence to the model endpoint in MIRA's configuration. This may
 cost tokens and should be used only with an endpoint trusted for that data.
 
-This is a CANDIDATE probe; it does not claim to test a feature already
-implemented in MIRA. Use it to establish whether the approach works before
-changing production code. No original report text is printed to stdout.
+The offloader, manifest, read guard, verifier, and final grader all use production
+code. No original report text is printed to stdout.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ import sys
 import tempfile
 import traceback
 from collections import defaultdict
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +55,7 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--thread-id", default=None, help="Optional exact LangGraph thread id within --session-id (Act/Plan/Goal)")
     ap.add_argument("--scan-sessions", type=int, default=25, help="How many recent sessions to inspect if --session-id is omitted (default: 25)")
     ap.add_argument("--rubric-file", type=Path, default=None, help="Optional rubric text; otherwise use saved rubric, or a diagnostic rubric")
-    ap.add_argument("--synthetic", action="store_true", help="Append one 6k-char synthetic message IN MEMORY if necessary (no checkpoint mutation)")
+    ap.add_argument("--synthetic", action="store_true", help="Use synthetic evidence only, or append it to an explicit --session-id if needed")
     ap.add_argument("--dry-run", action="store_true", help="Read snapshot, offload and verify files; make NO model calls")
     ap.add_argument("--max-total-chars", type=int, default=250_000, help="Fail safely above this total offloaded text size (default: 250000)")
     return ap.parse_args()
@@ -98,8 +98,8 @@ def _session_candidates(config: dict[str, Any], requested: str | None, scan_limi
 
 def _copy_db_read_only(src: Path, dest: Path) -> None:
     """Online SQLite backup: never open source read/write, safe while MIRA runs."""
-    with sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True, timeout=15) as connection:
-        with sqlite3.connect(dest) as cloned:
+    with closing(sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True, timeout=15)) as connection:
+        with closing(sqlite3.connect(dest)) as cloned:
             connection.backup(cloned, pages=128, sleep=0.05)
 
 
@@ -190,67 +190,29 @@ def _effective_messages(messages: list[Any], values: dict[str, Any]) -> list[Any
 
 
 def _selected_indices(messages: list[Any]) -> list[int]:
-    """Mirror DeepAgents 0.7.32's first-real-human plus last-30 window."""
-    from deepagents.middleware import rubric as stock
-    from langchain_core.messages import HumanMessage
-
-    n = len(messages)
-    count = stock._MAX_TRANSCRIPT_MESSAGES
-    indices = list(range(max(0, n - count), n))
-    for i, message in enumerate(messages):
-        if isinstance(message, HumanMessage) and message.additional_kwargs.get("lc_source") != stock.RUBRIC_GRADER_MESSAGE_SOURCE:
-            if i not in indices:
-                return [i, *indices]
-            break
-    return indices
-
-
-def _surrogate(original: Any, breadcrumb: str) -> Any:
-    """Evaluation-only copy; preserve role and tool-call IDs, not tool-call text."""
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-    if isinstance(original, HumanMessage):
-        return HumanMessage(content=breadcrumb)
-    if isinstance(original, ToolMessage):
-        return ToolMessage(content=breadcrumb, tool_call_id=original.tool_call_id, name=original.name)
-    if isinstance(original, AIMessage):
-        return AIMessage(content=breadcrumb)
-    return original.model_copy(update={"content": breadcrumb}, deep=True)
+    from agent.rubric.offload import selected_indices
+    return selected_indices(messages)
 
 
 def _offload(messages: list[Any], backend: Any, max_total_chars: int) -> tuple[list[Any], dict[str, str]]:
-    """Use stock _coerce_text and limits, only on messages actually selected."""
-    from deepagents.middleware import rubric as stock
+    """Inspect production offloading; independently round-trip its source text."""
+    from agent.rubric.offload import offload_transcript
 
-    modified = list(messages)
-    selected = _selected_indices(messages)
-    needed: dict[str, str] = {}
-    for index in selected:
-        original = messages[index]
-        text = stock._coerce_text(original)
-        if len(text) <= stock._MAX_TRANSCRIPT_CHARS_PER_MESSAGE:
-            continue
-        path = f"/offloaded/message-{index + 1}.txt"
-        needed[path] = text
+    modified, files, manifest = offload_transcript(messages)
+    needed = {item["path"]: files[item["path"]]["content"] for item in manifest}
     total = sum(map(len, needed.values()))
     if not needed:
-        raise RuntimeError("No oversized messages in the stock rubric window. Try --synthetic.")
+        raise RuntimeError("No oversized messages in the rubric window. Try --synthetic.")
     if total > max_total_chars:
-        raise RuntimeError(f"Would offload {total:,} characters, exceeding safety cap {max_total_chars:,}; adjust --max-total-chars if intended.")
+        raise RuntimeError(f"Would offload {total:,} characters, exceeding cap {max_total_chars:,}.")
     for path, content in needed.items():
         result = backend.write(path, content)
         if result.error:
-            raise RuntimeError(f"DeepAgents backend.write failed for {path}: {result.error}")
-        check = backend.read(path, offset=0, limit=max(1, len(content.splitlines()) + 1))
-        if check.error or check.file_data is None:
-            raise RuntimeError(f"DeepAgents backend cannot read freshly written {path}: {check.error}")
-        # This direct backend read checks disk integrity, not the verifier's tool read.
-        stored = check.file_data["content"]
-        if stored.replace("\r\n", "\n").rstrip("\n") != content.replace("\r\n", "\n").rstrip("\n"):
-            raise RuntimeError(f"Offloaded file's content differs from original: {path}")
-    for index in selected:
-        path = f"/offloaded/message-{index + 1}.txt"
-        if path in needed:
-            modified[index] = _surrogate(messages[index], f"[Rubric evidence offloaded: {path}. Read this complete file to recover this message's original content.]")
+            raise RuntimeError(result.error)
+        check = backend.read(path, offset=0, limit=len(content.splitlines()) + 1)
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        if check.error or check.file_data is None or check.file_data["content"].rstrip("\n") != normalized.rstrip("\n"):
+            raise RuntimeError(f"Evidence round-trip failed: {path}")
     return modified, needed
 
 
@@ -270,7 +232,7 @@ def _complete_tool_pages(evidence: list[Any], required: dict[str, str]) -> dict[
     for msg in evidence:
         if isinstance(msg, AIMessage):
             for call in msg.tool_calls:
-                if call.get("name") == "read_file" and isinstance(call.get("args"), dict):
+                if call.get("name") == "read_rubric_evidence" and isinstance(call.get("args"), dict):
                     calls[str(call.get("id"))] = str(call["args"].get("file_path") or "")
     pages: dict[str, list[tuple[int, int, int, str]]] = defaultdict(list)
     per_file_counts: dict[str, int] = defaultdict(int)
@@ -292,9 +254,7 @@ def _complete_tool_pages(evidence: list[Any], required: dict[str, str]) -> dict[
         pages[path].append((start, end, total, body))
     report: dict[str, dict[str, Any]] = {}
     for path, source in required.items():
-        source_lines = source.replace("\r\n", "\n").split("\n")
-        if source_lines and source_lines[-1] == "":
-            source_lines.pop()
+        source_lines = source.splitlines()
         matched_lines: set[int] = set()
         mismatched_pages: list[str] = []
         for start, end, total, body in pages[path]:
@@ -319,20 +279,18 @@ def _complete_tool_pages(evidence: list[Any], required: dict[str, str]) -> dict[
     return report
 
 
-async def _live_probe(config: dict[str, Any], messages: list[Any], values: dict[str, Any], backend: Any, required: dict[str, str], surrogate_messages: list[Any], rubric_text: str) -> None:
-    from deepagents.middleware.filesystem import FilesystemMiddleware
-    from langchain_core.messages import HumanMessage, ToolMessage
+async def _live_probe(config: dict[str, Any], messages: list[Any], required: dict[str, str], rubric_text: str) -> None:
+    from langchain_core.messages import ToolMessage
     from agent.llm import get_llm, get_rubric_model_name
     from agent.rubric.middleware import MiraRubricMiddleware
     from config.settings import RUBRIC_MODEL
 
     print(f"Rubric LLM: {get_rubric_model_name(config)}", flush=True)
     model = get_llm(config, role=RUBRIC_MODEL)
-    fs = FilesystemMiddleware(backend=backend, tools=["read_file"])
     middleware = MiraRubricMiddleware(
         model=model,
         verifier_tools=[],
-        verifier_middleware=[fs],
+        verifier_middleware=[],
         max_iterations=1,
     )
     state: dict[str, Any] = {"messages": list(messages), "rubric": rubric_text, "_rubric_criteria": []}
@@ -341,20 +299,9 @@ async def _live_probe(config: dict[str, Any], messages: list[Any], values: dict[
     grader_run_base = middleware._astream_final_grader
     captured: dict[str, Any] = {}
 
-    # CANDIDATE OFFLOADING: the only change to MIRA behaviour, restricted to
-    # this middleware *instance* in this probe. Never writes into graph state.
+    # Observe production input without changing its prompt, files, or manifest.
     def verifier_input(state_for_verifier: dict[str, Any], iteration: int) -> dict[str, Any]:
-        temporary = {**state_for_verifier, "messages": surrogate_messages}
-        nested_input = verifier_input_base(temporary, iteration)
-        prompt = nested_input["messages"][0].content
-        prompt += (
-            "\n\nPROBE REQUIREMENT (operational, not part of the quoted transcript): "
-            "Every offloaded file mentioned in the transcript MUST be read in its entirety "
-            "with the available read_file tool. If read_file reports a next offset, read "
-            "the remaining pages until the end. Do not summarize a file in place of "
-            "reading it. Do not finish verification until every line has been read."
-        )
-        nested_input["messages"][0] = HumanMessage(content=prompt)
+        nested_input = verifier_input_base(state_for_verifier, iteration)
         captured["verifier_input"] = nested_input
         return nested_input
 
@@ -387,7 +334,9 @@ async def _live_probe(config: dict[str, Any], messages: list[Any], values: dict[
         expected = captured.get("evidence") or []
         actual_messages = nested_input.get("messages") or []
         actual_ids = {id(x) for x in actual_messages}
-        missing = [x for x in expected if id(x) not in actual_ids]
+        missing = [x for x in expected if (
+            id(x) not in actual_ids if isinstance(x, ToolMessage) else x not in actual_messages
+        )]
         assert not missing, f"GRADER INPUT LOST {len(missing)} REAL VERIFIER EVIDENCE MESSAGES"
         forwarded_tools = [x for x in expected if isinstance(x, ToolMessage)]
         assert forwarded_tools, "Grader input has NO ToolMessage evidence"
@@ -405,12 +354,7 @@ async def _live_probe(config: dict[str, Any], messages: list[Any], values: dict[
     middleware._astream_verifier = verifier_run  # type: ignore[method-assign]
     middleware._astream_final_grader = grader_run  # type: ignore[method-assign]
 
-    try:
-        graded = await middleware._ainvoke_grader(state, iteration=0, context=None)
-    finally:
-        # The actual TemporaryDirectory context owns cleanup after grading,
-        # including all errors. The source session is never involved.
-        pass
+    graded = await middleware._ainvoke_grader(state, iteration=0, context=None)
     print("\nREAL structured grader result:", flush=True)
     print(f"  verdict = {graded.result}", flush=True)
     print(f"  criteria = {len(graded.criteria)}", flush=True)
@@ -445,7 +389,7 @@ async def _main(opts: argparse.Namespace) -> int:
     if opts.thread_id and not opts.session_id:
         raise RuntimeError("--thread-id requires --session-id")
     config = load_config(workspace)
-    candidates = _session_candidates(config, opts.session_id, opts.scan_sessions)
+    candidates = [] if opts.synthetic and not opts.session_id else _session_candidates(config, opts.session_id, opts.scan_sessions)
     print("MIRA LIVE RUBRIC OFFLOAD PROBE", flush=True)
     print(f"Repository: {repo}", flush=True)
     print(f"Workspace:  {workspace}", flush=True)
@@ -455,7 +399,9 @@ async def _main(opts: argparse.Namespace) -> int:
 
     with tempfile.TemporaryDirectory(prefix="mira-rubric-offload-probe-") as tmp:
         temp = Path(tmp)
-        selected: tuple[str, str, list[Any], dict[str, Any]] | None = None
+        selected: tuple[str, str, list[Any], dict[str, Any]] | None = (
+            ("synthetic", "synthetic", [], {}) if opts.synthetic and not opts.session_id else None
+        )
         fallback: tuple[str, str, list[Any], dict[str, Any]] | None = None
         for idx, (session_id, db) in enumerate(candidates):
             cloned_db = temp / f"session-{idx}-backup.db"
@@ -518,7 +464,7 @@ async def _main(opts: argparse.Namespace) -> int:
                 + "PROBE_END_SENTINEL_7F32F4D1\n"
             )
             effective.append(AIMessage(content=synthetic))
-            print("No oversized saved message: appended a synthetic message to the IN-MEMORY copy only.", flush=True)
+            print("Using synthetic evidence in memory only.", flush=True)
         backend = FilesystemBackend(root_dir=temp / "workspace", virtual_mode=True)
         surrogates, required = _offload(effective, backend, opts.max_total_chars)
         print(f"Offloaded {len(required)} message(s), {sum(map(len, required.values())):,} chars to isolated temp backend:", flush=True)
@@ -529,10 +475,10 @@ async def _main(opts: argparse.Namespace) -> int:
                 print("PASS DRY RUN: all files round-tripped through DeepAgents backend; no LLM calls made.", flush=True)
             else:
                 rubric = opts.rubric_file.read_text(encoding="utf-8") if opts.rubric_file else _default_rubric(values, required)
-                print("Live mode: sending selected saved transcript to configured Rubric model.", flush=True)
-                await _live_probe(config, effective, values, backend, required, surrogates, rubric)
+                print("Live mode: sending selected evidence to configured Rubric model.", flush=True)
+                await _live_probe(config, effective, required, rubric)
         finally:
-            cleanup = backend.delete("/offloaded")
+            cleanup = backend.delete("/rubric_offload")
             if cleanup.error:
                 print(f"WARNING backend cleanup failed: {cleanup.error}; temporary workspace will still be removed.", flush=True)
             else:
