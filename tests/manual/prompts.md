@@ -1476,8 +1476,10 @@ Run MIRA in a disposable workspace on Windows using its normal
    selected directory and prompt focus returns after selection and cancellation.
 2. In Explorer, copy multiple files with Ctrl+C, focus MIRA, and press Ctrl+V.
    Confirm every file is uploaded and referenced. Then copy and paste ordinary
-   non-empty text and confirm it remains ordinary text even if files were copied
-   previously.
+   non-empty text and multiline text with blank lines and indentation. Confirm
+   each Ctrl+V inserts the exact text once, even if files were copied previously.
+   During a runtime reload, confirm the disabled prompt rejects text and file
+   paste, then accepts one insertion per paste after editing is restored.
 3. Submit a prompt that mentions an uploaded file and confirm normal filesystem
    tools can inspect it. Confirm the uploaded bytes were not placed directly in
    the user or system message and that Shift+Enter still inserts one newline.

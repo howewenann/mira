@@ -108,11 +108,14 @@ class PromptBox(TextArea):
     async def _on_paste(self, event: events.Paste) -> None:
         """Promote empty Windows CF_HDROP pastes without affecting text paste."""
         if event.text or sys.platform != "win32" or self.disabled or self.read_only:
+            # Textual dispatches base handlers automatically; delegate only once.
+            event.prevent_default()
             await super()._on_paste(event)
             return
 
         paths = await asyncio.to_thread(get_windows_clipboard_files)
         if not paths:
+            event.prevent_default()
             await super()._on_paste(event)
             return
 

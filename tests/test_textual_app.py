@@ -310,16 +310,18 @@ class AutocompleteTestApp(App[None]):
     #prompt { width: 100%; height: 5; }
     """
 
-    def __init__(self, backend: Any = None, tool_provider: Any = None) -> None:
+    def __init__(self, backend: Any = None, tool_provider: Any = None, *, compact: bool = False) -> None:
         super().__init__()
         self.backend = backend
         self.tool_provider = tool_provider
+        self.compact = compact
         self.submissions: list[str] = []
 
     def compose(self) -> ComposeResult:
         yield AutocompleteInput(
             project_backend=self.backend,
             tool_provider=self.tool_provider,
+            compact=self.compact,
         )
 
     def on_mount(self) -> None:
@@ -824,6 +826,101 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(prompt.value, "ad")
             self.assertEqual(app.submissions, ["ad"])
 
+    async def test_prompt_box_app_paste_inserts_exactly_once(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            for text in ("paste once", "first line\n\n\tsecond line\n"):
+                with self.subTest(text=text):
+                    prompt.value = ""
+                    prompt.focus()
+                    await pilot.pause()
+                    app.post_message(Paste(text))
+                    await pilot.pause()
+                    self.assertEqual(prompt.value, text)
+                    self.assertEqual(app.submissions, [])
+
+    async def test_main_composer_app_paste_inserts_exactly_once(self) -> None:
+        app = make_app()
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            prompt = app.query_one(AutocompleteInput).query_one(PromptBox)
+            prompt.focus()
+            await pilot.pause()
+            text = "first line\n\n\tsecond line\n"
+            app.post_message(Paste(text))
+            await pilot.pause()
+            self.assertEqual(prompt.value, text)
+
+    async def test_compact_composer_app_paste_and_ctrl_v_insert_exactly_once(self) -> None:
+        app = AutocompleteTestApp(compact=True)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            text = "first line\n\n\tsecond line\n"
+            app.post_message(Paste(text))
+            await pilot.pause()
+            self.assertEqual(prompt.value, text)
+            self.assertEqual(app.submissions, [])
+
+            prompt.value = ""
+            app._clipboard = text
+            await pilot.press("ctrl+v")
+            await pilot.pause()
+            self.assertEqual(prompt.value, text)
+            self.assertEqual(app.submissions, [])
+
+    async def test_empty_windows_paste_without_files_calls_base_once(self) -> None:
+        app = PromptBoxTestApp()
+        base_paste = TextArea._on_paste
+        calls: list[Paste] = []
+
+        async def record_base(prompt: TextArea, event: Paste) -> None:
+            calls.append(event)
+            await base_paste(prompt, event)
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "unchanged"
+            event = Paste("")
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "win32"),
+                patch("ui.textual.widgets.prompt_box.get_windows_clipboard_files", return_value=[]) as files,
+                patch.object(TextArea, "_on_paste", record_base),
+            ):
+                app.post_message(event)
+                await pilot.pause()
+            self.assertEqual(calls, [event])
+            files.assert_called_once_with()
+            self.assertEqual(prompt.value, "unchanged")
+            self.assertEqual(app.local_files, [])
+
+    async def test_read_only_prompt_rejects_text_and_windows_file_paste(self) -> None:
+        app = PromptBoxTestApp()
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            prompt.value = "unchanged"
+            prompt.read_only = True
+            prompt.focus()
+            await pilot.pause()
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "win32"),
+                patch("ui.textual.widgets.prompt_box.get_windows_clipboard_files") as files,
+            ):
+                for text in ("blocked\ntext", ""):
+                    app.post_message(Paste(text))
+                    await pilot.pause()
+                    self.assertTrue(prompt.has_focus)
+                    self.assertEqual(prompt.value, "unchanged")
+                    await prompt._on_paste(Paste(text))
+                    await pilot.pause()
+                    self.assertEqual(prompt.value, "unchanged")
+            files.assert_not_called()
+            self.assertEqual(app.local_files, [])
+            self.assertEqual(app.submissions, [])
+
     async def test_disabled_prompt_blocks_ordinary_text_paste(self) -> None:
         app = PromptBoxTestApp()
 
@@ -847,6 +944,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.focus()
             await pilot.press("a", "enter")
             self.assertEqual(app.submissions, ["beforea"])
+
+            app.post_message(Paste(" pasted once"))
+            await pilot.pause()
+            self.assertEqual(prompt.value, "beforea pasted once")
 
     async def test_reload_scopes_block_disabled_prompt_input_and_restore_editing(self) -> None:
         for full_runtime in (False, True):
@@ -920,6 +1021,30 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.local_files, paths)
             clipboard_files.assert_called_once_with()
             self.assertEqual(prompt.value, "")
+
+    async def test_empty_windows_app_paste_routes_clipboard_files_once(self) -> None:
+        app = PromptBoxTestApp()
+        paths = [Path(r"C:\files\one.txt"), Path(r"C:\files\annual report.pdf")]
+
+        async with app.run_test() as pilot:
+            prompt = app.query_one(PromptBox)
+            with (
+                patch("ui.textual.widgets.prompt_box.sys.platform", "win32"),
+                patch("ui.textual.widgets.prompt_box.get_windows_clipboard_files", return_value=paths) as files,
+            ):
+                app.post_message(Paste(""))
+                await pilot.pause()
+                self.assertEqual(app.local_files, paths)
+                files.assert_called_once_with()
+                self.assertEqual(prompt.value, "")
+
+                prompt.disabled = True
+                await pilot.pause()
+                app.post_message(Paste(""))
+                await pilot.pause()
+                self.assertEqual(app.local_files, paths)
+                files.assert_called_once_with()
+                self.assertEqual(prompt.value, "")
 
     async def test_nonempty_paste_never_consults_windows_file_clipboard(self) -> None:
         app = PromptBoxTestApp()

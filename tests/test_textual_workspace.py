@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from rich.console import Console
+from textual.events import Paste
 from textual.widgets import Button, OptionList, Static, TextArea
 
 from tests.test_textual_app import (
@@ -358,6 +359,11 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(app.query_one("#model-trigger-btw").disabled)
                 grip = app.query_one("#btw-resize-handle")
                 prompt = app.query_one("#btw-prompt")
+                prompt.focus()
+                app.post_message(Paste("blocked paste"))
+                await pilot.pause()
+                self.assertFalse(prompt.has_focus)
+                self.assertEqual(prompt.text, "")
                 width = grip.region.width
                 x, y = grip.region.x + width // 2, grip.region.y
                 await pilot.hover(grip)
