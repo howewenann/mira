@@ -27,6 +27,7 @@ from agent.middleware import (
     QUICKJS_PTC_TOOLS,
     build_agent_middleware,
 )
+from agent.middleware.builder import subagents_with_repeated_tool_call_guard
 from agent.rubric.middleware import MiraRubricMiddleware as RubricMiddleware
 from agent.planning.response_status import PlanningResponseStatusRule
 from agent.planning.tool_context import PlanningToolContext
@@ -279,6 +280,7 @@ def _build_agent(
         *([ProjectToolErrorMiddleware(project_tool_names)] if project_tool_names else []),
         ModelToolVisibilityMiddleware(excluded_tools),
     ]
+    subagents = subagents_with_repeated_tool_call_guard(subagents, config.get("settings"))
     subagents = subagents_with_project_tool_errors(subagents, project_tool_names)
     subagents = subagents_with_model_compatibility(subagents, Path(workspace))
     subagents = subagents_with_execution_context(subagents)

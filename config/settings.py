@@ -30,6 +30,8 @@ PLANNING_RESPONSE_STATUS_MAX_RETRIES_LIMIT = 20
 RUBRIC = "rubric"
 RUBRIC_MAX_ITERATIONS = "max_iterations"
 RUBRIC_MAX_ITERATIONS_LIMIT = 20
+REPEATED_TOOL_CALL_GUARD = "repeated_tool_call_guard"
+REPEATED_TOOL_CALL_LIMIT = 100
 MODELS = "models"
 CONTEXT_LIMIT_TOKENS = "context_limit_tokens"
 MAIN_MODEL = "main"
@@ -93,6 +95,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         RUBRIC: {
             "enabled": False,
             RUBRIC_MAX_ITERATIONS: 3,
+        },
+        REPEATED_TOOL_CALL_GUARD: {
+            "enabled": False,
+            "max_repeats": 3,
+            "max_blocked_attempts": 2,
         },
     },
     "hitl": {
@@ -289,6 +296,13 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
                 settings["system"][PLANNING_RESPONSE_STATUS][
                     PLANNING_RESPONSE_STATUS_MAX_RETRIES
                 ] = retries
+        guard = system.get(REPEATED_TOOL_CALL_GUARD)
+        if isinstance(guard, dict):
+            if isinstance(guard.get("enabled"), bool):
+                settings["system"][REPEATED_TOOL_CALL_GUARD]["enabled"] = guard["enabled"]
+            for key in ("max_repeats", "max_blocked_attempts"):
+                if valid_repeated_tool_call_limit(guard.get(key)):
+                    settings["system"][REPEATED_TOOL_CALL_GUARD][key] = guard[key]
         rubric = system.get(RUBRIC)
         if isinstance(rubric, dict):
             if isinstance(rubric.get("enabled"), bool):
@@ -460,6 +474,7 @@ def settings_issues(raw: Any) -> list[Issue]:
                 PLANNING_TODOS: {"enabled"},
                 PLANNING_RESPONSE_STATUS: {PLANNING_RESPONSE_STATUS_MAX_RETRIES},
                 RUBRIC: {"enabled", RUBRIC_MAX_ITERATIONS},
+                REPEATED_TOOL_CALL_GUARD: {"enabled", "max_repeats", "max_blocked_attempts"},
             }
             _unknown_settings(system, set(system_shapes), "system", issues)
             for name, allowed in system_shapes.items():
@@ -475,6 +490,15 @@ def settings_issues(raw: Any) -> list[Issue]:
             _validate_boolean(system, DYNAMIC_SUBAGENTS, DYNAMIC_SUBAGENT_RESPONSE_SCHEMA, issues)
             _validate_boolean(system, PLANNING_TODOS, "enabled", issues)
             _validate_boolean(system, RUBRIC, "enabled", issues)
+            _validate_boolean(system, REPEATED_TOOL_CALL_GUARD, "enabled", issues)
+            guard = system.get(REPEATED_TOOL_CALL_GUARD)
+            if isinstance(guard, dict):
+                for key in ("max_repeats", "max_blocked_attempts"):
+                    if key in guard and not valid_repeated_tool_call_limit(guard[key]):
+                        issues.append(_invalid_setting(
+                            f"system.{REPEATED_TOOL_CALL_GUARD}.{key}",
+                            f"must be an integer from 1 to {REPEATED_TOOL_CALL_LIMIT}",
+                        ))
             retries = (system.get(PLANNING_RESPONSE_STATUS) or {}).get(PLANNING_RESPONSE_STATUS_MAX_RETRIES) if isinstance(system.get(PLANNING_RESPONSE_STATUS), dict) else None
             if retries is not None and not valid_planning_response_status_max_retries(retries):
                 issues.append(_invalid_setting(f"system.{PLANNING_RESPONSE_STATUS}.{PLANNING_RESPONSE_STATUS_MAX_RETRIES}", "is out of range"))
@@ -888,6 +912,34 @@ def valid_planning_response_status_max_retries(value: Any) -> bool:
         and not isinstance(value, bool)
         and 1 <= value <= PLANNING_RESPONSE_STATUS_MAX_RETRIES_LIMIT
     )
+
+
+def repeated_tool_call_guard_settings(config_or_settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the effective guard configuration from settings or app config."""
+    source = config_or_settings if isinstance(config_or_settings, dict) else {}
+    return normalize_settings(source.get("settings", source))["system"][REPEATED_TOOL_CALL_GUARD]
+
+
+def set_repeated_tool_call_guard_enabled(settings: dict[str, Any], enabled: bool) -> dict[str, Any]:
+    """Toggle protection without discarding the configured thresholds."""
+    updated = normalize_settings(settings)
+    updated["system"][REPEATED_TOOL_CALL_GUARD]["enabled"] = bool(enabled)
+    return updated
+
+
+def set_repeated_tool_call_limit(settings: dict[str, Any], key: str, value: Any) -> dict[str, Any]:
+    """Set one valid threshold, retaining the saved value for invalid input."""
+    if key not in {"max_repeats", "max_blocked_attempts"}:
+        raise ValueError(f"Unknown repeated tool call threshold: {key}")
+    updated = normalize_settings(settings)
+    if valid_repeated_tool_call_limit(value):
+        updated["system"][REPEATED_TOOL_CALL_GUARD][key] = value
+    return updated
+
+
+def valid_repeated_tool_call_limit(value: Any) -> bool:
+    """Accept positive integer thresholds up to the Settings UI limit."""
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= REPEATED_TOOL_CALL_LIMIT
 
 
 def rubric_enabled(config_or_settings: dict[str, Any] | None) -> bool:

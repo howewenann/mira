@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +20,40 @@ from agent.subagents.compilation import compile_dynamic_subagents
 
 class SubagentCompilationTests(unittest.TestCase):
     """Compiled mode should preserve subagent capabilities and block schemas."""
+
+    def test_guard_runs_once_in_native_compiled_and_forked_owned_workers(self) -> None:
+        from deepagents import create_deep_agent
+        from deepagents.backends import FilesystemBackend
+        from agent.middleware.builder import subagents_with_repeated_tool_call_guard
+        from agent.middleware.repeated_tool_call_guard import RepeatedToolCallMiddleware
+        from tests.test_repeated_tool_call_guard import ScriptedModel, call, responses
+
+        for mode in ("raw", "compiled", "fork"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                (workspace / "palindrome.py").write_text("fixture", encoding="utf-8")
+                backend = FilesystemBackend(root_dir=workspace, virtual_mode=True)
+                worker = ScriptedModel(responses=responses([call(i) for i in range(9)]))
+                spec = {"name": "worker", "description": "Inspect files", "model": worker}
+                if mode == "fork":
+                    spec["mode"] = "fork"
+                specs = subagents_with_repeated_tool_call_guard([spec], {
+                    "system": {"repeated_tool_call_guard": {"enabled": True}},
+                })
+                if mode == "compiled":
+                    specs = compile_dynamic_subagents(specs, model=worker, tools=[], backend=backend,
+                                                     permissions=None, interrupt_on=None)
+                    nodes = specs[0]["runnable"].get_graph().nodes
+                    self.assertEqual(list(nodes).count("RepeatedToolCallMiddleware.before_model"), 1)
+                parent = ScriptedModel(responses=[AIMessage(content="", tool_calls=[{
+                    "id": "delegate", "name": "task", "args": {"description": "Inspect palindrome.py", "subagent_type": "worker"},
+                }]), AIMessage(content="Done.")])
+                graph = create_deep_agent(parent, backend=backend, subagents=specs,
+                                          middleware=[RepeatedToolCallMiddleware()])
+                result = graph.invoke({"messages": [HumanMessage(content="Inspect the file")]})
+                delegated = next(m for m in result["messages"] if getattr(m, "tool_call_id", None) == "delegate")
+                self.assertIn("current agent turn has been stopped", delegated.content)
+                self.assertEqual(worker.i, 6)
 
     def test_general_purpose_is_left_to_deepagents(self) -> None:
         compiled = compile_dynamic_subagents(

@@ -2587,6 +2587,33 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.final_text, "final plan")
 
+    async def test_repeated_tool_guard_diagnostic_reaches_real_mira_stream_and_terminal(self) -> None:
+        from langchain.agents import create_agent
+        from langchain_core.tools import tool
+        from agent.middleware.repeated_tool_call_guard import RepeatedToolCallMiddleware
+        from tests.test_repeated_tool_call_guard import ScriptedModel, call, responses
+
+        executed = []
+
+        @tool
+        def read_file(file_path: str) -> str:
+            """Read a file."""
+            executed.append(file_path)
+            return "palindrome implementation"
+
+        graph = create_agent(ScriptedModel(responses=responses([call(i) for i in range(9)])),
+                             tools=[read_file], middleware=[RepeatedToolCallMiddleware()])
+        renderer = RunTurnRenderer()
+        result = await runner.run_turn(graph, "Inspect palindrome.py", renderer, "guard")
+        self.assertEqual(len(executed), 3)
+        self.assertIn("current agent turn has been stopped", result.final_text)
+        self.assertIn("current agent turn has been stopped", "".join(event[1] for event in renderer.events if event[0] == "text"))
+        with redirect_stdout(StringIO()) as captured:
+            terminal = Renderer()
+            terminal.text_delta(result.final_text)
+            terminal.finish_main()
+        self.assertIn("Recovery attempts exhausted (2)", strip_ansi(captured.getvalue()))
+
     def test_final_text_skips_trailing_compaction_summary(self) -> None:
         """Metadata-marked compaction summaries should not become the visible final reply."""
         self.assertEqual(

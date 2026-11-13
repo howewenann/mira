@@ -26,6 +26,27 @@ A tracing reset reports when Reload Runtime is needed. Ordinary image messages,
 workflow tools, protected skill validation, Custom Tools, and MCP controls still
 work. `/tools` and `/skills` expose no bundled desktop automation feature.
 
+## Repeated tool call guard
+
+In `/settings` > General, find Repeated Tool Call Guard near Rubric Middleware.
+Fresh settings show no, Maximum identical calls 3, and Recovery attempts 2;
+both inputs are disabled. Enable it, enter 5 and 4, and press Enter in each.
+Expected: each successful change reports agents rebuilt (or Reload Runtime
+required when MIRA is not ready). Disable and re-enable: 5 and 4 remain. Close
+and reopen Settings: saved values remain. Try `0`, `-1`, `101`, `true`, and
+`3.5`: the saved values reappear and the status explains the valid range.
+Reset General and confirm: no, 3, 2, disabled inputs.
+
+Run `python tests/probes/probe_repeated_tool_call_guard.py` from the repository.
+Expected: guarded nine-request script executes three reads, returns two recovery
+errors and a sixth terminal error, and stops with a visible diagnostic. The
+disabled baseline executes all nine. Run with `--live` for configured local
+LM Studio Gemma recovery and a disposable-workspace MIRA CLI smoke test.
+Expected: the model can finish from existing results, change strategy, or reach
+the enforced stop. A skip reports that no suitable local model is available.
+Rubric may still grade a stopped attempt and request a revision through its
+normal end-of-turn hook; this guard does not stop the whole Rubric-managed run.
+
 ## Stock ACP stdio integration
 
 Install `mira[acp]` and run

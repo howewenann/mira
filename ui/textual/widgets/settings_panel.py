@@ -28,6 +28,12 @@ from config.settings import (
     PLANNING_TODOS,
     RUBRIC,
     RUBRIC_MAX_ITERATIONS_LIMIT,
+    REPEATED_TOOL_CALL_GUARD,
+    REPEATED_TOOL_CALL_LIMIT,
+    repeated_tool_call_guard_settings,
+    set_repeated_tool_call_guard_enabled,
+    set_repeated_tool_call_limit,
+    valid_repeated_tool_call_limit,
     dynamic_subagent_response_schema_enabled,
     dynamic_subagents_enabled,
     execute_env_settings,
@@ -84,7 +90,7 @@ ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access", "ptc",
     "rubric_access", "mcp_server_enabled", "mcp_server_allow", "mcp_tool_enabled", "mcp_tool_allow",
     "mcp_tool_plan", "mcp_tool_ptc", "mcp_tool_rubric",
-    "subagent_enabled", "tracing",
+    "subagent_enabled", "tracing", "repeated_tool_call_guard",
 ]
 EXECUTE_ENV_LABELS = {
     "system": "system shell",
@@ -274,6 +280,26 @@ class SettingsPanel(Vertical):
                             classes="settings-input rubric-iterations-input",
                             disabled=not rubric_enabled(self.settings),
                         )
+
+                    guard = repeated_tool_call_guard_settings(self.settings)
+                    with Horizontal(classes="settings-row settings-policy-row"):
+                        yield Static("Repeated Tool Call Guard", classes="settings-label")
+                        yield self._toggle_button(
+                            ToggleCell("repeated_tool_call_guard", REPEATED_TOOL_CALL_GUARD),
+                            guard["enabled"],
+                        )
+                    for key, label in (
+                        ("max_repeats", "Maximum identical calls"),
+                        ("max_blocked_attempts", "Recovery attempts"),
+                    ):
+                        with Horizontal(classes="settings-row settings-child-row settings-value-row repeated-tool-call-limit-row"):
+                            yield Static(label, classes="settings-label settings-child-label")
+                            yield Input(
+                                value=str(guard[key]),
+                                id=f"settings-guard-{key.replace('_', '-')}",
+                                classes="settings-input repeated-tool-call-limit-input",
+                                disabled=not guard["enabled"],
+                            )
 
                     for section, groups in builtin_tool_groups(self.tool_metadata):
                         for group, names in groups:
@@ -749,6 +775,9 @@ class SettingsPanel(Vertical):
         """Save execute environment text fields on Enter."""
         event.stop()
         input_id = event.input.id or ""
+        if input_id in {"settings-guard-max-repeats", "settings-guard-max-blocked-attempts"}:
+            await self._submit_repeated_tool_call_limit(event.input)
+            return
         if input_id == "settings-planning-response-status-max-retries":
             await self._submit_planning_response_status_retries(event.input)
             return
@@ -835,6 +864,7 @@ class SettingsPanel(Vertical):
         self._refresh_access_counts()
         if tab == "general":
             self._refresh_rubric_control()
+            self._refresh_repeated_tool_call_controls()
             self._refresh_tracing_control()
             env = execute_env_settings(self.settings)
             self._restore_select_value(self.query_one("#settings-execute-env-mode", Select), env["mode"])
@@ -900,6 +930,8 @@ class SettingsPanel(Vertical):
                 self._set_status(f"model profile '{override}' is unavailable")
                 return
             updated = set_rubric_enabled(self.settings, value)
+        elif cell.kind == "repeated_tool_call_guard":
+            updated = set_repeated_tool_call_guard_enabled(self.settings, value)
         elif cell.kind == "tracing":
             updated = set_tracing_enabled(self.settings, value)
         elif cell.kind == "subagent_enabled":
@@ -964,6 +996,35 @@ class SettingsPanel(Vertical):
         self._refresh_tracing_control()
         self._refresh_access_counts()
         self._refresh_rubric_control()
+        self._refresh_repeated_tool_call_controls()
+
+    async def _submit_repeated_tool_call_limit(self, input_widget: Input) -> None:
+        """Validate, rebuild through the normal callback, and show saved values."""
+        key = (input_widget.id or "").removeprefix("settings-guard-").replace("-", "_")
+        try:
+            value = int(input_widget.value.strip())
+        except ValueError:
+            value = 0
+        if not valid_repeated_tool_call_limit(value):
+            self._set_status(f"repeated tool call thresholds must be from 1 to {REPEATED_TOOL_CALL_LIMIT}")
+        else:
+            updated = set_repeated_tool_call_limit(self.settings, key, value)
+            self.set_runtime_busy(True)
+            try:
+                ok, message = await self.apply_change(updated)
+            finally:
+                self.set_runtime_busy(False)
+            self._set_status(message)
+            if ok:
+                self.settings = updated
+        self._refresh_repeated_tool_call_controls()
+
+    def _refresh_repeated_tool_call_controls(self) -> None:
+        guard = repeated_tool_call_guard_settings(self.settings)
+        for key in ("max_repeats", "max_blocked_attempts"):
+            control = self.query_one(f"#settings-guard-{key.replace('_', '-')}", Input)
+            control.disabled = not guard["enabled"] or self._runtime_busy
+            control.value = str(guard[key])
 
     async def _submit_rubric_iterations(self, input_widget: Input) -> None:
         """Persist a valid rubric cap and restore the last value after invalid input."""
@@ -1472,6 +1533,8 @@ def selected_value(settings: dict[str, Any], cell: ToggleCell) -> bool | None:
         return planning_todos_enabled(settings)
     if cell.kind == "rubric":
         return rubric_enabled(settings)
+    if cell.kind == "repeated_tool_call_guard":
+        return repeated_tool_call_guard_settings(settings)["enabled"]
     if cell.kind == "tracing":
         return tracing_enabled(settings)
     if cell.kind == "subagent_enabled":

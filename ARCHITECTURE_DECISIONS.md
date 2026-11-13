@@ -18,6 +18,7 @@ behavior changes; update this document when a change alters a decision.
   - [Resource discovery and replacement](#resource-discovery-and-replacement)
 - [Agents, models, and runtime](#agents-models-and-runtime)
   - [DeepAgents and LangGraph ownership](#deepagents-and-langgraph-ownership)
+  - [Repeated tool call protection](#repeated-tool-call-protection)
   - [Model correction and control-tool recovery](#model-correction-and-control-tool-recovery)
 - [Tools, permissions, and execution](#tools-permissions-and-execution)
   - [Execute backend and environment](#execute-backend-and-environment)
@@ -493,6 +494,52 @@ a parallel PTC event bridge.
 
 **Update this when:** DeepAgents or QuickJS versions change, prompt ownership
 moves, todo defaults change, or filesystem/rubric semantics change.
+
+### Repeated tool call protection
+
+**Decision:** An optional, self-contained LangChain middleware detects consecutive
+tool requests by name and schema-normalized arguments, using retained conversation
+history since the last human message. It has no MIRA-specific imports or shared
+session counters. The source preserves kxleee's DeepAgents PR #3581 attribution
+and MIT notice.
+
+`RepeatedToolCallMiddleware(max_repeats=3, max_blocked_attempts=2)` executes
+requests 1–3, returns paired error ToolMessages for requests 4–5, and blocks
+request 6 with a terminal marker. Its before-model hook appends an assistant
+diagnostic and uses the supported `jump_to="end"` route. No exception, model
+call, or checkpoint rewrite is needed to end that tool loop. Sync and async
+graphs share this behavior; serialized messages retain the decision on resume.
+
+General Settings persist `system.repeated_tool_call_guard` with `enabled: false`,
+`max_repeats: 3`, and `max_blocked_attempts: 2`. Both threshold controls accept
+integers from 1 to 100, remain saved while disabled, and use the ordinary agent
+rebuild/rollback workflow. General reset restores these defaults. The builder
+installs the guard only when enabled, in Act, Plan, and owned raw subagents
+before native, compiled dynamic, or workflow specialization. Existing guards
+on owned raw specs are replaced by the saved configuration. External compiled
+and remote graphs are left intact. The Rubric verifier receives no guard.
+
+**Limits:** Different arguments, pages, tools, or an intervening write break the
+sequence. Failed results count as attempts too; there is no automatic retry
+exemption for side effects. Parallel calls count in declaration order, independent
+of completion order; siblings in an already dispatched batch finish and receive
+paired results before termination. Calls within Eval code are not independently
+counted by tool wrappers; the model's Eval request itself is guarded. Invalid
+arguments and JSON-schema-only tools use stable raw serialization; Pydantic
+schemas normalize defaults and coercions while excluding injected runtime fields.
+Detection cannot recover calls removed from the retained history, detect semantic
+progress, or recognize alternating-tool cycles.
+
+The pinned LangChain end route **still runs after-agent hooks**. Rubric grading
+therefore retains its normal policy: a `needs_revision` verdict can inject a new
+human message and start another attempt, resetting the sequence. A strict stop
+of the entire Rubric-managed run is not provided; implementing that would require
+changing Rubric's revision behavior or framework routing. Tests explicitly cover
+this limitation instead of bypassing grading or claiming an unconditional stop.
+
+**Where to check:** [middleware API and license](agent/middleware/repeated_tool_call_guard.py),
+[construction](agent/middleware/builder.py), [standalone graph tests](tests/test_repeated_tool_call_guard.py),
+[regression and live probe](tests/probes/probe_repeated_tool_call_guard.py).
 
 ### Model correction and control-tool recovery
 

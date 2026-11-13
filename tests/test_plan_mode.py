@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from copy import deepcopy
 import unittest
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -246,6 +248,65 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
             & set(factory._write_interrupts({"settings": settings}))
         )
 
+    def test_repeated_tool_call_guard_registration_in_act_plan_and_owned_subagents(self) -> None:
+        from agent.middleware.repeated_tool_call_guard import RepeatedToolCallMiddleware
+        from agent.middleware.builder import subagents_with_repeated_tool_call_guard
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                config = {"settings": {"system": {"repeated_tool_call_guard": {
+                    "enabled": enabled, "max_repeats": 7, "max_blocked_attempts": 4,
+                }}}}
+                with (
+                    patch("agent.factory.get_llm", return_value="model"),
+                    patch("agent.middleware.builder.CodeInterpreterMiddleware", return_value="code"),
+                    patch("agent.middleware.builder.create_mira_summarization_middleware", return_value="auto-summary"),
+                    patch("agent.middleware.builder.MiraCompactionMiddleware", return_value="summary"),
+                    patch("agent.factory.create_deep_agent", return_value=type("Agent", (), {})()) as create,
+                ):
+                    for build in (factory.build_agent, factory.build_plan_agent):
+                        build(config, Path(directory), None)
+                        kwargs = create.call_args.kwargs
+                        guards = [m for m in kwargs["middleware"] if isinstance(m, RepeatedToolCallMiddleware)]
+                        self.assertEqual(len(guards), int(enabled))
+                        if enabled:
+                            self.assertEqual((guards[0].max_repeats, guards[0].max_blocked_attempts), (7, 4))
+                        for spec in kwargs["subagents"]:
+                            if "runnable" not in spec and "graph_id" not in spec:
+                                self.assertEqual(sum(isinstance(m, RepeatedToolCallMiddleware) for m in spec.get("middleware", [])), int(enabled))
+
+        raw = {"name": "fork", "mode": "fork", "middleware": [RepeatedToolCallMiddleware()]}
+        compiled = {"name": "external", "runnable": object()}
+        remote = {"name": "remote", "graph_id": "remote"}
+        protected = subagents_with_repeated_tool_call_guard([raw, compiled, remote], config["settings"])
+        self.assertIs(protected[1], compiled)
+        self.assertIs(protected[2], remote)
+        self.assertEqual(raw["middleware"][0].max_repeats, 3)
+        self.assertEqual(len(protected[0]["middleware"]), 1)
+        self.assertEqual(protected[0]["middleware"][0].max_repeats, 7)
+
+    def test_repeated_tool_call_guard_stops_real_mira_act_and_plan_graphs(self) -> None:
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from tests.test_repeated_tool_call_guard import ScriptedModel, call, responses, assert_paired
+
+        for build in (factory.build_agent, factory.build_plan_agent):
+            with self.subTest(mode=build.__name__), tempfile.TemporaryDirectory() as directory:
+                workspace = Path(directory)
+                fixture = workspace / "palindrome.py"
+                fixture.write_text("fixture", encoding="utf-8")
+                model = ScriptedModel(responses=responses([call(i) for i in range(9)]))
+                config = {"settings": {"system": {"repeated_tool_call_guard": {"enabled": True}}}}
+                with patch("agent.factory.get_llm", return_value=model):
+                    graph = build(config, workspace, None)
+                result = graph.invoke({"messages": [HumanMessage(content="Inspect palindrome.py")]})
+                results = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+                self.assertEqual([m.status for m in results], ["success"] * 3 + ["error"] * 3)
+                self.assertEqual(model.i, 6)
+                self.assertTrue(any("current agent turn has been stopped" in str(m.content)
+                                    for m in result["messages"] if isinstance(m, AIMessage)))
+                self.assertEqual(fixture.read_text(encoding="utf-8"), "fixture")
+                assert_paired(self, result["messages"])
+
     def test_planning_todos_are_opt_in_for_action_and_plan_agents(self) -> None:
         """Todo middleware and metadata should appear exactly once only when enabled."""
         config = {"settings": {"system": {"planning_todos": {"enabled": True}}}}
@@ -408,6 +469,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         settings = deepcopy(DEFAULT_SETTINGS)
         settings["models"]["main"] = "main"
         settings["system"]["rubric"] = {"enabled": True, "max_iterations": 5}
+        settings["system"]["repeated_tool_call_guard"]["enabled"] = True
         config = {
             "settings": settings,
             "model_registry": ModelRegistry(

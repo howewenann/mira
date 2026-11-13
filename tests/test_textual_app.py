@@ -7484,6 +7484,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async def resolve(task: asyncio.Task[Any], key: str) -> Any:
                 await wait_until(lambda: app.query_one(PromptPanel).active)
                 self.assertFalse(settings.display)
+                # active is set before choice buttons and shortcuts finish mounting.
+                await pilot.pause()
                 await pilot.press(key)
                 result = await asyncio.wait_for(task, timeout=2)
                 await wait_until(lambda: settings.display)
@@ -8867,6 +8869,74 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one("#settings-close", Button).press()
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 0)
                 await wait_until(lambda: app.query_one(PromptBox).has_focus)
+
+    async def test_settings_repeated_tool_guard_persistence_rebuild_failure_and_reset(self) -> None:
+        from config.settings import repeated_tool_call_guard_settings
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            workspace = Path(directory)
+            app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
+            rebuilt = []
+
+            async def rebuild() -> None:
+                rebuilt.append(repeated_tool_call_guard_settings(app.config))
+
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                app._rebuild_agents = rebuild
+                app._handle_settings_command()
+                await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
+                panel = app.query_one(SettingsPanel)
+                await wait_until(lambda: len(panel.query("#settings-guard-max-repeats")) == 1)
+                toggle = panel.query_one("#settings-toggle-repeated_tool_call_guard-repeated_tool_call_guard", Button)
+                repeats = panel.query_one("#settings-guard-max-repeats", Input)
+                recovery = panel.query_one("#settings-guard-max-blocked-attempts", Input)
+                self.assertTrue(repeats.disabled and recovery.disabled)
+                self.assertEqual((repeats.value, recovery.value), ("3", "2"))
+                toggle.press()
+                await pilot.pause()
+                self.assertFalse(repeats.disabled or recovery.disabled)
+                self.assertEqual(repeats.styles.width, panel.query_one("#settings-rubric-max-iterations", Input).styles.width)
+                for control, value in ((repeats, "6"), (recovery, "4")):
+                    control.value = value
+                    await panel.submit_execute_env_input(Input.Submitted(control, value))
+                self.assertEqual(rebuilt[-1], {"enabled": True, "max_repeats": 6, "max_blocked_attempts": 4})
+                for invalid in ("0", "-1", "101", "true", "bad", "3.5", ""):
+                    for control, saved in ((repeats, "6"), (recovery, "4")):
+                        control.value = invalid
+                        await panel.submit_execute_env_input(Input.Submitted(control, invalid))
+                        self.assertEqual(control.value, saved)
+                self.assertEqual(len(rebuilt), 3)
+                toggle.press()
+                await pilot.pause()
+                self.assertTrue(repeats.disabled and recovery.disabled)
+                self.assertEqual(repeated_tool_call_guard_settings(load_settings(workspace)),
+                                 {"enabled": False, "max_repeats": 6, "max_blocked_attempts": 4})
+                toggle.press()
+                await pilot.pause()
+                self.assertFalse(repeats.disabled or recovery.disabled)
+                self.assertEqual((repeats.value, recovery.value), ("6", "4"))
+
+                # Runtime rebuild failure rolls YAML and visible values back.
+                app._rebuild_agents = AsyncMock(side_effect=RuntimeError("rebuild failed"))
+                repeats.value = "8"
+                await panel.submit_execute_env_input(Input.Submitted(repeats, "8"))
+                self.assertEqual(repeats.value, "6")
+                self.assertEqual(repeated_tool_call_guard_settings(load_settings(workspace))["max_repeats"], 6)
+                self.assertIn("agent rebuild failed", renderable_plain(panel.query_one("#settings-status", Static)))
+                toggle.press()
+                await pilot.pause()
+                self.assertEqual(str(toggle.label), "yes")
+                self.assertFalse(repeats.disabled or recovery.disabled)
+
+                app._rebuild_agents = rebuild
+                app._prompt_choice = AsyncMock(return_value="r")
+                panel.query_one("#settings-reset-default", Button).press()
+                await pilot.pause()
+                self.assertEqual((repeats.value, recovery.value), ("3", "2"))
+                self.assertTrue(repeats.disabled and recovery.disabled)
+                self.assertEqual(str(toggle.label), "no")
+                self.assertEqual(load_settings(workspace), panel.settings)
 
     async def test_settings_panel_validates_and_persists_rubric_iterations(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:

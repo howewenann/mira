@@ -17,6 +17,42 @@ from core.interface import NullFrontend
 class SettingsTests(unittest.TestCase):
     """Tests for .mira/settings.yml loading and normalization."""
 
+    def test_repeated_tool_call_guard_defaults_round_trip_toggle_and_reset(self) -> None:
+        expected = {"enabled": False, "max_repeats": 3, "max_blocked_attempts": 2}
+        self.assertEqual(settings.repeated_tool_call_guard_settings(None), expected)
+        configured = settings.set_repeated_tool_call_guard_enabled({}, True)
+        configured = settings.set_repeated_tool_call_limit(configured, "max_repeats", 8)
+        configured = settings.set_repeated_tool_call_limit(configured, "max_blocked_attempts", 4)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            self.assertTrue(settings.save_settings(workspace, configured))
+            self.assertEqual(settings.load_settings(workspace), configured)
+            disabled = settings.set_repeated_tool_call_guard_enabled(configured, False)
+            self.assertTrue(settings.save_settings(workspace, disabled))
+            restored = settings.set_repeated_tool_call_guard_enabled(settings.load_settings(workspace), True)
+            self.assertEqual(restored, configured)
+            self.assertEqual(settings.settings_issues(restored), [])
+        self.assertEqual(settings.repeated_tool_call_guard_settings({"settings": configured}),
+                         {"enabled": True, "max_repeats": 8, "max_blocked_attempts": 4})
+        self.assertEqual(settings.repeated_tool_call_guard_settings(settings.reset_tab_settings(configured, "general")), expected)
+
+    def test_repeated_tool_call_guard_normalization_and_invalid_threshold_diagnostics(self) -> None:
+        configured = settings.set_repeated_tool_call_limit({}, "max_repeats", 7)
+        for key in ("max_repeats", "max_blocked_attempts"):
+            for value in (True, False, "3", "invalid", 0, -1, 101, 3.5, None):
+                with self.subTest(key=key, value=value):
+                    raw = {"system": {settings.REPEATED_TOOL_CALL_GUARD: {key: value}}}
+                    self.assertFalse(settings.valid_repeated_tool_call_limit(value))
+                    self.assertEqual(settings.set_repeated_tool_call_limit(configured, key, value), configured)
+                    self.assertEqual(settings.repeated_tool_call_guard_settings(raw)[key],
+                                     settings.DEFAULT_SETTINGS["system"][settings.REPEATED_TOOL_CALL_GUARD][key])
+                    issues = settings.settings_issues(raw)
+                    self.assertEqual(len(issues), 1)
+                    self.assertIn(key, str(issues[0]))
+        self.assertTrue(settings.valid_repeated_tool_call_limit(100))
+        self.assertEqual(settings.repeated_tool_call_guard_settings({"system": {settings.REPEATED_TOOL_CALL_GUARD: []}}),
+                         settings.DEFAULT_SETTINGS["system"][settings.REPEATED_TOOL_CALL_GUARD])
+
     def test_tab_resets_use_factory_defaults_and_preserve_other_owners(self) -> None:
         configured = deepcopy(settings.DEFAULT_SETTINGS)
         configured["tracing"]["enabled"] = True
