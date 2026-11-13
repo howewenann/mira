@@ -86,6 +86,9 @@ from mira.api import Frontend, MessageEvent
 See the [MIRA Python API guide](docs/frontend-api.md) for lifecycle, events,
 blocking requests, snapshots, and minimal and full runnable frontends.
 
+For contributors, the [middleware guide](docs/middleware/README.md) explains
+the agent stacks, middleware behavior, and upstream integrations.
+
 ## TUI basics
 
 | Action | Shortcut or command |
