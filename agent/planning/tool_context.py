@@ -19,3 +19,4 @@ class PlanningToolContext:
     tools: BoundToolMap = field(default_factory=ImmutableDict)
     agents: BoundAgentMap = field(default_factory=ImmutableDict)
     workspace: Path | None = None
+    mode_transition: dict[str, str] | None = None

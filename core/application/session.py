@@ -28,6 +28,7 @@ class MiraSession:
         "plan_runs", "plan_thread_id", "rubric_enabled", "rubric_max_iterations",
         "pending_artifact",
         "goal_context_thread_id",
+        "mode_transition",
     )
 
     def __init__(
@@ -86,6 +87,13 @@ class MiraSession:
             if agent is None or not hasattr(agent, "aget_state") or not thread_id:
                 continue
             state = await agent.aget_state({"configurable": {"thread_id": thread_id}})
+            transition = self.mode.get("mode_transition") or {}
+            if transition.get("thread_id") == thread_id and not state.next and any(
+                message.id == transition.get("message_id")
+                for message in state.values.get("messages", [])
+            ):
+                # Completion can precede the semantic save during a crash.
+                self.mode["mode_transition"] = None
             if agent is self.plan_agent and isinstance(state.values, dict):
                 stage = state.values.get("planning_stage")
                 if isinstance(stage, str):
@@ -297,6 +305,7 @@ class MiraSession:
         if kind == "plan":
             if not self.mode["planning"]:
                 await synchronize_conversation(self.agent, self.id, self.plan_agent, plan_thread_id(self.record))
+                self.mode["mode_transition"] = {"mode": "plan"}
             self.mode["planning"] = True
             self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             self.mode["plan_thread_id"] = plan_thread_id(self.record)
@@ -350,6 +359,8 @@ class MiraSession:
             return None
         self.mode[f"executing_{kind}"] = True
         self.mode[f"executing_{'goal' if kind == 'plan' else 'plan'}"] = False
+        if self.mode["planning"]:
+            self.mode["mode_transition"] = {"mode": "act"}
         self.mode["planning"] = False
         if kind == "goal":
             self.mode["planning_stage"] = None

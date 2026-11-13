@@ -23,6 +23,7 @@ from agent.middleware.execute_tool_description_rewrite import (
 from agent.middleware.context_report import ContextReportMiddleware
 from agent.middleware.file_references import FileReferenceMiddleware
 from agent.middleware.model_compatibility import ModelCompatibilityMiddleware
+from agent.middleware.mode_transition import ModeTransitionMiddleware
 from agent.middleware.repeated_tool_call_guard import RepeatedToolCallMiddleware
 from config.settings import (
     READ_ONLY_BUILTIN_TOOLS,
@@ -79,6 +80,7 @@ def build_agent_middleware(
         ExecuteToolDescriptionRewriteMiddleware(),
     ]
     middleware.extend(extra_middleware or [])
+    middleware.append(ModeTransitionMiddleware())
     middleware.append(ContextReportMiddleware(summarization_middleware))
     return AgentMiddlewareBundle(
         items=middleware, summarization=summarization_middleware,

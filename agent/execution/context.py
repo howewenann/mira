@@ -25,6 +25,7 @@ class MiraContext:
     tools: BoundToolMap
     agents: BoundAgentMap
     workspace: Path | None = None
+    mode_transition: dict[str, str] | None = None
 
 
 _ACTIVE_TOOL_RUNTIME: ContextVar[ToolRuntime[Any, Any] | None] = ContextVar(

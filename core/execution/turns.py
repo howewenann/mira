@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import HumanMessage
@@ -249,6 +251,20 @@ async def run_user_turn(
         )
         poller = asyncio.create_task(poll_compactions(phase_recorder, phase_agent, thread_id))
         try:
+            phase_messages = invocation_messages(request_text, supplied_messages)
+            transition = mode.get("mode_transition")
+            resuming = recovery is not None and recovery.get("thread_id") == thread_id
+            phase_mode_name = "plan" if phase_agent is plan_agent else "act"
+            if transition and transition["mode"] == phase_mode_name and not resuming:
+                for index, message in enumerate(phase_messages):
+                    if isinstance(message, HumanMessage):
+                        message = message.model_copy(update={"id": message.id or uuid4().hex})
+                        phase_messages[index] = message
+                        transition = {"mode": phase_mode_name, "message_id": message.id, "thread_id": thread_id}
+                        mode["mode_transition"] = transition
+                        if persist_graph_state is not None:
+                            await persist_graph_state()
+                        break
             with context_usage_scope(
                 lambda usage: apply_deepagents_context_usage(
                     usage,
@@ -284,6 +300,8 @@ async def run_user_turn(
                     if agent_key not in execution_contexts:
                         execution_contexts[agent_key] = context_factory()
                     execution_context = execution_contexts[agent_key]
+                    if transition and transition.get("thread_id") == thread_id:
+                        execution_context = replace(execution_context, mode_transition=dict(transition))
                 phase_result = await selected_runner(
                     agent=phase_agent,
                     text=request_text,
@@ -297,11 +315,13 @@ async def run_user_turn(
                     planning_stage=stage,
                     planning_state=state,
                     planning_context=execution_context,
-                    messages=invocation_messages(request_text, supplied_messages),
+                    messages=phase_messages,
                     pinned_skills=phase_pinned_skills,
                     **policy_kwargs,
                 )
                 recovery = None
+                if transition and transition.get("thread_id") == thread_id and mode.get("mode_transition") == transition:
+                    mode["mode_transition"] = None
         except asyncio.CancelledError:
             recording_emitter.stop_active_tools("cancelled")
             await sync_compaction_safely(phase_recorder, phase_agent, thread_id)

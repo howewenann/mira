@@ -2,6 +2,23 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## Transient Plan/Act transitions
+
+In a disposable workspace, switch `/plan`, `/act`, `/plan`, `/act`, `/plan`,
+submitting a short read-only question after each switch. Then use
+`/plan Please inspect palindrome.py.` followed by another question. Repeat
+`/plan` while already in Plan. Switch `/act` and request a small edit; approve
+the write. Repeat `/act` and submit another prompt. Also switch several times
+without a prompt and restart with a pending `/plan` before submitting a question.
+Expected: current mode and tool permissions govern each turn; only the latest
+switch matters. No notice appears as a transcript bubble or in session JSON.
+Interrupt at write approval, reopen, and approve: the same turn completes once.
+
+Run `python tests/probes/probe_mode_transition.py` for deterministic effective
+model-message checks, or add `--live` for repeated transitions using a configured
+local Gemma 4 12B endpoint. The live probe reports behavior separately from the
+deterministic delivery assertions; it does not establish general model reliability.
+
 ## Settings tab resets
 
 Open `/settings`. Expected: no initial keyboard focus; General has the flat

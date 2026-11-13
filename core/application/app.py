@@ -452,6 +452,7 @@ def initial_mode(
     """Return MIRA's mutable semantic state for one application session."""
     return {
         "planning": False,
+        "mode_transition": None,
         "current_plan": current_plan(session or {}),
         "executing_plan": False,
         "current_goal": current_goal(session or {}),
@@ -481,6 +482,8 @@ def select_mode(
     if normalized not in {"act", "action", "plan", "planning"}:
         raise ValueError(f"unknown MIRA mode: {requested}")
     planning = normalized in {"plan", "planning"}
+    if planning != mode.get("planning", False):
+        mode["mode_transition"] = {"mode": "plan" if planning else "act"}
     mode["planning"] = planning
     mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
     if planning:

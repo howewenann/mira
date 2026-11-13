@@ -101,6 +101,8 @@ def resolve_artifact_review(
         accepted = start_plan_attempt(record) if kind == "plan" else start_goal_attempt(record)
         mode[f"executing_{kind}"] = True
         mode[f"executing_{'goal' if kind == 'plan' else 'plan'}"] = False
+        if mode["planning"]:
+            mode["mode_transition"] = {"mode": "act"}
         mode["planning"] = False
         update_artifact_event_status(record, kind, artifact_id, "active")
     else:

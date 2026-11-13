@@ -35,6 +35,7 @@ behavior changes; update this document when a change alters a decision.
 - [Conversation handoff](#conversation-handoff)
   - [Why Act and Plan have separate conversations](#why-act-and-plan-have-separate-conversations)
   - [What a handoff copies](#what-a-handoff-copies)
+  - [Transient mode guidance](#transient-mode-guidance)
   - [When transfer is allowed](#when-transfer-is-allowed)
 - [Context management and compaction](#context-management-and-compaction)
   - [DeepAgents summarization and archives](#deepagents-summarization-and-archives)
@@ -1108,6 +1109,23 @@ that metadata describes its former messages; leaving it in place could apply
 an obsolete summary over the newly inherited conversation. The source remains
 unchanged, and the destination's todos and all other non-message channels stay
 independent.
+
+### Transient mode guidance
+
+Mode switches queue one notice in session semantic state; requesting the active
+mode leaves that queue unchanged, and another switch replaces it. The first user
+turn binds the notice to its real HumanMessage ID before starting the graph.
+`ModeTransitionMiddleware` reads this trusted runtime context and inserts a
+temporary HumanMessage immediately before that message in each model request,
+including continuations after tools and checkpoint resume. Completion clears the
+binding. Pending and interrupted bindings survive session restart; only mode,
+thread, and message IDs are checkpointed, never the synthetic notice. Ordinary
+conversation messages, session JSON, compaction archives, and handoffs therefore
+contain no injected notices. The middleware runs after native summarization;
+if compaction summarizes the bound user message during a long turn, guidance
+precedes its retained continuation without restoring archived messages.
+
+See [mode_transition.py](agent/middleware/mode_transition.py).
 
 ### When transfer is allowed
 

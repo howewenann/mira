@@ -15,6 +15,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.graph import END
 
 from agent.planning.policy import PLAN_BEHAVIOR_POLICY, PLAN_DISABLED_TOOLS
+from agent.middleware.mode_transition import MODE_NOTICES, MODE_TRANSITION_SOURCE
 from core.execution.compaction import commit_forced_compaction
 from core.execution.handoff import effective_conversation
 from core.execution.runner import TurnResult
@@ -170,7 +171,8 @@ class ConversationHandoffTests(unittest.IsolatedAsyncioTestCase):
                     message = AIMessage(content="Written.\nRESPONSE_STATUS: COMPLETE")
                 elif "write_file" in names:
                     # Resolve the requested content from inherited Plan context.
-                    original = next(m.content for m in messages if isinstance(m, HumanMessage))
+                    original = next(m.content for m in messages if isinstance(m, HumanMessage)
+                                    and m.name != MODE_TRANSITION_SOURCE)
                     message = AIMessage(content="", tool_calls=[{
                         "name": "write_file", "id": "write-note", "type": "tool_call",
                         "args": {"file_path": "/note.txt", "content": original.split("'")[1]},
@@ -194,7 +196,8 @@ class ConversationHandoffTests(unittest.IsolatedAsyncioTestCase):
                 await session.prompt(discussion)
                 plan_messages, plan_tools = requests[-1]
                 self.assertTrue(set(PLAN_DISABLED_TOOLS).isdisjoint(plan_tools))
-                self.assertEqual([m.content for m in plan_messages if isinstance(m, HumanMessage)], [discussion])
+                self.assertEqual([m.content for m in plan_messages if isinstance(m, HumanMessage)],
+                                 [MODE_NOTICES["plan"], discussion])
                 self.assertIn(PLAN_BEHAVIOR_POLICY, next(m.text for m in plan_messages if isinstance(m, SystemMessage)))
                 self.assertFalse((workspace / "note.txt").exists())
 
