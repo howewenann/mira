@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from deepagents import create_deep_agent
 from deepagents.middleware.skills import SkillsMiddleware
-from fastmcp.skills.models import Skill
+from fastmcp.skills.models import MCPSkill as SkillManifest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -193,7 +193,7 @@ class MCPManifestTests(unittest.IsolatedAsyncioTestCase):
     def manifest(self, *, dynamic=False):
         self.raw = b"---\nname: review\ndescription: Review files.\n---\nBody\n"
         uri = "skill://library/review/SKILL.md"
-        return Skill.model_validate({"uri": uri, "frontmatter": {"name": "review", "description": "Review files."},
+        return SkillManifest.model_validate({"uri": uri, "frontmatter": {"name": "review", "description": "Review files."},
             "resources": "dynamic" if dynamic else [{"uri": uri, "size": len(self.raw), "digest": "sha256:" + hashlib.sha256(self.raw).hexdigest()}]})
 
     def session(self, manifest):

@@ -470,6 +470,13 @@ MIRA context capabilities are intentionally coupled to MIRA.
 
 ## OTLP tracing
 
+Phoenix 21 supports FastMCP 4 in the same environment. Its default loopback
+server keeps authentication disabled unless explicitly configured; non-loopback
+deployments now enable authentication by default and require exporter
+credentials. `phoenix serve --host` was removed; use `PHOENIX_HOST` instead.
+Before upgrading an existing Phoenix deployment, review the
+[upstream migration guide](https://github.com/Arize-ai/phoenix/blob/arize-phoenix-v21.0.0/MIGRATION.md).
+
 Optional OTLP tracing exports agent runs to a selected OTLP/HTTP destination.
 This differs from `--trace`, which opens a local diagnostic transcript. Install
 the optional tracing runtime first:

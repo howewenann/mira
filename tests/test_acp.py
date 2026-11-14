@@ -762,7 +762,7 @@ class ACPWiringTests(unittest.TestCase):
         )
         self.assertIn('"agent-client-protocol==0.12.1"', project)
         self.assertIn('"agent-client-protocol[http]==0.12.1"', project)
-        self.assertIn('"hypercorn>=0.17"', project)
+        self.assertIn('"hypercorn>=0.18.0"', project)
         self.assertNotIn("deepagents-acp", project.lower())
         self.assertNotIn("deepagents_acp", sources)
         self.assertNotIn("AgentServerACP", sources)

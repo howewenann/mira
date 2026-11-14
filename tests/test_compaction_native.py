@@ -59,6 +59,52 @@ class NativeCompactionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([item for item in stack if item.name == "SummarizationMiddleware"], [summarization])
             self.assertIs(tool._summarization, summarization)
 
+    async def test_forced_compaction_resolves_shifted_cutoff_and_anchors_new_event(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = FilesystemBackend(root_dir=Path(directory), virtual_mode=True)
+            model = BindableModel(responses=[AIMessage(content="fresh summary")])
+            summarization = create_mira_summarization_middleware(model, backend)
+            summarization._lc_helper.keep = ("messages", 2)
+            compaction = MiraCompactionMiddleware(summarization)
+            messages = [HumanMessage(content=f"turn {i}", id=f"m{i}") for i in range(12)]
+            event = {
+                "cutoff_index": 8, "cutoff_message_id": "m8",
+                "summary_message": HumanMessage(content="old summary"),
+                "file_path": "/history.md",
+            }
+            # Prefix removal moves m8 to index 2. The retained conversation is
+            # still the previous summary and turns 8-11, not the stale index 8.
+            remaining = messages[6:]
+            plan = await compaction.aplan_forced_compaction_update({
+                "messages": remaining, "_summarization_event": event,
+            })
+            self.assertIsNotNone(plan)
+            update = plan.state_update("/history.md")["_summarization_event"]
+            self.assertEqual(update["cutoff_index"], 4)
+            self.assertEqual(update["cutoff_message_id"], "m10")
+            self.assertEqual([m.content for m in plan.messages], ["old summary", "turn 8", "turn 9"])
+            # A subsequent prefix change must preserve the same effective tail.
+            projected = summarization._apply_event_to_messages(remaining[1:], update)
+            self.assertEqual([m.id for m in projected[1:]], ["m10", "m11"])
+
+    async def test_forced_compaction_does_not_resummarize_only_a_shifted_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = FilesystemBackend(root_dir=Path(directory), virtual_mode=True)
+            model = BindableModel(responses=[AIMessage(content="unused")])
+            summarization = create_mira_summarization_middleware(model, backend)
+            summarization._lc_helper.keep = ("messages", 2)
+            compaction = MiraCompactionMiddleware(summarization)
+            messages = [HumanMessage(content=f"turn {i}", id=f"m{i}") for i in range(4)]
+            plan = await compaction.aplan_forced_compaction_update({
+                "messages": messages,
+                "_summarization_event": {
+                    "cutoff_index": 8, "cutoff_message_id": "m2",
+                    "summary_message": HumanMessage(content="old summary"),
+                    "file_path": "/history.md",
+                },
+            })
+            self.assertIsNone(plan)
+
     async def test_automatic_and_tool_compaction_share_native_engine(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             backend = FilesystemBackend(root_dir=Path(directory), virtual_mode=True)

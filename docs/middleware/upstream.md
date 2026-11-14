@@ -18,6 +18,7 @@ assertion about future dependency releases.
 - [MemoryMiddleware](#memorymiddleware)
 - [HumanInTheLoopMiddleware](#humanintheloopmiddleware)
 - [UnsupportedContentMiddleware](#unsupportedcontentmiddleware)
+- [ModelRefusalMiddleware](#modelrefusalmiddleware)
 - [TodoListMiddleware](#todolistmiddleware)
 - [Provider prompt caching](#provider-prompt-caching)
 - [_ToolExclusionMiddleware](#_toolexclusionmiddleware)
@@ -28,7 +29,7 @@ assertion about future dependency releases.
 
 ## Inventory
 
-The first 13 rows are **unmodified upstream implementations reachable through
+The first 14 rows are **unmodified upstream implementations reachable through
 MIRA's regular construction paths**, including optional todos, remote workers,
 forks and profile tool exclusions. The last 14 rows require additional packages
 or an exact model harness match. “Yes” means registration can occur;
@@ -47,6 +48,7 @@ tool wrappers; `BA/BM/AM/AA` are lifecycle hooks, including async equivalents.
 | MemoryMiddleware | Load configured instruction files into model prompt | If memory supplied | Same | Native forks; not ordinary isolated | BA, M | [memory.py][memory] |
 | HumanInTheLoopMiddleware | Pause for tool approval and apply decisions | If policy present | Same | Native/precompiled, selected verifier tools | AM, T | [human_in_the_loop.py][hitl] |
 | UnsupportedContentMiddleware | Replace unsupported model input blocks | Yes | Yes | Native/precompiled | M | [unsupported_content.py][unsupported] |
+| ModelRefusalMiddleware | Raise native model-refusal errors | Yes | Yes | Native raw/fork/fallback; not MIRA precompiled | M | [model_refusal.py][refusal] |
 | TodoListMiddleware | Editable agent todo list | Optional | Optional | MIRA precompiled; forks; matching harness profile | M, AM; contributes `write_todos` | [todo.py][todo] |
 | AnthropicPromptCachingMiddleware | Provider cache breakpoints | Lazy wrapper always | Same | Native; not MIRA precompiled | M | [_prompt_caching.py][caching], [provider implementation][anthropic] |
 | _ToolExclusionMiddleware | Apply harness-profile tool-name exclusions | If exclusions | Same | Native profile-dependent | M, T | [_tool_exclusion.py][exclusion] |
@@ -73,9 +75,9 @@ There are also **12 additional implementations** in the optional Nemotron
 harness, described below. Codex profiles reuse TodoListMiddleware, already
 counted above.
 
-Together with the **18 MIRA/customized entries**, that gives **31 regular-path
+Together with the **18 MIRA/customized entries**, that gives **32 regular-path
 reference entries**, plus **14 additional environment/model-dependent upstream
-entries**, or **45 inventory entries across the documented conditional
+entries**, or **46 inventory entries across the documented conditional
 paths**. This is not a single 45-layer stack. Delegates, internal helpers and
 subclass bases are not extra registrations. Arbitrary project-supplied custom
 middleware and dynamically registered harness profiles are open extension
@@ -111,6 +113,13 @@ human-message eviction; there are tool-specific exceptions, so this is not a
 universal output cap. Binary-content handling and blob metadata are also
 native behavior. Filesystem commands/messages can update state; backend writes
 are separate external effects.
+
+In 0.7.38, `ls`, `grep` and `glob` also filter symlinks whose resolved targets
+require approval outside the approved search scope. Explicit deny rules still
+apply to aliases and targets. MIRA's normal workspace-read policy does not add
+read-interrupt rules, so this introduces no new read prompt in the default
+stack. Virtual results preserve an allowed symlink's name. `grep` restricts its
+Python fallback to the requested file and clips long lines around the match.
 
 **MIRA scope and interaction:** Main modes and native/MIRA-compiled children.
 Plan has write-deny permissions and hidden write tools; Act protects mounted
@@ -162,7 +171,9 @@ the task tool disappear. Permissions/HITL remain properties of the child stack.
 
 **Example:** Parent `task(subagent_type='reviewer', description='Review a.py')`
 gets a reviewer result as its ToolMessage rather than importing all of the
-reviewer's chat into parent history.
+reviewer's chat into parent history. Native task dispatch now records the task
+call ID in child checkpoint metadata and its checkpoint namespace in the result
+ToolMessage artifact. Native child refusals become a notice to the parent.
 
 **Source/tests:** [implementation][sub],
 [construction tests](../../tests/test_subagent_compilation.py),
@@ -370,6 +381,20 @@ where an image would have been; switching to a capable model can send it again.
 
 **Source:** [implementation][unsupported].
 
+## ModelRefusalMiddleware
+
+**Purpose and timing:** A model wrapper added by DeepAgents 0.7.33 and later.
+It recognizes standardized refusal blocks and raises `ModelRefusalError`,
+retaining the raw response. Main graphs place it after UnsupportedContent and
+before profile tool exclusions, allowing an outer fallback to handle refusals.
+Native raw/fork/fallback children receive it; MIRA's independently precompiled
+`create_sub_agent` path does not automatically add it. Native task dispatch
+turns a child's refusal into a notice for the parent instead of failing that
+parent turn. MIRA keeps its custom middleware and normal exception reporting.
+
+**Source/tests:** [implementation][refusal],
+[compatibility tests](../../tests/test_deepagents_compat.py).
+
 ## TodoListMiddleware
 
 **Purpose and timing:** Adds `write_todos`, a model-wrapper system reminder,
@@ -410,6 +435,10 @@ possible but those provider caching hints are absent.
 on the system/tool prefix and automatic conversation caching settings. Merely
 using an Anthropic endpoint through ChatAnyLLM is not sufficient for that
 native-model type check.
+
+DeepAgents 0.7.37 caches optional provider-class lookups, including absent
+providers. Fork construction also keeps the parent's prompt-cache prefix
+instead of rebuilding a different prefix for each fork.
 
 | Additional middleware | Enablement verified in DeepAgents | Role and limits |
 | --- | --- | --- |
@@ -477,6 +506,13 @@ adapter calls the same engine, not the LangChain helper's independent graph hook
 **Source/tests:** [DeepAgents implementation][summary],
 [LangChain helper][lcsummary],
 [MIRA integration tests](../../tests/test_compaction_native.py).
+
+Summary events now include `cutoff_message_id`. Projection and subsequent
+compaction resolve that boundary against the current messages before falling
+back to the stored index, preserving the tail after earlier messages are
+removed. MIRA's forced path records and resolves the same anchor. Failed native
+compact-tool results now have error status. Summary/pinned-skill notifications
+use LangChain's notification helper, which retains the `lc_source` convention.
 
 ## Bases used through MIRA subclasses
 
@@ -557,15 +593,15 @@ together:nvidia/nemotron-3-ultra-550b-a55b
 
 Upstream files are installed in the active environment's `site-packages`, not
 vendored in MIRA. Source links below use the verified release-tag commits for
-DeepAgents 0.7.32 (`e85c6b9`), LangChain 1.4.7 (`fbb8a35`), QuickJS 0.3.7
-(`6c89fe2`) and the optional installed Anthropic 1.7.7 delegate (`6eb169b`).
+DeepAgents 0.7.38 (`c858b36`), LangChain 1.5.0, QuickJS 0.3.12
+(`6f9e494`) and the installed Anthropic 1.7.10 delegate.
 Optional Bedrock/Fireworks internals were unavailable and are explicitly marked
 as such above.
 
 | Package | Installed source paths to inspect |
 | --- | --- |
 | DeepAgents | `deepagents/graph.py`; `middleware/{filesystem,subagents,async_subagents,_parent_notifier,patch_tool_calls,skills,memory,unsupported_content,_prompt_caching,_tool_exclusion,summarization,rubric}.py`; `profiles/harness/{harness_profiles,_openai_codex,_nvidia_nemotron_3_ultra}.py` |
-| LangChain | `langchain/agents/factory.py`; `agents/middleware/{types,todo,human_in_the_loop,summarization,tool_retry}.py` |
+| LangChain | `langchain/agents/factory.py`; `agents/middleware/{types,todo,human_in_the_loop,model_refusal,summarization,tool_retry}.py` |
 | QuickJS | `langchain_quickjs/middleware.py` and its tool/subagent bridges |
 | Anthropic | `langchain_anthropic/middleware/prompt_caching.py` |
 
@@ -581,24 +617,26 @@ MIRA construction links: [factory](../../agent/factory.py),
 [Rubric](../../agent/rubric/middleware.py),
 [dependency declarations](../../pyproject.toml).
 
-[fs]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/filesystem.py
-[sub]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/subagents.py
-[async]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/async_subagents.py
-[parent]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/_parent_notifier.py
-[patch]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/patch_tool_calls.py
-[skills]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/skills.py
-[memory]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/memory.py
-[unsupported]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/unsupported_content.py
-[caching]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/_prompt_caching.py
-[exclusion]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/_tool_exclusion.py
-[summary]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/summarization.py
-[rubric]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/middleware/rubric.py
-[profiles]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/profiles/harness/harness_profiles.py
-[codexprofile]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/profiles/harness/_openai_codex.py
-[nemotron]: https://github.com/langchain-ai/deepagents/blob/e85c6b98087861512d2c5240305e16cfac68a746/libs/deepagents/deepagents/profiles/harness/_nvidia_nemotron_3_ultra.py
-[todo]: https://github.com/langchain-ai/langchain/blob/fbb8a35da7023ac0382c3b22f047337861bd3486/libs/langchain_v1/langchain/agents/middleware/todo.py
-[hitl]: https://github.com/langchain-ai/langchain/blob/fbb8a35da7023ac0382c3b22f047337861bd3486/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py
-[lcsummary]: https://github.com/langchain-ai/langchain/blob/fbb8a35da7023ac0382c3b22f047337861bd3486/libs/langchain_v1/langchain/agents/middleware/summarization.py
-[toolretry]: https://github.com/langchain-ai/langchain/blob/fbb8a35da7023ac0382c3b22f047337861bd3486/libs/langchain_v1/langchain/agents/middleware/tool_retry.py
-[quickjs]: https://github.com/langchain-ai/deepagents/blob/6c89fe2197a2dfe4f3851cda38565bcadba6066b/libs/partners/quickjs/langchain_quickjs/middleware.py
-[anthropic]: https://github.com/langchain-ai/langchain/blob/6eb169b56cea0b535b9af0ca504bb367f6407455/libs/partners/anthropic/langchain_anthropic/middleware/prompt_caching.py
+[fs]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/filesystem.py
+[sub]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/subagents.py
+[async]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/async_subagents.py
+[parent]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/_parent_notifier.py
+[patch]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/patch_tool_calls.py
+[skills]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/skills.py
+[memory]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/memory.py
+[unsupported]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/unsupported_content.py
+[caching]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/_prompt_caching.py
+[exclusion]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/_tool_exclusion.py
+[summary]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/summarization.py
+[rubric]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/middleware/rubric.py
+[profiles]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/profiles/harness/harness_profiles.py
+[codexprofile]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/profiles/harness/_openai_codex.py
+[nemotron]: https://github.com/langchain-ai/deepagents/blob/c858b3641b13fb3f40fe3a12515517b81fb8a744/libs/deepagents/deepagents/profiles/harness/_nvidia_nemotron_3_ultra.py
+[todo]: https://github.com/langchain-ai/langchain/blob/langchain%3D%3D1.5.0/libs/langchain_v1/langchain/agents/middleware/todo.py
+[hitl]: https://github.com/langchain-ai/langchain/blob/langchain%3D%3D1.5.0/libs/langchain_v1/langchain/agents/middleware/human_in_the_loop.py
+[lcsummary]: https://github.com/langchain-ai/langchain/blob/langchain%3D%3D1.5.0/libs/langchain_v1/langchain/agents/middleware/summarization.py
+[toolretry]: https://github.com/langchain-ai/langchain/blob/langchain%3D%3D1.5.0/libs/langchain_v1/langchain/agents/middleware/tool_retry.py
+[quickjs]: https://github.com/langchain-ai/deepagents/blob/6f9e49481687011210a71e4a9731ecba7feb82e7/libs/partners/quickjs/langchain_quickjs/middleware.py
+[anthropic]: https://github.com/langchain-ai/langchain/blob/langchain-anthropic%3D%3D1.7.10/libs/partners/anthropic/langchain_anthropic/middleware/prompt_caching.py
+
+[refusal]: https://github.com/langchain-ai/langchain/blob/langchain%3D%3D1.5.0/libs/langchain_v1/langchain/agents/middleware/model_refusal.py

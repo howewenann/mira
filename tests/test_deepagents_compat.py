@@ -7,12 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from deepagents import create_deep_agent
+from deepagents import FilesystemPermission, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
 from langchain_quickjs import CodeInterpreterMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.exceptions import ModelRefusalError
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 from agent.factory import _action_permissions, _write_interrupts
@@ -267,8 +270,109 @@ class DeepAgentsPermissionCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(defaults.read("/protected.txt").file_data["content"], "protected")
 
 
+class FilesystemSearchScopeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_searches_filter_resolved_paths_outside_approved_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            for name in ("notes.txt", "escape.txt"):
+                (root / "safe" / name).write_text("search marker", encoding="utf-8")
+            middleware = FilesystemMiddleware(
+                backend=FilesystemBackend(root_dir=root, virtual_mode=True),
+                permissions=[FilesystemPermission(paths=["/**"], operations=["read"], mode="interrupt")],
+            )
+            tools = {item.name: item for item in middleware.tools}
+            runtime = SimpleNamespace(state={}, tool_call_id="search", config={})
+            # Resolve as a symlink without requiring Windows symlink privileges.
+            with patch("deepagents.middleware.filesystem._resolve_real_path", side_effect=(
+                lambda backend, path: "/elsewhere/private.txt" if path.rstrip("/") == "/safe/escape.txt" else path
+            )):
+                for name, arguments in (
+                    ("ls", {"path": "/safe"}),
+                    ("glob", {"path": "/safe", "pattern": "*.txt"}),
+                    ("grep", {"path": "/safe", "pattern": "search marker"}),
+                ):
+                    for asynchronous in (False, True):
+                        with self.subTest(tool=name, asynchronous=asynchronous):
+                            result = (
+                                await tools[name].coroutine(runtime=runtime, **arguments)
+                                if asynchronous else tools[name].func(runtime=runtime, **arguments)
+                            )
+                            self.assertEqual(result.status, "success")
+                            self.assertIn("/safe/notes.txt", result.content)
+                            self.assertNotIn("escape.txt", result.content)
+
+    async def test_searches_preserve_symlink_names_and_filter_unapproved_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "safe").mkdir()
+            (root / "elsewhere").mkdir()
+            (root / "safe/notes.txt").write_text("search marker", encoding="utf-8")
+            (root / "elsewhere/private.txt").write_text("search marker", encoding="utf-8")
+            try:
+                (root / "safe/alias.txt").symlink_to(root / "safe/notes.txt")
+                (root / "safe/escape.txt").symlink_to(root / "elsewhere/private.txt")
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314:
+                    self.skipTest("Windows requires symlink privileges or Developer Mode")
+                raise
+            backend = FilesystemBackend(root_dir=root, virtual_mode=True)
+            runtime = SimpleNamespace(state={}, tool_call_id="search", config={})
+            for permissions in (_action_permissions(), [
+                FilesystemPermission(paths=["/**"], operations=["read"], mode="interrupt"),
+            ]):
+                middleware = FilesystemMiddleware(backend=backend, permissions=permissions)
+                tools = {item.name: item for item in middleware.tools}
+                for name, arguments in (
+                    ("ls", {"path": "/safe"}),
+                    ("glob", {"path": "/safe", "pattern": "*.txt"}),
+                    ("grep", {"path": "/safe", "pattern": "search marker"}),
+                ):
+                    for asynchronous in (False, True):
+                        with self.subTest(tool=name, asynchronous=asynchronous, permissions=permissions):
+                            result = (
+                                await tools[name].coroutine(runtime=runtime, **arguments)
+                                if asynchronous else tools[name].func(runtime=runtime, **arguments)
+                            )
+                            self.assertEqual(result.status, "success")
+                            self.assertIn("/safe/alias.txt", result.content)
+                            self.assertIn("/safe/notes.txt", result.content)
+                            # MIRA allows workspace reads. An explicit native
+                            # approval only covers the requested search scope.
+                            if permissions[0].mode == "interrupt":
+                                self.assertNotIn("escape.txt", result.content)
+                            else:
+                                self.assertIn("/safe/escape.txt", result.content)
+                            self.assertNotIn("/elsewhere/private.txt", result.content)
+
+
+class ModelRefusalCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_main_refusal_raises_native_error(self) -> None:
+        message = AIMessage(content=[{"type": "refusal", "refusal": "Cannot fulfill request"}])
+        agent = create_deep_agent(model=BindableFakeMessagesListChatModel(responses=[message]))
+        with self.assertRaises(ModelRefusalError):
+            await agent.ainvoke({"messages": [("user", "refuse")]})
+
+    async def test_native_subagent_refusal_returns_notice_to_parent(self) -> None:
+        model = BindableFakeMessagesListChatModel(responses=[
+            AIMessage(content="", tool_calls=[{
+                "name": "task", "args": {"subagent_type": "worker", "description": "Review this"}, "id": "delegate",
+            }]),
+            AIMessage(content=[{"type": "refusal", "refusal": "Cannot fulfill request"}]),
+            AIMessage(content="The worker declined."),
+        ])
+        agent = create_deep_agent(model=model, subagents=[{
+            "name": "worker", "description": "Review work", "system_prompt": "Review the request.",
+        }])
+        result = await agent.ainvoke({"messages": [("user", "Delegate a review")]})
+        replies = [m for m in result["messages"] if isinstance(m, ToolMessage) and m.tool_call_id == "delegate"]
+        self.assertEqual(len(replies), 1)
+        self.assertIn("Cannot fulfill request", replies[0].content)
+        self.assertEqual(result["messages"][-1].content, "The worker declined.")
+
+
 class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
-    """Exercise the QuickJS 0.3.7 execution and native PTC streaming MIRA relies on."""
+    """Exercise the pinned QuickJS execution and native PTC streaming MIRA relies on."""
 
     def runtime(self, call_id: str = "eval-call") -> SimpleNamespace:
         return SimpleNamespace(

@@ -745,6 +745,8 @@ result. For forced compaction, MIRA converts state messages, normalizes any
 existing summary event, applies it, chooses a native retained-tail cutoff,
 and rejects empty/no-progress cutoffs. It generates summary text and returns a
 ForcedCompactionPlan without immediately editing state or the archive.
+The forced path passes current messages into the native cutoff calculation and
+stores `cutoff_message_id`, preserving the retained tail after prefix removal.
 
 The application commit path verifies the checkpoint is still the same completed
 checkpoint, appends and verifies the archive, rechecks for concurrent changes,

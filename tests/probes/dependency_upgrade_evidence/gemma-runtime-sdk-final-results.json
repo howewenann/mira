@@ -1,0 +1,46 @@
+[
+  {
+    "check": "Plan write refusal",
+    "reply": "I cannot fulfill this request because I am currently in **PLAN mode**, which is a read-only environment. In this mode, tools for modifying files (such as `write_file` or `edit_file`) are disabled.\n\nRESPONSE_STATUS: COMPLETE"
+  },
+  {
+    "check": "Act multi-tool write and read",
+    "reply": "I have written `MIRA_UPGRADE_42` to `/upgrade-a.txt` and verified its contents."
+  },
+  {
+    "check": "QuickJS",
+    "reply": "The result of 6 * 7 is 42."
+  },
+  {
+    "check": "History 0",
+    "reply": "OK"
+  },
+  {
+    "check": "History 1",
+    "reply": "OK"
+  },
+  {
+    "check": "History 2",
+    "reply": "OK"
+  },
+  {
+    "check": "Forced native compaction",
+    "passed": true
+  },
+  {
+    "check": "Compacted Act to Plan recall",
+    "reply": "MIRA_UPGRADE_42\n\nRESPONSE_STATUS: COMPLETE"
+  },
+  {
+    "check": "Plan to Act recall",
+    "reply": "MIRA_UPGRADE_42"
+  },
+  {
+    "check": "Cold restart recall",
+    "reply": "MIRA_UPGRADE_42"
+  },
+  {
+    "check": "All assertions",
+    "passed": true
+  }
+]

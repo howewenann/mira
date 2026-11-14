@@ -26,7 +26,7 @@ from deepagents.backends.protocol import (
     ReadResult,
     WriteResult,
 )
-from fastmcp.skills.models import Skill, SkillResource
+from fastmcp.skills.models import MCPSkill as SkillManifest, SkillResource
 
 from agent.mcp.errors import sanitized_error
 from agent.mcp.models import MCPServerState
@@ -104,13 +104,13 @@ async def _read_bytes(session: Any, uri: str, resource: SkillResource | None = N
 class MCPSkill:
     name: str
     description: str
-    manifest: Skill
+    manifest: SkillManifest
     files: dict[str, SkillResource]
     instructions: bytes
 
 
-async def discover_skill(session: Any, server: str, summary: Skill) -> MCPSkill:
-    manifest = Skill.model_validate(await session.get_skill(summary.uri))
+async def discover_skill(session: Any, server: str, summary: SkillManifest) -> MCPSkill:
+    manifest = SkillManifest.model_validate(await session.get_skill(summary.uri))
     if manifest.uri != summary.uri or manifest.frontmatter.name != summary.frontmatter.name:
         raise ValueError("skills/get changed the requested skill identity")
     _relative_uri(manifest.uri, manifest.uri)

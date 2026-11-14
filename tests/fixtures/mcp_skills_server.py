@@ -4,12 +4,12 @@ from pathlib import Path
 import sys
 
 from fastmcp import FastMCP
-from fastmcp.server.providers.skills import SkillsDirectoryProvider
+from fastmcp.skills.provider import SkillsDirectoryProvider
 from fastmcp.skills.extension import SkillsExtension
 
 server = FastMCP("MIRA skills regression")
 if sys.argv[2] != "no-skills":
-    provider = SkillsDirectoryProvider(roots=Path(sys.argv[1]), experimental_skills=True, reload=True)
+    provider = SkillsDirectoryProvider(roots=Path(sys.argv[1]), reload=True)
     server.add_provider(provider)
     server.add_extension(SkillsExtension(providers=[provider]))
 

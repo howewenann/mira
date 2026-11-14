@@ -1,0 +1,108 @@
+{
+  "baseline": {
+    "run": 1653,
+    "failures": 6,
+    "errors": 10,
+    "headers": [
+      "test_closing_panel_reveals_approval_and_same_reload_completes \r",
+      "setUpClass (tests.test_middleware_span_construction.MiddlewareSpanConstructionTests)\r",
+      "test_subagents_inherit_main_or_use_their_assigned_image_capability \r",
+      "test_footer_model_button_is_bright_left_aligned_and_responsive \r",
+      "test_footer_model_button_reflows_immediately_when_identity_changes (tests.test_model_management_ui.ModelManageme\r",
+      "test_keyboard_main_selection_is_saved_once_without_reverting \r",
+      "test_models_changes_rebuild_agents_without_reloading_mcp \r",
+      "test_models_command_and_footer_share_models_tab \r",
+      "test_models_layout_uses_aligned_full_height_rows \r",
+      "test_policy_refresh_coalesces_and_only_rebuilds_the_agent_pair \r",
+      "test_real_http_preserves_sessions_interactions_and_connection_isolation \r",
+      "test_file_filtering_is_case_insensitive_alphabetical_and_capped \r",
+      "test_issues_screen_is_flat_collapsed_and_view_only \r",
+      "test_models_change_without_main_keeps_expected_model_issue \r",
+      "test_inspector_header_divider_and_spacing_styles_are_explicit \r",
+      "test_git_configure_yes_initializes_persists_and_clears_issue \r"
+    ]
+  },
+  "initial_upgrade": {
+    "run": 1661,
+    "failures": 9,
+    "errors": 11,
+    "skipped": 1,
+    "headers": [
+      "test_searches_filter_resolved_paths_outside_approved_scope \r",
+      "test_closing_panel_reveals_approval_and_same_reload_completes \r",
+      "setUpClass (tests.test_middleware_span_construction.MiddlewareSpanConstructionTests)\r",
+      "test_subagents_inherit_main_or_use_their_assigned_image_capability \r",
+      "test_footer_model_button_is_bright_left_aligned_and_responsive \r",
+      "test_footer_model_button_reflows_immediately_when_identity_changes (tests.test_model_management_ui.ModelManageme\r",
+      "test_keyboard_main_selection_is_saved_once_without_reverting \r",
+      "test_models_changes_rebuild_agents_without_reloading_mcp \r",
+      "test_models_command_and_footer_share_models_tab \r",
+      "test_models_layout_uses_aligned_full_height_rows \r",
+      "test_policy_refresh_coalesces_and_only_rebuilds_the_agent_pair \r",
+      "test_architecture_uses_only_stock_stable_acp \r",
+      "test_real_http_preserves_sessions_interactions_and_connection_isolation \r",
+      "test_file_filtering_is_case_insensitive_alphabetical_and_capped \r",
+      "test_issues_screen_is_flat_collapsed_and_view_only \r",
+      "test_models_change_without_main_keeps_expected_model_issue \r",
+      "test_inspector_header_divider_and_spacing_styles_are_explicit \r",
+      "test_ask_user_vertical_buttons_fit_narrow_and_truncate_long_labels \r",
+      "test_git_configure_yes_initializes_persists_and_clears_issue \r",
+      "test_subagent_panel_resize_preserves_paused_chat_scroll \r"
+    ]
+  },
+  "final_upgrade": {
+    "run": 1661,
+    "failures": 6,
+    "errors": 10,
+    "skipped": 1,
+    "summary": "1,661 run in 645.561s; failures=6, errors=10, skipped=1",
+    "headers": [
+      "test_closing_panel_reveals_approval_and_same_reload_completes \r",
+      "setUpClass (tests.test_middleware_span_construction.MiddlewareSpanConstructionTests)\r",
+      "test_subagents_inherit_main_or_use_their_assigned_image_capability \r",
+      "test_footer_model_button_is_bright_left_aligned_and_responsive \r",
+      "test_footer_model_button_reflows_immediately_when_identity_changes (tests.test_model_management_ui.ModelManageme\r",
+      "test_keyboard_main_selection_is_saved_once_without_reverting \r",
+      "test_models_changes_rebuild_agents_without_reloading_mcp \r",
+      "test_models_command_and_footer_share_models_tab \r",
+      "test_models_layout_uses_aligned_full_height_rows \r",
+      "test_policy_refresh_coalesces_and_only_rebuilds_the_agent_pair \r",
+      "test_real_http_preserves_sessions_interactions_and_connection_isolation \r",
+      "test_file_filtering_is_case_insensitive_alphabetical_and_capped \r",
+      "test_issues_screen_is_flat_collapsed_and_view_only \r",
+      "test_models_change_without_main_keeps_expected_model_issue \r",
+      "test_inspector_header_divider_and_spacing_styles_are_explicit \r",
+      "test_git_configure_yes_initializes_persists_and_clears_issue \r"
+    ],
+    "same_failure_methods_as_baseline": true
+  },
+  "compatibility": {
+    "run": 215,
+    "skipped": 1,
+    "failures": 0,
+    "errors": 0
+  },
+  "critical": {
+    "run": 213,
+    "failures": 0,
+    "errors": 0
+  },
+  "provider": {
+    "run": 64,
+    "failures": 0,
+    "errors": 0
+  },
+  "mode_probe": {
+    "run": 13,
+    "failures": 0,
+    "errors": 0
+  },
+  "ui_comparison": [
+    "8.2.8-0 0",
+    "8.2.7-0 0",
+    "8.2.8-1 0",
+    "8.2.7-1 0",
+    "8.2.8-2 0",
+    "8.2.7-2 1"
+  ]
+}

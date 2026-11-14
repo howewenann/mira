@@ -2,6 +2,22 @@
 
 Use these prompts for manual smoke testing while developing MIRA.
 
+## Dependency upgrade smoke
+
+With the local Gemma 4 12B profile available, run
+`python tests/probes/probe_dependency_upgrade_live.py --output-dir build/dependency-upgrade/gemma-runtime`.
+Expected: Plan refuses the write, Act writes and reads the marker, Eval returns
+42, forced compaction preserves marker recall across both handoff directions,
+and cold session restart retains it. The output contains the ordinary
+`session.json` with reasoning events and a short results file.
+
+On Windows with Developer Mode or symlink privileges, run
+`python -m unittest tests.test_deepagents_compat.FilesystemSearchScopeTests`.
+Both tests should pass without skips: search results retain allowed aliases
+and omit symlink targets outside the approved scope. Without that privilege,
+the real-symlink case is explicitly skipped; deterministic scope filtering
+still runs.
+
 ## Transient Plan/Act transitions
 
 In a disposable workspace, switch `/plan`, `/act`, `/plan`, `/act`, `/plan`,

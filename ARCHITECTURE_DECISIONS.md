@@ -454,8 +454,8 @@ or edit skills. Group metadata changes its presentation without changing these
 privileges. The override and safe-access regression lives in
 [tests/test_skill_validation.py](tests/test_skill_validation.py).
 
-**Decision:** MIRA pins DeepAgents 0.7.32, LangChain 1.4.7, and
-`langchain-quickjs` 0.3.7, with the LangGraph and LangSmith minimums required
+**Decision:** MIRA pins DeepAgents 0.7.38, LangChain 1.5.0, and
+`langchain-quickjs` 0.3.12, with the LangGraph and LangSmith minimums required
 by DeepAgents. MIRA
 owns a small general-purpose action prompt and its existing planning prompt;
 DeepAgents owns the filesystem, delegation, streaming, and middleware
@@ -479,6 +479,17 @@ exposes recursive `delete` only where the selected backend implements it.
 Delete is action-only and destructive; like other consequential tools, it uses
 the workspace's configurable HITL policy. Filesystem backends use explicit
 virtual paths rooted in the selected workspace.
+
+DeepAgents search results preserve permitted symlink names and exclude targets
+outside an approved read-search scope. Default MIRA reads do not require
+per-directory approval, so the change does not introduce a new read prompt.
+Native refusal middleware now raises `ModelRefusalError` for main-model
+refusals; native delegated refusals return a notice to the parent. The forced
+compaction adapter follows the native message-ID cutoff anchor so prefix
+removal cannot silently discard retained messages. Paused native tool streams
+without a payload leave the result pending until resume; an explicit empty
+string remains a valid completed result. See the
+[upgrade report](docs/dependency-upgrade-report.md) for verification and limits.
 
 Rubric terminal events are accepted directly from DeepAgents, including
 `max_iterations_reached`. MIRA preserves the explanation and available grader

@@ -33,6 +33,7 @@ from core.execution.streams.tools import (
     consume_live_tool_errors,
     consume_tool_calls,
     render_projected_tool_errors,
+    watch_tool_result,
 )
 from core.context.usage import usage_from_message, usage_from_output
 from scripts.stream_smoke import raw_event_summary, sse_chunk_summary
@@ -3430,6 +3431,27 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                 ("tool_result", "eval", "<stdout>ok</stdout><result>2</result>", "call-doc"),
             ],
         )
+
+    async def test_paused_tool_without_payload_does_not_consume_resumed_result(self) -> None:
+        for as_dict in (False, True):
+            with self.subTest(as_dict=as_dict):
+                renderer = RecordingRenderer()
+                result = runner.TurnResult()
+                call = DocumentedToolCall("eval", {}, output_deltas=AsyncItems([]), call_id="paused")
+                await watch_tool_result(vars(call) if as_dict else call, "eval", "paused", renderer, result)
+                self.assertEqual(result.tool_results, [])
+                self.assertEqual(renderer.events, [])
+                resumed = DocumentedToolCall("eval", {}, output="completed", call_id="paused")
+                await watch_tool_result(resumed, "eval", "paused", renderer, result)
+                self.assertEqual(result.tool_results, ["completed"])
+
+    async def test_explicit_empty_tool_output_is_still_a_completed_result(self) -> None:
+        renderer = RecordingRenderer()
+        result = runner.TurnResult()
+        call = DocumentedToolCall("eval", {}, output="", call_id="empty")
+        await watch_tool_result(call, "eval", "empty", renderer, result)
+        self.assertEqual(result.tool_results, [""])
+        self.assertEqual(renderer.events, [("tool_result", "eval", "", "empty")])
 
     async def test_tool_call_stream_does_not_double_subscribe_output_deltas(self) -> None:
         renderer = RecordingRenderer()

@@ -6,9 +6,9 @@ user switched modes, or shorten an oversized conversation before calling the
 model. Some pieces only observe; others change requests, return tool errors,
 update graph state, or ask the graph to take another step.
 
-This guide describes the implementation at MIRA `f82f75a`, audited against the
-installed **DeepAgents 0.7.32, LangChain 1.4.7, LangGraph 1.2.18, and
-langchain-quickjs 0.3.7**. Dependency upgrades can change the automatically
+This guide describes MIRA's middleware, rechecked for the dependency upgrade
+from `4b5f01b` against **DeepAgents 0.7.38, LangChain 1.5.0, LangGraph 1.2.21, and
+langchain-quickjs 0.3.12**. Dependency upgrades can change the automatically
 inserted stack. Settings below are fresh-workspace defaults, not a claim about
 an existing user's configuration.
 
@@ -166,7 +166,8 @@ when their condition is false.
 | 27 | [MemoryMiddleware] | Same | D; memory argument is not `None` |
 | 28 | [HumanInTheLoopMiddleware] | Same | D; merged interrupt policy is not `None` |
 | 29 | UnsupportedContentMiddleware | Same | D |
-| 30 | [_ToolExclusionMiddleware] | Same | D; harness profile excludes tool names |
+| 30 | ModelRefusalMiddleware | Same | D; raises native refusal errors |
+| 31 | [_ToolExclusionMiddleware] | Same | D; harness profile excludes tool names |
 
 The gaps are intentional: the same row numbers compare the modes. DeepAgents
 does **not** install TodoListMiddleware in its ordinary base stack in this
@@ -217,11 +218,11 @@ instances of that class. This is not automatic inheritance of the main stack.
 
 | Path | Effective registration order and differences |
 | --- | --- |
-| Native isolated raw spec | Filesystem → native summarization → PatchToolCalls → spec middleware (including MIRA additions) → profile extras → Skills if declared → provider caches → profile tool exclusion if any → HITL if truthy → UnsupportedContent. No main Correction, mode notice, QuickJS, reporter, compaction tool or Rubric is copied. No todos from MIRA's parent switch; a matching profile can add them. |
+| Native isolated raw spec | Filesystem → native summarization → PatchToolCalls → spec middleware (including MIRA additions) → profile extras → Skills if declared → provider caches → ModelRefusal → profile tool exclusion if any → HITL if truthy → UnsupportedContent. No main Correction, mode notice, QuickJS, reporter, compaction tool or Rubric is copied. No todos from MIRA's parent switch; a matching profile can add them. |
 | MIRA precompiled isolated raw spec | Optional TodoList → Filesystem → native summarization → PatchToolCalls → Skills if truthy → spec middleware → HITL if truthy → UnsupportedContent. Selected when dynamic subagents are enabled and response schemas disabled. Uses `create_sub_agent`, not `create_deep_agent`; no automatic provider caches, profile tail, or Memory. |
-| Native fork (`mode="fork"`) | Filesystem → `_ForkTaskToolMiddleware` → summarization → PatchToolCalls → merged parent MIRA middleware/spec middleware → profile extras → inherited Skills → caches → inherited Memory → profile exclusions → HITL → UnsupportedContent. Same-name spec entries replace inherited ones in place. MIRA leaves forks declarative even when isolated siblings are precompiled. |
+| Native fork (`mode="fork"`) | Filesystem → `_ForkTaskToolMiddleware` → summarization → PatchToolCalls → merged parent MIRA middleware/spec middleware → profile extras → inherited Skills → caches → inherited Memory → ModelRefusal → profile exclusions → HITL → UnsupportedContent. Same-name spec entries replace inherited ones in place. MIRA leaves forks declarative even when isolated siblings are precompiled. |
 | Configured `general-purpose` | Normal MIRA discovery supplies it as an explicit raw spec; it follows native isolated or MIRA precompiled construction above, and receives the raw-spec additions. |
-| DeepAgents auto-created `general-purpose` fallback | Only when no explicit spec of that name is passed and the harness allows it: Filesystem → summarization → PatchToolCalls → profile extras → Skills → caches → profile exclusions → HITL → UnsupportedContent. Only parent custom middleware matching a default slot is inherited (not novel MIRA guards/context wrappers). Distinguish this from MIRA's usual configured spec. |
+| DeepAgents auto-created `general-purpose` fallback | Only when no explicit spec of that name is passed and the harness allows it: Filesystem → summarization → PatchToolCalls → profile extras → Skills → caches → ModelRefusal → profile exclusions → HITL → UnsupportedContent. Only parent custom middleware matching a default slot is inherited (not novel MIRA guards/context wrappers). Distinguish this from MIRA's usual configured spec. |
 | Already compiled runnable | Used as supplied. MIRA cannot inspect or retrofit its internal middleware or approvals. |
 | Remote/background `graph_id` | Main graph gains AsyncSubAgentMiddleware; remote implementation and approvals remain remote. |
 | Workflow-local specialized agent | `WorkflowAgentRegistry.specialize` copies an effective raw isolated spec, applies overrides, resolves any new tool allowlist, inherits skills when absent, then calls the same MIRA `compile_raw_subagent` path. Existing runnables can be reused without overrides; remote and fork specs are rejected as independent workflow nodes. |
@@ -231,7 +232,8 @@ instances of that class. This is not automatic inheritance of the main stack.
 | Rubric final grader | Plain LangChain `create_agent`, no middleware, no tools, `ProviderStrategy(GraderResponse)`. The inspection callback is not middleware. |
 | Success Criteria generation/revision | Direct `model.ainvoke` from SuccessCriteriaService; no agent middleware stack. Summary generation similarly calls the summarizer's model helper, not another main agent. |
 
-Forks rebuild the inherited prompt from parent conversation/state. Isolated
+Forks keep the parent's system-prompt prefix and carry their task instructions
+in a harness notification, preserving the shared prompt-cache prefix. Isolated
 child inputs and child output merges exclude private middleware channels and
 the rubric channel. Declarative fork inputs retain private channels needed to
 rebuild the parent prompt, while excluding rubric and the native fork-specific
@@ -317,5 +319,6 @@ Review installed `deepagents.graph.create_deep_agent`,
 `langchain.agents.factory.create_agent` after upgrades. Effective ordering was
 also checked by intercepting construction with local fake models; no provider
 call is needed to verify registration. Relevant executable behavior tests are
-linked from each reference subsection. This documentation change does not alter
-Python, settings, middleware behavior, or dependency versions.
+linked from each reference subsection. See the
+[dependency upgrade report](../dependency-upgrade-report.md) for compatibility
+changes and verification results.

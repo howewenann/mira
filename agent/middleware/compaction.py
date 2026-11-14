@@ -46,12 +46,14 @@ class ForcedCompactionPlan:
     summary: str
     session_id: str
     cutoff_index: int
+    cutoff_message_id: str | None
 
     def state_update(self, file_path: str) -> dict[str, Any]:
         # DeepAgents owns the summary message format and archive reference.
         return {
             "_summarization_event": {
                 "cutoff_index": self.cutoff_index,
+                "cutoff_message_id": self.cutoff_message_id,
                 "summary_message": self.summarization._build_new_messages_with_path(self.summary, file_path)[0],
                 "file_path": file_path,
             },
@@ -73,8 +75,10 @@ class MiraCompactionMiddleware(SummarizationToolMiddleware):
         cutoff = summarization._determine_cutoff_index(effective)
         if not cutoff:
             return None
-        absolute_cutoff = summarization._compute_state_cutoff(event, cutoff)
-        previous_cutoff = event.get("cutoff_index", 0) if isinstance(event, dict) else 0
+        absolute_cutoff = summarization._compute_state_cutoff(event, cutoff, messages)
+        # A prior summary occupies one effective-message slot. Resolve its
+        # boundary against the current state, just as native compaction does.
+        previous_cutoff = summarization._compute_state_cutoff(event, 1, messages) if event else 0
         if absolute_cutoff <= previous_cutoff:
             # DeepAgents can otherwise summarize only its previous summary.
             return None
@@ -83,6 +87,7 @@ class MiraCompactionMiddleware(SummarizationToolMiddleware):
         return ForcedCompactionPlan(
             summarization, to_summarize, summary,
             summarization._get_session_id(state), absolute_cutoff,
+            messages[absolute_cutoff].id if absolute_cutoff < len(messages) else None,
         )
 
 

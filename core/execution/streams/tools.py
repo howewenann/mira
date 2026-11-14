@@ -198,6 +198,10 @@ async def watch_tool_result(
 ) -> None:
     """Follow one call to completion and deliver a visible non-control result."""
     output, is_error, native_error = await tool_call_completion(call)
+    if output is None and not is_error:
+        # LangGraph closes a paused tool stream without output or error. Its
+        # real result arrives after HITL resume; do not consume its call ID yet.
+        return
     if isinstance(output, Command):
         completion = PREPARE_TOOL_COMPLETIONS.get(name)
         if completion:
@@ -533,7 +537,7 @@ async def tool_call_completion(call: Any) -> tuple[Any, bool, bool]:
             output = await maybe_await(call["output"])
             native_error = is_error_tool_message(output)
             return output, native_error, native_error
-        return "".join(deltas), delta_error, delta_error
+        return "".join(deltas) if deltas else None, delta_error, delta_error
 
     error = field(call, "error")
     if error is not None:
@@ -546,7 +550,7 @@ async def tool_call_completion(call: Any) -> tuple[Any, bool, bool]:
         native_error = is_error_tool_message(output)
         return output, native_error, native_error
 
-    return "".join(deltas), delta_error, delta_error
+    return "".join(deltas) if deltas else None, delta_error, delta_error
 
 
 def is_error_tool_message(value: Any) -> bool:
