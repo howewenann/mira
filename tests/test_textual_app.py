@@ -602,6 +602,84 @@ def mcp_activity_snapshot(
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     """Smoke tests for the Textual app shell."""
 
+    async def test_production_adapter_preserves_identity_errors_and_stopped_timing(self) -> None:
+        from mira.api import MessageEvent, RuntimeEvent, ToolEvent
+
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            frontend = app.application.frontend
+            self.assertIsInstance(frontend, TextualFrontend)
+            user = MessageEvent(
+                phase="user", text="inspect", session_id=app.core_session.id, turn_id="outer",
+                attachments=({"kind": "mcp_resource", "uri": "resource://test"},),
+            )
+            frontend.emit(user)
+            await pilot.pause()
+            user_widget = next(child for child in app.query_one(ChatLog).children if child.has_class("user"))
+            self.assertIs(user_widget.frontend_event, user)
+            emitter = FrontendEmitter(frontend, session_id=app.core_session.id, turn_id="outer")
+            app.busy = True
+            emitter.session_state("turn_started")
+            self.assertEqual(app.status_state, "running")
+            bridge = SessionEventEmitter(
+                emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer"),
+                clock=iter([10.0, 12.5]).__next__,
+            )
+            bridge.text_delta("hello", message_id="native-message", namespace=("root",), metadata={"provider": "test"})
+            chat = app.query_one(ChatLog)
+            message = chat._assistant_block.frontend_event
+            self.assertIsInstance(message, MessageEvent)
+            self.assertEqual(message.message_id, "native-message")
+            self.assertEqual(message.namespace, ("root",))
+            self.assertGreater(message.event_id, 0)
+            bridge.tool_call("read_file", {"file_path": "x"}, call_id="call")
+            block = chat._tool_blocks["id:call"]
+            self.assertEqual(block["origin_event_id"], app.session["events"][-1]["id"])
+            bridge.stop_active_tools("interrupted")
+            self.assertEqual(block["duration_ms"], 2500)
+            self.assertEqual(block["terminal_status"], "interrupted")
+            frontend.emit(ToolEvent(phase="error", name="read_file", tool_call_id="call", result="failure", duration_ms=3000))
+            self.assertTrue(block["is_error"])
+            self.assertEqual(block["result"], "failure")
+            self.assertIsInstance(block["widget"].frontend_event, ToolEvent)
+            frontend.emit(RuntimeEvent(kind="session", state="cancelling", session_id=app.core_session.id))
+            self.assertEqual(app.status_state, "cancelling")
+            emitter.session_state("ready")
+            self.assertEqual(app.status_state, "ready")
+            app.busy = False
+
+    async def test_normal_startup_explicitly_selects_textual_frontend(self) -> None:
+        state = make_app().prebuilt
+        bootstrap = AsyncMock(return_value=state)
+        app = MiraApp(workspace=Path("."), bootstrap=bootstrap)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await wait_until(lambda: app.ready)
+            await pilot.pause()
+            frontend = bootstrap.await_args.kwargs["frontend"]
+            self.assertIsInstance(frontend, TextualFrontend)
+            self.assertIs(frontend.renderer, app)
+
+    async def test_typed_recovery_reuses_the_original_tool_widget_and_restarts_its_clock(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            app.busy = True
+            emitter = FrontendEmitter(app.application.frontend, session_id=app.core_session.id, turn_id="outer")
+            first = SessionEventEmitter(emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer"))
+            first.tool_call("read_file", {"file_path": "x"}, call_id="call")
+            first.stop_active_tools("interrupted")
+            chat = app.query_one(ChatLog)
+            widget = chat._tool_blocks["id:call"]["widget"]
+            resumed = SessionEventEmitter(emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer", recovering=True))
+            resumed.recovered_tool_call("read_file", {"file_path": "x"}, call_id="call")
+            block = chat._tool_blocks["id:call"]
+            self.assertIs(block["widget"], widget)
+            self.assertIsNone(block["duration_ms"])
+            self.assertFalse(block["terminal"])
+            self.assertEqual(len([e for e in app.session["events"] if e["type"] == "tool_call"]), 1)
+            app.busy = False
+
     async def test_mcp_skills_inventory_has_native_disclosure_and_no_initial_focus(self) -> None:
         from agent.mcp.models import MCPResource
         from tests.test_mcp import PanelManager

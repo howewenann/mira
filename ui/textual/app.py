@@ -66,6 +66,7 @@ from core.execution.inspection.persistence import (
 )
 from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
+from mira.api import FrontendEvent, MessageEvent, RuntimeEvent, ToolEvent
 from tracing.stream import TraceStream
 from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.context import sync_deepagents_compaction
@@ -145,7 +146,7 @@ from ui.textual.widgets.workspace import Workspace
 from ui.textual.widgets.workspace_controls import DragDivider, ModelAliasPopup
 from ui.textual.widgets.workspace_surfaces import ChatSurface, ComposerActions
 
-Bootstrap = Callable[[Path, str | None, bool, dict[str, Any] | None, Any | None], Awaitable[dict[str, Any]]]
+Bootstrap = Callable[..., Awaitable[dict[str, Any]]]
 DESTRUCTIVE_HISTORY_COMMANDS = {
     "/clear-chat",
     "/clear-all-chats",
@@ -355,6 +356,7 @@ class MiraApp(App[None]):
                 self.resume,
                 self.config,
                 self,
+                frontend=TextualFrontend(self),
             )
             self._install_state(state)
             self._notify_startup_issues()
@@ -2044,10 +2046,15 @@ class MiraApp(App[None]):
             workspace=str(self.session["workspace"]),
         )
 
-    def user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
+    def user_message(
+        self, text: str, *, planning: bool = False, created_at: str = "",
+        frontend_event: MessageEvent | None = None,
+    ) -> None:
         """Write a submitted user message to the chat log."""
         self.trace.user_message(text, planning=planning)
-        self.query_one(ChatLog).timestamped_user_message(text, planning=planning, created_at=created_at)
+        self.query_one(ChatLog).timestamped_user_message(
+            text, planning=planning, created_at=created_at, frontend_event=frontend_event,
+        )
 
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Write a presentation-only message to the trace and chat log."""
@@ -2956,7 +2963,10 @@ class MiraApp(App[None]):
         self.query_one(ChatLog).finish_main()
         self._set_status(state="running")
 
-    def tool_call(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
+    def tool_call(
+        self, name: str, args: Any, call_id: str = "", *,
+        created_at: str = "", frontend_event: ToolEvent | None = None,
+    ) -> None:
         """Render a tool call in transcript order."""
         self.trace.tool_call(name, args)
         self._finish_main_stream_activity()
@@ -2966,7 +2976,10 @@ class MiraApp(App[None]):
             args,
             call_id=call_id,
             created_at=created_at,
-            origin_event_id=self._tool_origin_event_id(name, call_id, args),
+            origin_event_id=(
+                frontend_event.origin_event_id if frontend_event is not None
+                else 0
+            ),
         )
         self._rearm_waiting_if_busy()
 
@@ -2979,27 +2992,6 @@ class MiraApp(App[None]):
             return []
         saved = self.store.read(self.store.path(session_id))
         return saved.get("runs", [])
-
-    def _tool_origin_event_id(self, name: str, call_id: str, args: Any) -> int:
-        """Resolve the just-recorded top-level tool event for a live bubble."""
-        events = self.session.get("events", []) if isinstance(self.session, dict) else []
-        task = str(args.get("description") or "") if isinstance(args, dict) else ""
-        for item in reversed(events if isinstance(events, list) else []):
-            if not isinstance(item, dict) or item.get("type") != "tool_call" or item.get("name") != name:
-                continue
-            if call_id and str(item.get("call_id") or "") == call_id:
-                return int(item.get("id") or 0)
-            item_args = item.get("args")
-            if (
-                not call_id
-                and not item.get("call_id")
-                and (
-                    not task
-                    or (isinstance(item_args, dict) and str(item_args.get("description") or "") == task)
-                )
-            ):
-                return int(item.get("id") or 0)
-        return 0
 
     def tool_call_updated(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Update an edited call without creating another transcript block."""
@@ -3036,6 +3028,37 @@ class MiraApp(App[None]):
             duration_ms=duration_ms,
         )
         self._rearm_waiting_if_busy()
+
+    def tool_error(
+        self, name: str, error: str, call_id: str = "", *,
+        created_at: str = "", duration_ms: int | None = None,
+    ) -> None:
+        """Render an explicitly failed tool result with its original call."""
+        self.trace.recovered_tool_error(name, error)
+        self._finish_main_stream_activity()
+        self.waiting_finished()
+        self.query_one(ChatLog).tool_error(
+            name, error, call_id=call_id, created_at=created_at, duration_ms=duration_ms,
+        )
+        self._rearm_waiting_if_busy()
+
+    def frontend_event_received(self, event: FrontendEvent) -> None:
+        """Retain native provenance on the existing transcript widgets."""
+        if self.is_mounted:
+            # Session close is emitted after Textual has removed its children.
+            with suppress(NoMatches):
+                self.query_one(ChatLog).retain_frontend_event(event)
+
+    def session_state_changed(self, event: RuntimeEvent) -> None:
+        """Project Core session notifications without clearing sticky UI errors."""
+        if event.session_id != str(self.session.get("id") or ""):
+            return
+        state = {"turn_started": "running", "cancelling": "cancelling", "ready": "ready"}.get(event.state)
+        if state is not None and not (state == "ready" and self.status_state == "error"):
+            self._set_status(state=state)
+
+    def stop_active_tools(self, status: str) -> None:
+        self.query_one(ChatLog).stop_live_tools(status)
 
     def completed_tool_result(
         self,

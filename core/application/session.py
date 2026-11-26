@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from agent.planning.policy import PLANNING_STAGE_GOAL_RESEARCH, PLANNING_STAGE_PLAN_RESEARCH
 from core.execution.handoff import synchronize_conversation
@@ -29,6 +30,7 @@ class MiraSession:
         "pending_artifact",
         "goal_context_thread_id",
         "mode_transition",
+        "turn_id",
     )
 
     def __init__(
@@ -104,6 +106,7 @@ class MiraSession:
             self.recovery = {
                 "agent": agent, "thread_id": thread_id,
                 "interrupts": interrupts, "incomplete": not bool(interrupts),
+                "turn_id": str(self.mode.get("turn_id") or ""),
             }
             break
         if self.recovery is None and (
@@ -151,8 +154,11 @@ class MiraSession:
         current = asyncio.current_task()
         self._active_task = current
         self.runtime_state = "running"
-        emitter = FrontendEmitter(self.application.frontend, session_id=self.id)
-        emitter.session_state("turn_started")
+        recovery = kwargs.get("recovery") or {}
+        self.mode["turn_id"] = str(recovery.get("turn_id") or uuid4().hex)
+        emitter = FrontendEmitter(
+            self.application.frontend, session_id=self.id, turn_id=self.mode["turn_id"],
+        )
         model_name = str(kwargs.pop("model_name", self.application.model_name) or "")
         context_limit_tokens = kwargs.pop("context_limit_tokens", self.application.context_limit_tokens)
         context_limit_source = str(
@@ -161,6 +167,9 @@ class MiraSession:
         kwargs.pop("continue_incomplete", None)
         turn_error: BaseException | None = None
         try:
+            # Save before invoking the graph so cold recovery keeps this interaction.
+            await self.persist_graph_state()
+            emitter.session_state("turn_started")
             result = await run_user_turn(
                 agent=self.agent,
                 plan_agent=self.plan_agent,
@@ -169,6 +178,7 @@ class MiraSession:
                 session=self.record,
                 mode=self.mode,
                 text=text,
+                turn_id=self.mode["turn_id"],
                 model_name=model_name,
                 context_limit_tokens=context_limit_tokens,
                 context_limit_source=context_limit_source,
@@ -227,7 +237,10 @@ class MiraSession:
         if task is None or task.done():
             return
         self.runtime_state = "cancelling"
-        FrontendEmitter(self.application.frontend, session_id=self.id).session_state("cancelling")
+        FrontendEmitter(
+            self.application.frontend, session_id=self.id,
+            turn_id=str(self.mode.get("turn_id") or ""),
+        ).session_state("cancelling")
         task.cancel()
 
     async def set_mode(self, mode: str) -> None:
@@ -404,7 +417,7 @@ class MiraSession:
 
         resources = self.mode.get("resources") if isinstance(self.mode.get("resources"), dict) else {}
         mcp_state = mcp_snapshot(getattr(self.application, "mcp_manager", None))
-        return SessionSnapshot(
+        snapshot = SessionSnapshot(
             session_id=self.id,
             workspace=str(self.record.get("workspace") or self.application.workspace),
             mode="planning" if self.mode.get("planning") else "action",
@@ -413,7 +426,7 @@ class MiraSession:
             turns=int(self.record.get("turns") or 0),
             current_goal=current_goal(self.record),
             current_plan=current_plan(self.record),
-            transcript=tuple(dict(event) for event in self.record.get("events", ()) if isinstance(event, dict)),
+            transcript=tuple(event for event in self.record.get("events", ()) if isinstance(event, dict)),
             dashboard=dict(normalize_dashboard(self.record.get("dashboard"))),
             model={
                 "name": self.application.model_name,
@@ -431,6 +444,7 @@ class MiraSession:
             },
             mcp=mcp_state,
         )
+        return deepcopy(snapshot)
 
     async def close(self, *, persist: bool = True) -> None:
         """Persist duration and close this consumer session projection."""

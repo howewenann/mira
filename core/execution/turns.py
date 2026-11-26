@@ -128,12 +128,13 @@ async def run_user_turn(
     persist_graph_state: Any | None = None,
     synchronize_conversation: Any | None = None,
     recovery: dict[str, Any] | None = None,
+    turn_id: str = "",
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
     emitter = FrontendEmitter(
         frontend,
         session_id=str(session.get("id") or ""),
-        turn_id=str(int(session.get("turns") or 0) + 1),
+        turn_id=turn_id or uuid4().hex,
     )
     live_usage_applied = False
 
@@ -192,7 +193,7 @@ async def run_user_turn(
         context_limit_source=context_limit_source,
     )
     initial_mode_name = "planning" if mode.get("planning") else "action"
-    recorder = SessionRecorder(session, store, initial_mode_name)
+    recorder = SessionRecorder(session, store, initial_mode_name, turn_id=emitter.turn_id)
     visible_text = display_text if display_text is not None else text
     if record_user:
         user_event = recorder.user_message(visible_text, attachments=attachments)
@@ -203,6 +204,7 @@ async def run_user_turn(
             planning=initial_mode_name == "planning",
             attachments=attachments,
             created_at=str(user_event.get("created_at") or ""),
+            event_id=int(user_event["id"]),
         )
 
     all_attachments = session_mcp_attachments(session)
@@ -239,7 +241,10 @@ async def run_user_turn(
 
         nonlocal recovery
 
-        phase_recorder = SessionRecorder(session, store, phase_mode)
+        phase_recorder = SessionRecorder(
+            session, store, phase_mode, turn_id=emitter.turn_id,
+            recovering=recovery is not None,
+        )
         recording_emitter = PersistentSubagentRuns(
             SessionEventEmitter(
                 emitter,
@@ -447,7 +452,13 @@ async def run_user_turn(
             if persist_graph_state is not None:
                 await persist_graph_state()
             store.save(session)
-            emitter.artifact(workflow, "implement", detail.get("accepted") or artifact, {**review, **detail})
+            artifact_event = next((event for event in session.get("events", ())
+                                   if event.get("type") == workflow
+                                   and event.get(workflow, {}).get("id") == artifact["id"]), None)
+            emitter.artifact(
+                workflow, "implement", detail.get("accepted") or artifact, {**review, **detail},
+                **recorder.frontend_identity(artifact_event),
+            )
         elif action == "close" and workflow == "goal":
             mode["goal_context_thread_id"] = thread_id
             if persist_graph_state is not None:

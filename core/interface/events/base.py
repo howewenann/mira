@@ -11,11 +11,17 @@ Namespace = tuple[str, ...]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EventIdentity:
-    """Stable native/application identity carried across the consumer boundary."""
+    """Native/application provenance; zero durable IDs indicate transient events.
+
+    ``event_id`` refers to an existing session transcript entry. Tool lifecycle
+    updates use ``origin_event_id`` to retain the original tool-call relationship.
+    """
 
     session_id: str = ""
     turn_id: str = ""
     message_id: str = ""
+    event_id: int = 0
+    origin_event_id: int = 0
     namespace: Namespace = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = ""

@@ -55,24 +55,24 @@ class RendererAdapter:
         elif isinstance(event, RubricEvent):
             self._rubric(event)
         elif isinstance(event, CompactionEvent):
-            self._call(f"compaction_{'started' if event.phase == 'start' else 'finished'}")
+            self._call(f"compaction_{'started' if event.phase == 'start' else 'finished'}", frontend_event=event)
         elif isinstance(event, UsageEvent):
-            self._call("usage_updated")
+            self._call("usage_updated", frontend_event=event)
         elif isinstance(event, InformationEvent):
             if event.correction is not None:
-                self._call("correction", dict(event.correction), created_at=event.created_at)
+                self._call("correction", dict(event.correction), created_at=event.created_at, frontend_event=event)
             else:
                 callback = getattr(self.renderer, "system_message", None)
                 if callable(callback):
-                    self._call("system_message", event.text, kind=event.kind, created_at=event.created_at)
+                    self._call("system_message", event.text, kind=event.kind, created_at=event.created_at, frontend_event=event)
                 elif hasattr(self.renderer, "console"):
                     self.renderer.console.print(event.text)
         elif isinstance(event, ArtifactEvent):
-            self._call("artifact_state_changed", event)
+            self._call("artifact_state_changed", event, frontend_event=event)
         elif isinstance(event, RuntimeEvent):
             self._runtime(event)
         elif isinstance(event, MCPEvent):
-            self._call("mcp_activity", event.phase, event.detail)
+            self._call("mcp_activity", event.phase, event.detail, frontend_event=event)
         elif isinstance(event, WorkflowEvent):
             self._workflow(event)
 
@@ -113,15 +113,16 @@ class RendererAdapter:
                 event.text,
                 planning=event.mode == "planning",
                 created_at=event.created_at,
+                frontend_event=event,
             )
         elif event.phase == "content":
-            self._call("text_delta", event.text, created_at=event.created_at)
+            self._call("text_delta", event.text, created_at=event.created_at, frontend_event=event)
         elif event.phase == "reasoning":
-            self._call("reasoning_delta", event.text, created_at=event.created_at)
+            self._call("reasoning_delta", event.text, created_at=event.created_at, frontend_event=event)
         elif event.phase == "discard_reasoning":
-            self._call("discard_reasoning")
+            self._call("discard_reasoning", frontend_event=event)
         elif event.phase == "end":
-            self._call("model_stream_finished")
+            self._call("model_stream_finished", frontend_event=event)
 
     def _tool(self, event: ToolEvent) -> None:
         common = {
@@ -130,32 +131,39 @@ class RendererAdapter:
             "duration_ms": event.duration_ms,
         }
         if event.phase == "delegation":
-            self._call("delegation_started", list(event.calls), created_at=event.created_at)
+            self._call("delegation_started", list(event.calls), created_at=event.created_at, frontend_event=event)
         elif event.phase == "arguments_delta":
-            self._call("tool_call_delta", event.name, event.arguments, **common)
+            self._call("tool_call_delta", event.name, event.arguments, **common, frontend_event=event)
         elif event.phase in {"start", "recovered_start"}:
-            method = "recovered_tool_call" if event.phase == "recovered_start" else "tool_call"
-            self._call(method, event.name, event.arguments, **common)
+            method = "tool_call"
+            if event.phase == "recovered_start" and callable(getattr(self.renderer, "recovered_tool_call", None)):
+                method = "recovered_tool_call"
+            self._call(method, event.name, event.arguments, **common, frontend_event=event)
         elif event.phase == "update":
-            self._call("tool_call_updated", event.name, event.arguments, **common)
+            self._call("tool_call_updated", event.name, event.arguments, **common, frontend_event=event)
         elif event.phase == "approval_resolved":
-            self._call("tool_call_approval_resolved", event.name, call_id=event.tool_call_id)
+            self._call("tool_call_approval_resolved", event.name, call_id=event.tool_call_id, frontend_event=event)
         elif event.phase in {"result", "completed_result", "recovered_result"}:
             method = {
                 "result": "tool_result",
                 "completed_result": "completed_tool_result",
                 "recovered_result": "recovered_tool_result",
             }[event.phase]
-            self._call(method, event.name, event.result, **common)
+            if method == "recovered_tool_result" and not callable(getattr(self.renderer, method, None)):
+                method = "tool_result"
+            self._call(method, event.name, event.result, **common, frontend_event=event)
         elif event.phase in {"error", "completed_error", "recovered_error"}:
             method = {
-                "error": "tool_result",
+                "error": "tool_error",
                 "completed_error": "completed_tool_error",
                 "recovered_error": "recovered_tool_error",
             }[event.phase]
-            self._call(method, event.name, event.result, **common)
+            self._call(method, event.name, event.result, **common, frontend_event=event)
         elif event.phase == "stop":
-            self._call("stop_active_tools", event.status)
+            if event.name or event.tool_call_id:
+                self._call("tool_call_stopped", event.name, status=event.status, **common, frontend_event=event)
+            else:
+                self._call("stop_active_tools", event.status, frontend_event=event)
 
     def _subagent(self, event: SubagentEvent) -> None:
         lifecycle = {
@@ -165,10 +173,10 @@ class RendererAdapter:
             "cancel_all": "subagents_cancelled",
         }.get(event.phase)
         if lifecycle:
-            self._call(lifecycle)
+            self._call(lifecycle, frontend_event=event)
             return
         if event.phase == "delegation_update":
-            self._call("delegation_delta", list(event.metadata.get("calls", ())))
+            self._call("delegation_delta", list(event.metadata.get("calls", ())), frontend_event=event)
             return
         method = {
             "start": "subagent_started",
@@ -182,7 +190,7 @@ class RendererAdapter:
         if method is None:
             return
         if event.phase == "request_update":
-            self._call(method, event.name, event.task_input)
+            self._call(method, event.name, event.task_input, frontend_event=event)
             return
         value = event.task_input if event.phase in {"start", "eval_start"} else event.result
         self._call(
@@ -197,20 +205,22 @@ class RendererAdapter:
             duration_ms=event.metadata.get("duration_ms"),
             inspection_id=str(event.metadata.get("inspection_id") or ""),
             created_at=event.created_at,
+            frontend_event=event,
         )
 
     def _rubric(self, event: RubricEvent) -> None:
         if event.phase == "lifecycle":
-            self._call("rubric_lifecycle_event", dict(event.lifecycle or {}))
+            self._call("rubric_lifecycle_event", dict(event.lifecycle or {}), frontend_event=event)
         elif event.phase == "finish":
             self._call(
                 "rubric_evaluation_finished",
                 dict(event.evaluation or {}),
                 event.max_iterations,
                 created_at=event.created_at,
+                frontend_event=event,
             )
         elif event.phase == "cancel":
-            self._call("rubric_evaluations_cancelled")
+            self._call("rubric_evaluations_cancelled", frontend_event=event)
         elif event.phase == "status":
             self._call(
                 "rubric_evaluation_status",
@@ -218,6 +228,7 @@ class RendererAdapter:
                 event.pass_number,
                 event.status,
                 event.max_iterations,
+                frontend_event=event,
             )
         else:
             self._call(
@@ -228,11 +239,12 @@ class RendererAdapter:
                 grader_model=event.grader_model,
                 phase=event.phase,
                 created_at=event.created_at,
+                frontend_event=event,
             )
 
     def _runtime(self, event: RuntimeEvent) -> None:
         if event.kind == "startup":
-            self._call("startup_progress", event.state)
+            self._call("startup_progress", event.state, frontend_event=event)
         elif event.kind == "waiting":
             if event.state == "start":
                 detail = event.detail if isinstance(event.detail, dict) else {}
@@ -240,11 +252,14 @@ class RendererAdapter:
                     "waiting_started",
                     detail.get("label"),
                     **{key: value for key, value in detail.items() if key != "label"},
+                    frontend_event=event,
                 )
             else:
-                self._call("waiting_finished")
+                self._call("waiting_finished", frontend_event=event)
         elif event.kind == "message_group" and event.state == "finish":
-            self._call("finish_main")
+            self._call("finish_main", frontend_event=event)
+        elif event.kind == "session":
+            self._call("session_state_changed", event, frontend_event=event)
 
     def _workflow(self, event: WorkflowEvent) -> None:
         if event.phase == "run_start":
@@ -252,6 +267,7 @@ class RendererAdapter:
                 "workflow_started",
                 event.workflow_id,
                 event.workflow_name,
+                frontend_event=event,
             )
         elif event.phase == "task_start":
             self._call(
@@ -261,6 +277,7 @@ class RendererAdapter:
                 event.step,
                 event.input_state,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "task_waiting":
             self._call(
@@ -269,6 +286,7 @@ class RendererAdapter:
                 event.name,
                 event.step,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "task_resume":
             self._call(
@@ -277,6 +295,7 @@ class RendererAdapter:
                 event.name,
                 event.step,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase in {"agent_start", "agent_resume"}:
             self._call(
@@ -287,6 +306,7 @@ class RendererAdapter:
                 task_input=event.task_input,
                 resumed=event.phase == "agent_resume",
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "agent_waiting":
             self._call(
@@ -295,6 +315,7 @@ class RendererAdapter:
                 event.name,
                 event.inspection_id,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "agent_finish":
             self._call(
@@ -306,6 +327,7 @@ class RendererAdapter:
                 result=event.result,
                 error=event.error,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "task_finish":
             self._call(
@@ -318,6 +340,7 @@ class RendererAdapter:
                 result=event.result,
                 result_available=event.result_available,
                 workflow_id=event.workflow_id,
+                frontend_event=event,
             )
         elif event.phase == "run_finish":
             self._call(
@@ -325,12 +348,14 @@ class RendererAdapter:
                 event.workflow_id,
                 final_state=event.final_state,
                 final_state_available=event.final_state_available,
+                frontend_event=event,
             )
         elif event.phase == "run_cancel":
             self._call(
                 "workflow_cancelled",
                 event.workflow_id,
                 error=event.error,
+                frontend_event=event,
             )
 
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:

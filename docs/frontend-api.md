@@ -3,7 +3,9 @@
 Use the MIRA API to run headless MIRA or build a custom frontend, GUI,
 protocol adapter, service, or integration.
 
-The same API is used by MIRA's Textual and terminal consumers. Application
+MIRA's Textual, terminal, and ACP consumers use this contract for normal turns
+and interactions. Textual still uses internal runtime, storage, and inspection
+operations; full frontend API dogfooding is not yet complete. Application
 classes are imported from `mira`; frontend events, requests, and snapshots are
 imported from `mira.api`. Modules under `core`, `agent`, `session`, `ui`, and
 `protocols` are implementation packages rather than supported developer entry
@@ -19,8 +21,10 @@ pip install mira
 ```
 
 ```python
+import asyncio
+
 from mira import MiraApplication, MiraSession
-from mira.api import Frontend, FrontendEvent, FrontendRequest, MessageEvent
+from mira.api import Frontend, FrontendEvent, FrontendRequest, MessageEvent, RuntimeEvent
 ```
 
 Start with the copyable
@@ -58,7 +62,12 @@ because Core is paused until the consumer supplies a decision.
 
 ```python
 class MyFrontend:
+    def __init__(self):
+        self.turn_started = asyncio.Event()
+
     def emit(self, event: FrontendEvent) -> None:
+        if isinstance(event, RuntimeEvent) and event.kind == "session" and event.state == "turn_started":
+            self.turn_started.set()
         print(type(event).__name__, event)
 
     async def request(self, request: FrontendRequest):
@@ -126,15 +135,28 @@ await session.prompt("Inspect the current implementation")
 `"action"` and `"planning"` are accepted aliases. PLAN uses its own LangGraph
 thread identity; changing mode does not change the MIRA session ID.
 
-To cancel from another task:
+To cancel from another task, wait until the frontend receives the session's
+`RuntimeEvent(kind="session", state="turn_started")`. Calling `cancel()`
+immediately after `create_task()` can run before the operation starts. For
+example, let your frontend set an `asyncio.Event` named `turn_started` when it
+receives that notification:
 
 ```python
+frontend.turn_started.clear()
 turn = asyncio.create_task(session.prompt("Long-running task"))
-await session.cancel()
+started = asyncio.create_task(frontend.turn_started.wait())
 try:
-    await turn
-except asyncio.CancelledError:
-    pass
+    # Also surface startup errors rather than waiting for a missing notification.
+    await asyncio.wait({turn, started}, return_when=asyncio.FIRST_COMPLETED)
+    if not turn.done():
+        await session.cancel()
+    try:
+        await turn
+    except asyncio.CancelledError:
+        pass
+finally:
+    started.cancel()
+    await asyncio.gather(started, return_exceptions=True)
 ```
 
 ## Goals and retained Plans
@@ -145,7 +167,7 @@ receives an `ArtifactReviewRequest` when the Plan is ready for review.
 An explicit Goal uses the Goal preparation pipeline:
 
 ```python
-session.begin_goal("Deliver the requested outcome")
+await session.begin_goal("Deliver the requested outcome")
 await session.prompt("Deliver the requested outcome")
 ```
 
@@ -160,13 +182,41 @@ work:
   and returns the removed mapping, or `None`.
 - `session.pause_active_artifacts()` makes interrupted formal work resumable.
 
-Only one current Goal or Plan is authoritative at a time.
+The first three operations above are async and must be awaited. Only one
+current Goal or Plan is authoritative at a time.
+
+## Interrupted execution
+
+`await session.resume_pending()` redisplays a checkpointed interaction and
+resumes the native graph after the frontend answers. It returns `None` if
+there is no pending interaction. It does not submit another user message.
+
+`await session.continue_incomplete()` explicitly continues saved incomplete
+work. External side effects may have happened before interruption and may
+repeat; obtain the user's decision before continuing. It returns `None` when
+there is no incomplete operation. Ordinary prompts are refused while recovery
+is pending. Recovery discovery still uses an internal descriptor; a supported
+snapshot projection is deferred to the ownership migration.
 
 ## Events
 
-Every event includes `session_id`, `turn_id`, `message_id`, `namespace`,
-`metadata`, and `created_at` identity/provenance fields. Consumers should
-ignore fields they do not display and accept new metadata keys.
+Every event includes `session_id`, `turn_id`, `message_id`, `event_id`,
+`origin_event_id`, `namespace`, `metadata`, and `created_at`. Fields without a
+corresponding identity remain empty or zero. Consumers should ignore fields
+they do not display and accept new metadata keys.
+
+`turn_id` is an opaque outer-interaction identity, independent of the completed
+turn counter, user messages, model invocations, and graph thread IDs. New
+prompts receive distinct IDs even after failure or cancellation. Explicit
+checkpoint recovery retains the saved interaction ID; historical checkpoints
+without one receive a new ID without regrouping old transcript entries.
+
+`event_id` references a persisted entry's integer `id` within the session.
+Several deltas may update the same entry. `origin_event_id` associates tool
+updates and results with their original call entry. Transient drafts have no
+durable event ID until promoted. Persisted entries retain turn and available
+native message/provenance fields. Historical entries missing those fields
+remain unassigned; do not infer exact turn boundaries from user messages.
 
 ### `MessageEvent`
 
@@ -192,6 +242,11 @@ displayable attachment metadata.
 Important fields are `name`, native `arguments`, `result`, `tool_call_id`,
 `calls`, `status`, and `duration_ms`. Preserve tool-call IDs when updating an
 existing visual row.
+
+An individual `stop` includes `name`, `tool_call_id` when available, the call's
+durable event reference, terminal `status`, and authoritative `duration_ms`.
+A `stop` without a tool identity describes bulk cleanup. Later authoritative
+results can replace a stopped outcome.
 
 ### `SubagentEvent`
 
@@ -241,6 +296,18 @@ completed `evaluation`, nested native `lifecycle` event, or reconciled
 `phase` is `initializing`, `initialized`, or `error`. `server` identifies a
 server when relevant and `detail` contains the current projection or error.
 
+### `WorkflowEvent`
+
+`phase` is `run_start`, `task_start`, `task_waiting`, `task_resume`,
+`task_finish`, `agent_start`, `agent_waiting`, `agent_resume`, `agent_finish`,
+`run_finish`, or `run_cancel`. `workflow_id`, `task_id`, `agent_id`, and
+`inspection_id` identify the corresponding execution objects. Fields include
+task `name`, `step`, `status`, `error`, `input_state`, `result`, and
+`final_state`. Respect `result_available` and `final_state_available`: a
+legitimate `None` result differs from an unavailable result. Registered
+Workflow launching still uses internal execution and persistence operations;
+the public workflow authoring API is not a session execution API.
+
 ### `InformationEvent`
 
 Contains displayable `text` or a structured `correction`. Known `kind` values
@@ -257,16 +324,22 @@ interrupt objects. Return one decision dictionary for every action request,
 in encounter order:
 
 ```python
-{"type": "approve"}
-{"type": "reject"}
-{"type": "reject", "message": "Reason"}
+{"type": "allow_once"}
+{"type": "allow_always"}
+{"type": "reject_once"}
+{"type": "reject_once", "message": "Reason"}
 {
     "type": "edit",
     "edited_action": {"name": "write_file", "args": {"file_path": "safe.txt"}},
 }
 ```
 
-Core resumes with `Command(resume={"decisions": decisions})`. Never approve by
+`allow_always` persists MIRA's tool policy and approves this invocation; a
+persistence failure aborts before resume. The supported `approve` and `reject`
+aliases remain accepted. Core translates the flat decisions to native
+LangGraph values, using `Command(resume={"decisions": decisions})` for one
+interrupt and partitioning by native interrupt ID for multiple interrupts.
+The frontend does not construct that native resume mapping. Never approve by
 default when no trusted approval UX is available.
 
 ### `AskUserRequest`
@@ -309,6 +382,20 @@ summary. Return exactly:
 
 Any other value is interpreted as denial.
 
+### `MCPElicitationRequest`
+
+Unwrap `request.interrupt.value` when present. Its `requests` list describes
+form or URL requests with stable `key` values. Return the native keyed shape:
+
+```python
+{"responses": {"request-key": {"action": "accept", "content": {"field": "value"}}}}
+```
+
+Form acceptance supplies a `content` object matching `requested_schema`.
+URL acceptance needs only `{"action": "accept"}`. To decline or cancel a
+request, return `{"action": "decline"}` or `{"action": "cancel"}` under
+its key, without `content`. The full frontend example handles both modes.
+
 ## Session snapshots
 
 ```python
@@ -325,7 +412,7 @@ snapshot = session.snapshot()
 - `turns`: completed/recorded turn count.
 - `current_goal`, `current_plan`: mutually exclusive retained artifact mapping
   or `None`.
-- `transcript`: immutable tuple of persisted event mappings.
+- `transcript`: tuple of detached persisted event mappings.
 - `dashboard`: usage/duration/context aggregate mapping.
 - `model`: `name`, `context_limit_tokens`, and `context_limit_source`.
 - `tools`: tuple of mappings such as `{"name": ..., "description": ...}` for
@@ -335,8 +422,17 @@ snapshot = session.snapshot()
 - `mcp`: server summaries, issues, and capability counts, for example
   `{"servers": (...), "issues": (...), "capabilities": {"tools": 2, ...}}`.
 
-Nested mappings intentionally remain lightweight projections rather than a
-second DTO hierarchy.
+Nested mappings remain ordinary detached copies. Mutating them, including
+nested tool arguments, attachments, artifact data, or MCP projections, cannot
+change authoritative session/runtime state. The snapshot dataclass itself is
+frozen. Copying the transcript costs time and memory proportional to its size;
+use incremental events for streaming and take snapshots at session/operation
+boundaries rather than on every token or animation tick.
+
+Full live/historical Inspector access is not currently part of this API.
+Inspection capture still discovers an internal frontend-owned store, and the
+snapshot does not expose stored inspection runs. This limitation remains for
+the next ownership migration.
 
 ## Errors and cleanup
 

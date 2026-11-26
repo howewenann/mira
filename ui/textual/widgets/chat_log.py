@@ -48,12 +48,31 @@ from ui.textual.widgets.workflow_bubble import (
     WorkflowTreeBubble,
     WorkflowValueBubble,
 )
+from mira.api import FrontendEvent, MessageEvent, ToolEvent
 
 DEFAULT_TOOL_OUTPUT_CHARS = 240
 
 
 class ChatLog(VerticalScroll):
     """A small scrollable chat transcript with streaming message updates."""
+
+    def retain_frontend_event(self, event: FrontendEvent) -> None:
+        """Keep provenance beside its presentation, without another transcript cache."""
+        widget = None
+        if isinstance(event, MessageEvent):
+            if event.phase == "content":
+                widget = self._assistant_block
+            elif event.phase == "reasoning":
+                widget = self._reasoning_block
+        elif isinstance(event, ToolEvent):
+            for key, block in self._tool_blocks.items():
+                if (event.tool_call_id and key == f"id:{event.tool_call_id}") or (
+                    event.origin_event_id and block.get("origin_event_id") == event.origin_event_id
+                ):
+                    widget = block["widget"]
+                    break
+        if widget is not None:
+            widget.frontend_event = event
 
     def __init__(
         self,
@@ -234,11 +253,16 @@ class ChatLog(VerticalScroll):
         title = "you (plan)" if planning else "you"
         self._add_block(title, Text(text), "message user")
 
-    def timestamped_user_message(self, text: str, *, planning: bool = False, created_at: str = "") -> None:
+    def timestamped_user_message(
+        self, text: str, *, planning: bool = False, created_at: str = "",
+        frontend_event: MessageEvent | None = None,
+    ) -> None:
         """Append a persisted user message with its session timestamp."""
         self._reset_delegation_group()
         title = "you (plan)" if planning else "you"
-        self._add_block(title, Text(text), "message user", created_at=created_at)
+        block = self._add_block(title, Text(text), "message user", created_at=created_at)
+        if frontend_event is not None:
+            block.frontend_event = frontend_event
 
     def assistant_message(self, text: str, *, created_at: str = "") -> None:
         """Append a completed assistant message."""
@@ -721,6 +745,14 @@ class ChatLog(VerticalScroll):
             block["name"] = name
             block["args"] = args
             block["draft"] = False
+            if (
+                start_timing and not terminal_status
+                and block.get("terminal_status") in {"cancelled", "interrupted"}
+            ):
+                block["terminal_status"] = ""
+                block["duration_ms"] = None
+                block["started_at"] = time.monotonic()
+                block["terminal"] = False
             if terminal_status in {"cancelled", "interrupted"}:
                 block["terminal_status"] = terminal_status
                 block["duration_ms"] = duration_ms

@@ -72,6 +72,10 @@ class Renderer:
         """Print a compact tool result."""
         self.transcript.tool_result(name, result)
 
+    def tool_error(self, name: str, error: str, call_id: str = "") -> None:
+        """Print an explicitly failed tool result."""
+        self.transcript.tool_error(name, error)
+
     def completed_tool_result(self, name: str, result: str, call_id: str = "") -> None:
         """Print a completed tool result at the next safe terminal boundary."""
         self.transcript.completed_tool_result(name, result)

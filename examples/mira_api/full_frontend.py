@@ -17,6 +17,7 @@ from mira.api import (
     FrontendRequest,
     InformationEvent,
     MCPApprovalRequest,
+    MCPElicitationRequest,
     MessageEvent,
     ToolEvent,
 )
@@ -80,10 +81,12 @@ class FullFrontend:
             return self._display_artifact(request)
         if isinstance(request, MCPApprovalRequest):
             return await self._approve_mcp(request)
+        if isinstance(request, MCPElicitationRequest):
+            return await self._answer_mcp_elicitation(request)
         raise RuntimeError(f"Unsupported request: {type(request).__name__}")
 
     async def _approve_actions(self, request: ApprovalRequest) -> list[dict[str, Any]]:
-        """Return the native approve/reject decisions expected by LangGraph."""
+        """Collect MIRA decisions; Core translates them to native LangGraph values."""
         decisions: list[dict[str, Any]] = []
         for interrupt in request.interrupts:
             value = interrupt_value(interrupt)
@@ -95,15 +98,19 @@ class FullFrontend:
                 print(json.dumps(action, indent=2, default=str))
                 answer = await asyncio.to_thread(
                     input,
-                    "Approve? Type 'approve' to allow [reject]: ",
+                    "Decision: allow_once, allow_always, edit, reject_once [reject_once]: ",
                 )
-                # Never silently auto-approve. A real application should show
-                # the allowed native approve/edit/reject choices in trusted UX.
-                decisions.append(
-                    {"type": "approve"}
-                    if answer.strip().lower() == "approve"
-                    else {"type": "reject"}
-                )
+                kind = answer.strip().lower()
+                if kind == "edit":
+                    edited = await asyncio.to_thread(input, "Complete edited action JSON (name and args): ")
+                    action = json.loads(edited)
+                    if not isinstance(action, dict) or not isinstance(action.get("args"), dict) or not action.get("name"):
+                        raise ValueError("An edited action requires name and args")
+                    decisions.append({"type": "edit", "edited_action": action})
+                elif kind in {"allow_once", "allow_always"}:
+                    decisions.append({"type": kind})
+                else:
+                    decisions.append({"type": "reject_once"})
         return decisions
 
     async def _answer_question(self, request: AskUserRequest) -> str:
@@ -155,6 +162,27 @@ class FullFrontend:
         print(f"\nMCP connection request:\n{request.preview}")
         answer = await asyncio.to_thread(input, "Type allow or always_allow [deny]: ")
         return answer.strip() if answer.strip() in {"allow", "always_allow"} else "deny"
+
+    async def _answer_mcp_elicitation(self, request: MCPElicitationRequest) -> dict[str, Any]:
+        """Return keyed MCP form or URL decisions in the native resume shape."""
+        payload = interrupt_value(request.interrupt)
+        responses: dict[str, Any] = {}
+        for item in payload.get("requests", []):
+            # Show the server's message and requested schema or URL before asking.
+            print(json.dumps(item, indent=2, default=str))
+            answer = await asyncio.to_thread(input, "accept, decline, or cancel [decline]: ")
+            action = answer.strip().lower()
+            if action not in {"accept", "cancel"}:
+                action = "decline"
+            response: dict[str, Any] = {"action": action}
+            if action == "accept" and item.get("mode") == "form":
+                text = await asyncio.to_thread(input, "Form values as a JSON object: ")
+                content = json.loads(text)
+                if not isinstance(content, dict):
+                    raise ValueError("MCP form values must be a JSON object")
+                response["content"] = content
+            responses[str(item["key"])] = response
+        return {"responses": responses}
 
 
 async def main() -> None:

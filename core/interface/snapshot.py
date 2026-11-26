@@ -17,7 +17,9 @@ class SessionSnapshot:
     ``current_plan`` contain at most one retained formal artifact; ``transcript``
     is the tuple of persisted event mappings; and the remaining mappings project
     dashboard usage, model metadata, tools, resources, Rubric settings, and MCP
-    state. Nested mappings intentionally remain lightweight projections.
+    state. Nested payloads are detached copies; mutating them cannot change
+    authoritative state. Snapshot creation copies the complete transcript;
+    streaming consumers should use events rather than repeatedly taking snapshots.
     """
 
     session_id: str

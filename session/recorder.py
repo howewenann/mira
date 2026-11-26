@@ -28,10 +28,15 @@ COMPACTION_POLL_SECONDS = 10.0
 class SessionRecorder:
     """Persist visible turn events while forwarding rendering elsewhere."""
 
-    def __init__(self, record: dict[str, Any], store: Any, mode: str) -> None:
+    def __init__(
+        self, record: dict[str, Any], store: Any, mode: str, *,
+        turn_id: str = "", recovering: bool = False,
+    ) -> None:
         self.record = record
         self.store = store
         self.mode = mode
+        self.turn_id = turn_id
+        self.recovering = recovering
         self._assistant_id: int | None = None
         self._assistant_text = ""
         self._assistant_seen = False
@@ -47,6 +52,67 @@ class SessionRecorder:
     def save(self) -> None:
         self.store.save(self.record)
 
+    def _append_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        if self.turn_id:
+            event["turn_id"] = self.turn_id
+        return append_event(self.record, event)
+
+    def _event(self, event_id: int | None) -> dict[str, Any] | None:
+        return next(
+            (event for event in reversed(self.record.get("events", ()))
+             if event.get("id") == event_id),
+            None,
+        )
+
+    def _belongs_to_turn(self, event: dict[str, Any]) -> bool:
+        return (
+            not self.turn_id or event.get("turn_id") == self.turn_id
+            or (self.recovering and not event.get("turn_id"))
+        )
+
+    def frontend_identity(self, event: dict[str, Any] | None, **identity: Any) -> dict[str, Any]:
+        """Link a live observation to its existing durable display event."""
+        if event is None:
+            return identity
+        saved = self._event(int(event["id"]))
+        if saved is None:
+            return identity
+        provenance = {
+            key: json_value(identity[key])
+            for key in ("message_id", "metadata") if identity.get(key)
+        }
+        if identity.get("namespace"):
+            provenance["namespace"] = list(identity["namespace"])
+        if self.turn_id and not (self.recovering and not saved.get("turn_id")):
+            provenance["turn_id"] = self.turn_id
+        if saved["type"] == "tool_call":
+            provenance["origin_event_id"] = saved["id"]
+        elif saved["type"] == "tool_result":
+            call_id = saved.get("call_id")
+            events = [item for item in self.record.get("events", ()) if self._belongs_to_turn(item)]
+            if call_id:
+                call = next((item for item in events if item.get("type") == "tool_call"
+                             and item.get("call_id") == call_id), None)
+            else:
+                # Preserve name-order matching, bounded by the outer interaction.
+                named = [item for item in events if not item.get("call_id")
+                         and item.get("name") == saved.get("name")]
+                calls = [item for item in named if item.get("type") == "tool_call"]
+                results = [item for item in named if item.get("type") == "tool_result"]
+                index = next((i for i, item in enumerate(results) if item["id"] == saved["id"]), len(calls))
+                call = calls[index] if index < len(calls) else None
+            if call is not None:
+                provenance["origin_event_id"] = call["id"]
+        if any(saved.get(key) != value for key, value in provenance.items()):
+            saved.update(provenance)
+            self.save()
+        return {
+            **identity,
+            "event_id": int(saved["id"]),
+            "origin_event_id": int(saved.get("origin_event_id") or 0),
+            "created_at": str(saved.get("created_at") or ""),
+        }
+
     def user_message(
         self,
         text: str,
@@ -56,7 +122,7 @@ class SessionRecorder:
         event: dict[str, Any] = {"type": "user", "mode": self.mode, "text": text}
         if attachments:
             event["attachments"] = attachments
-        return append_event(self.record, event)
+        return self._append_event(event)
 
     def text_delta(self, delta: str) -> dict[str, Any] | None:
         delta = normalize_response_delta(self._assistant_text, delta)
@@ -64,8 +130,10 @@ class SessionRecorder:
             return None
         self._close_reasoning_phase()
         event = None
+        if self._assistant_id is not None and self._event(self._assistant_id) is None:
+            self._assistant_id = None
         if self._assistant_id is None:
-            event = append_event(self.record, {"type": "assistant", "mode": self.mode, "text": ""})
+            event = self._append_event({"type": "assistant", "mode": self.mode, "text": ""})
             self._assistant_id = int(event["id"])
             self._last_assistant_id = self._assistant_id
             self._assistant_text = ""
@@ -73,7 +141,7 @@ class SessionRecorder:
         self._assistant_text += str(delta)
         update_event_text(self.record, self._assistant_id, self._assistant_text)
         self.save()
-        return event
+        return self._event(self._assistant_id)
 
     def reasoning_delta(self, delta: str) -> dict[str, Any] | None:
         if not delta:
@@ -83,23 +151,44 @@ class SessionRecorder:
     def _append_reasoning(self, delta: str) -> dict[str, Any] | None:
         self._close_assistant_phase()
         event = None
+        if self._reasoning_id is not None and self._event(self._reasoning_id) is None:
+            self._reasoning_id = None
         if self._reasoning_id is None:
-            event = append_event(self.record, {"type": "reasoning", "mode": self.mode, "text": ""})
+            event = self._append_event({"type": "reasoning", "mode": self.mode, "text": ""})
             self._reasoning_id = int(event["id"])
             self._reasoning_text = ""
         self._reasoning_text += str(delta)
         update_event_text(self.record, self._reasoning_id, self._reasoning_text)
         self.save()
-        return event
+        return self._event(self._reasoning_id)
 
     def tool_call(self, name: str, args: Any, call_id: str = "") -> dict[str, Any]:
         self.finish_main()
+        resumed = self._resumed_tool_call(name, args, call_id)
+        if resumed is not None:
+            return resumed
         event = {"type": "tool_call", "mode": self.mode, "name": name, "args": json_value(args)}
         if call_id:
             event["call_id"] = call_id
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self.save()
         return stored
+
+    def _resumed_tool_call(self, name: str, args: Any, call_id: str) -> dict[str, Any] | None:
+        """Native checkpoint replay updates the original call, not another entry."""
+        if not self.recovering or not call_id:
+            return None
+        for event in self.record.get("events", ()):
+            if event.get("type") != "tool_call" or event.get("call_id") != call_id:
+                continue
+            if event.get("turn_id") and event["turn_id"] != self.turn_id:
+                continue
+            event.update(name=name, args=json_value(args))
+            event.pop("status", None)
+            event.pop("duration_ms", None)
+            self.save()
+            return event
+        return None
 
     def tool_result(
         self,
@@ -116,7 +205,7 @@ class SessionRecorder:
             event["call_id"] = call_id
         if duration_ms is not None:
             event["duration_ms"] = max(0, int(duration_ms))
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self.save()
         return stored
 
@@ -127,6 +216,9 @@ class SessionRecorder:
         call_id: str = "",
     ) -> dict[str, Any]:
         """Persist a late-discovered executed call before the last assistant."""
+        resumed = self._resumed_tool_call(name, args, call_id)
+        if resumed is not None:
+            return resumed
         event = {
             "type": "tool_call",
             "mode": self.mode,
@@ -135,7 +227,7 @@ class SessionRecorder:
         }
         if call_id:
             event["call_id"] = call_id
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self._move_event_before(stored, self._last_assistant_id)
         self.save()
         return stored
@@ -158,7 +250,7 @@ class SessionRecorder:
             event["call_id"] = call_id
         if duration_ms is not None:
             event["duration_ms"] = max(0, int(duration_ms))
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self._move_result_after_call(stored, name, call_id)
         self.save()
         return stored
@@ -195,7 +287,7 @@ class SessionRecorder:
             event["status"] = "error"
         if call_id:
             event["call_id"] = call_id
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self._move_event_before(stored, self._last_assistant_id)
         self.save()
         return stored
@@ -205,7 +297,7 @@ class SessionRecorder:
         if not calls:
             return None
         self.finish_main()
-        stored = append_event(self.record, {"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
+        stored = self._append_event({"type": "delegation", "mode": self.mode, "calls": json_value(calls)})
         self.save()
         return stored
 
@@ -227,7 +319,7 @@ class SessionRecorder:
         payload = {"type": "subagent", "mode": self.mode, "name": name, "status": "RUNNING", "task_input": task_input}
         if origin:
             payload["origin"] = origin
-        event = append_event(self.record, payload)
+        event = self._append_event(payload)
         self._running_subagent_event_ids[name] = int(event["id"])
         self.save()
         return event
@@ -257,7 +349,7 @@ class SessionRecorder:
         }
         if origin:
             payload["origin"] = origin
-        stored = append_event(self.record, payload)
+        stored = self._append_event(payload)
         self.save()
         return stored
 
@@ -275,7 +367,7 @@ class SessionRecorder:
         }
         if origin:
             payload["origin"] = origin
-        stored = append_event(self.record, payload)
+        stored = self._append_event(payload)
         self.save()
         return stored
 
@@ -285,19 +377,19 @@ class SessionRecorder:
 
     def system_error(self, text: str) -> dict[str, Any]:
         self.finish_main()
-        stored = append_event(self.record, {"type": "system_error", "mode": self.mode, "text": text})
+        stored = self._append_event({"type": "system_error", "mode": self.mode, "text": text})
         self.save()
         return stored
 
     def info(self, text: str) -> dict[str, Any]:
         self.finish_main()
-        stored = append_event(self.record, {"type": "info", "mode": self.mode, "text": text})
+        stored = self._append_event({"type": "info", "mode": self.mode, "text": text})
         self.save()
         return stored
 
     def interrupted(self, text: str) -> dict[str, Any]:
         self.finish_main()
-        stored = append_event(self.record, {"type": "interrupted", "mode": self.mode, "text": text})
+        stored = self._append_event({"type": "interrupted", "mode": self.mode, "text": text})
         self.save()
         return stored
 
@@ -307,8 +399,7 @@ class SessionRecorder:
         max_iterations: int,
     ) -> dict[str, Any]:
         """Persist one completed rubric evaluation as a non-tool event."""
-        stored = append_event(
-            self.record,
+        stored = self._append_event(
             {
                 "type": "rubric",
                 "mode": self.mode,
@@ -343,7 +434,7 @@ class SessionRecorder:
         self.finish_main()
         event = normalize_correction_event(value)
         event["mode"] = self.mode
-        stored = append_event(self.record, event)
+        stored = self._append_event(event)
         self.save()
         return stored
 
@@ -379,6 +470,8 @@ class SessionRecorder:
         for event in reversed(events):
             if not isinstance(event, dict) or event.get("type") != "tool_call":
                 continue
+            if not self._belongs_to_turn(event):
+                continue
             if event_id is not None:
                 if int(event.get("id") or 0) != event_id:
                     continue
@@ -406,7 +499,7 @@ class SessionRecorder:
             self.save()
             return
         if not self._assistant_seen:
-            append_event(self.record, {"type": "assistant", "mode": self.mode, "text": text})
+            self._append_event({"type": "assistant", "mode": self.mode, "text": text})
             self.save()
 
     def finish_main(self) -> None:
@@ -453,6 +546,7 @@ class SessionRecorder:
                 if (
                     isinstance(item, dict)
                     and item.get("type") == "tool_call"
+                    and self._belongs_to_turn(item)
                     and str(item.get("call_id") or "") == call_id
                 ):
                     target_index = index
@@ -463,6 +557,7 @@ class SessionRecorder:
                 for index, item in enumerate(events)
                 if isinstance(item, dict)
                 and item.get("type") == "tool_call"
+                and self._belongs_to_turn(item)
                 and str(item.get("name") or "") == name
             ]
             completed = sum(
@@ -470,6 +565,7 @@ class SessionRecorder:
                 for item in events
                 if isinstance(item, dict)
                 and item.get("type") == "tool_result"
+                and self._belongs_to_turn(item)
                 and str(item.get("name") or "") == name
                 and not item.get("call_id")
             )
@@ -485,6 +581,8 @@ class SessionRecorder:
         """Let a real result replace earlier cancellation-only metadata."""
         for event in self.record.get("events", []):
             if not isinstance(event, dict) or event.get("type") != "tool_call":
+                continue
+            if not self._belongs_to_turn(event):
                 continue
             if call_id:
                 matches = str(event.get("call_id") or "") == call_id
@@ -513,7 +611,12 @@ class SessionRecorder:
         self._reasoning_text = ""
 
     async def sync_compaction(self, agent: Any, thread_id: str) -> None:
+        latest_id = max((int(event["id"]) for event in self.record.get("events", ())), default=0)
         if await sync_deepagents_compaction(self.record, agent, thread_id):
+            if self.turn_id:
+                for event in self.record.get("events", ()):
+                    if event["type"] == "compaction" and int(event["id"]) > latest_id:
+                        event["turn_id"] = self.turn_id
             self.save()
 
 
@@ -530,6 +633,8 @@ class SessionEventEmitter:
     ) -> None:
         self.renderer = renderer
         self.recorder = recorder
+        if not recorder.turn_id:
+            recorder.turn_id = str(getattr(renderer, "turn_id", "") or "")
         self._clock = clock
         self.semantic_state = semantic_state
         self._context_notice_rendered = False
@@ -646,7 +751,7 @@ class SessionEventEmitter:
             kind,
             "proposed",
             artifact,
-            created_at=event_created_at(event),
+            **self.recorder.frontend_identity(event),
         )
         try:
             decision = await getattr(self.renderer, f"finalize_{kind}")(interrupt, artifact)
@@ -658,7 +763,7 @@ class SessionEventEmitter:
                 "cancelled",
             )
             self.recorder.save()
-            self.renderer.artifact(kind, "cancelled", artifact)
+            self.renderer.artifact(kind, "cancelled", artifact, **self.recorder.frontend_identity(event))
             raise
         if not isinstance(decision, dict):
             raise RuntimeError(f"{kind} review must return a decision mapping")
@@ -683,6 +788,7 @@ class SessionEventEmitter:
             str(resolved.get("action") or "reviewed"),
             detail.get("accepted") or artifact,
             {**resolved, **detail},
+            **self.recorder.frontend_identity(event),
         )
         return resolved
 
@@ -696,8 +802,7 @@ class SessionEventEmitter:
         call_renderer(
             self.renderer.reasoning_delta,
             delta,
-            created_at=event_created_at(event),
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
 
     def discard_reasoning(self) -> None:
@@ -711,9 +816,16 @@ class SessionEventEmitter:
         call_renderer(
             self.renderer.text_delta,
             delta,
-            created_at=event_created_at(event),
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
+
+    def model_stream_finished(self, **frontend_identity: Any) -> None:
+        """Close the durable message phase just as the live frontend does."""
+        event = self.recorder._event(self.recorder._assistant_id or self.recorder._reasoning_id)
+        callback = getattr(self.renderer, "model_stream_finished", None)
+        if callable(callback):
+            call_renderer(callback, **self.recorder.frontend_identity(event, **frontend_identity))
+        self.recorder.finish_main()
 
     def tool_call(
         self,
@@ -732,8 +844,7 @@ class SessionEventEmitter:
             name,
             args,
             call_id=call_id,
-            created_at=event_created_at(event),
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
 
     def tool_call_updated(
@@ -763,8 +874,7 @@ class SessionEventEmitter:
                 name,
                 args,
                 call_id=call_id,
-                created_at=event_created_at(event),
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
         else:
             call_renderer(
@@ -772,17 +882,24 @@ class SessionEventEmitter:
                 name,
                 args,
                 call_id=call_id,
-                created_at=event_created_at(event),
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
 
     def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
         """Advance idless edit matching when approval kept the proposed call."""
+        if call_id:
+            event = next((item for item in self.recorder.record.get("events", ())
+                          if item.get("type") == "tool_call" and item.get("call_id") == call_id
+                          and self.recorder._belongs_to_turn(item)), None)
+        else:
+            event_id = next((event_id for event_id, pending_name in self._open_idless_tool_calls
+                             if pending_name == name), None)
+            event = self.recorder._event(event_id)
         if not call_id:
             self._discard_open_idless_tool_call(name)
         callback = getattr(self.renderer, "tool_call_approval_resolved", None)
         if callable(callback):
-            callback(name, call_id=call_id)
+            call_renderer(callback, name, call_id=call_id, **self.recorder.frontend_identity(event))
 
     def tool_result(
         self,
@@ -805,9 +922,8 @@ class SessionEventEmitter:
             name,
             result,
             call_id=call_id,
-            created_at=event_created_at(event),
             duration_ms=duration_ms,
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
 
     def _discard_open_idless_tool_call(self, name: str) -> None:
@@ -840,9 +956,8 @@ class SessionEventEmitter:
                 name,
                 result,
                 call_id=call_id,
-                created_at=event_created_at(event),
                 duration_ms=duration_ms,
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
         else:
             call_renderer(
@@ -850,9 +965,8 @@ class SessionEventEmitter:
                 name,
                 result,
                 call_id=call_id,
-                created_at=event_created_at(event),
                 duration_ms=duration_ms,
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
 
     def completed_tool_error(
@@ -879,9 +993,8 @@ class SessionEventEmitter:
                 name,
                 error,
                 call_id=call_id,
-                created_at=event_created_at(event),
                 duration_ms=duration_ms,
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
         else:
             call_renderer(
@@ -889,9 +1002,8 @@ class SessionEventEmitter:
                 name,
                 error,
                 call_id=call_id,
-                created_at=event_created_at(event),
                 duration_ms=duration_ms,
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
 
     def recovered_tool_result(
@@ -907,9 +1019,9 @@ class SessionEventEmitter:
         if not call_id:
             self._discard_open_idless_tool_call(name)
         if callable(callback):
-            call_renderer(callback, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(callback, name, result, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
         else:
-            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(self.renderer.tool_result, name, result, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
 
     def recovered_tool_call(
         self,
@@ -922,9 +1034,9 @@ class SessionEventEmitter:
         callback = getattr(self.renderer, "recovered_tool_call", None)
         event = self.recorder.recovered_tool_call(name, args, call_id=call_id)
         if callable(callback):
-            call_renderer(callback, name, args, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(callback, name, args, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
         else:
-            call_renderer(self.renderer.tool_call, name, args, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(self.renderer.tool_call, name, args, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
 
     def recovered_tool_error(
         self,
@@ -939,9 +1051,9 @@ class SessionEventEmitter:
         if not call_id:
             self._discard_open_idless_tool_call(name)
         if callable(callback):
-            call_renderer(callback, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(callback, name, error, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
         else:
-            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, created_at=event_created_at(event), **frontend_identity)
+            call_renderer(self.renderer.tool_result, name, error, call_id=call_id, **self.recorder.frontend_identity(event, **frontend_identity))
 
     def delegation_started(
         self,
@@ -953,8 +1065,7 @@ class SessionEventEmitter:
             call_renderer(
                 self.renderer.delegation_started,
                 calls,
-                created_at=event_created_at(event),
-                **frontend_identity,
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
 
     def delegation_delta(self, calls: list[dict[str, Any]], **frontend_identity: Any) -> None:
@@ -1037,7 +1148,7 @@ class SessionEventEmitter:
             duration_ms = elapsed_ms(float(timer["started_at"]), clock=self._clock)
             name = str(timer.get("name") or "tool")
             call_id = str(timer.get("call_id") or "")
-            self.recorder.stop_tool_call(event_id, status, duration_ms)
+            event = self.recorder.stop_tool_call(event_id, status, duration_ms)
             stopped_event_ids.add(event_id)
             self._discard_tool_timer(token)
             if callable(callback):
@@ -1047,6 +1158,7 @@ class SessionEventEmitter:
                     call_id=call_id,
                     status=status,
                     duration_ms=duration_ms,
+                    **self.recorder.frontend_identity(event),
                 )
         if stopped_event_ids:
             self._open_idless_tool_calls = [
@@ -1097,8 +1209,7 @@ class SessionEventEmitter:
             eval_id=eval_id,
             row_id=row_id,
             model=model,
-            created_at=event_created_at(event),
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
@@ -1125,8 +1236,7 @@ class SessionEventEmitter:
             eval_id=eval_id,
             row_id=row_id,
             duration_ms=duration_ms,
-            created_at=event_created_at(event),
-            **frontend_identity,
+            **self.recorder.frontend_identity(event, **frontend_identity),
         )
 
     def subagent_cancelled(
@@ -1137,6 +1247,7 @@ class SessionEventEmitter:
         eval_id: str = "",
         row_id: str = "",
         duration_ms: int | None = None,
+        **frontend_identity: Any,
     ) -> None:
         callback = getattr(self.renderer, "subagent_cancelled", None)
         event = self.recorder.subagent_cancelled(subagent, result)
@@ -1148,7 +1259,7 @@ class SessionEventEmitter:
                 eval_id=eval_id,
                 row_id=row_id,
                 duration_ms=duration_ms,
-                created_at=event_created_at(event),
+                **self.recorder.frontend_identity(event, **frontend_identity),
             )
 
     def eval_subagent_started(
@@ -1255,7 +1366,7 @@ class SessionEventEmitter:
         event = self.recorder.correction(value)
         callback = getattr(self.renderer, "correction", None)
         if callable(callback):
-            call_renderer(callback, value, created_at=event_created_at(event))
+            call_renderer(callback, value, **self.recorder.frontend_identity(event))
 
     def rubric_evaluation_finished(self, evaluation: dict[str, Any], max_iterations: int) -> None:
         """Persist and forward one completed rubric evaluation."""
@@ -1266,7 +1377,7 @@ class SessionEventEmitter:
                 callback,
                 evaluation,
                 max_iterations,
-                created_at=event_created_at(event),
+                **self.recorder.frontend_identity(event),
             )
 
     def rubric_evaluations_cancelled(self) -> None:
@@ -1299,7 +1410,7 @@ class SessionEventEmitter:
         if callable(callback):
             if kind == "info":
                 event = self.recorder.info(text)
-                call_renderer(callback, text, kind=kind, created_at=event_created_at(event))
+                call_renderer(callback, text, kind=kind, **self.recorder.frontend_identity(event))
             else:
                 callback(text, kind=kind)
         elif hasattr(self.renderer, "console"):

@@ -35,6 +35,64 @@ from core.execution.runner import run_turn
 
 
 class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_prompt_recovery_retains_outer_identity_after_cold_restart(self) -> None:
+        from core.interface import MessageEvent, RuntimeEvent
+        from tests.core.interface.test_contract import RecordingFrontend
+
+        effects = []
+
+        @tool
+        def side_effect(value: str) -> str:
+            """Record an explicitly approved action."""
+            effects.append(value)
+            return "done"
+
+        active_model = BindableFakeMessagesListChatModel(responses=[AIMessage(
+            content="", tool_calls=[{"name": "side_effect", "args": {"value": "x"}, "id": "native-call"}],
+        )])
+
+        def pair(*, checkpointer, **kwargs):
+            graph = create_agent(
+                model=active_model, tools=[side_effect],
+                middleware=[HumanInTheLoopMiddleware(interrupt_on={"side_effect": True})],
+                checkpointer=checkpointer,
+            )
+            return graph, graph
+
+        with tempfile.TemporaryDirectory() as directory, patch("core.application.app.build_agent_pair", side_effect=pair):
+            workspace = Path(directory)
+            first_frontend = RecordingFrontend()
+            first = await self.start(workspace, frontend=first_frontend)
+            try:
+                session = await first.open_session("identity-recovery")
+                with self.assertRaisesRegex(AssertionError, "no response supplied"):
+                    await session.prompt("run the action")
+                original = next(e.turn_id for e in first_frontend.events if isinstance(e, MessageEvent) and e.phase == "user")
+                self.assertEqual(session.recovery["turn_id"], original)
+            finally:
+                await self.stop(first)
+
+            active_model = BindableFakeMessagesListChatModel(responses=[AIMessage(content="stopped")])
+            frontend = RecordingFrontend([[{"type": "reject_once"}]])
+            second = await self.start(workspace, frontend=frontend)
+            try:
+                reopened = await second.open_session("identity-recovery")
+                self.assertEqual(reopened.recovery["turn_id"], original)
+                await reopened.resume_pending()
+                recovered = [e for e in frontend.events if isinstance(e, RuntimeEvent) and e.state == "turn_started"]
+                self.assertEqual([e.turn_id for e in recovered], [original])
+                self.assertEqual(effects, [])
+                self.assertIsNone(reopened.recovery)
+                await reopened.prompt("a new request")
+                new = next(e.turn_id for e in reversed(frontend.events) if isinstance(e, MessageEvent) and e.phase == "user")
+                self.assertNotEqual(new, original)
+                saved = reopened.snapshot().transcript
+                self.assertEqual(next(e for e in saved if e["type"] == "user")["turn_id"], original)
+                calls = [e for e in saved if e["type"] == "tool_call" and e.get("call_id") == "native-call"]
+                self.assertEqual(len(calls), 1)
+            finally:
+                await self.stop(second)
+
     async def test_real_mcp_skills_follow_headless_lifecycle_in_existing_session(self) -> None:
         from tests.core.interface.test_contract import RecordingFrontend
         from tests.test_mcp import write_config

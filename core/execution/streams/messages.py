@@ -51,7 +51,7 @@ async def consume_messages(
         ) or is_success_criteria_metadata_message(message)
         if is_success_criteria:
             await _drain_message(message)
-            call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished", **identity)
             if result is not None:
                 usage = usage_from_message(message)
                 if has_usage(usage):
@@ -63,7 +63,7 @@ async def consume_messages(
         ) or is_summarization_metadata_message(message)
         if is_compaction:
             await _consume_compaction_message(message, renderer)
-            call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished", **identity)
             call_list = await _finalized_tool_calls(
                 message,
                 renderer,
@@ -91,7 +91,7 @@ async def consume_messages(
         ) or is_correction_metadata_message(message)
         if is_protocol_message:
             await _drain_message(message)
-            call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished", **identity)
             continue
 
         if is_raw_message_stream(message):
@@ -101,7 +101,7 @@ async def consume_messages(
                 result,
                 identity=identity,
             )
-            call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished", **identity)
             call_list = await _finalized_tool_calls(
                 message,
                 renderer,
@@ -114,7 +114,7 @@ async def consume_messages(
             )
             await _consume_reasoning(message, renderer, identity=identity)
             await _consume_text(message, renderer, identity=identity)
-            call_renderer(renderer, "model_stream_finished")
+            call_renderer(renderer, "model_stream_finished", **identity)
             call_list = await call_task
 
         if call_list:

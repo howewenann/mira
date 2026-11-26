@@ -323,6 +323,8 @@ async def _bootstrap(
     resume: bool,
     config: dict[str, Any] | None = None,
     renderer: Any | None = None,
+    *,
+    frontend: Any | None = None,
 ) -> dict[str, Any]:
     """Build the headless application/session and expose legacy state aliases."""
     from core.application import MiraApplication
@@ -335,10 +337,10 @@ async def _bootstrap(
         from config.runtime import LaunchOptions, load_effective_config
 
         config = load_effective_config(workspace, LaunchOptions())
-    if renderer is None:
+    if renderer is None and frontend is None:
         renderer = Renderer(tool_output_chars=config["tool_output_chars"])
 
-    frontend = TerminalFrontend(renderer)
+    frontend = frontend if frontend is not None else TerminalFrontend(renderer)
     progress = FrontendEmitter(frontend)
     progress.startup_progress("loading session...")
     progress.startup_progress("discovering resources...")
@@ -350,7 +352,8 @@ async def _bootstrap(
     progress.startup_progress("loading model metadata...")
     progress.startup_progress("building agents...")
     core_session = await application.open_session(session, resume=resume)
-    setattr(renderer, "mcp_manager", application.mcp_manager)
+    if renderer is not None:
+        setattr(renderer, "mcp_manager", application.mcp_manager)
 
     return {
         "application": application,

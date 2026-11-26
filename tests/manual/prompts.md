@@ -2143,3 +2143,30 @@ Run these from the checkout in the shared environment:
    Add `--headless` for an unattended live run of the real Inspector widget.
    To inspect saved evidence, use `--session-id ID` and optionally `--thread-id ID`;
    the source SQLite database is backed up read-only and never resumed.
+
+## API contract and frontend bootstrap regression checks
+
+Use a disposable workspace with the usual model configuration. Keep the
+existing transcript layout throughout these checks.
+
+1. In ACT, ask: `Use ask_user to ask me to choose between reading README.md
+   and listing the workspace, then perform my choice.` Open Settings before
+   the request arrives. Expected: one serialized prompt, Settings temporarily
+   suspended and restored, the chosen result in its original tool bubble,
+   and prompt focus restored after the turn. Repeat with an MCP elicitation
+   tool when a configured test server provides one.
+2. Enter PLAN and request a small file change. Revise its proposal, then choose
+   Implement. Expected: the existing Plan review controls and Act transition,
+   a single ordinary interaction lifecycle, and retained Plan status preserved
+   after switching away from the session and reopening it. Repeat with a Goal.
+3. Cancel a running tool, then reopen the session. Expected: the same stopped
+   status and frozen duration before and after restoration. A later request
+   creates a separate response; tools and text do not attach to the cancelled
+   response. Native call/interaction correlation is covered by automated tests.
+4. Request two same-name tools in parallel and inspect a subagent or Rubric
+   run. Expected: independent tool outcomes, unchanged Inspector interactions,
+   and original tool-history links after reopening the session.
+5. Start MIRA normally, exercise a tool approval (including Edit and Always
+   allow), and run an existing registered Workflow with an interaction.
+   Expected: unchanged modal suspension, request serialization, cancellation,
+   and prompt focus. Terminal and ACP remain separate frontend consumers.

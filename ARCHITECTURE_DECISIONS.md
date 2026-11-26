@@ -135,7 +135,24 @@ offers prompt, cancellation, mode, snapshot, and close operations. The Core
 Interface under [core/interface/](core/interface/) implements ordered event emission plus
 blocking interaction requests. The thin `mira` and `mira.api` facades expose
 those exact classes and types as the one supported MIRA API. Textual and
-one-shot terminal output consume that same public surface.
+one-shot terminal output use that surface for normal turns. Textual still owns
+internal runtime rebuild, Workflow launch, history, and inspection operations;
+the API boundary migration is incomplete.
+
+Outer interactions use opaque IDs distinct from completed-turn counts and
+native model-message IDs. The ID is saved in the session's semantic checkpoint
+before graph execution; checkpoint recovery retains it. Persisted display
+events retain that ID and available native provenance, while live events link
+to the existing durable event and tool origin IDs. Historical events without
+provenance remain unassigned. Model phases and user bubbles are not turn
+boundaries. Per-tool cancellation/interruption events carry persisted timing.
+
+Snapshots detach nested payloads without a second immutable type hierarchy.
+Their full transcript copying is reserved for consumer snapshot requests, not
+streaming or telemetry ticks. Textual startup explicitly selects its adapter;
+the shared renderer projection retains the complete typed event for callbacks
+that accept it, and Textual retains provenance on existing message/tool widgets.
+Foreground guards remain around requests, including Workflow requests.
 
 **Why:** A frontend should render state and collect choices without owning
 agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,

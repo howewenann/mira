@@ -60,6 +60,8 @@ class FrontendEmitter:
             "session_id": str(kwargs.pop("session_id", self.session_id) or ""),
             "turn_id": str(kwargs.pop("turn_id", self.turn_id) or ""),
             "message_id": str(kwargs.pop("message_id", "") or ""),
+            "event_id": int(kwargs.pop("event_id", 0) or 0),
+            "origin_event_id": int(kwargs.pop("origin_event_id", 0) or 0),
             "namespace": tuple(str(item) for item in (kwargs.pop("namespace", ()) or ())),
             "metadata": dict(kwargs.pop("metadata", {}) or {}),
             "created_at": str(kwargs.pop("created_at", "") or ""),
@@ -133,8 +135,8 @@ class FrontendEmitter:
     def tool_call_updated(self, name: str, args: Any, call_id: str = "", **identity: Any) -> None:
         self._tool("update", name, args=args, call_id=call_id, **identity)
 
-    def tool_call_approval_resolved(self, name: str, call_id: str = "") -> None:
-        self._tool("approval_resolved", name, call_id=call_id)
+    def tool_call_approval_resolved(self, name: str, call_id: str = "", **identity: Any) -> None:
+        self._tool("approval_resolved", name, call_id=call_id, **identity)
 
     def tool_result(
         self,
@@ -187,6 +189,15 @@ class FrontendEmitter:
 
     def stop_active_tools(self, status: str) -> None:
         self.frontend.emit(ToolEvent(phase="stop", status=status, **self._identity()))
+
+    def tool_call_stopped(
+        self, name: str, call_id: str = "", *, status: str,
+        duration_ms: int | None = None, **identity: Any,
+    ) -> None:
+        self._tool(
+            "stop", name, call_id=call_id, status=status,
+            duration_ms=duration_ms, **identity,
+        )
 
     def _tool(
         self,

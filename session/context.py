@@ -87,6 +87,17 @@ def normalize_events(value: Any) -> list[dict[str, Any]]:
         mode = str(item.get("mode") or "")
         if mode:
             event["mode"] = mode
+        # Missing historical provenance stays missing; never infer turn boundaries.
+        for key in ("turn_id", "message_id"):
+            if item.get(key):
+                event[key] = str(item[key])
+        if isinstance(item.get("namespace"), (list, tuple)) and item["namespace"]:
+            event["namespace"] = [str(part) for part in item["namespace"]]
+        if isinstance(item.get("metadata"), dict) and item["metadata"]:
+            event["metadata"] = item["metadata"]
+        origin = item.get("origin_event_id")
+        if isinstance(origin, int) and not isinstance(origin, bool) and origin > 0:
+            event["origin_event_id"] = origin
 
         if event_type in {"user", "assistant", "reasoning", "info", "system_error", "interrupted"}:
             text = str(item.get("text") or "").strip()
