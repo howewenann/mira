@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.rubric import RubricInspectionProjector
 from core.execution.streams.output import call_renderer
 from core.execution.streams.tool_args import ToolCallDrafts
@@ -39,6 +40,7 @@ class RubricEventRenderer:
         renderer: Any,
         max_iterations: int,
         *,
+        inspections: LiveInspectionStore | None = None,
         grader_model: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -46,7 +48,7 @@ class RubricEventRenderer:
         self.max_iterations = max(1, int(max_iterations or 1))
         self.grader_model = str(grader_model or "").strip()
         self.clock = clock
-        self.inspection = RubricInspectionProjector(renderer)
+        self.inspection = RubricInspectionProjector(inspections)
         self.evaluations: list[dict[str, Any]] = []
         self._latest: dict[str, dict[str, Any]] = {}
         self._started_at: dict[tuple[str, int], float] = {}

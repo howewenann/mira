@@ -45,10 +45,20 @@ InspectionListener = Callable[[str, InspectionUpdate], None]
 class LiveInspectionStore:
     """Own live inspection state without persistence or session coupling."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_update: InspectionListener | None = None) -> None:
         self._items: dict[str, LiveInspection] = {}
         self._listeners: dict[str, set[InspectionListener]] = defaultdict(set)
         self._fallback_ids = count(1)
+        self._on_update = on_update
+
+    def clear(self) -> None:
+        """Release process-local transcripts and subscriptions at session close."""
+        self._items.clear()
+        self._listeners.clear()
+
+    def restore(self, inspection: LiveInspection) -> None:
+        """Restore an existing durable transcript for explicit graph recovery."""
+        self._items.setdefault(inspection.id, inspection)
 
     def allocate_id(self, hint: str = "") -> str:
         """Return a stable unused ID derived from native execution identity."""
@@ -81,6 +91,16 @@ class LiveInspectionStore:
             self._notify(inspection_id, InspectionUpdate("reset"))
             return current
         changed = False
+        if current.status != "RUNNING":
+            if current.status == "CANCELLED":
+                # These completions are MIRA's interruption markers, not native
+                # tool outcomes. A resumed native result must be able to replace them.
+                current.events[:] = [event for event in current.events if not (
+                    event.kind == "tool_error"
+                    and event.text in {"cancelled", "interrupted by session restart"}
+                )]
+            current.status = "RUNNING"
+            changed = True
         if title and current.title != title:
             current.title = title
             changed = True
@@ -139,11 +159,12 @@ class LiveInspectionStore:
         if current is None:
             return
         if event.call_id:
-            if any(
-                existing.call_id == event.call_id
-                and existing.kind in {"tool_result", "tool_error"}
-                for existing in current.events
-            ):
+            for index, existing in enumerate(current.events):
+                if existing.call_id != event.call_id or existing.kind not in {"tool_result", "tool_error"}:
+                    continue
+                if current.status == "RUNNING" and existing.kind == "tool_error":
+                    current.events[index] = event
+                    self._notify(inspection_id, InspectionUpdate("reset"))
                 return
             for index in range(len(current.events) - 1, -1, -1):
                 existing = current.events[index]
@@ -222,3 +243,5 @@ class LiveInspectionStore:
     def _notify(self, inspection_id: str, update: InspectionUpdate) -> None:
         for listener in tuple(self._listeners.get(inspection_id, ())):
             listener(inspection_id, update)
+        if self._on_update is not None:
+            self._on_update(inspection_id, update)

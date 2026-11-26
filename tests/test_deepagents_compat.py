@@ -564,6 +564,7 @@ class QuickJSCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             "Check the date in an Eval child",
             renderer,
             "quickjs-hitl-replay",
+            inspections=renderer.live_inspections,
         )
 
         self.assertEqual(executions, ["date /T"])

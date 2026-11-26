@@ -20,7 +20,7 @@ from textual.events import Click, DescendantFocus, Key, Resize
 from textual.geometry import Size
 from textual.widgets import Button, ContentSwitcher, Input, Markdown, Static, TextArea
 
-from core.execution.inspection.rubric import rubric_inspection_id
+from mira.api import rubric_inspection_id
 from core.execution.streams.output import normalize_response_delta
 from core.execution.streams.rubric import (
     elapsed_ms,
@@ -30,7 +30,6 @@ from core.execution.streams.rubric import (
 )
 from core.execution.streams.corrections import correction_text, correction_title
 from session.context import normalize_events
-from session.subagent_runs import run_count, run_for_inspection_id
 from session.goals import GOAL_STATUSES
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
@@ -1420,10 +1419,8 @@ class ChatLog(VerticalScroll):
             phase,
         )
         try:
-            run = run_for_inspection_id(
-                self.subagent_runs_provider(),
-                inspection_id,
-            )
+            run = next((run for run in self.subagent_runs_provider()
+                        if run.get("inspection_id") == inspection_id), None)
         except Exception:
             return ""
         return inspection_id if run is not None else ""
@@ -2183,7 +2180,8 @@ class ChatLog(VerticalScroll):
         count = 0
         if terminal and self.subagent_runs_provider is not None and origin_event_id:
             try:
-                count = run_count(self.subagent_runs_provider(), origin_event_id)
+                count = sum(run.get("origin_event_id") == origin_event_id
+                            for run in self.subagent_runs_provider())
             except Exception:
                 count = 0
         widget.update_subagents(origin_event_id, count, terminal=terminal)

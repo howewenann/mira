@@ -44,7 +44,7 @@ def start_event(run_id: str, iteration: int, phase: str, text: str) -> dict[str,
 class RubricInspectionTests(unittest.TestCase):
     def test_phase_is_created_before_lifecycle_and_keeps_exact_input(self) -> None:
         renderer = RecordingRenderer()
-        rubric = RubricEventRenderer(renderer, 2)
+        rubric = RubricEventRenderer(renderer, 2, inspections=renderer.live_inspections)
 
         rubric.handle(start_event("run-1", 0, "verifier", "exact verifier input"))
 
@@ -57,7 +57,7 @@ class RubricInspectionTests(unittest.TestCase):
 
     def test_live_deltas_and_authoritative_tools_share_one_transcript(self) -> None:
         renderer = RecordingRenderer()
-        rubric = RubricEventRenderer(renderer, 1)
+        rubric = RubricEventRenderer(renderer, 1, inspections=renderer.live_inspections)
         identity = {"grading_run_id": "run-tools", "iteration": 0}
         rubric.handle(start_event("run-tools", 0, "verifier", "inspect"))
         rubric.handle(
@@ -129,7 +129,7 @@ class RubricInspectionTests(unittest.TestCase):
 
     def test_running_restart_is_hitl_continuation_and_terminal_restart_is_retry(self) -> None:
         renderer = RecordingRenderer()
-        rubric = RubricEventRenderer(renderer, 1)
+        rubric = RubricEventRenderer(renderer, 1, inspections=renderer.live_inspections)
         start = start_event("run-retry", 0, "verifier", "request")
 
         rubric.handle(start)
@@ -158,7 +158,7 @@ class RubricInspectionTests(unittest.TestCase):
         for cancelled, expected in ((False, "ERROR"), (True, "CANCELLED")):
             with self.subTest(cancelled=cancelled):
                 renderer = RecordingRenderer()
-                rubric = RubricEventRenderer(renderer, 1)
+                rubric = RubricEventRenderer(renderer, 1, inspections=renderer.live_inspections)
                 identity = {"grading_run_id": f"run-{cancelled}", "iteration": 0}
                 rubric.handle(start_event(identity["grading_run_id"], 0, "verifier", "inspect"))
                 rubric.handle(
@@ -202,7 +202,7 @@ class RubricInspectionTests(unittest.TestCase):
         ]
         events = inspection_event_values(messages)
         renderer = RecordingRenderer()
-        rubric = RubricEventRenderer(renderer, 2)
+        rubric = RubricEventRenderer(renderer, 2, inspections=renderer.live_inspections)
         for iteration in (0, 1):
             event = start_event("run-isolated", iteration, "grader", "unused")
             event["inspection_events"] = events

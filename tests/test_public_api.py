@@ -51,6 +51,10 @@ MIRA_EXPORTS = {
     "MiraWorkflowAPI",
 }
 API_EXPORTS = {
+    "rubric_inspection_id",
+    "InspectionEvent",
+    "InspectionUpdate",
+    "LiveInspection",
     "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",

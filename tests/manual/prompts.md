@@ -2170,3 +2170,35 @@ existing transcript layout throughout these checks.
    allow), and run an existing registered Workflow with an interaction.
    Expected: unchanged modal suspension, request serialization, cancellation,
    and prompt focus. Terminal and ACP remain separate frontend consumers.
+
+## Session-owned inspection and API dogfooding
+
+Use a disposable workspace with your usual model configuration. Keep the
+existing Inspector styling and workspace layout.
+
+1. Ask: `Delegate two parallel read-only checks with identical task descriptions
+   to separate subagents. Have each report its own result.` Leave the Inspector
+   closed until both start. Open each task row, switch between them, close the
+   Inspector, and reopen it after completion. Expected: independent transcripts,
+   complete captured input and output, live updates only for the selected child,
+   and the same scrolling, tabs, expansion, and Escape behavior as before.
+2. Switch to another conversation while viewing a completed child, then return.
+   Expected: the other conversation does not display that child's transcript;
+   historical selection in the original conversation works without agent execution.
+3. Run a Rubric evaluation, select Verifier and Grader in turn, then reopen the
+   session. Expected: distinct exact inputs and outputs, unchanged inspection
+   controls and colors, and saved transcripts available after reopening.
+4. Run an existing Workflow with parallel agent nodes and one approval. Inspect
+   its node input/result, each child, and final state. Expected: existing tree
+   navigation and values, isolated child streams, native approval resume, and
+   saved child history. Cancel a second attempt and reopen its captured history.
+5. Cancel a running child or stop at its tool approval, then reopen the saved
+   session and explicitly resume pending work. Expected: existing history stays
+   available, recovered native results replace interruption markers, and child
+   identities do not split into unrelated duplicate records.
+6. Run the full API example in the disposable workspace. Use `/inspections` and
+   `/inspect ID` after delegation, then reopen with `--resume --session ID`.
+   Expected: the same transcript is available without Textual or a hidden store.
+   Use `--cancel-after 1` with a one-shot prompt to check cancellation cleanup.
+   `/resume-pending` redisplays a saved request; `/continue-incomplete` asks before
+   retrying uncertain work. Unsupported requests in the minimal example abort.

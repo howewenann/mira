@@ -1651,7 +1651,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         renderer = EvalAwareRenderer()
 
-        await runner.run_turn(FakeAgent([stream]), "delegate via eval", renderer, "thread-1")
+        await runner.run_turn(FakeAgent([stream]), "delegate via eval", renderer, "thread-1", inspections=renderer.live_inspections)
 
         self.assertIn(
             (
@@ -1877,6 +1877,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
             "delegate",
             renderer,
             "thread-1",
+            inspections=renderer.live_inspections,
         )
 
         starts = [event for event in renderer.events if event[0] == "subagent_started"]
@@ -2039,6 +2040,7 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
                     "delegate via eval",
                     renderer,
                     f"thread-{decision['type']}",
+                    inspections=renderer.live_inspections,
                 )
 
                 self.assertEqual(result.tool_calls, [])

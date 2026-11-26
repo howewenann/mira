@@ -12,7 +12,6 @@ from core.execution.inspection.subagents import (
     SubagentInspectionCapture,
     SubagentInspectionCoordinator,
     capture_child_streams,
-    live_inspection_store,
     native_parent_tool_call_id,
 )
 from core.execution.streams.output import message_text, visible_message_text
@@ -146,8 +145,8 @@ async def consume_subagent(
     """Render one subagent lifecycle while observing its native child streams."""
     name = renderer.subagent_label(subagent)
     task_input = getattr(subagent, "task_input", "")
-    store = live_inspection_store(renderer)
-    coordinator = inspection or SubagentInspectionCoordinator(store)
+    coordinator = inspection or SubagentInspectionCoordinator(None)
+    store = coordinator.store
     inspection_id, row_id, first_start = coordinator.standalone_started(
         subagent,
         name,
@@ -348,7 +347,7 @@ async def consume_eval_inspection(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        store = live_inspection_store(renderer)
+        store = inspection.store
         if inspection_id and store is not None:
             store.finish(
                 inspection_id,
@@ -356,7 +355,7 @@ async def consume_eval_inspection(
                 error=f"error: {exc}",
             )
         return
-    store = live_inspection_store(renderer)
+    store = inspection.store
     if inspection_id and store is not None:
         store.finish(
             inspection_id,

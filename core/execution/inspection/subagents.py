@@ -163,10 +163,12 @@ class SubagentInspectionCoordinator:
         store: LiveInspectionStore | None,
         result: Any | None = None,
         renderer: Any | None = None,
+        *, recovering: bool = False,
     ) -> None:
         self.store = store
         self.result = result
         self.renderer = renderer
+        self.recovering = recovering
         self._inspection_by_row: dict[str, str] = {}
         self._eval_task_call_ids: set[str] = set()
         self._native_row_by_trigger: dict[str, str] = {}
@@ -204,6 +206,12 @@ class SubagentInspectionCoordinator:
         self._pass_interrupt_calls.clear()
         self._seen_pass_interrupt_actions.clear()
         self._standalone_interrupt_actions.clear()
+
+    def _allocate_id(self, hint: str) -> str:
+        existing = f"subagent:{hint}"
+        if self.recovering and self.store.get(existing) is not None:
+            return existing
+        return self.store.allocate_id(hint)
 
     def observe_workflow_agents(
         self,
@@ -284,7 +292,7 @@ class SubagentInspectionCoordinator:
 
         inspection_id = self._standalone_inspection_by_row.get(row_id, "")
         if not inspection_id and self.store is not None:
-            inspection_id = self.store.allocate_id(row_id)
+            inspection_id = self._allocate_id(row_id)
             self._standalone_inspection_by_row[row_id] = inspection_id
         exact_task = task or self._standalone_tasks_by_call_id.get(row_id, "")
         if inspection_id and self.store is not None:
@@ -348,6 +356,9 @@ class SubagentInspectionCoordinator:
             self._standalone_task_rows.add(call_id)
             if task:
                 self._standalone_tasks_by_call_id[call_id] = task
+                inspection_id = self._standalone_inspection_by_row.get(call_id, "")
+                if inspection_id and self.store is not None:
+                    self.store.update_task(inspection_id, task)
 
     def standalone_row_for_namespace(self, namespace: tuple[str, ...]) -> str:
         """Return the inspected standalone owner of a native tool namespace."""
@@ -417,7 +428,7 @@ class SubagentInspectionCoordinator:
         existing = self._inspection_by_row.get(row_id, "")
         if existing:
             return existing
-        inspection_id = self.store.allocate_id(row_id)
+        inspection_id = self._allocate_id(row_id)
         self._inspection_by_row[row_id] = inspection_id
         description = str(event.get("description") or "")
         self.store.start(
@@ -1141,25 +1152,6 @@ def _message_reasoning(message: Any) -> str:
     return "".join(values)
 
 
-def live_inspection_store(renderer: Any) -> LiveInspectionStore | None:
-    """Find the Textual-owned store through existing in-process wrappers."""
-    pending = [renderer]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        store = getattr(current, "live_inspections", None)
-        if isinstance(store, LiveInspectionStore):
-            return store
-        for attribute in ("renderer", "frontend"):
-            nested = getattr(current, attribute, None)
-            if nested is not None:
-                pending.append(nested)
-    return None
-
-
 def native_inspection_hint(subagent: Any) -> str:
     """Prefer the native parent tool call, then scheduler and path identities."""
     parent_call_id = native_parent_tool_call_id(subagent)
@@ -1257,7 +1249,6 @@ __all__ = [
     "SubagentInspectionCapture",
     "SubagentInspectionCoordinator",
     "capture_child_streams",
-    "live_inspection_store",
     "native_inspection_hint",
     "native_parent_tool_call_id",
 ]

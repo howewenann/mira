@@ -19,6 +19,7 @@ from mira.api import (
     MCPApprovalRequest,
     MCPElicitationRequest,
     MessageEvent,
+    RuntimeEvent,
     ToolEvent,
 )
 
@@ -39,12 +40,21 @@ class FullFrontend:
     def __init__(self) -> None:
         self.session: MiraSession | None = None
         self._assistant_open = False
+        self.turn_started = asyncio.Event()
 
     def emit(self, event: FrontendEvent) -> None:
         # Event handling -----------------------------------------------------
         # MIRA calls emit() synchronously with ordered streaming observations.
         # A real GUI would update owned widgets here; this example writes a
         # readable terminal transcript instead.
+        if isinstance(event, RuntimeEvent):
+            if event.kind == "session" and event.state == "turn_started":
+                self.turn_started.set()
+            elif event.kind == "inspection" and event.state == "reset":
+                # Announce the key; do not fetch full transcripts on every delta.
+                print(f"\n[inspection available] {event.detail['inspection_id']}")
+            return
+
         if isinstance(event, MessageEvent):
             if event.phase == "content":
                 print(event.text, end="", flush=True)
@@ -188,6 +198,9 @@ class FullFrontend:
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", nargs="?", help="Send one prompt and exit.")
+    parser.add_argument("--resume", action="store_true", help="Open saved state without executing it.")
+    parser.add_argument("--session", help="Durable session ID to open.")
+    parser.add_argument("--cancel-after", type=float, help="Cancel a one-shot prompt after this many seconds.")
     arguments = parser.parse_args()
 
     frontend = FullFrontend()
@@ -197,16 +210,35 @@ async def main() -> None:
     try:
         # Open one durable MIRA conversation and give the frontend access to its
         # public snapshot for ArtifactDisplayRequest handling.
-        session = await application.open_session()
+        session = await application.open_session(session_id=arguments.session, resume=arguments.resume)
         frontend.session = session
 
         if arguments.prompt is not None:
-            await session.prompt(arguments.prompt)
+            if arguments.cancel_after is None:
+                await session.prompt(arguments.prompt)
+            else:
+                # Wait for Core to begin before cancellation can target this turn.
+                frontend.turn_started.clear()
+                turn = asyncio.create_task(session.prompt(arguments.prompt))
+                started = asyncio.create_task(frontend.turn_started.wait())
+                try:
+                    await asyncio.wait({turn, started}, return_when=asyncio.FIRST_COMPLETED)
+                    if not turn.done():
+                        await asyncio.sleep(max(0, arguments.cancel_after))
+                        await session.cancel()
+                    try:
+                        await turn
+                    except asyncio.CancelledError:
+                        print("\nCancelled; captured inspection history remains available.")
+                finally:
+                    started.cancel()
+                    await asyncio.gather(started, return_exceptions=True)
         else:
             # Reuse the same durable MiraSession for each message. Responses
             # continue to arrive through FullFrontend.emit() and request().
             print("Connected to MIRA's in-process Python API.")
-            print("Type /quit to stop.")
+            print("Type /quit, /inspections, /inspect ID, /resume-pending, or /continue-incomplete.")
+            print(f"Session: {session.snapshot().session_id}")
             while True:
                 try:
                     prompt = await asyncio.to_thread(input, "\n> ")
@@ -215,7 +247,24 @@ async def main() -> None:
                 prompt = prompt.strip()
                 if prompt == "/quit":
                     break
-                if prompt:
+                if prompt == "/inspections":
+                    print(json.dumps(session.inspections(), indent=2, default=str))
+                elif prompt.startswith("/inspect "):
+                    # Selection fetches one detached payload through the public API.
+                    inspection = session.inspection(prompt.removeprefix("/inspect ").strip())
+                    if inspection is None:
+                        print("Inspection unavailable.")
+                    else:
+                        print(f"{inspection.title} [{inspection.status}]")
+                        for item in inspection.events:
+                            print(item.kind, item.name, item.text, item.args or "")
+                elif prompt == "/resume-pending":
+                    await session.resume_pending()
+                elif prompt == "/continue-incomplete":
+                    answer = await asyncio.to_thread(input, "Side effects may repeat. Continue? [y/N] ")
+                    if answer.strip().lower() == "y":
+                        await session.continue_incomplete()
+                elif prompt:
                     await session.prompt(prompt)
     finally:
         # Application shutdown closes sessions and releases MCP/runtime resources.

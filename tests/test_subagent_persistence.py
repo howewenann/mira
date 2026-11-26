@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
 from core.execution.inspection.persistence import PersistentSubagentRuns
 from core.execution.streams.subagents import consume_subagent
@@ -64,7 +65,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         inspections = LiveInspectionStore()
         task = "native child task"
         record = {"events": [tool_call_event(12, "task", "native-call", task)], "runs": []}
-        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore())
+        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore(), inspections=inspections)
         subagent = SimpleNamespace(
             name="general-purpose",
             task_input=task,
@@ -73,7 +74,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
             output=output(),
         )
 
-        await consume_subagent(subagent, observer)
+        await consume_subagent(subagent, observer, SubagentInspectionCoordinator(inspections))
         observer.close()
 
         self.assertEqual(len(record["runs"]), 1)
@@ -89,7 +90,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         renderer = InspectionRenderer(inspections)
         record = {"events": [tool_call_event(7, "task", "task-call", task)], "runs": []}
         store = SavingStore()
-        observer = PersistentSubagentRuns(renderer, record, store)
+        observer = PersistentSubagentRuns(renderer, record, store, inspections=inspections)
 
         returned = observer.subagent_started(
             "researcher [violet-fox]",
@@ -147,7 +148,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         inspections.start("inspection-1", "worker [blue-heron]", "task")
         record = {"events": [tool_call_event(1, "task", "call-1", "task")], "runs": []}
         store = SavingStore()
-        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, store)
+        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, store, inspections=inspections)
         observer.subagent_started("worker", "task", row_id="call-1", inspection_id="inspection-1")
         initial_saves = len(store.saved)
 
@@ -177,7 +178,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
             store,
             command="/workflow__research topic=history",
         )
-        observer = PersistentSubagentRuns(history, record, store)
+        observer = PersistentSubagentRuns(history, record, store, inspections=inspections)
         observer.workflow_started("wf-1", "research")
         observer.workflow_task_started(
             "task-1",
@@ -249,7 +250,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
     async def test_eval_rows_share_only_their_eval_origin(self) -> None:
         inspections = LiveInspectionStore()
         record = {"events": [tool_call_event(14, "eval", "eval-14", "")], "runs": []}
-        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore())
+        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore(), inspections=inspections)
         for index, name in enumerate(("critic [amber-owl]", "tester [silver-lynx]"), start=1):
             inspection_id = f"eval-inspection-{index}"
             row_id = f"eval-row-{index}"
@@ -273,7 +274,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
     async def test_idless_inverted_delivery_uses_exact_request_fifo(self) -> None:
         inspections = LiveInspectionStore()
         record: dict[str, Any] = {"events": [], "runs": []}
-        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore())
+        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore(), inspections=inspections)
         for index in (1, 2):
             inspections.start(f"inspection-{index}", f"worker [{index}]", "same request")
             observer.subagent_started(
@@ -288,7 +289,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
                 f"done {index}",
                 inspection_id=f"inspection-{index}",
             )
-        self.assertEqual({run["status"] for run in record["runs"]}, {"RUNNING"})
+        self.assertEqual({run["status"] for run in record["runs"]}, {"DONE"})
         record["events"].extend(
             [
                 tool_call_event(21, "task", "", "same request"),
@@ -307,13 +308,13 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         inspections.start("inspection-1", "worker [cool-name]", "original task")
         record = {"events": [tool_call_event(4, "task", "call-4", "original task")], "runs": []}
         store = SavingStore()
-        first = PersistentSubagentRuns(InspectionRenderer(inspections), record, store)
+        first = PersistentSubagentRuns(InspectionRenderer(inspections), record, store, inspections=inspections)
         first.subagent_started("worker [cool-name]", "original task", row_id="call-4", inspection_id="inspection-1")
         inspections.append_delta("inspection-1", "reasoning", "before approval")
         first.close()
         durable_id = record["runs"][0]["id"]
 
-        second = PersistentSubagentRuns(InspectionRenderer(inspections), record, store)
+        second = PersistentSubagentRuns(InspectionRenderer(inspections), record, store, inspections=inspections)
         second.subagent_started("worker [cool-name]", "original task", row_id="call-4", inspection_id="inspection-1")
         inspections.append_delta("inspection-1", "reasoning", " after approval")
         inspections.finish("inspection-1", status="DONE", final_response="complete")
@@ -334,7 +335,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
             ],
             "runs": [],
         }
-        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore())
+        observer = PersistentSubagentRuns(InspectionRenderer(inspections), record, SavingStore(), inspections=inspections)
         inspections.start("cancel-inspection", "worker [red-kite]", "cancel task")
         observer.subagent_started(
             "worker [red-kite]",
@@ -381,7 +382,7 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         inspections = LiveInspectionStore()
         inspections.start("inspection-1", "worker", "task")
         failing_renderer = InspectionRenderer(inspections)
-        observer = PersistentSubagentRuns(failing_renderer, {"events": [], "runs": []}, SavingStore(fail=True))
+        observer = PersistentSubagentRuns(failing_renderer, {"events": [], "runs": []}, SavingStore(fail=True), inspections=inspections)
         self.assertEqual(
             observer.subagent_started("worker", "task", inspection_id="inspection-1"),
             "forwarded:subagent_started",

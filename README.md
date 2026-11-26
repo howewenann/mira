@@ -83,8 +83,9 @@ from mira import MiraApplication
 from mira.api import Frontend, MessageEvent
 ```
 
-See the [MIRA Python API guide](docs/frontend-api.md) for lifecycle, events,
-blocking requests, snapshots, and minimal and full runnable frontends.
+See the [frontend integration guide](docs/frontend-api.md) to build a frontend,
+and the [architecture walkthrough](docs/frontend-architecture.md) for execution,
+ownership, and inspection. Runnable examples teach the complete lifecycle.
 
 For contributors, the [middleware guide](docs/middleware/README.md) explains
 the agent stacks, middleware behavior, and upstream integrations.

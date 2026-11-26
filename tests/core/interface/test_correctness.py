@@ -11,8 +11,6 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from core.execution.inspection.live import LiveInspectionStore
-from core.execution.inspection.subagents import live_inspection_store
 from core.interface import ArtifactEvent, FrontendEmitter, MessageEvent, RuntimeEvent, ToolEvent
 from core.execution.runner import TurnResult
 from session.context import normalize_events
@@ -240,13 +238,6 @@ class AdapterCorrectnessTests(unittest.TestCase):
         self.assertNotIn('turn_id', event)
         self.assertNotIn('message_id', event)
 
-    def test_inspection_capture_still_requires_a_hidden_frontend_capability(self) -> None:
-        # Evidence for the next ownership slice, not a new public capability.
-        frontend = RecordingFrontend()
-        emitter = FrontendEmitter(frontend)
-        self.assertIsNone(live_inspection_store(emitter))
-        frontend.live_inspections = LiveInspectionStore()
-        self.assertIs(live_inspection_store(emitter), frontend.live_inspections)
 
 
 class FrontendExampleTests(unittest.IsolatedAsyncioTestCase):

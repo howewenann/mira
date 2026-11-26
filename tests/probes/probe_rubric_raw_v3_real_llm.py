@@ -254,6 +254,7 @@ async def main() -> None:
     renderer = ProbeRenderer()
     rubric_renderer = RubricEventRenderer(
         renderer,
+        inspections=renderer.live_inspections,
         max_iterations=1,
         grader_model=model_name,
     )

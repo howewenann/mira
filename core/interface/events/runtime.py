@@ -7,7 +7,7 @@ from typing import Any, Literal, Mapping
 
 from core.interface.events.base import EventIdentity
 
-RuntimeKind = Literal["startup", "waiting", "message_group", "session"]
+RuntimeKind = Literal["startup", "waiting", "message_group", "session", "inspection"]
 MCPPhase = Literal["initializing", "initialized", "error"]
 
 
@@ -19,6 +19,9 @@ class RuntimeEvent(EventIdentity):
     message groups use ``finish``; sessions use ``opened``, ``turn_started``,
     ``ready``, ``cancelling``, and ``closed``. Startup state is intentionally
     extensible human-readable progress text.
+
+    Inspection states are ``reset``, ``append``, ``delta``, and ``status``.
+    Their detail contains ``inspection_id`` and a detached ``InspectionUpdate``.
     """
 
     kind: RuntimeKind

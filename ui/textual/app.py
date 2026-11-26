@@ -58,12 +58,6 @@ from core.application import available_tools, initial_mode, refresh_agent_specs,
 from core.execution.compaction import commit_forced_compaction
 from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
 from core.execution.workflows import execute_workflow
-from core.execution.inspection.live import LiveInspectionStore
-from core.execution.inspection.subagents import SubagentInspectionCoordinator
-from core.execution.inspection.persistence import (
-    PersistentSubagentRuns,
-    inspection_from_run,
-)
 from core.interface import FrontendEmitter
 from mira import MiraApplication, MiraSession
 from mira.api import FrontendEvent, MessageEvent, RuntimeEvent, ToolEvent
@@ -80,12 +74,6 @@ from session.plans import (
     plan_artifact_text,
 )
 from session.recorder import update_goal_event_status, update_plan_event_status
-from session.subagent_runs import (
-    clear_runs,
-    run_for_id,
-    run_for_inspection_id,
-    runs_for_origin,
-)
 from session.workflows import PersistentWorkflowHistory
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
@@ -277,7 +265,6 @@ class MiraApp(App[None]):
         self.agent_unavailable_message = "Main model is not configured. Run /models."
         self.trace = TraceStream.disabled(output_chars=self.tool_output_chars)
         self._subagent_live_active = False
-        self.live_inspections = LiveInspectionStore()
         self._pending_artifact_review: PendingArtifactReview | None = None
 
     def compose(self) -> ComposeResult:
@@ -319,7 +306,7 @@ class MiraApp(App[None]):
                         workflow_registry_provider=self._workflow_registry,
                     ),
                 )
-                yield Workspace(chat, Inspector(self.live_inspections,
+                yield Workspace(chat, Inspector(lambda key: self.core_session.inspection(key) if self.core_session else None,
                                 tool_output_chars=self.tool_output_chars, embedded=True, id="inspector"))
         yield TelemetryBar(id="telemetry-row")
 
@@ -950,7 +937,6 @@ class MiraApp(App[None]):
             self.application.frontend,
             session_id=str(self.session.get("id") or ""),
         )
-        inspection = SubagentInspectionCoordinator(self.live_inspections)
         try:
             graph = build_workflow_demo()
             payload = {"events": []}
@@ -959,7 +945,7 @@ class MiraApp(App[None]):
                 graph,
                 payload,
                 emitter=emitter,
-                inspection=inspection,
+                session=self.core_session,
                 workflow_id="workflow-demo",
                 workflow_name="workflow-demo",
             )
@@ -987,7 +973,6 @@ class MiraApp(App[None]):
             self.application.frontend,
             session_id=str(self.session.get("id") or ""),
         )
-        inspection = SubagentInspectionCoordinator(self.live_inspections)
         try:
             agent = self.application.workflows.agent(
                 name="workflow-demo-agent",
@@ -1016,7 +1001,7 @@ class MiraApp(App[None]):
                 graph,
                 payload,
                 emitter=emitter,
-                inspection=inspection,
+                session=self.core_session,
                 workflow_id="workflow-demo-phase2",
                 workflow_name="workflow-demo-phase2",
                 config=config,
@@ -1057,8 +1042,6 @@ class MiraApp(App[None]):
             validate_workflow_input,
         )
 
-        inspection = SubagentInspectionCoordinator(self.live_inspections)
-        persistent_runs: PersistentSubagentRuns | None = None
         workflow_history: PersistentWorkflowHistory | None = None
         try:
             graph = spec.factory(self.application.workflows)
@@ -1072,20 +1055,15 @@ class MiraApp(App[None]):
                 self.store,
                 command=command_text,
             )
-            persistent_runs = PersistentSubagentRuns(
-                workflow_history,
-                self.session,
-                self.store,
-            )
             emitter = FrontendEmitter(
-                TextualFrontend(persistent_runs),
+                TextualFrontend(workflow_history),
                 session_id=str(self.session.get("id") or ""),
             )
             await execute_workflow(
                 graph,
                 inputs,
                 emitter=emitter,
-                inspection=inspection,
+                session=self.core_session,
                 workflow_id=workflow_id,
                 workflow_name=spec.name,
                 config={
@@ -1112,8 +1090,6 @@ class MiraApp(App[None]):
             )
             self._set_status(state="error")
         finally:
-            if persistent_runs is not None:
-                persistent_runs.close()
             if workflow_history is not None:
                 workflow_history.close()
             self.turn_worker = None
@@ -2860,7 +2836,7 @@ class MiraApp(App[None]):
         self.session["title"] = "Untitled session"
         self.session["turns"] = 0
         self.session["events"] = []
-        clear_runs(self.session)
+        self.core_session._clear_inspections()
         self.session["dashboard"] = normalize_dashboard(None)
         ensure_dashboard(
             self.session,
@@ -2985,13 +2961,7 @@ class MiraApp(App[None]):
 
     def _current_subagent_runs(self) -> Any:
         """Return normalized run state owned by the current persisted session."""
-        if self.store is None or not isinstance(self.session, dict):
-            return []
-        session_id = str(self.session.get("id") or "")
-        if not session_id:
-            return []
-        saved = self.store.read(self.store.path(session_id))
-        return saved.get("runs", [])
+        return self.core_session.inspections() if self.core_session else []
 
     def tool_call_updated(self, name: str, args: Any, call_id: str = "", *, created_at: str = "") -> None:
         """Update an edited call without creating another transcript block."""
@@ -3041,6 +3011,13 @@ class MiraApp(App[None]):
             name, error, call_id=call_id, created_at=created_at, duration_ms=duration_ms,
         )
         self._rearm_waiting_if_busy()
+
+    def inspection_updated(self, event: RuntimeEvent) -> None:
+        """Route public incremental observations only to the selected session."""
+        if self.core_session is None or event.session_id != self.core_session.id:
+            return
+        detail = event.detail
+        self.query_one(Inspector).update_inspection(detail["inspection_id"], detail["update"])
 
     def frontend_event_received(self, event: FrontendEvent) -> None:
         """Retain native provenance on the existing transcript widgets."""
@@ -3372,16 +3349,11 @@ class MiraApp(App[None]):
         """Replace the chat viewport with the selected live or historical transcript."""
         event.stop()
         inspector = self.query_one(Inspector)
-        if event.run_id:
-            try:
-                saved = self._read_current_session()
-                run = run_for_id(saved.get("runs"), event.run_id)
-                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
-                    raise ValueError("the selected subagent run is no longer available")
-            except Exception as exc:
-                self.system_message(f"subagent history unavailable: {exc}", kind="error")
-                return
-        elif not inspector.open(event.inspection_id):
+        try:
+            if not inspector.open(event.run_id or event.inspection_id):
+                raise ValueError("the selected inspection is no longer available")
+        except Exception as exc:
+            self.system_message(f"subagent history unavailable: {exc}", kind="error")
             return
         self._show_inspector(inspector)
 
@@ -3390,18 +3362,12 @@ class MiraApp(App[None]):
         """Prefer one live Rubric transcript, then its durable snapshot."""
         event.stop()
         inspector = self.query_one(Inspector)
-        if not inspector.open(event.inspection_id):
-            try:
-                saved = self._read_current_session()
-                run = run_for_inspection_id(
-                    saved.get("runs"),
-                    event.inspection_id,
-                )
-                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
-                    raise ValueError("the selected Rubric inspection is no longer available")
-            except Exception as exc:
-                self.system_message(f"Rubric history unavailable: {exc}", kind="error")
-                return
+        try:
+            if not inspector.open(event.inspection_id):
+                raise ValueError("the selected inspection is no longer available")
+        except Exception as exc:
+            self.system_message(f"Rubric history unavailable: {exc}", kind="error")
+            return
         self._show_inspector(inspector)
 
     @on(WorkflowFinalStateSelected)
@@ -3429,23 +3395,12 @@ class MiraApp(App[None]):
         """Open a Workflow-owned agent in the ordinary full Inspector."""
         event.stop()
         inspector = self.query_one(Inspector)
-        if not inspector.open(event.inspection_id):
-            try:
-                saved = self._read_current_session()
-                run = run_for_inspection_id(
-                    saved.get("runs"),
-                    event.inspection_id,
-                )
-                if run is None or not inspector.open_snapshot(inspection_from_run(run)):
-                    raise ValueError(
-                        "the selected Workflow inspection is no longer available"
-                    )
-            except Exception as exc:
-                self.system_message(
-                    f"Workflow history unavailable: {exc}",
-                    kind="error",
-                )
-                return
+        try:
+            if not inspector.open(event.inspection_id):
+                raise ValueError("the selected inspection is no longer available")
+        except Exception as exc:
+            self.system_message(f"Workflow history unavailable: {exc}", kind="error")
+            return
         self._show_workflow_inspector(inspector)
 
     def _show_inspector(self, inspector: Inspector) -> None:
@@ -3465,23 +3420,13 @@ class MiraApp(App[None]):
         """Reload one owning tool's durable children into the existing panel."""
         event.stop()
         try:
-            saved = self._read_current_session()
-            runs = runs_for_origin(saved.get("runs"), event.origin_event_id)
+            runs = self.core_session.inspections(origin_event_id=event.origin_event_id)
             if not runs:
                 raise ValueError("no persisted subagent runs remain for this tool")
         except Exception as exc:
             self.system_message(f"subagent history unavailable: {exc}", kind="error")
             return
         self.query_one(SubagentsPanel).restore_records(runs)
-
-    def _read_current_session(self) -> dict[str, Any]:
-        """Read the active session from disk for retrospective interactions."""
-        if self.store is None or not isinstance(self.session, dict):
-            raise RuntimeError("session storage is unavailable")
-        session_id = str(self.session.get("id") or "")
-        if not session_id:
-            raise RuntimeError("the active session has no id")
-        return self.store.read(self.store.path(session_id))
 
     @on(Inspector.Closed)
     def close_inspector(self, event: Inspector.Closed) -> None:
@@ -3553,15 +3498,13 @@ class MiraApp(App[None]):
         self.trace.subagent_started(subagent, task_input)
         self._finish_main_stream_activity()
         self.waiting_finished()
-        record = self.query_one(SubagentsPanel).start_subagent(
+        self.query_one(SubagentsPanel).start_subagent(
             subagent,
             task_input,
             row_id=row_id,
             eval_id=eval_id,
             inspection_id=inspection_id,
         )
-        if record is not None and inspection_id:
-            self.live_inspections.start(inspection_id, record.name, task_input)
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
         self._rearm_waiting_if_busy()
@@ -3569,9 +3512,7 @@ class MiraApp(App[None]):
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Fill in a subagent request that arrived after the block started."""
         self.waiting_finished()
-        record = self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
-        if record is not None and record.inspection_id:
-            self.live_inspections.update_task(record.inspection_id, task_input)
+        self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
         if not self._subagent_live_active:
             self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
 
@@ -3639,7 +3580,7 @@ class MiraApp(App[None]):
         """Render an eval-created subagent only in the live panel."""
         self._finish_main_stream_activity()
         self.waiting_finished()
-        record = self.query_one(SubagentsPanel).start_subagent(
+        self.query_one(SubagentsPanel).start_subagent(
             subagent,
             task_input,
             row_id=row_id,
@@ -3647,8 +3588,6 @@ class MiraApp(App[None]):
             label=label,
             inspection_id=inspection_id,
         )
-        if record is not None and inspection_id:
-            self.live_inspections.start(inspection_id, record.name, task_input)
 
     def eval_subagent_finished(
         self,

@@ -600,6 +600,56 @@ def mcp_activity_snapshot(
 
 
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inspection_query_failures_preserve_the_chat_and_report_unavailability(self) -> None:
+        from ui.textual.widgets.subagent_panel import SubagentSelected
+        from ui.textual.widgets.rubric_bubble import RubricInspectionSelected
+        from ui.textual.widgets.workflow_bubble import WorkflowAgentSelected
+
+        app = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            with patch.object(app.core_session, "inspection", side_effect=OSError("history read failed")):
+                app.open_subagent_inspector(SubagentSelected(run_id="saved-run"))
+                app.open_rubric_inspector(RubricInspectionSelected("rubric-id"))
+                app.open_workflow_agent(WorkflowAgentSelected("workflow-id"))
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(widget) for widget in app.query_one(ChatLog).children)
+            self.assertIn("subagent history unavailable: history read failed", rendered)
+            self.assertIn("Rubric history unavailable: history read failed", rendered)
+            self.assertIn("Workflow history unavailable: history read failed", rendered)
+            self.assertEqual(app.query_one(Workspace).active["main"], "chat")
+
+    async def test_typed_inspection_updates_and_queries_follow_the_selected_session(self) -> None:
+        app = make_app()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            first = app.core_session
+            first._inspections.start("shared-key", "first child", "first task")
+            inspector = app.query_one(Inspector)
+            self.assertTrue(inspector.open("shared-key"))
+            self.assertFalse(hasattr(app, "live_inspections"))
+            self.assertFalse(hasattr(inspector, "store"))
+            record = deepcopy(first.record)
+            record["id"] = "second-inspection-session"
+            second = MiraSession(app.application, record)
+            # The real Core -> TextualFrontend path must ignore another session
+            # even when its local inspection key is identical.
+            second._inspections.start("shared-key", "second child", "second task")
+            second._inspections.append_delta("shared-key", "assistant", "other session")
+            first._inspections.append_delta("shared-key", "assistant", "selected session")
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(widget) for widget in inspector.query_one(ChatLog).children)
+            self.assertIn("selected session", rendered)
+            self.assertNotIn("other session", rendered)
+            app._activate_core_session(second)
+            self.assertEqual(inspector.inspection_id, "")
+            self.assertTrue(inspector.open("shared-key"))
+            first._inspections.append_delta("shared-key", "assistant", "late first update")
+            await pilot.pause()
+            rendered = "\n".join(renderable_plain(widget) for widget in inspector.query_one(ChatLog).children)
+            self.assertIn("other session", rendered)
+            self.assertNotIn("late first update", rendered)
+
     """Smoke tests for the Textual app shell."""
 
     async def test_production_adapter_preserves_identity_errors_and_stopped_timing(self) -> None:
@@ -3453,7 +3503,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(goal_blocks[0].query(".goal-action")), 4)
 
             initial_children = len(chat.children)
-            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai")
+            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai", inspections=app.core_session._inspections)
             identity = {"grading_run_id": "grade-1", "iteration": 0}
             projection.handle({"type": "rubric_evaluation_start", **identity})
             await pilot.pause()
@@ -3722,7 +3772,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         async with app.run_test(size=(110, 38)) as pilot:
             await pilot.pause()
-            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai")
+            projection = RubricEventRenderer(app, 3, grader_model="lmstudio:bonsai", inspections=app.core_session._inspections)
             identity = {"grading_run_id": "grade-tools", "iteration": 0}
             projection.handle({"type": "rubric_evaluation_start", **identity})
             projection.handle({"type": "rubric_verification_start", **identity})
@@ -3833,7 +3883,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         async with app.run_test(size=(110, 38)) as pilot:
             await pilot.pause()
-            projection = RubricEventRenderer(app, 2)
+            projection = RubricEventRenderer(app, 2, inspections=app.core_session._inspections)
             identity = {"grading_run_id": "grade-inspect", "iteration": 0}
             verifier_id = "rubric:grade-inspect:0:verifier"
             grader_id = "rubric:grade-inspect:0:grader"
@@ -4110,13 +4160,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(110, 38)) as pilot:
                 await pilot.pause()
-                app.live_inspections.start(
+                app.core_session._inspections.start(
                     inspection_id,
                     "Verifier · Pass 1",
                     "fresh live input",
                     inspection_type="Rubrics",
                 )
-                app.live_inspections.append(
+                app.core_session._inspections.append(
                     inspection_id,
                     InspectionEvent("reasoning", text="fresh live reasoning"),
                 )
@@ -4182,7 +4232,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test(size=(120, 50)) as pilot:
             await pilot.pause()
             chat = app.query_one(ChatLog)
-            projection = RubricEventRenderer(app, 1, grader_model="lmstudio:bonsai")
+            projection = RubricEventRenderer(app, 1, grader_model="lmstudio:bonsai", inspections=app.core_session._inspections)
             identity = {"grading_run_id": "grade-footer", "iteration": 0}
             verifier_id = "rubric:grade-footer:0:verifier"
             grader_id = "rubric:grade-footer:0:grader"
@@ -4252,7 +4302,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         async with app.run_test(size=(100, 32)) as pilot:
             await pilot.pause()
-            projection = RubricEventRenderer(app, 2)
+            projection = RubricEventRenderer(app, 2, inspections=app.core_session._inspections)
             zero = {"grading_run_id": "grade-zero", "iteration": 0}
             for event in (
                 {"type": "rubric_evaluation_start", **zero},
@@ -12318,8 +12368,8 @@ def workflow(mira):
                 },
                 workflow_id="demo-id",
             )
-            inspection_id = app.live_inspections.allocate_id("task-1")
-            app.live_inspections.start(
+            inspection_id = app.core_session._inspections.allocate_id("task-1")
+            app.core_session._inspections.start(
                 inspection_id,
                 "workflow-demo-agent",
                 "Run the demo.",
@@ -12596,11 +12646,11 @@ def workflow(mira):
                     workflow_id="parallel-id",
                 )
                 for agent_index in range(2):
-                    inspection_id = app.live_inspections.allocate_id(
+                    inspection_id = app.core_session._inspections.allocate_id(
                         f"{task_id}-agent-{agent_index}"
                     )
                     inspection_ids.append(inspection_id)
-                    app.live_inspections.start(
+                    app.core_session._inspections.start(
                         inspection_id,
                         f"agent-{agent_index}",
                         f"request {task_index}:{agent_index}",
@@ -14428,6 +14478,7 @@ def workflow(mira):
                     consume_subagents(
                         discovered_subagents(),
                         request_renderer,
+                        inspection=SubagentInspectionCoordinator(app.core_session._inspections),
                     )
                 )
                 await asyncio.wait_for(output_started.wait(), timeout=1)
@@ -14478,7 +14529,7 @@ def workflow(mira):
                 await asyncio.sleep(0.02)
                 panel.tick()
                 self.assertEqual(record.elapsed_seconds(), stopped_elapsed)
-                inspection = app.live_inspections.get(record.inspection_id)
+                inspection = app.core_session._inspections.get(record.inspection_id)
                 assert inspection is not None
                 self.assertEqual(inspection.status, "DONE")
                 self.assertEqual(inspection.events[-1].text, parent_result)
@@ -14490,7 +14541,7 @@ def workflow(mira):
         app = make_app()
         async with app.run_test(size=(120, 30)) as pilot:
             await pilot.pause()
-            coordinator = SubagentInspectionCoordinator(app.live_inspections)
+            coordinator = SubagentInspectionCoordinator(app.core_session._inspections)
             event = {
                 "id": "eval-row",
                 "eval_id": "eval-call",
@@ -14514,6 +14565,7 @@ def workflow(mira):
             self.assertTrue(panel.display)
             self.assertEqual(len(panel._records), 1)
             record = panel._records["eval-row"]
+            coordinator.update_title("eval-row", record.name)
             self.assertEqual(record.status, "RUNNING")
             self.assertRegex(record.name, r"^general-purpose \[[^]]+\]$")
             self.assertEqual(panel._regular_order, [])
@@ -14545,7 +14597,7 @@ def workflow(mira):
             self.assertEqual(panel._regular_order, [])
             self.assertEqual(panel._records["eval-row"].status, "DONE")
             self.assertFalse(app._subagent_live_active)
-            inspection = app.live_inspections.get(inspection_id)
+            inspection = app.core_session._inspections.get(inspection_id)
             assert inspection is not None
             self.assertEqual(inspection.status, "DONE")
             self.assertEqual(inspection.events[-1].text, child_result)
@@ -14562,15 +14614,16 @@ def workflow(mira):
 
         async with app.run_test(size=(120, 40)) as pilot:
             await pilot.pause()
-            inspection_id = app.live_inspections.allocate_id("task-call")
+            inspection_id = app.core_session._inspections.allocate_id("task-call")
             full_task = "Inspect every relevant file and preserve this complete request."
+            app.core_session._inspections.start(inspection_id, "researcher [fox]", full_task)
             app.start_subagent_live()
             app.subagent_started(
                 "researcher [fox]",
                 full_task,
                 inspection_id=inspection_id,
             )
-            app.live_inspections.append_delta(inspection_id, "reasoning", "Checking the repository.")
+            app.core_session._inspections.append_delta(inspection_id, "reasoning", "Checking the repository.")
             await pilot.pause()
 
             panel = app.query_one(SubagentsPanel)
@@ -14629,8 +14682,8 @@ def workflow(mira):
             self.assertTrue(inspector_log.has_focus)
             self.assertFalse(bool(list(inspector.query("#inspector-close"))))
 
-            app.live_inspections.append_delta(inspection_id, "reasoning", " Still live.")
-            app.live_inspections.append(
+            app.core_session._inspections.append_delta(inspection_id, "reasoning", " Still live.")
+            app.core_session._inspections.append(
                 inspection_id,
                 InspectionEvent(
                     "tool_call",
@@ -14639,7 +14692,7 @@ def workflow(mira):
                     call_id="read-one",
                 ),
             )
-            app.live_inspections.upsert_tool_completion(
+            app.core_session._inspections.upsert_tool_completion(
                 inspection_id,
                 InspectionEvent(
                     "tool_result",
@@ -14660,7 +14713,7 @@ def workflow(mira):
             self.assertFalse(table.show_cursor)
             self.assertTrue(app.query_one(PromptBox).has_focus)
 
-            app.live_inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
+            app.core_session._inspections.append_delta(inspection_id, "assistant", "Finished while closed.")
             await pilot.click("#subagents-tasks", offset=(2, 0))
             await pilot.pause()
             reopened = "\n".join(renderable_plain(child) for child in inspector_log.children)
@@ -14871,7 +14924,7 @@ def workflow(mira):
 
             async with app.run_test(size=(130, 48)) as pilot:
                 await pilot.pause()
-                self.assertEqual(app.live_inspections._items, {})
+                self.assertEqual(app.core_session._inspections._items, {})
                 bubbles = list(app.query(ToolBubble))
                 self.assertEqual(len(bubbles), 4)
                 self.assertIsInstance(bubbles[0].subagents_anchor, Button)
@@ -14930,7 +14983,7 @@ def workflow(mira):
                 self.assertIn("contained failure", rendered)
                 self.assertIn("diagnostic detail", rendered)
                 self.assertIn("final response changed on disk", rendered)
-                self.assertEqual(inspector.store._items, {})
+                self.assertFalse(hasattr(inspector, "store"))
 
                 await pilot.press("escape")
                 await pilot.pause()

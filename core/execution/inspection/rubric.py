@@ -7,7 +7,6 @@ from typing import Any
 
 from core.context.usage import field as value_field
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
-from core.execution.inspection.subagents import live_inspection_store
 from core.execution.streams.messages import streamed_message_deltas
 from core.execution.streams.output import is_tool_message, message_text
 from core.execution.streams.tool_args import normalized_call
@@ -73,8 +72,8 @@ def inspection_event_values(messages: Any) -> list[dict[str, Any]]:
 class RubricInspectionProjector:
     """Keep Rubric observation small, process-local, and execution-neutral."""
 
-    def __init__(self, renderer: Any) -> None:
-        self.store: LiveInspectionStore | None = live_inspection_store(renderer)
+    def __init__(self, store: LiveInspectionStore | None) -> None:
+        self.store = store
 
     def start(self, event: dict[str, Any], phase: str) -> str:
         if self.store is None or phase not in RUBRIC_PHASES:

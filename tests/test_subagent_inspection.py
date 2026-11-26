@@ -24,7 +24,6 @@ from core.execution.inspection.subagents import (
     SubagentInspectionCapture,
     SubagentInspectionCoordinator,
     capture_child_streams,
-    live_inspection_store,
 )
 from core.execution.streams.subagents import (
     consume_subagent,
@@ -349,7 +348,7 @@ class LiveInspectionStoreTests(unittest.TestCase):
             ["inspect", "already captured and live", "after close"],
         )
 
-    def test_frontend_wrappers_expose_store_and_forward_inspection_metadata(self) -> None:
+    def test_frontend_wrappers_forward_inspection_metadata(self) -> None:
         class Sink:
             def __init__(self) -> None:
                 self.live_inspections = LiveInspectionStore()
@@ -369,7 +368,6 @@ class LiveInspectionStoreTests(unittest.TestCase):
         sink = Sink()
         adapter = RendererAdapter(sink)
         emitter = FrontendEmitter(adapter)
-        wrapper = SimpleNamespace(renderer=emitter)
 
         emitter.eval_subagent_started(
             "worker [fox]",
@@ -378,7 +376,6 @@ class LiveInspectionStoreTests(unittest.TestCase):
             inspection_id="subagent:call",
         )
 
-        self.assertIs(live_inspection_store(wrapper), sink.live_inspections)
         self.assertEqual(
             sink.received,
             {"inspection_id": "subagent:call"},
@@ -610,7 +607,7 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
             output=result(),
         )
 
-        await consume_subagents(AsyncItems([subagent]), renderer)
+        await consume_subagents(AsyncItems([subagent]), renderer, inspection=SubagentInspectionCoordinator(renderer.live_inspections))
 
         self.assertEqual(renderer.events[0], ("live_started",))
         self.assertEqual(renderer.events[-1], ("live_stopped",))
@@ -966,7 +963,7 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
             output=fail(),
         )
 
-        await consume_subagent(subagent, renderer)
+        await consume_subagent(subagent, renderer, inspection=SubagentInspectionCoordinator(renderer.live_inspections))
 
         self.assertEqual(renderer.events[-1], ("worker [fox]", "error: child failed"))
         inspection = renderer.live_inspections.get(renderer.events[0][1])
@@ -1002,7 +999,7 @@ class SubagentCaptureTests(unittest.IsolatedAsyncioTestCase):
             output=succeed(),
         )
 
-        await consume_subagent(subagent, renderer)
+        await consume_subagent(subagent, renderer, inspection=SubagentInspectionCoordinator(renderer.live_inspections))
 
         self.assertEqual(renderer.finished, "parent-facing result")
         inspection = renderer.live_inspections.get("subagent:successful-call")

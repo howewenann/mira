@@ -110,8 +110,10 @@ def inspector_main() -> int:
 
         def __init__(self) -> None:
             super().__init__(driver_class=driver_class_for_platform(sys.platform))
-            self.live_inspections = LiveInspectionStore()
-            self.projection = RubricInspectionProjector(self)
+            self.live_inspections = LiveInspectionStore(
+                lambda key, update: self.query_one(Inspector).update_inspection(key, update)
+            )
+            self.projection = RubricInspectionProjector(self.live_inspections)
             self.active_phase = "verifier"
             self.ui_thread: int | None = None
             self.done = False
@@ -126,7 +128,7 @@ def inspector_main() -> int:
                 yield Button("2 · Grader", id="probe-grader")
                 yield Static("Read-only · live model calls", id="probe-title")
             yield Inspector(
-                self.live_inspections,
+                self.live_inspections.get,
                 tool_output_chars=max(240, opts.tool_output_chars),
                 embedded=True,
                 id="probe-inspector",

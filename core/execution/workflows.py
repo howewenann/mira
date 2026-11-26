@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 from langgraph.graph.state import CompiledStateGraph
@@ -13,6 +13,7 @@ from langgraph.stream.transformers import TasksTransformer
 from langgraph.types import Command
 
 from core.execution.inspection.subagents import SubagentInspectionCoordinator
+from core.execution.inspection.persistence import PersistentSubagentRuns
 from core.execution.runner import (
     annotate_filesystem_approvals,
     approval_resume_value,
@@ -24,6 +25,9 @@ from core.execution.streams.subagents import consume_workflow_inspections
 from core.execution.streams.tools import consume_live_tool_errors
 from core.interface import FrontendEmitter
 from session.checkpoint import make_checkpointer
+
+if TYPE_CHECKING:
+    from core.application.session import MiraSession
 
 
 _MISSING = object()
@@ -247,7 +251,7 @@ async def execute_workflow(
     payload: Any,
     *,
     emitter: FrontendEmitter,
-    inspection: SubagentInspectionCoordinator,
+    session: MiraSession,
     workflow_id: str,
     workflow_name: str = "",
     config: dict[str, Any] | None = None,
@@ -257,6 +261,11 @@ async def execute_workflow(
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
 ) -> Any:
     """Run one native graph through the established Workflow observation path."""
+    inspection = SubagentInspectionCoordinator(session._inspections)
+    persistent_runs = PersistentSubagentRuns(
+        emitter, session.record, session.application.store, session._inspections,
+    )
+    emitter = persistent_runs
     coordinator = WorkflowCoordinator(
         emitter,
         workflow_id=workflow_id,
@@ -350,6 +359,8 @@ async def execute_workflow(
         inspection.cancel_standalone(str(error))
         coordinator.cancel(str(error))
         raise
+    finally:
+        persistent_runs.close()
 
 
 def _native_task_result(value: Any) -> Any:

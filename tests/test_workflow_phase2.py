@@ -24,6 +24,7 @@ from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.streams.output import capture_output, collect_interrupts
 from core.execution.streams.subagents import consume_workflow_inspections
 from core.execution.workflows import WorkflowCoordinator, execute_workflow
+from tests.core.interface.test_contract import application_for, FakeAgent
 from core.interface import (
     ApprovalRequest,
     AskUserRequest,
@@ -324,7 +325,7 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             graph,
             {"messages": [{"role": "user", "content": "Run the tool."}]},
             emitter=FrontendEmitter(frontend),
-            inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+            session=application_for(frontend, FakeAgent([]))[1],
             workflow_id="agent-no-author-checkpointer",
         )
 
@@ -391,12 +392,13 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         parent.add_edge("analyse", END)
         parent.add_edge("verify", END)
         frontend = RecordingFrontend()
-        store = LiveInspectionStore()
+        session = application_for(frontend, FakeAgent([]))[1]
+        store = session._inspections
         output = await execute_workflow(
             parent.compile(),
             {"messages": [{"role": "user", "content": "Compare."}]},
             emitter=FrontendEmitter(frontend),
-            inspection=SubagentInspectionCoordinator(store),
+            session=session,
             workflow_id="parallel-agents",
             workflow_name="parallel-agents",
         )
@@ -435,6 +437,11 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(store.get(event.agent_id).inspection_type == "subagent" for event in agent_starts)
         )
+        runs = session.inspections()
+        self.assertEqual(len(runs), 4)
+        self.assertTrue(all(run["origin_event_id"] is None for run in runs))
+        self.assertTrue(all(session.inspection(event.inspection_id).status == "DONE"
+                            for event in agent_starts))
 
     async def test_shared_executor_consumes_output_once_and_returns_native_state(self) -> None:
         graph = StateGraph(ResumeState)
@@ -443,13 +450,13 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         graph.add_edge("done", END)
         counting = CountingGraph(graph.compile())
         frontend = RespondingFrontend()
-        inspection = SubagentInspectionCoordinator(LiveInspectionStore())
+        session = application_for(frontend, FakeAgent([]))[1]
 
         output = await execute_workflow(
             counting,
             {},
             emitter=FrontendEmitter(frontend),
-            inspection=inspection,
+            session=session,
             workflow_id="counting",
         )
 
@@ -484,7 +491,7 @@ class WorkflowInspectionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     graph,
                     {},
                     emitter=FrontendEmitter(frontend),
-                    inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                    session=application_for(frontend, FakeAgent([]))[1],
                     workflow_id=f"resume-{index}",
                     config={"configurable": {"thread_id": f"resume-{index}"}},
                     action_agent=SimpleNamespace(mira_backend=None),

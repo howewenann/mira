@@ -25,6 +25,7 @@ from agent.planning.policy import (
 from core.application.artifacts import resolve_artifact_review
 from core.context.observation import context_usage_scope
 from core.interface import Frontend, FrontendEmitter
+from core.execution.inspection.live import LiveInspectionStore
 from core.execution.runner import TurnResult, run_turn, supported_kwargs
 from session.context import session_mcp_attachments, update_title
 from session.dashboard import apply_context_usage, apply_turn_usage, ensure_dashboard
@@ -129,6 +130,7 @@ async def run_user_turn(
     synchronize_conversation: Any | None = None,
     recovery: dict[str, Any] | None = None,
     turn_id: str = "",
+    inspections: LiveInspectionStore | None = None,
 ) -> TurnResult:
     """Run one submitted MIRA interaction across all immediate native phases."""
     emitter = FrontendEmitter(
@@ -253,6 +255,7 @@ async def run_user_turn(
             ),
             session,
             store,
+            inspections,
         )
         poller = asyncio.create_task(poll_compactions(phase_recorder, phase_agent, thread_id))
         try:
@@ -281,6 +284,7 @@ async def run_user_turn(
                 policy_kwargs = supported_kwargs(
                     selected_runner,
                     {
+                        "inspections": inspections,
                         "always_allowed_tools": always_allowed_tools,
                         "persist_always_allow": persist_always_allow,
                         "resume_interrupts": (

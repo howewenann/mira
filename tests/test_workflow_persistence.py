@@ -487,7 +487,7 @@ class WorkflowPersistenceTests(unittest.TestCase):
                 command="/workflow__agents topic=history",
                 clock=lambda: current[0],
             )
-            runs = PersistentSubagentRuns(history, record, store)
+            runs = PersistentSubagentRuns(history, record, store, inspections=inspections)
             observer = FrontendEmitter(RendererAdapter(runs))
 
             observer.workflow_started("wf-agent-save", "agents")

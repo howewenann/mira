@@ -14,6 +14,7 @@ from langgraph.types import Send, interrupt
 from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.subagents import SubagentInspectionCoordinator
 from core.execution.workflows import WorkflowCoordinator, execute_workflow
+from tests.core.interface.test_contract import application_for, FakeAgent
 from core.interface import FrontendEmitter, FrontendEvent, WorkflowEvent
 from core.interface.requests import AskUserRequest
 from ui.shared.adapter import RendererAdapter
@@ -41,7 +42,7 @@ async def run_workflow(
         graph,
         payload,
         emitter=FrontendEmitter(frontend),
-        inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+        session=application_for(frontend, FakeAgent([]))[1],
         workflow_id="workflow:test",
         workflow_name="test",
     )
@@ -261,7 +262,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 graph.compile(),
                 {"seed": "alpha"},
                 emitter=FrontendEmitter(frontend),
-                inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                session=application_for(frontend, FakeAgent([]))[1],
                 workflow_id="failure",
                 workflow_name="failure",
             )
@@ -290,7 +291,7 @@ class WorkflowCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cancel_graph.compile(),
                 {"seed": "alpha"},
                 emitter=FrontendEmitter(cancelled_frontend),
-                inspection=SubagentInspectionCoordinator(LiveInspectionStore()),
+                session=application_for(cancelled_frontend, FakeAgent([]))[1],
                 workflow_id="cancel",
                 workflow_name="cancel",
             )

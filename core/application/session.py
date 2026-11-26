@@ -10,11 +10,15 @@ from uuid import uuid4
 
 from agent.planning.policy import PLANNING_STAGE_GOAL_RESEARCH, PLANNING_STAGE_PLAN_RESEARCH
 from core.execution.handoff import synchronize_conversation
+from core.execution.inspection.live import InspectionUpdate, LiveInspection, LiveInspectionStore
+from core.execution.inspection.persistence import inspection_from_run
 from core.execution.turns import plan_thread_id, run_user_turn
 from core.interface import FrontendEmitter, SessionSnapshot
+from core.interface.events import RuntimeEvent
 from session.dashboard import normalize_dashboard, update_duration
 from session.goals import clear_current_goal, current_goal, pause_current_goal, start_goal_attempt
 from session.plans import clear_current_plan, current_plan, pause_current_plan, start_plan_attempt
+from session.subagent_runs import clear_runs
 
 if TYPE_CHECKING:
     from core.application.app import MiraApplication
@@ -56,7 +60,47 @@ class MiraSession:
         self._active_task: asyncio.Task[Any] | None = None
         self._transitioning = False
         self.recovery: dict[str, Any] | None = None
+        self._inspections = LiveInspectionStore(self._inspection_updated)
         application._sessions[self.id] = self
+
+    def inspection(self, inspection_id: str) -> LiveInspection | None:
+        """Retrieve a detached live or historical transcript by inspection or run ID."""
+        if self.runtime_state == "closed":
+            return None
+        live = self._inspections.get(inspection_id)
+        if live is not None:
+            return deepcopy(live)
+        try:
+            saved = self.application.store.read(self.application.store.path(self.id))
+        except FileNotFoundError:
+            return None
+        runs = saved.get("runs", ())
+        run = next((run for run in runs
+                    if run.get("inspection_id") == inspection_id or run.get("id") == inspection_id), None)
+        return deepcopy(inspection_from_run(run)) if run is not None else None
+
+    def inspections(self, *, origin_event_id: int | None = None) -> list[dict[str, Any]]:
+        """List detached durable runs, optionally for one parent transcript entry."""
+        if self.runtime_state == "closed":
+            return []
+        return deepcopy([
+            {key: value for key, value in run.items() if key != "events"}
+            for run in self.record.get("runs", ())
+            if origin_event_id is None or run.get("origin_event_id") == origin_event_id
+        ])
+
+    def _inspection_updated(self, inspection_id: str, update: InspectionUpdate) -> None:
+        # Only the changed item crosses the event boundary, never the transcript.
+        self.application.frontend.emit(RuntimeEvent(
+            kind="inspection", state=update.operation, session_id=self.id,
+            turn_id=str(self.mode.get("turn_id") or "") if self._active_task else "",
+            detail={"inspection_id": inspection_id, "update": deepcopy(update)},
+        ))
+
+    def _clear_inspections(self) -> None:
+        """Keep inspection cleanup coupled while transcript clearing migrates."""
+        clear_runs(self.record)
+        self._inspections.clear()
 
     async def restore_graph_state(self) -> None:
         """Restore application semantics and discover saved graph work without running it."""
@@ -155,6 +199,12 @@ class MiraSession:
         self._active_task = current
         self.runtime_state = "running"
         recovery = kwargs.get("recovery") or {}
+        if recovery:
+            for run in self.record.get("runs", ()):
+                if run.get("inspection_id") and run.get("status") != "DONE":
+                    inspection = inspection_from_run(run)
+                    inspection.id = run["inspection_id"]
+                    self._inspections.restore(deepcopy(inspection))
         self.mode["turn_id"] = str(recovery.get("turn_id") or uuid4().hex)
         emitter = FrontendEmitter(
             self.application.frontend, session_id=self.id, turn_id=self.mode["turn_id"],
@@ -179,6 +229,7 @@ class MiraSession:
                 mode=self.mode,
                 text=text,
                 turn_id=self.mode["turn_id"],
+                inspections=self._inspections,
                 model_name=model_name,
                 context_limit_tokens=context_limit_tokens,
                 context_limit_source=context_limit_source,
@@ -460,6 +511,7 @@ class MiraSession:
         if self.checkpointer is not None:
             await self.checkpointer.conn.close()
         self.runtime_state = "closed"
+        self._inspections.clear()
         FrontendEmitter(self.application.frontend, session_id=self.id).session_state("closed")
 
 

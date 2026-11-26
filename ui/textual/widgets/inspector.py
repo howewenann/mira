@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from textual import on
@@ -11,17 +12,16 @@ from textual.events import Click
 from textual.message import Message
 from textual.widgets import Button, Static
 
-from core.execution.inspection.live import (
+from mira.api import (
     InspectionEvent,
     InspectionUpdate,
     LiveInspection,
-    LiveInspectionStore,
 )
 from ui.textual.widgets.chat_log import ChatLog, DEFAULT_TOOL_OUTPUT_CHARS
 
 
 class Inspector(Vertical):
-    """Generic live inspection surface backed by a LiveInspectionStore."""
+    """Presentation of detached public inspection payloads."""
 
     can_focus = True
 
@@ -30,14 +30,14 @@ class Inspector(Vertical):
 
     def __init__(
         self,
-        store: LiveInspectionStore,
+        inspection: Callable[[str], LiveInspection | None],
         *,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
         embedded: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.store = store
+        self._inspection = inspection
         self.tool_output_chars = tool_output_chars
         self.embedded = embedded
         self.title = "Inspector"
@@ -57,27 +57,13 @@ class Inspector(Vertical):
         )
 
     def open(self, inspection_id: str) -> bool:
-        """Replay captured state and subscribe for subsequent live updates."""
-        inspection = self.store.get(inspection_id)
+        """Replay a detached selection; typed events provide subsequent updates."""
+        inspection = self._inspection(inspection_id)
         if inspection is None:
             return False
-        self._unsubscribe()
-        self._snapshot = None
-        self.workflow_task_id = ""
-        self.inspection_id = inspection_id
-        self._update_header(inspection)
-        self._replay()
-        self.store.subscribe(inspection_id, self._inspection_updated)
-        return True
-
-    def open_snapshot(self, inspection: LiveInspection) -> bool:
-        """Open one immutable historical transcript without subscribing."""
-        if not inspection.id:
-            return False
-        self._unsubscribe()
-        self.inspection_id = inspection.id
         self._snapshot = inspection
         self.workflow_task_id = ""
+        self.inspection_id = inspection.id
         self._update_header(inspection)
         self._replay()
         return True
@@ -89,7 +75,6 @@ class Inspector(Vertical):
         snapshot: dict[str, str] | None = None,
     ) -> None:
         """Show one retained Workflow final state value bubble."""
-        self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = ""
@@ -102,7 +87,6 @@ class Inspector(Vertical):
 
     def open_workflow_node(self, view: Any) -> None:
         """Render Input, agent summaries, and the available terminal boundary."""
-        self._unsubscribe()
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = str(view.task_id)
@@ -128,14 +112,10 @@ class Inspector(Vertical):
             log.system_message(view.error, kind="error")
 
     def stop_inspection(self) -> None:
-        """Detach from the current transcript without changing stored state."""
-        self._unsubscribe()
+        """Stop displaying updates without changing captured state."""
         self.inspection_id = ""
         self._snapshot = None
         self.workflow_task_id = ""
-
-    def on_unmount(self) -> None:
-        self._unsubscribe()
 
     def on_click(self, event: Click) -> None:
         """Give Escape ownership to the Inspector after a non-button click."""
@@ -147,11 +127,7 @@ class Inspector(Vertical):
         event.stop()
         self.post_message(self.Closed())
 
-    def _unsubscribe(self) -> None:
-        if self.inspection_id:
-            self.store.unsubscribe(self.inspection_id, self._inspection_updated)
-
-    def _inspection_updated(
+    def update_inspection(
         self,
         inspection_id: str,
         update: InspectionUpdate,
@@ -159,8 +135,9 @@ class Inspector(Vertical):
         if inspection_id != self.inspection_id:
             return
         if update.operation == "reset":
-            inspection = self.store.get(inspection_id)
+            inspection = self._inspection(inspection_id)
             if inspection is not None:
+                self._snapshot = inspection
                 self._update_header(inspection)
             self._replay()
         elif update.event is not None:
@@ -169,7 +146,7 @@ class Inspector(Vertical):
     def _replay(self) -> None:
         log = self.query_one("#inspector-log", ChatLog)
         log.clear_log()
-        inspection = self._snapshot or self.store.get(self.inspection_id)
+        inspection = self._snapshot or self._inspection(self.inspection_id)
         if inspection is None:
             return
         for event in inspection.events:

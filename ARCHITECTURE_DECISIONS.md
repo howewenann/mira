@@ -136,7 +136,7 @@ Interface under [core/interface/](core/interface/) implements ordered event emis
 blocking interaction requests. The thin `mira` and `mira.api` facades expose
 those exact classes and types as the one supported MIRA API. Textual and
 one-shot terminal output use that surface for normal turns. Textual still owns
-internal runtime rebuild, Workflow launch, history, and inspection operations;
+internal runtime rebuild, Workflow launch, and history operations;
 the API boundary migration is incomplete.
 
 Outer interactions use opaque IDs distinct from completed-turn counts and
@@ -153,6 +153,30 @@ streaming or telemetry ticks. Textual startup explicitly selects its adapter;
 the shared renderer projection retains the complete typed event for callbacks
 that accept it, and Textual retains provenance on existing message/tool widgets.
 Foreground guards remain around requests, including Workflow requests.
+
+Each session now owns its existing `LiveInspectionStore`. Capture consumers
+receive it explicitly; renderer traversal and hidden frontend capabilities are
+removed. `PersistentSubagentRuns` still projects child observations into the
+existing durable `runs[]` schema because live streams and historical records
+have different lifetimes. Native namespace correlation remains necessary for
+parallel and out-of-order child streams. Established origin IDs are cached
+rather than repeatedly scanning the transcript for each delta.
+
+The public `inspection(id)` query returns one detached live or historical
+transcript, and `inspections(origin_event_id=...)` returns detached run metadata
+without event contents. Incremental updates use the existing `RuntimeEvent`
+channel with kind `inspection`; Textual consumes these directly once. There
+is no public mutable store, extra persistence layer, or snapshot-wide copy of
+inspections. Closing a session releases live contents; recovery restores saved
+inspection identities. Core Workflow execution now constructs and closes inspection observers using
+the owning session. Textual still launches that internal executor and wires
+Workflow history until Workflow launch itself migrates. Transcript clearing
+still calls a private session cleanup hook pending broader session migration.
+
+The [frontend walkthrough](docs/frontend-architecture.md) explains current
+ownership and remaining exceptions; the [API guide](docs/frontend-api.md)
+teaches a complete minimal integration before the detailed contracts.
+
 
 **Why:** A frontend should render state and collect choices without owning
 agent execution, HITL resume, Plan/Goal phases, compaction, persistence, usage,

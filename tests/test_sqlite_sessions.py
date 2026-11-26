@@ -35,6 +35,72 @@ from core.execution.runner import run_turn
 
 
 class SqliteSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inspection_survives_native_child_approval_and_cold_recovery(self) -> None:
+        from deepagents import create_deep_agent
+        from tests.core.interface.test_contract import RecordingFrontend
+
+        effects = []
+
+        @tool
+        def approved_action(value: str) -> str:
+            """Record an explicitly approved child action."""
+            effects.append(value)
+            return "action completed"
+
+        main_model = BindableFakeMessagesListChatModel(responses=[AIMessage(
+            content="", tool_calls=[{"name": "task", "id": "parent-task",
+                                     "args": {"subagent_type": "worker", "description": "inspect then act"}}],
+        )])
+        child_model = BindableFakeMessagesListChatModel(responses=[AIMessage(
+            content=[{"type": "reasoning", "reasoning": "before child approval"}],
+            tool_calls=[{"name": "approved_action", "id": "child-action", "args": {"value": "x"}}],
+        )])
+
+        def pair(*, checkpointer, **kwargs):
+            graph = create_deep_agent(model=main_model, subagents=[{
+                "name": "worker", "description": "Inspect and act", "system_prompt": "Do the task.",
+                "model": child_model, "tools": [approved_action],
+                "interrupt_on": {"approved_action": True},
+            }], checkpointer=checkpointer)
+            return graph, graph
+
+        with tempfile.TemporaryDirectory() as directory, patch("core.application.app.build_agent_pair", side_effect=pair):
+            workspace = Path(directory)
+            first = await self.start(workspace, frontend=RecordingFrontend())
+            try:
+                session = await first.open_session("inspection-recovery")
+                with self.assertRaisesRegex(AssertionError, "no response supplied"):
+                    await session.prompt("delegate the action")
+                saved = session.inspections()[0]
+                inspection = session.inspection(saved["inspection_id"])
+                self.assertTrue(any(item.name == "approved_action" for item in inspection.events))
+            finally:
+                await self.stop(first)
+
+            main_model = BindableFakeMessagesListChatModel(responses=[AIMessage(content="main complete")])
+            child_model = BindableFakeMessagesListChatModel(responses=[AIMessage(content="child complete")])
+            second = await self.start(workspace, frontend=RecordingFrontend([[{"type": "allow_once"}]]))
+            try:
+                reopened = await second.open_session("inspection-recovery")
+                self.assertIsNotNone(reopened.inspection(saved["id"]))
+                await reopened.resume_pending()
+                runs = reopened.inspections()
+                self.assertEqual(len(runs), 1)
+                self.assertEqual(runs[0]["id"], saved["id"])
+                self.assertEqual(runs[0]["inspection_id"], saved["inspection_id"])
+                self.assertEqual(runs[0]["origin_event_id"], saved["origin_event_id"])
+                inspection = reopened.inspection(saved["inspection_id"])
+                self.assertEqual(inspection.status, "DONE")
+                self.assertEqual(inspection.events[-1].text, "child complete")
+                self.assertEqual([item.text for item in inspection.events if item.kind == "reasoning"],
+                                 ["before child approval"])
+                completions = [item for item in inspection.events
+                               if item.call_id == "child-action" and item.kind in {"tool_result", "tool_error"}]
+                self.assertEqual([(item.kind, item.text) for item in completions], [("tool_result", "action completed")])
+                self.assertEqual(effects, ["x"])
+            finally:
+                await self.stop(second)
+
     async def test_public_prompt_recovery_retains_outer_identity_after_cold_restart(self) -> None:
         from core.interface import MessageEvent, RuntimeEvent
         from tests.core.interface.test_contract import RecordingFrontend

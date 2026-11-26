@@ -18,10 +18,10 @@ from langgraph.stream.transformers import CustomTransformer
 from agent.middleware.correction import CORRECTION_EVENT
 from agent.planning.policy import PLANNING_STAGES
 from core.execution.streams.corrections import normalize_correction_event
+from core.execution.inspection.live import LiveInspectionStore
 from core.execution.inspection.subagents import (
     EvalInspectionTransformer,
     SubagentInspectionCoordinator,
-    live_inspection_store,
     native_inspection_hint,
 )
 from core.execution.streams.messages import consume_messages
@@ -652,6 +652,7 @@ async def run_turn(
     persist_always_allow: Callable[[Any, dict[str, Any]], None] | None = None,
     resume_interrupts: list[Any] | None = None,
     resume_incomplete: bool = False,
+    inspections: LiveInspectionStore | None = None,
 ) -> TurnResult:
     """Stream one top-level agent turn and handle HITL approval loops.
 
@@ -692,9 +693,10 @@ async def run_turn(
     # only by the resumed stream.
     event_renderer = SubagentRequestRenderer(renderer)
     inspection = SubagentInspectionCoordinator(
-        live_inspection_store(event_renderer),
+        inspections,
         result,
         event_renderer,
+        recovering=bool(resume_interrupts or resume_incomplete),
     )
     eval_renderer = EvalSubagentRenderer(event_renderer, inspection)
     always_allowed_tools = always_allowed_tools if always_allowed_tools is not None else set()
@@ -747,6 +749,7 @@ async def run_turn(
             event_renderer,
             rubric_max_iterations,
             grader_model=rubric_model_name,
+            inspections=inspections,
         )
         output: dict[str, Any] = {}
         projected_tool_errors = []

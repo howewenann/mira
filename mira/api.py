@@ -1,5 +1,7 @@
 """Supported frontend and integration API for MIRA."""
 
+from core.execution.inspection.live import InspectionEvent, InspectionUpdate, LiveInspection
+from core.execution.inspection.rubric import rubric_inspection_id
 from core.interface.events import (
     ArtifactEvent,
     CompactionEvent,
@@ -28,6 +30,10 @@ from core.interface.requests import (
 from core.interface.snapshot import SessionSnapshot
 
 __all__ = [
+    "rubric_inspection_id",
+    "InspectionEvent",
+    "InspectionUpdate",
+    "LiveInspection",
     "ApprovalDecision",
     "ApprovalRequest",
     "ArtifactDisplayRequest",

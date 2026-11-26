@@ -10,7 +10,6 @@ from typing import Any
 
 from core.diagnostics.logging import get_diagnostics_logger
 from core.execution.inspection.live import InspectionEvent, InspectionUpdate, LiveInspection, LiveInspectionStore
-from core.execution.inspection.subagents import live_inspection_store
 from session.subagent_runs import normalize_runs, upsert_run
 
 
@@ -20,13 +19,17 @@ TEXT_FLUSH_SECONDS = 0.25
 class PersistentSubagentRuns:
     """Transparent renderer wrapper that persists existing Phase 1 truth."""
 
-    def __init__(self, renderer: Any, record: dict[str, Any], store: Any) -> None:
+    def __init__(
+        self, renderer: Any, record: dict[str, Any], store: Any,
+        inspections: LiveInspectionStore | None = None,
+    ) -> None:
         self.renderer = renderer
         self.record = record
         self.session_store = store
-        self.inspections = live_inspection_store(renderer)
+        self.inspections = inspections
         self._metadata: dict[str, dict[str, Any]] = {}
         self._subscriptions: set[str] = set()
+        self._pending_snapshots: set[str] = set()
         self._dirty = False
         self._flush_handle: asyncio.TimerHandle | None = None
 
@@ -235,6 +238,10 @@ class PersistentSubagentRuns:
         return outcome
 
     def flush(self) -> None:
+        pending = tuple(self._pending_snapshots)
+        self._pending_snapshots.clear()
+        for inspection_id in pending:
+            self._snapshot(inspection_id, immediate=False)
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
@@ -302,16 +309,24 @@ class PersistentSubagentRuns:
             update.event is not None
             and update.event.kind not in {"reasoning", "assistant"}
         )
-        self._snapshot(inspection_id, immediate=structural)
+        if structural:
+            self._pending_snapshots.discard(inspection_id)
+            self._snapshot(inspection_id, immediate=True)
+        else:
+            # Coalesce text growth before copying the accumulated transcript.
+            self._pending_snapshots.add(inspection_id)
+            self._dirty = True
+            self._schedule_flush()
 
     def _snapshot(self, inspection_id: str, *, immediate: bool) -> None:
+        self._pending_snapshots.discard(inspection_id)
         try:
             inspection = self.inspections.get(inspection_id) if self.inspections is not None else None
             metadata = self._metadata.get(inspection_id)
             if inspection is None or metadata is None:
                 return
             requires_origin = metadata.get("requires_origin") is not False
-            origin_event_id = (
+            origin_event_id = metadata.get("origin_event_id") or (
                 self._origin_event_id(
                     str(metadata.get("origin_tool") or ""),
                     str(metadata.get("origin_call_id") or ""),
@@ -322,15 +337,12 @@ class PersistentSubagentRuns:
                 if requires_origin
                 else None
             )
+            if origin_event_id:
+                metadata["origin_event_id"] = origin_event_id
             now = _now_iso()
             events = [_event_dict(event) for event in inspection.events]
             status = str(metadata.get("status") or inspection.status or "RUNNING")
             output = str(metadata.get("output") or _final_output(events))
-            if status != "RUNNING" and requires_origin and origin_event_id is None:
-                # A child stream may finish before its owning top-level call is
-                # delivered. Keep the last RUNNING snapshot durable and let the
-                # later call backfill ownership and the terminal state together.
-                return
             candidate = {
                 "id": str(uuid.uuid4()),
                 "inspection_id": inspection_id,

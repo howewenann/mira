@@ -102,8 +102,9 @@ class RubricPersistenceTests(unittest.TestCase):
             InspectionRenderer(inspections),
             record,
             SavingStore(fail=fail),
+            inspections=inspections,
         )
-        return observer, RubricEventRenderer(observer, 3), record, inspections
+        return observer, RubricEventRenderer(observer, 3, inspections=inspections), record, inspections
 
     def test_verifier_persists_exact_ordered_live_transcript(self) -> None:
         observer, rubric, record, _inspections = self.observer()
@@ -184,7 +185,7 @@ class RubricPersistenceTests(unittest.TestCase):
         self.assertEqual(run_count(record["runs"], 1), 0)
         self.assertEqual(runs_for_origin(record["runs"], 1), [])
 
-    def test_subagents_still_require_an_origin_before_terminal_snapshot(self) -> None:
+    def test_terminal_subagents_keep_status_while_origin_is_not_yet_available(self) -> None:
         inspections = LiveInspectionStore()
         inspections.start("subagent:no-origin", "worker", "task")
         record: dict[str, Any] = {"events": [], "runs": []}
@@ -192,6 +193,7 @@ class RubricPersistenceTests(unittest.TestCase):
             InspectionRenderer(inspections),
             record,
             SavingStore(),
+            inspections=inspections,
         )
         observer.subagent_started("worker", "task", inspection_id="subagent:no-origin")
         inspections.finish("subagent:no-origin", status="DONE", final_response="done")
@@ -199,7 +201,8 @@ class RubricPersistenceTests(unittest.TestCase):
         observer.close()
 
         self.assertEqual(len(record["runs"]), 1)
-        self.assertEqual(record["runs"][0]["status"], "RUNNING")
+        self.assertEqual(record["runs"][0]["status"], "DONE")
+        self.assertIsNone(record["runs"][0]["origin_event_id"])
 
     def test_error_cancel_and_hitl_reattach_keep_authoritative_identity(self) -> None:
         observer, first, record, inspections = self.observer()
@@ -212,8 +215,9 @@ class RubricPersistenceTests(unittest.TestCase):
             InspectionRenderer(inspections),
             record,
             SavingStore(),
+            inspections=inspections,
         )
-        second = RubricEventRenderer(second_observer, 3)
+        second = RubricEventRenderer(second_observer, 3, inspections=inspections)
         second.handle(phase_start("grade-resume", 0, "verifier", [{"kind": "user", "text": "request"}]))
         second.handle({"type": "rubric_inspection_delta", "grading_run_id": "grade-resume", "iteration": 0, "phase": "verifier", "kind": "reasoning", "text": " after approval"})
         second.handle(phase_end("grade-resume", 0, "verifier", final_response="complete"))

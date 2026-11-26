@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from mira.api import FrontendEvent, FrontendRequest
+from mira.api import FrontendEvent, FrontendRequest, RuntimeEvent
 from ui.shared.adapter import RendererAdapter
 
 
@@ -10,6 +10,9 @@ class TextualFrontend(RendererAdapter):
     """Connect typed Core events and requests to the Textual application."""
 
     def emit(self, event: FrontendEvent) -> None:
+        if isinstance(event, RuntimeEvent) and event.kind == "inspection":
+            self.renderer.inspection_updated(event)
+            return
         super().emit(event)
         # Keep the complete observation available to the widgets; callback
         # projection remains shared with the terminal and Workflow observers.

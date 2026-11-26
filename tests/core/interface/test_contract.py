@@ -138,6 +138,15 @@ class MemoryStore:
     def save(self, record: dict[str, Any]) -> None:
         self.saves.append(dict(record))
 
+    def path(self, session_id: str) -> str:
+        return session_id
+
+    def read(self, session_id: str) -> dict[str, Any]:
+        for record in reversed(self.saves):
+            if record.get("id") == session_id:
+                return dict(record)
+        raise FileNotFoundError(session_id)
+
 
 def session_record() -> dict[str, Any]:
     return {

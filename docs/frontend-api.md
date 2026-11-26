@@ -1,82 +1,98 @@
-# MIRA Python API
+# Build a MIRA frontend
 
-Use the MIRA API to run headless MIRA or build a custom frontend, GUI,
-protocol adapter, service, or integration.
+A frontend communicates with MIRA in three ways: **operations** ask it to do
+work, **events** report what happens, and **requests** pause execution for a
+user decision. Your frontend renders events and answers requests. MIRA executes
+the agents and saves their conversation.
 
-MIRA's Textual, terminal, and ACP consumers use this contract for normal turns
-and interactions. Textual still uses internal runtime, storage, and inspection
-operations; full frontend API dogfooding is not yet complete. Application
-classes are imported from `mira`; frontend events, requests, and snapshots are
-imported from `mira.api`. Modules under `core`, `agent`, `session`, `ui`, and
-`protocols` are implementation packages rather than supported developer entry
-points.
+`MiraApplication` owns workspace resources and shutdown. A `MiraSession` owns
+one durable conversation and its active operation. Your `Frontend` implements
+`emit(event)` and `async request(request)`. A `FrontendEvent` is an observation;
+a `FrontendRequest` needs an answer before execution continues. A
+`SessionSnapshot` gives detached state for opening or refreshing a view.
 
-## Installation and imports
+Read the [architecture walkthrough](frontend-architecture.md) for diagrams,
+identity examples, ownership, and the actual Textual integration. Continue below
+for a working frontend and precise contracts. The public entry points are
+`mira` and `mira.api`; importing `core`, `agent`, `session`, `ui`, or `protocols`
+is not required or supported for custom frontend implementations.
 
-Install MIRA and configure the workspace model as described in the main
-README:
+## Build a minimal frontend
 
-```bash
-pip install mira
-```
+Install and configure MIRA's Main model using the [README](../README.md).
+Save this as a Python file and run it from your configured workspace:
 
 ```python
 import asyncio
+from mira import MiraApplication
+from mira.api import FrontendEvent, FrontendRequest, MessageEvent
 
-from mira import MiraApplication, MiraSession
-from mira.api import Frontend, FrontendEvent, FrontendRequest, MessageEvent, RuntimeEvent
-```
-
-Start with the copyable
-[`minimal_frontend.py`](../examples/mira_api/minimal_frontend.py), then see
-[`full_frontend.py`](../examples/mira_api/full_frontend.py) for complete
-interactive request handling.
-
-## Lifecycle
-
-```text
-implement Frontend
-      |
-      v
-MiraApplication.start()
-      |
-      v
-open_session()
-      |
-      v
-session.prompt()
-      |
-      +------> frontend.emit(event)
-      |
-      <------ frontend.request(request)
-      |
-      v
-session.snapshot()
-      |
-      v
-app.shutdown()
-```
-
-`emit` is synchronous and receives ordered notifications. `request` is async
-because Core is paused until the consumer supplies a decision.
-
-```python
-class MyFrontend:
-    def __init__(self):
-        self.turn_started = asyncio.Event()
-
+class MinimalFrontend:
     def emit(self, event: FrontendEvent) -> None:
-        if isinstance(event, RuntimeEvent) and event.kind == "session" and event.state == "turn_started":
-            self.turn_started.set()
-        print(type(event).__name__, event)
+        if isinstance(event, MessageEvent) and event.phase == "content":
+            print(event.text, end="", flush=True)
 
     async def request(self, request: FrontendRequest):
-        raise RuntimeError(f"Interaction not implemented: {type(request).__name__}")
+        raise RuntimeError(f"Unsupported interaction: {type(request).__name__}")
+
+async def main():
+    app = await MiraApplication.start(workspace=".", frontend=MinimalFrontend())
+    try:
+        session = await app.open_session()
+        await session.prompt("Reply only with PONG")
+    finally:
+        await app.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-A production frontend must handle every request it can encounter. Raising an
-exception aborts the active startup or turn rather than silently approving an
-operation.
+This is the complete lifecycle: implement the two callbacks, start the
+application, open a session, await a prompt, and always shut down. Unsupported
+requests abort safely; they never approve an action. `emit` is synchronous, so
+keep it fast and do not perform blocking input there. `request` is async because
+Core waits for the answer. A GUI can update widgets or enqueue observations on
+its own event loop.
+
+The runnable [minimal example](../examples/mira_api/minimal_frontend.py) keeps
+this lifecycle visible. Next read the
+[full frontend](../examples/mira_api/full_frontend.py) for streaming tools,
+blocking decisions, explicit inspection selection, and session restoration.
+These two examples share the public API, not a custom framework.
+
+## Operation reference
+
+All operations below belong to `MiraApplication` or its returned `MiraSession`.
+Async operations must be awaited. Use one prompt at a time per session.
+
+| Operation | When to use it / result | Lifecycle implications |
+| --- | --- | --- |
+| `await MiraApplication.start(workspace=..., frontend=...)` | Load configuration, MCP, and native agents; returns application | Can request MCP approval and raise startup/configuration errors. |
+| `await app.open_session(session_id=None, resume=False)` | Create a conversation, or reopen saved state with `resume=True`; returns session | Emits session `opened`; discovers saved work without executing it. |
+| `app.session_exists(session_id)` | Check an externally supplied ID before opening | Returns bool; unknown IDs can otherwise create a session. |
+| `await session.prompt(text)` | Execute a complete outer interaction; returns turn result with `final_text` | Streams events and requests; raises provider/request failures or `CancelledError`; emits `ready` after cleanup. Use events and snapshot as display contracts. |
+| `await session.set_mode("act" or "plan")` | Select execution mode | Synchronizes native conversation context; refuses active operations or pending recovery. |
+| `await session.cancel()` | Request cancellation from another task | Does not wait for prompt cleanup; await the prompt task as well. |
+| `session.snapshot()` | Open/refresh authoritative display state | Detached full transcript; proportional copying cost. |
+| `session.inspection(id)` | Select a live or saved inspection by inspection ID or durable run ID | Detached `LiveInspection` or `None`; historical selection refreshes saved contents. |
+| `session.inspections(origin_event_id=None)` | Discover saved run summaries, optionally for a tool entry | Detached list of mappings excluding transcript `events`; no execution. |
+| `await session.resume_pending()` | Redisplay a saved request and resume its checkpoint | Same outer identity; returns result or `None` if no pending request. |
+| `await session.continue_incomplete()` | Explicitly continue uncertain saved work | Side effects may repeat; returns result or `None`. |
+| `await session.begin_goal(objective)` | Stage explicit Goal preparation | Follow with `prompt(objective)`; requires Act and Plan agents. |
+| `await session.start_artifact(kind)` | Begin an explicit retained Plan/Goal attempt | Returns artifact mapping or `None`; follow with prompt to execute. |
+| `await session.begin_artifact_revision(kind, artifact, feedback)` | Stage replacement of an exact retained artifact | Follow with a prompt; successful presentation commits replacement. |
+| `await session.clear_artifact(kind)` | Remove retained artifact | Returns removed mapping or `None`. |
+| `session.pause_active_artifacts()` | Mark interrupted formal work resumable | Synchronous; Core already uses it during interrupted turns. |
+| `await session.close()` | Release one conversation's live state and connection | Cancels/joins active prompt, saves duration, emits `closed`; inspection queries become empty. |
+| `await app.delete_session(session_id)` | Remove a saved conversation | Closes active projection first; returns bool. |
+| `await app.clear_sessions()` | Remove all saved conversations | Closes sessions first; returns count. |
+| `await app.shutdown()` | Release all sessions and shared resources | Always use in `finally`; safe after normal work ends. |
+
+`kind` for artifact methods is `"plan"` or `"goal"`. State transitions reject
+concurrent operations with `RuntimeError`. There is no general public operation
+to reconstruct runtime settings or launch a registered workflow in a session.
+The [migration inventory](frontend-architecture.md#migration-inventory) records
+remaining official-frontend exceptions.
 
 ## Start MIRA and open a session
 
@@ -259,7 +275,7 @@ The event includes task/result text plus graph provenance such as `origin`,
 
 ### `RuntimeEvent`
 
-`kind` is one of `startup`, `waiting`, `message_group`, or `session`.
+`kind` is one of `startup`, `waiting`, `message_group`, `session`, or `inspection`.
 
 - `waiting`: state is `start` or `finish`; start detail may contain `label`,
   `immediate`, and `elapsed` presentation hints.
@@ -267,6 +283,8 @@ The event includes task/result text plus graph provenance such as `origin`,
 - `session`: known states are `opened`, `turn_started`, `ready`, `cancelling`,
   and `closed`.
 - `startup`: state is intentionally extensible human-readable progress text.
+- `inspection`: state is `reset`, `append`, `delta`, or `status`; see
+  [inspection retrieval](#inspection-retrieval-and-updates).
 
 ### `UsageEvent`
 
@@ -429,10 +447,90 @@ frozen. Copying the transcript costs time and memory proportional to its size;
 use incremental events for streaming and take snapshots at session/operation
 boundaries rather than on every token or animation tick.
 
-Full live/historical Inspector access is not currently part of this API.
-Inspection capture still discovers an internal frontend-owned store, and the
-snapshot does not expose stored inspection runs. This limitation remains for
-the next ownership migration.
+## Inspection retrieval and updates
+
+Inspection capture is session-owned and enabled for a frontend implementing
+only the two public protocol methods. Opening an Inspector does not enable or
+disable capture. `session.snapshot()` deliberately excludes inspection contents.
+
+Discover IDs in `SubagentEvent.metadata["inspection_id"]`, rubric lifecycle payloads, and
+`WorkflowEvent.inspection_id`. Live mutations also arrive as ordinary
+`RuntimeEvent(kind="inspection")` observations. The notification has:
+
+| Field | Contract |
+| --- | --- |
+| `session_id`, `turn_id` | Owning session and current outer interaction when available |
+| `state` | `reset`, `append`, `delta`, or `status` |
+| `detail["inspection_id"]` | Transcript key |
+| `detail["update"]` | Detached `InspectionUpdate(operation, event)`; `event` is an `InspectionEvent` or `None` |
+
+For a restored rubric evaluation, import `rubric_inspection_id` from `mira.api`
+and call `rubric_inspection_id(grading_run_id, iteration, "verifier" or "grader")`.
+`iteration` is zero-based. This existing identity builder connects a saved
+evaluation to its phase transcript without reproducing an internal ID format.
+The generated key can still be unavailable when an older session has no run.
+
+Retrieve the initial state when selected:
+
+```python
+inspection = session.inspection(selected_id)
+if inspection is not None:
+    for item in inspection.events:
+        print(item.kind, item.text, item.name, item.args)
+```
+
+`LiveInspection` is the existing transcript payload, also used for historical
+results: `id`, `title`, `inspection_type`, `status`, and ordered `events`.
+A live result's `id` is its inspection key; a historical result's `id` is its
+durable run ID. Keep the selected query key for subsequent live notifications.
+Statuses are `RUNNING`, `DONE`, `ERROR`, and `CANCELLED`. Event kinds are `user`,
+`reasoning`, `assistant`, `tool_call`, `tool_result`, `tool_error`, and `error`.
+Each `InspectionEvent` has `kind`, `text`, `name`, `args`, and `call_id`; fields
+not used by its kind are empty. These payload classes are imported from
+`mira.api`; they do not grant access to the store.
+
+For a selected live transcript, apply `append` as a new item and `delta` as
+text growth of its final item. On `reset`, retrieve and replay the selected
+transcript because a prior tool draft or input may have changed. On `status`,
+refresh status if displayed. Notifications carry only a detached changed item,
+never all inspection contents. Ignore notifications for unselected IDs or other
+sessions. If an update was missed while the view was closed, query again when
+opening it. Do not query the full transcript for each text delta.
+
+For historical navigation:
+
+```python
+runs = session.inspections(origin_event_id=parent_tool_event_id)
+for run in runs:
+    print(run["id"], run["display_name"], run["status"])
+    transcript = session.inspection(run["id"])
+```
+
+Omit the filter to list all durable runs, including origin-less rubric and
+workflow inspections. Summaries retain existing run metadata: `id`,
+`inspection_id`, `origin_event_id`, `origin_tool`, `origin_call_id`, `row_id`,
+`eval_id`, `inspection_type`, `display_name`, `task`, `status`, `started_at`,
+`updated_at`, `duration_ms`, `output`, and optional `finished_at`. They exclude
+`events`; fetch that transcript only on selection. Origin-less runs have
+`origin_event_id=None`. Do not invent parent relationships for them.
+
+Queries return detached nested values; modifying arguments, events, or summary
+mappings cannot change authoritative state. Live queries and run summaries use
+session-owned state. Historical transcript selection reads the existing saved
+session once so externally updated history remains visible; it does not reload
+storage during streaming. Storage read failures can raise `OSError` or a format
+error. An unknown or
+unavailable transcript returns `None`, an unknown parent yields `[]`, and closed
+sessions yield `None` / `[]`. Older sessions may simply have no captured runs.
+
+Live capture is process-local. Existing `runs[]` persist captured inputs,
+messages, tools, terminal status, and origins. Text updates use the existing
+batched save schedule; text is coalesced before copying the accumulated transcript.
+Structural and terminal changes flush immediately.
+Coordinator namespace/row maps and notifications are transient. Explicit
+checkpoint recovery retains stored identities; cancellation finalizes observed
+children without clearing their history. Session close clears live contents,
+while reopening retrieves saved runs without rerunning an agent.
 
 ## Errors and cleanup
 
