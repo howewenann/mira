@@ -98,7 +98,8 @@ class KeylineProbe(App):
         )
 
 
-async def check():
+async def check(out):
+    out.mkdir(parents=True, exist_ok=True)
     print("Textual", version("textual"))
     for width in (60, 110):
         app = KeylineProbe()
@@ -111,7 +112,7 @@ async def check():
             await pilot.pause()
             print("Selected index:", app.selected, "expected: 1")
             print("Duration right edges:", [i.query_one('.duration').region.right for i in items])
-            path = Path(f"keyline_probe_{width}.svg")
+            path = out / f"keyline_probe_{width}.svg"
             path.write_text(app.export_screenshot(), encoding="utf-8")
             print("Screenshot:", path.resolve())
 
@@ -119,9 +120,10 @@ async def check():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--out", type=Path, default=Path('.'))
     parser.add_argument("--rows", type=int, default=5)
     args = parser.parse_args()
     if args.check:
-        asyncio.run(check())
+        asyncio.run(check(args.out))
     else:
         KeylineProbe(rows=max(1, args.rows)).run()

@@ -1811,8 +1811,6 @@ class ChatLog(VerticalScroll):
 
     def show_waiting(self, label: str = "working...", *, elapsed: bool | None = None) -> None:
         """Show the transient thinking status while MIRA is idle."""
-        if self.grouped and self._active_turn_id:
-            return  # The outer header owns the working clock.
         if elapsed is None:
             elapsed = bool(
                 self._waiting_block is not None
@@ -1826,7 +1824,7 @@ class ChatLog(VerticalScroll):
         self._waiting_elapsed = elapsed
         text = self._render_waiting()
         if self._waiting_block is None:
-            self._waiting_block = self._add_block("mira", text, "message status")
+            self._waiting_block = self._add_block("mira", text, "message status", transient=True)
             return
         self._waiting_block.update(text)
         self._scroll_to_end()
@@ -1898,7 +1896,16 @@ class ChatLog(VerticalScroll):
             return text
         return text[: self.tool_output_chars].rstrip() + "\n... truncated ..."
 
-    def _add_block(self, title: str, renderable: Any, classes: str, *, created_at: str = "", inspection_id: str = "") -> Static:
+    def _add_block(
+        self,
+        title: str,
+        renderable: Any,
+        classes: str,
+        *,
+        created_at: str = "",
+        inspection_id: str = "",
+        transient: bool = False,
+    ) -> Static:
         """Mount one bordered transcript block."""
         block = Static(renderable, classes=classes)
         block.inspection_id = inspection_id
@@ -1911,7 +1918,8 @@ class ChatLog(VerticalScroll):
             ("error", "Activity"), ("warning", "Activity"),
             ("info", "Activity"), ("status", "Activity"), ("summary", "Activity"),
         ) if key in classes.split()), None)
-        if category is not None:
+        # Waiting is ephemeral, even while an outer turn owns other status activity.
+        if category is not None and not transient:
             self._mount_activity(block, category, attention=bool({"error", "warning"} & set(classes.split())))
         else:
             before = self._turns.get(self._event_turn_id) if "user" in classes.split() else None

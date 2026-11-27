@@ -2259,7 +2259,9 @@ for some checks; its transcript should retain the existing flat presentation.
    joined native keyline boxes (2N+1 terminal rows), all entries accessible with
    the conversation scrollbar, stable selection/position and no nested scroller.
    Use Up/Down and Enter, then mouse selection. Hover the summary and selected
-   row; glyph geometry must remain stable. Resize narrow and wide: long argument
+   row; glyph geometry must remain stable. Click the summary, focus it with Tab,
+   then toggle with Enter and Space: both header rows remain visible and the
+   background still highlights focus/hover. Resize narrow and wide: long argument
    previews stay on one line with an ellipsis and durations remain flush right.
 8. Copy a final and intermediate response, switch Markdown/plain text, inspect
    full tool arguments/output, and reopen an old chat lacking turn identities.
@@ -2270,3 +2272,11 @@ for some checks; its transcript should retain the existing flat presentation.
    one detail is shown below the complete list; Arguments and Output begin
    collapsed. The final response has exactly one blank row before it in Text
    and Markdown modes, with history collapsed, expanded, or a detail selected.
+10. Submit a prompt with a slow first token, then request a tool or Rubric stage
+    followed by another model response. Expect the original yellow animated
+    `working...` bubble after the usual silent grace period; actual text,
+    reasoning or tool activity removes it. Later model pauses can show it again.
+    It never increases completed counts or appears in expanded/saved history,
+    and the outer clock continues across every wait. Cancel while it is visible,
+    trigger a model failure, and switch chats after the turn stops. Expect no
+    leftover indicator or animation in either chat.

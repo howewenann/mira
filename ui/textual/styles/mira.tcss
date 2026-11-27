@@ -2005,8 +2005,6 @@ Button.settings-access-back:hover {
     text-style: none;
 }
 
-.turn-summary:focus { outline: solid #5bb8b1; }
-
 .turn-active, .completed-activity, .activity-details {
     height: auto;
     padding: 0;

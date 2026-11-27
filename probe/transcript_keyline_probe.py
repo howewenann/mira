@@ -12,20 +12,18 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
-import sys
 
 os.environ.pop('NO_COLOR', None)
 os.environ['TERM'] = 'xterm-256color'
 os.environ['COLORTERM'] = 'truecolor'
 os.environ['FORCE_COLOR'] = '1'
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rich.text import Text
 from textual import on
 from textual.app import App
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Button, Collapsible, Input, Label, ListItem, ListView, Static
-from tests.probes.keyline_probe import KeylineProbe
+from keyline_probe import KeylineProbe
 
 
 STEPS = [
@@ -200,9 +198,8 @@ class TranscriptProbe(App):
         await self.query_one('#long-turn', ProbeTurn).insert_activity()
 
 
-async def check():
-    destination = Path('artifacts')
-    destination.mkdir(exist_ok=True)
+async def check(destination):
+    destination.mkdir(parents=True, exist_ok=True)
     app = TranscriptProbe()
     async with app.run_test(size=(110, 44)) as pilot:
         await pilot.pause()
@@ -317,8 +314,9 @@ async def check():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--out', type=Path, default=Path('artifacts'))
     arguments = parser.parse_args()
     if arguments.check:
-        asyncio.run(check())
+        asyncio.run(check(arguments.out))
     else:
         TranscriptProbe().run()

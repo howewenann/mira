@@ -1,21 +1,52 @@
-# Transcript keyline integration probe
+# Standalone Textual transcript probes
 
-This probe was approved for production integration. The approved reference
-was found at [tests/probes/keyline_probe.py](../tests/probes/keyline_probe.py).
-Its source is unchanged. Both probes were run from this directory using MIRA's
-pinned **Textual 8.2.8** environment:
+Run from this directory with an activated MIRA environment (`cd probe`). These
+scripts use Textual and Rich, with no production MIRA imports. The integration
+probe imports only its sibling `keyline_probe.py`. Contributor checks use
+`conda run -n mira python ...` in place of `python ...`. Results below were
+checked with **Textual 8.2.8**.
+
+## Superseded activity-box experiments
+
+[textual_activity_box_probe.py](textual_activity_box_probe.py) compares separate
+full borders, native partial borders, manually joined separators, and flat rows.
+Five entries measure 15, 11, 11 and 5 terminal rows respectively. Selection,
+keyboard toggling and right-aligned durations pass at widths 60 and 110, but
+geometry alone does not establish correct border junctions or hover rendering.
+
+[textual_activity_box_probe_v2.py](textual_activity_box_probe_v2.py) adds manually
+rendered vertical border cells and explicit hover/focus refresh to the joined
+variant. It preserves the same geometry and duration checks while experimenting
+with keeping border cells out of the selected background. Both versions remain
+historical experiments; their custom separators/rendering are superseded by
+native parent keylines and are not production recommendations.
 
 ```powershell
-conda run -n mira python ../tests/probes/keyline_probe.py --check
-conda run -n mira python transcript_keyline_probe.py --check
-conda run -n mira python transcript_keyline_probe.py
+python textual_activity_box_probe.py --mode native
+python textual_activity_box_probe_v2.py --mode joined
+python textual_activity_box_probe.py --check --out ../.phase3-followup-validation/activity-v1
+python textual_activity_box_probe_v2.py --check --out ../.phase3-followup-validation/activity-v2
 ```
 
-The integration probe uses native ListView, ListItem, Horizontal, Label and
-parent keylines. It imports no production MIRA modules. Enter/click selects or
-closes a detail, Up/Down moves the native list cursor, and A simulates another
-completed activity when the composer is not focused. The composer accepts text.
-The simulated duration values are fixtures, not measurements of agent execution.
+## Validated native keyline solution
+
+[keyline_probe.py](keyline_probe.py) is the approved minimal reference, moved
+here from `tests/probes/`. Native ListView, ListItem, Horizontal, Label and parent
+keylines give five one-line activities an 11-row joined outline. Native keyboard
+selection works and duration right edges agree at widths 60 and 110.
+
+[transcript_keyline_probe.py](transcript_keyline_probe.py) extends that reference
+with natural conversation scrolling, larger histories, details and final-response
+spacing. Enter/click selects or closes a detail, Up/Down moves the native list
+cursor, and A simulates another completion when the composer is not focused.
+The composer accepts text. Duration values are fixtures, not execution timings.
+
+```powershell
+python keyline_probe.py --rows 50
+python keyline_probe.py --check --out ../.phase3-followup-validation/keyline
+python transcript_keyline_probe.py
+python transcript_keyline_probe.py --check --out ../.phase3-followup-validation/integration
+```
 
 ## Observed behavior
 
@@ -63,23 +94,23 @@ Production uses this approved arrangement. The probe verifies native layout;
 the final production results are recorded in
 [the Phase 3 validation report](../tests/manual/phase3-validation.md).
 
-## Existing correction validation
+## Summary focus overlay reproduction
 
-Before this keyline checkpoint, the working correction passed **242 API,
-identity, inspection, SQLite and runner tests**. A broader UI run executed 444
-tests with five failures. Two new test assumptions (lazy Inspector-button
-mounting and delayed argument-editor layout) were corrected; the focused rerun
-passed all 11 grouped tests plus the two intermittent UI paths. Git-dialog focus
-still failed both on this checkout and unchanged `f55cd08`. Subsequent production
-validation is recorded in the linked Phase 3 report.
+[summary_focus_probe.py](summary_focus_probe.py) compares the historical
+`f98e83b` two-row summary with a focus outline (A) against the same widget with
+only that outline removed (B). Textual's outline paints over both content rows;
+height and content size still report two rows. B keeps the text visible with
+the same background-based hover/focus feedback and click/Enter/Space behavior.
+Checks exercise both variants at widths 60 and 110 and export their real frames.
+The historical A variant deliberately retains the bug as a reference.
 
-Native execution on `f55cd08` reproduced missing **read-result content**: the
-native tool captured 2,163 characters including `READ_END`, while the tool widget
-exposed only a truncated 119-character presentation. The intermediate assistant
-message and call identity were present. The correction shows the complete
-captured result in grouped details, leaving Inspector presentation unchanged.
-Seven parallel native `read_file` calls and their preceding assistant message
-passed both live and restored checks. A configured Gemma/LM Studio run also
-exposed its full 6,017-character read result after restoration. Complete loss of
-a read-call event was not reproduced, so the truncation finding is not a claim
-that every instance of the original missing-call report has been explained.
+```powershell
+python summary_focus_probe.py
+python summary_focus_probe.py --check --out ../.phase3-followup-validation/summary
+```
+
+Check modes export SVGs (and integration observations). Use `--out` to keep new
+exports outside the reference artifact directories. Generated caches and repeat
+screenshots are not source changes; retain the existing approved frames rather
+than committing another copy. Production regressions and limitations are in
+[the Phase 3 follow-up report](../tests/manual/phase3-followup-validation.md).

@@ -383,7 +383,11 @@ captured content, display preferences and controls across lifecycle moves.
 
 The shaded two-line header toggles history and counts completed logical widgets,
 excluding active work and the final answer. Parallel unfinished activities remain
-visible together. The latest
+visible together. Header focus uses background highlighting; an outline overlays
+both rows in Textual 8.2.8 and obscures the content. The original animated working
+bubble remains a transient ChatLog child during silent model phases, outside the
+grouped activity registry. Its removal cannot leave a completed history entry or
+reset the independent outer turn clock. The latest
 assistant message streams outside history as a candidate; later execution can
 make it intermediate. Model-message end never ends the outer container. At
 outer completion, the final candidate remains visible, including when Rubric

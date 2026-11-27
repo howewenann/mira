@@ -95,7 +95,7 @@ from core.execution.runner import SubagentRequestRenderer
 from core.execution.streams.subagents import consume_subagents
 from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
-from mira.api import MessageEvent
+from mira.api import MessageEvent, RuntimeEvent, ToolEvent
 from ui.shared.trace import TraceStream
 from session.goals import current_goal, goal_artifact
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -3229,8 +3229,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
     async def test_turn_failure_shows_error_report_path(self) -> None:
         """Suppressed TUI turn errors should show the generated report path."""
         app = make_app()
+        app._waiting_delay_seconds = 0.01
+        release = asyncio.Event()
 
         async def fake_run_user_turn(**kwargs: Any) -> None:
+            app.waiting_started()
+            await release.wait()
             raise RuntimeError("turn boom")
 
         with (
@@ -3241,7 +3245,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 await app.submit_prompt(PromptBox.Submitted(app.query_one(PromptBox), "hello"))
-                await pilot.pause()
+                chat = app.query_one(ChatLog)
+                await wait_until(lambda: chat._waiting_block is not None)
+                waiting = chat._waiting_block
+                release.set()
+                await wait_until(lambda: not app.busy)
+                await pilot.pause(0.03)
 
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                 self.assertIn("error: turn boom", rendered)
@@ -3249,6 +3258,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 report.assert_called_once()
                 self.assertEqual(report.call_args.kwargs["source"], "tui.turn")
                 self.assertEqual(report.call_args.kwargs["session_id"], "thread-1")
+                self.assertIsNone(chat._waiting_block)
+                self.assertIsNone(waiting.parent)
+                self.assertFalse(list(chat.query(".status")))
+                self.assertNotIn(waiting, chat._widget_turns)
 
     async def test_plan_turn_failure_shows_error_report_path(self) -> None:
         """Approved-plan turn errors should show the generated report path."""
@@ -3450,6 +3463,160 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 for handler in logger.handlers:
                     handler.close()
                 logger.handlers = old_handlers
+
+    async def test_grouped_summary_stays_visible_with_mouse_and_keyboard_focus(self) -> None:
+        """Render both rows through Textual's style cache, including focus overlays."""
+        from ui.textual.widgets.assistant_turn import AssistantTurn
+
+        for width in (60, 110):
+            with self.subTest(width=width):
+                app = make_app()
+                async with app.run_test(size=(width, 40)) as pilot:
+                    chat = app.query_one(ChatLog)
+                    chat.clear_log()
+                    await pilot.pause()
+                    chat.restore_session({"events": [
+                        {"type": "reasoning", "text": "Think", "turn_id": "focus"},
+                        {"type": "assistant", "text": "Answer", "turn_id": "focus"},
+                    ]})
+                    turn = chat.query_one(AssistantTurn)
+                    summary = turn.summary
+                    await wait_until(lambda: summary.size.height == 2 and not turn._moving)
+                    await pilot.pause()
+                    before = summary.region
+
+                    def assert_visible():
+                        lines = summary.render_lines(summary.size.region)
+                        self.assertEqual(summary.region, before)
+                        self.assertEqual(len(lines), 2)
+                        self.assertIn("Completed", lines[0].text)
+                        self.assertIn("1 Thinking", lines[1].text)
+
+                    assert_visible()
+                    await pilot.hover(summary)
+                    await pilot.pause()
+                    self.assertEqual(summary.styles.background, Color.parse("#1b3036"))
+                    assert_visible()
+                    await pilot.click(summary, offset=(20, 1))
+                    await pilot.pause()
+                    self.assertTrue(summary.has_focus)
+                    self.assertTrue(turn.expanded)
+                    assert_visible()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertFalse(turn.expanded)
+                    assert_visible()
+
+                    app.action_focus_prompt()
+                    await pilot.hover(app.query_one(PromptBox))
+                    # Reach the summary through the native keyboard focus chain.
+                    for _ in range(40):
+                        await pilot.press("tab")
+                        if summary.has_focus:
+                            break
+                    self.assertTrue(summary.has_focus)
+                    self.assertEqual(summary.styles.background, Color.parse("#1b3036"))
+                    assert_visible()
+                    await pilot.press("space")
+                    await pilot.pause()
+                    self.assertTrue(turn.expanded)
+                    assert_visible()
+
+    async def test_grouped_waiting_animation_is_transient_across_execution_phases(self) -> None:
+        """Waiting keeps the original bubble without becoming grouped history."""
+        from ui.textual.widgets.assistant_turn import AssistantTurn
+
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+        async with app.run_test(size=(110, 40)) as pilot:
+            chat = app.query_one(ChatLog)
+            frontend = app.application.frontend
+            identity = dict(session_id=app.core_session.id, turn_id="waiting")
+            frontend.emit(RuntimeEvent(kind="session", state="turn_started", **identity))
+            app.busy = True
+            turn = chat.query_one(AssistantTurn)
+            started = turn._started
+            saved = deepcopy(app.session.get("events", []))
+            frontend.emit(RuntimeEvent(kind="waiting", state="start", **identity))
+            self.assertIsNone(chat._waiting_block)
+            await wait_until(lambda: chat._waiting_block is not None)
+            await pilot.pause()
+            waiting = chat._waiting_block
+            self.assertIs(waiting.parent, chat)
+            self.assertEqual(waiting.classes, frozenset({"message", "status"}))
+            self.assertEqual(waiting.border_title, "mira")
+            self.assertIn("working...", waiting.content.plain)
+            self.assertIn("elapsed", waiting.content.plain)
+            self.assertTrue(all(span.style == "bold yellow" for span in waiting.content.spans))
+            first = waiting.content.plain
+            chat.tick_waiting()
+            self.assertNotEqual(waiting.content.plain, first)
+            self.assertNotIn(waiting, chat._widget_turns)
+            self.assertFalse(turn.rows)
+            self.assertFalse(turn.completed_counts)
+            self.assertEqual(turn._started, started)
+            self.assertEqual(app.session.get("events", []), saved)
+
+            frontend.emit(ToolEvent(phase="start", name="read_file", arguments={"file_path": "/a"},
+                                    tool_call_id="read", **identity))
+            await pilot.pause()
+            self.assertIsNone(chat._waiting_block)
+            self.assertIsNone(waiting.parent)
+            frontend.emit(ToolEvent(phase="result", name="read_file", result="Full result",
+                                    tool_call_id="read", **identity))
+            await wait_until(lambda: chat._waiting_block is not None)
+            self.assertEqual(turn.completed_counts["Tools"], 1)
+            self.assertEqual(len(turn.rows), 1)
+            frontend.emit(MessageEvent(phase="reasoning", text="Think", message_id="r", **identity))
+            self.assertIsNone(chat._waiting_block)
+            frontend.emit(MessageEvent(phase="end", message_id="r", **identity))
+            await wait_until(lambda: chat._waiting_block is not None)
+            frontend.emit(MessageEvent(phase="content", text="Final", message_id="a", **identity))
+            self.assertIsNone(chat._waiting_block)
+            app.finish_turn()
+            app.busy = False
+            frontend.emit(RuntimeEvent(kind="session", state="ready", **identity))
+            await pilot.pause(0.08)
+            self.assertIsNone(chat._waiting_block)
+            self.assertEqual(turn.completed_counts["Thinking"], 1)
+            self.assertEqual(len(turn.completed_rows), 2)
+            self.assertFalse(any(row.category == "Activity" for row in turn.rows.values()))
+            self.assertEqual(turn._started, started)
+            self.assertFalse(list(chat.query(".status")))
+
+    async def test_grouped_waiting_clears_on_cancellation_and_session_switch(self) -> None:
+        from ui.textual.widgets.assistant_turn import AssistantTurn
+
+        app = make_app()
+        app._waiting_delay_seconds = 0.05
+        async with app.run_test(size=(110, 40)) as pilot:
+            chat = app.query_one(ChatLog)
+            frontend = app.application.frontend
+            identity = dict(session_id=app.core_session.id, turn_id="cancel-wait")
+            frontend.emit(RuntimeEvent(kind="session", state="turn_started", **identity))
+            app.busy = True
+            app.turn_worker = FakeWorker()
+            app.waiting_started()
+            await wait_until(lambda: chat._waiting_block is not None)
+            waiting = chat._waiting_block
+            app._cancel_turn()
+            await pilot.pause(0.08)
+            self.assertIsNone(chat._waiting_block)
+            self.assertIsNone(waiting.parent)
+            self.assertFalse(chat.query_one(AssistantTurn).rows)
+
+            # A switch replaces display state and removes a visible transient bubble.
+            app.busy = False
+            app.turn_worker = None
+            chat.show_waiting()
+            await pilot.pause()
+            waiting = chat._waiting_block
+            await app._handle_new_chat()
+            await pilot.pause(0.08)
+            self.assertIsNone(chat._waiting_block)
+            self.assertIsNone(waiting.parent)
+            self.assertFalse(list(chat.query(AssistantTurn)))
+            self.assertFalse(list(chat.query(".status")))
 
     async def test_waiting_indicator_appears_after_silence_and_hides_on_output(self) -> None:
         """The transient working block should appear only during phase silence."""
