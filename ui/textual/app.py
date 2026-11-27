@@ -243,7 +243,7 @@ class MiraApp(App[None]):
             with Vertical(id="main-panel"):
                 chat = ChatSurface(
                     ChatLog(tool_output_chars=self.tool_output_chars,
-                            subagent_runs_provider=self._current_subagent_runs, id="chat-log"),
+                            subagent_runs_provider=self._current_subagent_runs, grouped=True, id="chat-log"),
                     PromptPanel(),
                     SubagentsPanel(id="subagents-panel"),
                     AutocompleteInput(
@@ -625,6 +625,7 @@ class MiraApp(App[None]):
         await self._run_operation(self.core_session.continue_incomplete())
 
     async def _run_operation(self, operation: Awaitable[Any], *, source: str = "tui.turn", error_label: str = "error") -> None:
+        self.query_one(ChatLog).begin_operation()
         previous_goal = self.session.get("current_goal") or {}
         previous_goal_state = (previous_goal.get("id"), previous_goal.get("status"))
         try:
@@ -639,7 +640,7 @@ class MiraApp(App[None]):
             self.finish_turn(cancelled=True, tool_status="interrupted")
             self._set_status(state="ready")
         except Exception as exc:
-            self.finish_turn(cancelled=True, tool_status="interrupted")
+            self.finish_turn(cancelled=True, tool_status="interrupted", outcome="failed")
             error_path = self._write_error_report(exc, source=source)
             self.system_message(f"{error_label}: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
@@ -2620,7 +2621,7 @@ class MiraApp(App[None]):
             eval_id=eval_id,
             inspection_id=inspection_id,
         )
-        if not self._subagent_live_active:
+        if not self._subagent_live_active and not self.query_one(ChatLog).has_grouped_turn:
             self.query_one(ChatLog).subagent_started(subagent, task_input, origin=origin, created_at=created_at)
         self._rearm_waiting_if_busy()
 
@@ -2628,7 +2629,7 @@ class MiraApp(App[None]):
         """Fill in a subagent request that arrived after the block started."""
         self.waiting_finished()
         self.query_one(SubagentsPanel).update_subagent_request(subagent, task_input)
-        if not self._subagent_live_active:
+        if not self._subagent_live_active and not self.query_one(ChatLog).has_grouped_turn:
             self.query_one(ChatLog).subagent_request_updated(subagent, task_input)
 
     def subagent_finished(
@@ -2652,7 +2653,7 @@ class MiraApp(App[None]):
             eval_id=eval_id,
             duration_ms=duration_ms,
         )
-        if not self._subagent_live_active:
+        if not self._subagent_live_active and not self.query_one(ChatLog).has_grouped_turn:
             self.query_one(ChatLog).subagent_finished(subagent, result, created_at=created_at)
         self._rearm_waiting_if_busy()
 
@@ -2678,7 +2679,7 @@ class MiraApp(App[None]):
             duration_ms=duration_ms,
             status="CANCELLED",
         )
-        if not self._subagent_live_active:
+        if not self._subagent_live_active and not self.query_one(ChatLog).has_grouped_turn:
             self.query_one(ChatLog).subagent_cancelled(subagent, result, created_at=created_at)
 
     def eval_subagent_started(
@@ -2818,14 +2819,14 @@ class MiraApp(App[None]):
         self.waiting_finished()
         self.query_one(ChatLog).finish_main()
 
-    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled") -> None:
+    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled", outcome: str | None = None) -> None:
         """Close live turn widgets without clearing visible transcript history."""
         self._sync_active_agent_pair()
         self.trace.flush_all()
         self._finish_main_stream_activity()
         self.waiting_finished()
         self._waiting_label = "working..."
-        self.query_one(ChatLog).finish_turn(cancelled=cancelled, tool_status=tool_status)
+        self.query_one(ChatLog).finish_turn(cancelled=cancelled, tool_status=tool_status, outcome=outcome)
         if cancelled:
             self.query_one(SubagentsPanel).cancel_running()
             self._subagent_live_active = False

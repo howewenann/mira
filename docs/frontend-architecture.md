@@ -365,10 +365,44 @@ session is the only native restoration path. File-picker, clipboard, local
 DirectoryTree/preview, docking, focus, dialogs, expansion and scrolling are UI
 presentation operations, not alternative agent execution paths.
 
-Grouped-turn transcript presentation remains deferred to Phase 3. Event
-identities, native provenance, durable origins and detached inspections retain
-the Phase 2A/2B contracts. Existing callbacks remain an internal UI presentation
-layer shared with terminal output, not an external frontend requirement.
+Event identities, native provenance, durable origins and detached inspections
+retain the Phase 2A/2B contracts. Existing callbacks remain an internal UI
+presentation layer shared with terminal output, not an external frontend requirement.
+
+## Grouped Textual transcript
+
+The main ChatLog groups identified assistant activity by the public `turn_id`.
+User messages remain outside each [AssistantTurn](../ui/textual/widgets/assistant_turn.py).
+Existing reasoning, tool, subagent, Rubric and artifact widgets update in place;
+completed widgets become independently expandable rows in a collapsed history.
+Its native scroll viewport shows five compact rows and retains every activity.
+Expanded details scroll inside that viewport. New rows preserve expansion and
+the reader's position; tail following resumes only when already following.
+
+The header counts completed logical widgets, excluding active work and the final
+answer. Parallel unfinished activities remain visible together. The latest
+assistant message streams outside history as a candidate; later execution can
+make it intermediate. Model-message end never ends the outer container. At
+outer completion, the final candidate remains visible, including when Rubric
+evaluation followed its text. Artifacts with live controls, failures and blocking
+requests retain visible attention surfaces. Workflow trees retain their existing
+navigation and final-state presentation inside their outer interaction.
+
+[TextualFrontend](../ui/textual/adapter.py) supplies event identity while the
+existing renderer callbacks build widgets. [ChatLog](../ui/textual/widgets/chat_log.py)
+uses that same grouping path for detached saved display records. Historical eval
+children use public inspection summaries linked by `origin_event_id`; no task-text
+matching is used. Unknown legacy identities remain flat, in saved order. A span
+interleaved with unassigned legacy records also stays flat rather than inventing
+a grouping boundary. Saved records are never rewritten for layout. Historical
+turns without an authoritative duration say Completed, rather than inventing a
+Worked-for duration. A cold recovery labels its new clock segment "since
+recovery". Live clocks remain local presentation state.
+
+The Inspector keeps its original flat transcript. Grouping, counters, expansion,
+scroll anchors and widget references are frontend state; they neither duplicate
+Core execution history nor change the public API. Native Textual batching is
+used for lifecycle moves, not a second renderer or a virtualization framework.
 
 All six diagrams in this document were parsed with Mermaid 11.12.0. The five
 message-text semicolons that broke sequence parsing were replaced with words.

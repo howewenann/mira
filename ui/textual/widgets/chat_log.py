@@ -39,6 +39,7 @@ from ui.textual.splash import loading_splash_text, splash_text
 from ui.textual.widgets.rubric_bubble import RubricGraderBubble, RubricVerifierBubble
 from ui.textual.widgets.mcp_activity import MCPActivityCell
 from ui.textual.widgets.tool_bubble import ToolBubble, tool_lifecycle_status
+from ui.textual.widgets.assistant_turn import AssistantTurn
 from ui.textual.widgets.workflow_bubble import (
     WorkflowAgentView,
     WorkflowTaskView,
@@ -76,6 +77,7 @@ class ChatLog(VerticalScroll):
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
         *,
         subagent_runs_provider: Callable[[], Any] | None = None,
+        grouped: bool = False,
         **kwargs: Any,
     ) -> None:
         self.follow_tail = True
@@ -86,6 +88,16 @@ class ChatLog(VerticalScroll):
         self.can_focus = True
         self.tool_output_chars = int(tool_output_chars)
         self.subagent_runs_provider = subagent_runs_provider
+        self.grouped = grouped
+        self._turns: dict[str, AssistantTurn] = {}
+        self._widget_turns: dict[Any, AssistantTurn] = {}
+        self._event_turn_id = ""
+        self._active_turn_id = ""
+        self._restoring = False
+        self._frontend_event: FrontendEvent | None = None
+        self._operation_turn_id = ""
+        self._subagent_event_labels: dict[tuple[str, str], str] = {}
+        self._message_widgets: dict[tuple[str, str, str], Any] = {}
         self._assistant_text = ""
         self._assistant_block: AssistantBubble | None = None
         self._reasoning_text = ""
@@ -102,7 +114,7 @@ class ChatLog(VerticalScroll):
         self._startup_loading = False
         self._mcp_activity_widgets: dict[str, MCPActivityCell] = {}
         self._subagent_labels: dict[int, str] = {}
-        self._subagent_blocks: dict[str, dict[str, str]] = {}
+        self._subagent_blocks: dict[str, dict[str, Any]] = {}
         self._subagent_widgets: dict[str, Static] = {}
         self._compaction_block: Static | None = None
         self._compaction_spinner_index = 0
@@ -126,6 +138,103 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_name: dict[str, deque[str]] = defaultdict(deque)
         self._subagent_aliases: dict[str, deque[str]] = {}
         self._workflow_bubbles: dict[str, WorkflowTreeBubble] = {}
+
+    def begin_frontend_event(self, event: FrontendEvent) -> None:
+        """Route widgets using the public outer identity before projection."""
+        self._event_turn_id = event.turn_id
+        self._frontend_event = event
+        if getattr(event, "kind", "") == "session" and getattr(event, "state", "") == "turn_started":
+            self.finish_main()
+            self._active_turn_id = event.turn_id
+            self._operation_turn_id = event.turn_id
+            if self.grouped and event.turn_id:
+                self._ensure_turn(event.turn_id).start()
+                self.hide_waiting()
+
+    def end_frontend_event(self, event: FrontendEvent) -> None:
+        if self.grouped and event.turn_id and isinstance(event, MessageEvent) and event.phase == "user":
+            self._ensure_turn(event.turn_id)
+        if self.grouped and event.turn_id and getattr(event, "kind", "") == "session" and event.state == "ready":
+            self._ensure_turn(event.turn_id)
+        turn = self._turns.get(event.turn_id)
+        if turn is not None and getattr(event, "kind", "") == "session":
+            if event.state == "ready":
+                self.finish_main()
+                turn.finish(turn.state if turn.state in {"failed", "cancelled", "interrupted"} else "completed")
+                if self._active_turn_id == event.turn_id:
+                    self._active_turn_id = ""
+            elif event.state == "cancelling":
+                turn.state = "cancelling"
+                turn.tick()
+        self._event_turn_id = ""
+        self._frontend_event = None
+
+    def _ensure_turn(self, turn_id: str) -> AssistantTurn:
+        turn = self._turns.get(turn_id)
+        if turn is None:
+            turn = AssistantTurn(turn_id, self._pause_tail)
+            self._turns[turn_id] = turn
+            self.mount(turn)
+        return turn
+
+    def begin_operation(self) -> None:
+        """An operation rejected before turn_started must not relabel old work."""
+        self._operation_turn_id = ""
+
+    @property
+    def has_grouped_turn(self) -> bool:
+        return self.grouped and bool(self._event_turn_id or self._active_turn_id)
+
+    def _mount_activity(self, widget: Any, category: str, *, attention: bool = False) -> None:
+        turn_id = self._event_turn_id or ("" if self._restoring else self._active_turn_id)
+        if self.grouped and turn_id:
+            turn = self._ensure_turn(turn_id)
+            turn.add(widget, category, attention=attention)
+            self._widget_turns[widget] = turn
+        else:
+            self.mount(widget)
+
+    def _pause_tail(self) -> None:
+        self.follow_tail = False
+
+    def _complete_activity(self, widget: Any) -> None:
+        if turn := self._widget_turns.get(widget):
+            turn.complete(widget)
+
+    def _remove_activity(self, widget: Any) -> None:
+        if turn := self._widget_turns.pop(widget, None):
+            turn.forget(widget)
+        else:
+            widget.remove()
+
+    def subagent_event(self, event: Any) -> None:
+        """Reuse subagent bubbles for identified live/eval rows and navigation."""
+        if not self.has_grouped_turn or event.phase not in {"start", "eval_start", "finish", "eval_finish", "cancel", "eval_cancel", "request_update"}:
+            return
+        if event.phase == "request_update":
+            self.subagent_request_updated(event.name, event.task_input)
+            return
+        identity = str(event.metadata.get("inspection_id") or
+                       (f"{event.eval_id}:{event.row_id}" if event.row_id else event.name))
+        key = (event.turn_id, identity)
+        label = self._subagent_event_labels.get(key)
+        if label is None:
+            label = self.subagent_started(event.name, event.task_input, origin=event.origin, created_at=event.created_at,
+                                          inspection_id=str(event.metadata.get("inspection_id") or ""))
+            self._subagent_event_labels[key] = label
+        self._subagent_blocks[label]["duration_ms"] = event.metadata.get("duration_ms")
+        if event.phase in {"start", "eval_start"}:
+            self._subagent_blocks[label]["status"] = "RUNNING"
+            self._update_subagent(label)
+        elif event.phase in {"finish", "eval_finish"}:
+            self.subagent_finished(label, event.result)
+        elif event.phase in {"cancel", "eval_cancel"}:
+            self.subagent_cancelled(label, event.result)
+            if event.result:
+                self._subagent_blocks[label]["status"] = "ERROR"
+                self._update_subagent(label)
+        elif event.phase == "request_update":
+            self.subagent_request_updated(label, event.task_input)
 
     def on_click(self, event: Click) -> None:
         """Move keyboard focus to the transcript when its content is clicked."""
@@ -274,7 +383,7 @@ class ChatLog(VerticalScroll):
         self.finish_stream_phase()
         bubble = WorkflowTreeBubble(workflow_id, workflow_name)
         self._workflow_bubbles[workflow_id] = bubble
-        self.mount(bubble)
+        self._mount_activity(bubble, "Workflows", attention=True)
         self._scroll_to_end()
         return bubble
 
@@ -283,7 +392,7 @@ class ChatLog(VerticalScroll):
         self.finish_stream_phase()
         bubble = WorkflowTreeBubble.from_snapshot(snapshot)
         self._workflow_bubbles[bubble.workflow_id] = bubble
-        self.mount(bubble)
+        self._mount_activity(bubble, "Workflows", attention=True)
         self._scroll_to_end()
         return bubble
 
@@ -464,7 +573,28 @@ class ChatLog(VerticalScroll):
         retained_id = str(retained.get("id") or "") if isinstance(retained, dict) else ""
         retained_goal = session.get("current_goal")
         retained_goal_id = str(retained_goal.get("id") or "") if isinstance(retained_goal, dict) else ""
-        for event in session.get("events", ()):
+        runs_by_origin: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        if self.grouped and self.subagent_runs_provider is not None:
+            for run in self.subagent_runs_provider():
+                if run.get("origin_tool") == "eval" and run.get("origin_event_id") and run.get("inspection_type") == "subagent":
+                    runs_by_origin[int(run["origin_event_id"])].append(run)
+        events = session.get("events", ())
+        # Do not pull identified fragments across interleaved legacy records.
+        # Such a span has no reliable single-container historical ordering.
+        epochs: dict[str, int] = {}
+        ungrouped: set[str] = set()
+        epoch = 0
+        for event in events:
+            turn_id = str(event.get("turn_id") or "")
+            if not turn_id:
+                epoch += 1
+            elif turn_id:
+                if epochs.setdefault(turn_id, epoch) != epoch:
+                    ungrouped.add(turn_id)
+        for event in events:
+            self._restoring = True
+            turn_id = str(event.get("turn_id") or "")
+            self._event_turn_id = "" if turn_id in ungrouped else turn_id
             event_type = event["type"]
             created_at = str(event.get("created_at") or "")
             if event_type == "user":
@@ -486,6 +616,9 @@ class ChatLog(VerticalScroll):
                     duration_ms=event.get("duration_ms"),
                     origin_event_id=int(event.get("id") or 0),
                 )
+                if self._event_turn_id:
+                    for run in runs_by_origin.get(int(event.get("id") or 0), ()):
+                        self._restore_subagent_run(run)
             elif event_type == "tool_result":
                 callback = self.tool_error if event.get("status") == "error" else self.tool_result
                 callback(
@@ -578,6 +711,25 @@ class ChatLog(VerticalScroll):
             elif event_type in {"info", "system_error", "interrupted"}:
                 kind = {"info": "info", "system_error": "error", "interrupted": "warning"}[event_type]
                 self.system_message(event["text"], kind=kind, created_at=created_at)
+        self.finish_main()
+        self._event_turn_id = ""
+        self._restoring = False
+        for turn in self._turns.values():
+            turn.finish(turn.state if turn.state in {"failed", "interrupted"} else "completed", historical=True)
+
+    def _restore_subagent_run(self, run: dict[str, Any]) -> None:
+        """Project an eval child using its durable parent link, never task text."""
+        label = self.subagent_started(str(run.get("display_name") or "subagent"), str(run.get("task") or ""),
+                                      inspection_id=str(run.get("inspection_id") or ""), created_at=str(run.get("started_at") or ""))
+        identity = str(run.get("inspection_id") or
+                       (f"{run.get('eval_id', '')}:{run['row_id']}" if run.get("row_id") else run["id"]))
+        self._subagent_event_labels[(self._event_turn_id, identity)] = label
+        block = self._subagent_blocks[label]
+        block.update(status=run.get("status") or "CANCELLED", output=str(run.get("output") or ""), duration_ms=run.get("duration_ms"))
+        # A saved running row is interrupted until explicit recovery resumes it.
+        if block["status"] == "RUNNING":
+            block["status"] = "CANCELLED"
+        self._update_subagent(label)
 
     def reasoning_delta(self, delta: str, *, created_at: str = "") -> None:
         """Append streamed reasoning text to the current reasoning block."""
@@ -587,9 +739,18 @@ class ChatLog(VerticalScroll):
         self.hide_waiting()
         self._close_assistant_phase()
 
+        key = self._message_key("reasoning")
+        if self._reasoning_block is None and key in self._message_widgets:
+            self._reasoning_block = self._message_widgets[key]
+            self._reasoning_text = self._reasoning_block.content.plain
+            if turn := self._widget_turns.get(self._reasoning_block):
+                turn.resume(self._reasoning_block)
+
         if self._reasoning_block is None:
             self._reasoning_text = ""
             self._reasoning_block = self._add_block("thinking", Text(""), "message reasoning", created_at=created_at)
+            if key is not None:
+                self._message_widgets[key] = self._reasoning_block
         elif created_at:
             self._style_block(self._reasoning_block, title="thinking", classes="message reasoning", created_at=created_at)
 
@@ -608,25 +769,42 @@ class ChatLog(VerticalScroll):
         self.hide_waiting()
         self._close_reasoning_phase()
 
+        key = self._message_key("content")
+        if self._assistant_block is None and key in self._message_widgets:
+            self._assistant_block = self._message_widgets[key]
+            self._assistant_text = self._assistant_block.text
+            if turn := self._widget_turns.get(self._assistant_block):
+                turn.resume(self._assistant_block)
+
         if self._assistant_block is None:
             self._assistant_text = ""
             self._assistant_block = self._add_assistant_block("", created_at=created_at)
+            if key is not None:
+                self._message_widgets[key] = self._assistant_block
 
         self._assistant_text += delta
         self._assistant_block.update(Text(self._assistant_text))
         self._scroll_to_end()
+
+    def _message_key(self, phase: str) -> tuple[str, str, str] | None:
+        event = self._frontend_event
+        if not self.grouped or event is None or not event.turn_id:
+            return None
+        identity = event.message_id or (f"event:{event.event_id}" if event.event_id else "")
+        return (event.turn_id, phase, identity) if identity else None
 
     def correction(self, event: dict[str, Any], *, created_at: str = "") -> None:
         """Append a technical correction bubble after rejected assistant prose."""
         self.hide_waiting()
         self._close_assistant_phase()
         self._close_reasoning_phase()
-        self._add_block(
+        block = self._add_block(
             correction_title(event),
             Text(correction_text(event)),
             "message correction",
             created_at=created_at,
         )
+        self._complete_activity(block)
 
     def finish_main(self) -> None:
         """Close the current streamed blocks so the next turn starts fresh."""
@@ -643,25 +821,34 @@ class ChatLog(VerticalScroll):
         self._assistant_text = ""
 
     def _close_reasoning_phase(self) -> None:
+        if self._reasoning_block is not None:
+            self._complete_activity(self._reasoning_block)
         self._reasoning_block = None
         self._reasoning_text = ""
 
-    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled") -> None:
+    def finish_turn(self, *, cancelled: bool = False, tool_status: str = "cancelled", outcome: str | None = None) -> None:
         """Close live turn state without clearing persisted transcript history."""
         self.finish_main()
         self.hide_waiting()
         self._discard_delegation_draft()
         if cancelled:
+            if turn := self._turns.get(self._operation_turn_id or self._active_turn_id):
+                turn.finish(outcome or tool_status)
             self.subagents_cancelled()
             self._discard_tool_drafts()
             self.stop_live_tools(tool_status)
             self._cancel_compaction()
             self._reset_delegation_group()
+        else:
+            self._operation_turn_id = ""
 
     def discard_reasoning(self) -> None:
         """Remove the current streamed reasoning block."""
         if self._reasoning_block is not None:
-            self._reasoning_block.remove()
+            for key, widget in tuple(self._message_widgets.items()):
+                if widget is self._reasoning_block:
+                    del self._message_widgets[key]
+            self._remove_activity(self._reasoning_block)
         self._reasoning_block = None
         self._reasoning_text = ""
         self._scroll_to_end()
@@ -669,8 +856,15 @@ class ChatLog(VerticalScroll):
     def system_message(self, text: str, *, kind: str = "system", created_at: str = "") -> None:
         """Append a system, info, status, warning, or error message."""
         self.finish_stream_phase()
+        if kind in {"error", "warning"}:
+            turn_id = self._event_turn_id or self._active_turn_id
+            if turn_id and self.grouped:
+                turn = self._ensure_turn(turn_id)
+                turn.state = "failed" if kind == "error" else "interrupted"
         title = "mira" if kind == "startup" else kind
-        self._add_block(title, Text(text), f"message {kind}", created_at=created_at)
+        block = self._add_block(title, Text(text), f"message {kind}", created_at=created_at)
+        if kind not in {"error", "warning"}:
+            self._complete_activity(block)
 
     def command_output(self, renderable: Any) -> None:
         """Append command output, including Rich renderables such as tables."""
@@ -695,6 +889,7 @@ class ChatLog(VerticalScroll):
             return
         self._compaction_running = False
         self._compaction_block.update(Text(message, style="bold green" if success else "dim"))
+        self._complete_activity(self._compaction_block)
         self._compaction_block = None
         self._scroll_to_end()
 
@@ -1046,6 +1241,8 @@ class ChatLog(VerticalScroll):
     def start_subagent_live(self) -> None:
         """Reset subagent state for a new delegation group."""
         self.discard_delegation_summary()
+        if self.has_grouped_turn:
+            return
         self._subagent_blocks = {}
         self._subagent_widgets = {}
         self._subagent_aliases = {}
@@ -1055,9 +1252,9 @@ class ChatLog(VerticalScroll):
         blocks = [self._delegation_draft_block, self._delegation_block]
         removed = False
         for block in blocks:
-            if block is None or block not in self.children:
+            if block is None:
                 continue
-            block.remove()
+            self._remove_activity(block)
             removed = True
         self._reset_delegation_group()
         if removed:
@@ -1104,7 +1301,8 @@ class ChatLog(VerticalScroll):
         *,
         origin: str = "",
         created_at: str = "",
-    ) -> None:
+        inspection_id: str = "",
+    ) -> str:
         """Create or replace the block for a running subagent."""
         self.hide_waiting()
         self.finish_main()
@@ -1120,8 +1318,10 @@ class ChatLog(VerticalScroll):
             self._render_subagent(subagent),
             "message subagent",
             created_at=created_at,
+            inspection_id=inspection_id,
         )
         self._subagent_widgets[subagent] = widget
+        return subagent
 
     def subagent_request_updated(self, subagent: str, task_input: str) -> None:
         """Fill request text into an existing running subagent block."""
@@ -1210,20 +1410,19 @@ class ChatLog(VerticalScroll):
         bubble = PlanBubble(plan, active=active, status=status)
         if timestamp := timestamp_text(created_at):
             bubble.border_subtitle = escape(timestamp)
-        self.mount(bubble)
+        self._mount_activity(bubble, "Plans", attention=active)
         if plan_id:
             self._plan_widgets[plan_id] = bubble
         self._scroll_to_end()
-        if active:
-            self.call_after_refresh(
-                lambda: self.call_after_refresh(bubble._focus_implement)
-            )
 
     def resolve_plan(self, plan_id: str, status: str) -> None:
         """Mark an existing plan bubble as resolved."""
         bubble = self._plan_widgets.get(plan_id)
         if bubble is not None:
             bubble.resolve(status)
+            if turn := self._widget_turns.get(bubble):
+                turn.rows[bubble].attention = False
+                turn.complete(bubble)
             self._scroll_to_end()
         self._release_artifact_tail_anchor("plan", plan_id)
 
@@ -1231,7 +1430,7 @@ class ChatLog(VerticalScroll):
         """Remove one Plan bubble from the visible transcript."""
         bubble = self._plan_widgets.pop(plan_id, None)
         if bubble is not None:
-            bubble.remove()
+            self._remove_activity(bubble)
             self._scroll_to_end()
 
     def present_goal(
@@ -1249,20 +1448,19 @@ class ChatLog(VerticalScroll):
         bubble = GoalBubble(value, active=active, status=status)
         if timestamp := timestamp_text(created_at):
             bubble.border_subtitle = escape(timestamp)
-        self.mount(bubble)
+        self._mount_activity(bubble, "Goals", attention=active)
         if goal_id:
             self._goal_widgets[goal_id] = bubble
         self._scroll_to_end()
-        if active:
-            self.call_after_refresh(
-                lambda: self.call_after_refresh(bubble._focus_implement)
-            )
 
     def resolve_goal(self, goal_id: str, status: str) -> None:
         """Mark an existing Goal bubble as resolved."""
         bubble = self._goal_widgets.get(goal_id)
         if bubble is not None:
             bubble.resolve(status)
+            if turn := self._widget_turns.get(bubble):
+                turn.rows[bubble].attention = False
+                turn.complete(bubble)
             self._scroll_to_end()
         self._release_artifact_tail_anchor("goal", goal_id)
 
@@ -1270,7 +1468,7 @@ class ChatLog(VerticalScroll):
         """Remove one Goal bubble from the visible transcript."""
         bubble = self._goal_widgets.pop(goal_id, None)
         if bubble is not None:
-            bubble.remove()
+            self._remove_activity(bubble)
             self._scroll_to_end()
 
     def rubric_evaluation_started(
@@ -1313,10 +1511,12 @@ class ChatLog(VerticalScroll):
                 str(event.get("tool_call_id") or "")
             )
         elif event_type == "rubric_verification_end":
-            self._ensure_verifier_bubble(key).finish(
+            widget = self._ensure_verifier_bubble(key)
+            widget.finish(
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
+            self._complete_activity(widget)
         elif event_type == "rubric_grading_start":
             widget = self._ensure_grader_bubble(
                 key,
@@ -1324,10 +1524,12 @@ class ChatLog(VerticalScroll):
             )
             widget.start(str(event.get("inspection_id") or ""))
         elif event_type == "rubric_grading_end":
-            self._ensure_grader_bubble(key).finish(
+            widget = self._ensure_grader_bubble(key)
+            widget.finish(
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
+            self._complete_activity(widget)
         self._scroll_to_end()
 
     def tick_rubrics(self) -> None:
@@ -1347,8 +1549,10 @@ class ChatLog(VerticalScroll):
             grader = self._rubric_grader_widgets.get(key)
             if verifier is not None:
                 verifier.interrupt()
+                self._complete_activity(verifier)
             if grader is not None:
                 grader.interrupt()
+                self._complete_activity(grader)
         self._rubric_activity.clear()
 
     def rubric_evaluation_finished(
@@ -1380,6 +1584,7 @@ class ChatLog(VerticalScroll):
             succeeded=str(evaluation.get("verifier_status") or "complete") != "failed",
             duration_ms=evaluation.get("verifier_duration_ms"),
         )
+        self._complete_activity(verifier)
         grader = None
         if (
             str(evaluation.get("verifier_status") or "complete") != "failed"
@@ -1400,6 +1605,7 @@ class ChatLog(VerticalScroll):
                 duration_ms=evaluation.get("grader_duration_ms"),
             )
             grader.set_result(body)
+            self._complete_activity(grader)
         if timestamp := timestamp_text(created_at):
             verifier.border_subtitle = escape(timestamp)
             if grader is not None:
@@ -1470,7 +1676,7 @@ class ChatLog(VerticalScroll):
                 or ""
             ),
         )
-        self.mount(widget)
+        self._mount_activity(widget, "Rubric")
         self._rubric_verifier_widgets[key] = widget
         return widget
 
@@ -1499,7 +1705,7 @@ class ChatLog(VerticalScroll):
             inspection_id=inspection_id,
             grader_model=grader_model,
         )
-        self.mount(widget)
+        self._mount_activity(widget, "Rubric")
         self._rubric_grader_widgets[key] = widget
         return widget
 
@@ -1572,6 +1778,13 @@ class ChatLog(VerticalScroll):
         self._pending_tool_results_by_name = defaultdict(deque)
         self._subagent_aliases = {}
         self._workflow_bubbles = {}
+        self._turns = {}
+        self._widget_turns = {}
+        self._active_turn_id = ""
+        self._event_turn_id = ""
+        self._operation_turn_id = ""
+        self._subagent_event_labels = {}
+        self._message_widgets = {}
         preserved_widgets = {
             widget
             for widget in (preserved_startup, *preserved_mcp.values())
@@ -1583,6 +1796,8 @@ class ChatLog(VerticalScroll):
 
     def show_waiting(self, label: str = "working...", *, elapsed: bool | None = None) -> None:
         """Show the transient thinking status while MIRA is idle."""
+        if self.grouped and self._active_turn_id:
+            return  # The outer header owns the working clock.
         if elapsed is None:
             elapsed = bool(
                 self._waiting_block is not None
@@ -1620,6 +1835,8 @@ class ChatLog(VerticalScroll):
 
     def tick_tools(self) -> None:
         """Advance live tool spinners and elapsed clocks in place."""
+        if turn := self._turns.get(self._active_turn_id):
+            turn.tick()
         for key, block in list(self._tool_blocks.items()):
             if block.get("duration_ms") is not None or block.get("started_at") is None:
                 continue
@@ -1666,13 +1883,24 @@ class ChatLog(VerticalScroll):
             return text
         return text[: self.tool_output_chars].rstrip() + "\n... truncated ..."
 
-    def _add_block(self, title: str, renderable: Any, classes: str, *, created_at: str = "") -> Static:
+    def _add_block(self, title: str, renderable: Any, classes: str, *, created_at: str = "", inspection_id: str = "") -> Static:
         """Mount one bordered transcript block."""
         block = Static(renderable, classes=classes)
+        block.inspection_id = inspection_id
         block.border_title = escape(title)
         if timestamp := timestamp_text(created_at):
             block.border_subtitle = escape(timestamp)
-        self.mount(block)
+        category = next((value for key, value in (
+            ("reasoning", "Thinking"), ("subagent", "Subagents"),
+            ("delegation", "Activity"), ("correction", "Activity"),
+            ("error", "Activity"), ("warning", "Activity"),
+            ("info", "Activity"), ("status", "Activity"), ("summary", "Activity"),
+        ) if key in classes.split()), None)
+        if category is not None:
+            self._mount_activity(block, category, attention=bool({"error", "warning"} & set(classes.split())))
+        else:
+            before = self._turns.get(self._event_turn_id) if "user" in classes.split() else None
+            self.mount(block, before=before)
         self._scroll_to_end()
         return block
 
@@ -1681,7 +1909,7 @@ class ChatLog(VerticalScroll):
         block = AssistantBubble(text)
         if timestamp := timestamp_text(created_at):
             block.border_subtitle = escape(timestamp)
-        self.mount(block)
+        self._mount_activity(block, "Messages")
         self._scroll_to_end()
         return block
 
@@ -1694,10 +1922,10 @@ class ChatLog(VerticalScroll):
         created_at: str = "",
     ) -> ToolBubble:
         """Mount one expandable tool-call transcript block."""
-        block = ToolBubble(name, args, draft=draft)
+        block = ToolBubble(name, args, draft=draft, collapse_output=self.has_grouped_turn)
         if timestamp := timestamp_text(created_at):
             block.border_subtitle = escape(timestamp)
-        self.mount(block)
+        self._mount_activity(block, "Tools")
         self._scroll_to_end()
         return block
 
@@ -1805,7 +2033,7 @@ class ChatLog(VerticalScroll):
 
     def _discard_delegation_draft(self) -> None:
         if self._delegation_draft_block is not None:
-            self._delegation_draft_block.remove()
+            self._remove_activity(self._delegation_draft_block)
             self._delegation_draft_block = None
 
     def _discard_tool_drafts(self) -> None:
@@ -1820,7 +2048,7 @@ class ChatLog(VerticalScroll):
                 continue
             widget = block.get("widget")
             if widget is not None:
-                widget.remove()
+                self._remove_activity(widget)
         if draft_keys:
             draft_key_set = set(draft_keys)
             for name, queue in list(self._tool_name_queues.items()):
@@ -1916,8 +2144,12 @@ class ChatLog(VerticalScroll):
             text.append(f"{SPINNER_FRAMES[self._subagent_spinner_index]} RUNNING", style="bold yellow")
         elif status == "CANCELLED":
             text.append("CANCELLED", style="bold yellow")
+        elif status == "ERROR":
+            text.append("ERROR", style="bold red")
         else:
             text.append("DONE", style="bold green")
+        if isinstance(block.get("duration_ms"), (int, float)):
+            text.append(f" · {format_elapsed(block['duration_ms'])}", style="dim")
 
         if block.get("output"):
             text.append("\n\noutput:\n", style="bold cyan")
@@ -1941,6 +2173,14 @@ class ChatLog(VerticalScroll):
             widget.border_subtitle = escape(timestamp)
         widget.border_title = escape(self._subagent_title(label))
         widget.update(self._render_subagent(label))
+        if self._subagent_blocks[label]["status"] != "RUNNING":
+            self._complete_activity(widget)
+            if self._subagent_blocks[label]["status"] in {"ERROR", "CANCELLED"}:
+                if turn := self._widget_turns.get(widget):
+                    turn.pin_completed(widget)
+        elif turn := self._widget_turns.get(widget):
+            turn.rows[widget].attention = False
+            turn.resume(widget)
         self._scroll_to_end()
 
     def _next_suffix(self) -> str:
@@ -2186,6 +2426,15 @@ class ChatLog(VerticalScroll):
             except Exception:
                 count = 0
         widget.update_subagents(origin_event_id, count, terminal=terminal)
+        if turn := self._widget_turns.get(widget):
+            if terminal:
+                turn.rows[widget].attention = False
+                turn.complete(widget)
+                if block.get("is_error") or block.get("terminal_status"):
+                    turn.pin_completed(widget)
+            else:
+                turn.rows[widget].attention = False
+                turn.resume(widget)
         if scroll:
             self._scroll_to_end()
 
@@ -2227,6 +2476,21 @@ def pending_result(value: str) -> tuple[str, bool, int | None]:
     return value, False, None
 
 
+class AssistantBodySwitcher(ContentSwitcher):
+    """Retain the selected native view across an activity's lifecycle move."""
+
+    retained_current = "assistant-text"
+
+    def on_mount(self) -> None:
+        # ContentSwitcher's native Mount handler selects its initial view.
+        # Apply the retained preference after that handler, on this widget's queue.
+        if self.retained_current != "assistant-text":
+            self.call_later(self._restore_selection)
+
+    def _restore_selection(self) -> None:
+        self.current = self.retained_current
+
+
 class AssistantBubble(Vertical):
     """Assistant response text with a compact clipboard footer action."""
 
@@ -2238,7 +2502,7 @@ class AssistantBubble(Vertical):
         self.border_title = "mira"
         self._body = Static(Text(text), id="assistant-text", classes="assistant-body")
         self._markdown_body = Markdown(text, id="assistant-markdown", classes="assistant-body")
-        self._body_switcher = ContentSwitcher(
+        self._body_switcher = AssistantBodySwitcher(
             initial="assistant-text", classes="assistant-body-switcher"
         )
         self._copy_button = Button(
@@ -2253,6 +2517,7 @@ class AssistantBubble(Vertical):
         )
         self._display_anchor_y: int | None = None
         self._feedback_version = 0
+        self._copy_feedback_deadline = 0.0
 
     @property
     def renderable(self) -> Any:
@@ -2270,22 +2535,32 @@ class AssistantBubble(Vertical):
     def update(self, renderable: Text) -> None:
         """Update streamed assistant text without replacing the footer."""
         self.text = renderable.plain
-        if self._body_switcher.current == "assistant-markdown":
+        if self._body_switcher.retained_current == "assistant-markdown":
             self._markdown_body.update(self.text)
         else:
             self._body.update(renderable)
 
+    def on_mount(self) -> None:
+        if self._copy_feedback_deadline:
+            remaining = self._copy_feedback_deadline - time.monotonic()
+            version = self._feedback_version
+            if remaining > 0:
+                self.set_timer(remaining, lambda: self._restore_copy_label(version))
+            else:
+                self._restore_copy_label(version)
+
     def on_resize(self, event: Resize) -> None:
         """Preserve the active viewport anchor as this bubble changes size."""
-        if isinstance(self.parent, ChatLog):
+        chat_log = next((parent for parent in self.ancestors if isinstance(parent, ChatLog)), None)
+        if chat_log is not None:
             if self._display_anchor_y is not None:
-                self.parent.follow_tail = False
-            elif self.parent.follow_tail:
-                self.parent._scroll_to_end()
+                chat_log.follow_tail = False
+            elif chat_log.follow_tail:
+                chat_log._scroll_to_end()
 
     def toggle_display(self) -> None:
         """Toggle this response between plain text and native Markdown."""
-        chat_log = self.parent if isinstance(self.parent, ChatLog) else None
+        chat_log = next((parent for parent in self.ancestors if isinstance(parent, ChatLog)), None)
         self._display_anchor_y = (
             self._display_button.region.y
             if chat_log is not None and not chat_log.follow_tail
@@ -2299,6 +2574,7 @@ class AssistantBubble(Vertical):
             self._body.update(Text(self.text))
             self._body_switcher.current = "assistant-text"
             self._display_button.label = "Markdown"
+        self._body_switcher.retained_current = str(self._body_switcher.current)
         if self._body_switcher.current == "assistant-text" and self._display_anchor_y is not None:
             self.call_after_refresh(self._finish_display_transition_after_refresh)
 
@@ -2318,9 +2594,10 @@ class AssistantBubble(Vertical):
         self.call_after_refresh(self._finish_display_transition)
 
     def _finish_display_transition(self) -> None:
-        if isinstance(self.parent, ChatLog) and self._display_anchor_y is not None:
-            self.parent.follow_tail = False
-            self.parent._preserve_screen_y(
+        chat_log = next((parent for parent in self.ancestors if isinstance(parent, ChatLog)), None)
+        if chat_log is not None and self._display_anchor_y is not None:
+            chat_log.follow_tail = False
+            chat_log._preserve_screen_y(
                 self._display_button.region.y,
                 self._display_anchor_y,
             )
@@ -2331,11 +2608,13 @@ class AssistantBubble(Vertical):
         self._feedback_version += 1
         version = self._feedback_version
         self._copy_button.label = "Copied"
+        self._copy_feedback_deadline = time.monotonic() + self.FEEDBACK_SECONDS
         self.set_timer(self.FEEDBACK_SECONDS, lambda: self._restore_copy_label(version))
 
     def _restore_copy_label(self, version: int) -> None:
-        if self._feedback_version == version and self._copy_button.is_mounted:
+        if self._feedback_version == version:
             self._copy_button.label = "Copy"
+            self._copy_feedback_deadline = 0.0
 
 
 def artifact_primary_label(status: str) -> str:
@@ -2414,6 +2693,10 @@ class PlanBubble(Vertical):
                 yield PlanActionButton(
                     "Clear", id=f"plan-clear-{self.plan_id}", classes="plan-action", compact=True
                 )
+
+    def on_mount(self) -> None:
+        if self.active:
+            self.call_after_refresh(self._focus_implement)
 
     def _focus_implement(self) -> None:
         """Focus Implement after composed children are available."""
@@ -2575,6 +2858,10 @@ class GoalBubble(Vertical):
                         classes="goal-action",
                         compact=True,
                     )
+
+    def on_mount(self) -> None:
+        if self.active:
+            self.call_after_refresh(self._focus_implement)
 
     def _focus_implement(self) -> None:
         """Focus the primary Goal action after tail layout settles."""

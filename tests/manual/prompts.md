@@ -2225,4 +2225,41 @@ Use a disposable workspace with your usual model and MCP configuration.
    Expected: the snapshot reports pending work; opening alone executes nothing;
    continuation retains existing interaction/tool/inspection identities.
 
-The grouped-turn transcript layout remains a separate Phase 3 change.
+The grouped-turn transcript layout has its own checks below.
+
+## Grouped assistant transcript
+
+Use a disposable workspace and your configured model. Keep the Inspector open
+for some checks; its transcript should retain the existing flat presentation.
+
+1. Ask for a short answer without tools, then request several file reads with
+   explanations between them. Expect one Assistant container per submitted
+   interaction, user messages outside it, a working clock and completed counts.
+   Model-message boundaries must not create extra containers. The final answer
+   stays visible without expanding history.
+2. Request parallel tools and two subagents. Expect all genuinely active rows
+   visible together; counts increase only as logical activities complete. Open
+   completed history, independently expand rows and use their Inspector links.
+3. Generate/revise/implement a Plan, then run a Goal with Rubric evaluation.
+   Expect reviews and artifact controls to remain visible. Verifier/grader
+   progress stays live; the final response remains outside history after grading.
+4. Exercise allow/reject/edit approval, AskUser and MCP elicitation. Expect the
+   usual editors/choices and a Waiting-for-you header. No choice is buried in
+   collapsed activity. Cancel and trigger a tool error; failure/interruption
+   status remains visible and later prompts get separate containers.
+5. Interrupt an approval, restart, explicitly recover, and switch between saved
+   chats. Expect the original outer identity and existing tool widget to be
+   reused during recovery. Saved turns without timings show Completed; a cold
+   recovery clock explicitly measures only the new segment.
+6. Run a registered Workflow, inspect its nodes and final state, and reopen its
+   saved chat. Expect the existing tree and Inspector navigation to work within
+   one identified outer container.
+7. Produce at least 20 completed activities. Expand history and scroll upward;
+   expand a row and leave it open while more work completes. Expect five compact
+   rows' worth of viewport height, all entries accessible by scrolling, stable
+   expansion/focus/position and no load-more control. Returning to the history
+   tail permits following new entries. Hover both disclosure glyphs while
+   collapsed and expanded; title geometry must remain stable.
+8. Copy a final and intermediate response, switch Markdown/plain text, inspect
+   full tool arguments/output, and reopen an old chat lacking turn identities.
+   Expect existing controls to work and legacy entries to retain saved order.

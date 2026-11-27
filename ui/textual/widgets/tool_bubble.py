@@ -203,7 +203,7 @@ class SubagentHistoryAnchor(Button):
 class ToolBubble(Vertical):
     """A MIRA transcript tool call with collapsible, complete arguments."""
 
-    def __init__(self, name: str, args: Any, *, draft: bool = False) -> None:
+    def __init__(self, name: str, args: Any, *, draft: bool = False, collapse_output: bool = False) -> None:
         super().__init__(classes="message tool-call")
         self._call_text = Text()
         self._output_text = Text()
@@ -216,6 +216,10 @@ class ToolBubble(Vertical):
             classes="tool-args-collapsible",
         )
         self.output = Static(classes="tool-output")
+        self.output_collapsible = Collapsible(self.output, title="Output", collapsed=True,
+                                              classes="tool-args-collapsible") if collapse_output else None
+        if self.output_collapsible is not None:
+            self.output_collapsible.display = False
         self.status = Static(classes="tool-status")
         self.subagents_anchor = SubagentHistoryAnchor()
         self.output.styles.display = "none"
@@ -224,7 +228,7 @@ class ToolBubble(Vertical):
 
     def compose(self) -> ComposeResult:
         yield self.args_collapsible
-        yield self.output
+        yield self.output_collapsible if self.output_collapsible is not None else self.output
         yield self.status
         yield self.subagents_anchor
 
@@ -259,6 +263,8 @@ class ToolBubble(Vertical):
         self.output.update(self._output_text)
         self.status.update(self._status_text)
         self.output.styles.display = "block" if self._output_text.plain else "none"
+        if self.output_collapsible is not None:
+            self.output_collapsible.display = bool(self._output_text.plain)
         self.status.styles.display = "block" if self._status_text.plain else "none"
 
     def update_subagents(self, origin_event_id: int, count: int, *, terminal: bool) -> None:

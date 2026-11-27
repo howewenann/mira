@@ -348,6 +348,8 @@ class AutocompleteTestApp(App[None]):
 
 def renderable_plain(widget: Any) -> str:
     """Return plain text from a Textual Static-like widget."""
+    if widget.has_class("assistant-turn"):
+        return "\n".join(renderable_plain(child) for child in widget.query(".message"))
     renderable = getattr(widget, "renderable", None) or getattr(widget, "_renderable", None) or getattr(widget, "content", "")
     plain = getattr(renderable, "plain", None)
     if plain is not None:
@@ -721,7 +723,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._run_turn("hello")
                 await app._run_workflow_demo()
                 await pilot.pause()
-                self.assertIn("public handle response", "\n".join(renderable_plain(child) for child in app.query_one(ChatLog).children))
+                self.assertIn("public handle response", "\n".join(renderable_plain(child) for child in app.query_one(ChatLog).query(".assistant")))
                 self.assertEqual(len(app.query(WorkflowTreeBubble)), 1)
 
     async def test_typed_inspection_updates_and_queries_follow_the_selected_session(self) -> None:
@@ -4732,8 +4734,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         )
 
                         await app._run_turn("Show, reopen, and review the retained Goal.")
+                        natural = app.query_one(ChatLog)._goal_widgets[value["id"]]
+                        await wait_until(lambda: natural.is_mounted and len(natural.query(".goal-action")) == 4)
                         await pilot.pause()
-                        natural = list(app.query_one(ChatLog).query(".goal"))[-1]
                         natural_actions = list(natural.query(".goal-action"))
 
                         self.assertEqual(len(direct_actions), 4)
@@ -5461,6 +5464,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app.submit_prompt(PromptBox.Submitted(prompt, "hello"))
                 await pilot.pause()
 
+                await wait_until(lambda: any(block.region.height > 0 for block in app.query_one(ChatLog).query(".info")))
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                 self.assertIn(notice, rendered)
                 self.assertNotIn("MIRA simulated a context overflow", rendered)
