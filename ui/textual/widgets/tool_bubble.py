@@ -33,11 +33,11 @@ TOOL_ARGS_PREVIEW_CHARS = 112
 TOOL_ARGS_MAX_ROWS = 12
 
 
-def compact_tool_args(args: Any, limit: int = TOOL_ARGS_PREVIEW_CHARS) -> str:
+def compact_tool_args(args: Any, limit: int | None = TOOL_ARGS_PREVIEW_CHARS) -> str:
     """Return a compact single-line preview without limiting the full arguments."""
     rendered = _json_text(args, indent=None)
     compact = re.sub(r"\s+", " ", rendered).strip()
-    if len(compact) <= limit:
+    if limit is None or len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "\u2026"
 
@@ -45,6 +45,20 @@ def compact_tool_args(args: Any, limit: int = TOOL_ARGS_PREVIEW_CHARS) -> str:
 def pretty_tool_args(args: Any) -> str:
     """Return readable complete arguments, preserving incomplete streamed JSON."""
     return _json_text(args, indent=2)
+
+
+def tool_argument_preview(name: str, args: Any) -> str:
+    """Select the ordinary identifying argument; retain the original for details."""
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (ValueError, TypeError):
+            pass
+    key = {"read_file": "file_path", "write_file": "file_path", "edit_file": "file_path",
+           "ls": "path", "grep": "pattern", "glob": "pattern", "execute": "command"}.get(name)
+    if isinstance(args, dict) and key in args:
+        return " ".join(str(args[key]).split())
+    return compact_tool_args(args, limit=None)
 
 
 def tool_lifecycle_status(
@@ -116,6 +130,7 @@ class ToolArgumentTextArea(TextArea):
     WRAP_ESTIMATE = 96
 
     def __init__(self, text: str) -> None:
+        self.natural_height = False
         super().__init__(
             text,
             language=None,
@@ -146,7 +161,7 @@ class ToolArgumentTextArea(TextArea):
             return
         self.load_text(text)
         self._estimated_rows = self._estimate_rows(text)
-        self.styles.height = min(self.MAX_ROWS, self._estimated_rows)
+        self.styles.height = self._estimated_rows if self.natural_height else min(self.MAX_ROWS, self._estimated_rows)
         if self.is_mounted:
             self.call_after_refresh(self.fit_to_rendered_content)
 
@@ -157,7 +172,7 @@ class ToolArgumentTextArea(TextArea):
             if self.wrap_width > 0
             else self._estimated_rows
         )
-        self.styles.height = min(self.MAX_ROWS, max(1, content_rows))
+        self.styles.height = max(1, content_rows) if self.natural_height else min(self.MAX_ROWS, max(1, content_rows))
 
     @classmethod
     def _estimate_rows(cls, text: str) -> int:
@@ -252,9 +267,20 @@ class ToolBubble(Vertical):
     def update_call(self, name: str, args: Any, *, draft: bool) -> None:
         """Update a streamed or edited call while preserving expansion state."""
         self.border_title = escape(f"tool - {name}")
+        self.tool_name, self.arguments = name, args
         self._call_text = self._title(args, draft)
-        self.args_collapsible.title = self._call_text  # type: ignore[assignment]
+        self.args_collapsible.title = "Arguments" if self.has_class("historical-detail") else self._call_text  # type: ignore[assignment]
         self.args_editor.replace_text(pretty_tool_args(args))
+
+    def set_history_detail(self, selected: bool) -> None:
+        """Reuse the tool body without another title/border or nested scrolling."""
+        if selected and not self.has_class("historical-detail"):
+            self.args_collapsible.collapsed = True
+            if self.output_collapsible is not None:
+                self.output_collapsible.collapsed = True
+        self.set_class(selected, "historical-detail")
+        self.args_editor.natural_height = selected
+        self.args_collapsible.title = "Arguments" if selected else self._call_text
 
     def update_details(self, output: Text, status: Text) -> None:
         """Update compact output and lifecycle status independently of arguments."""

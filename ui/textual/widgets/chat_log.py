@@ -189,7 +189,7 @@ class ChatLog(VerticalScroll):
         turn_id = self._event_turn_id or ("" if self._restoring else self._active_turn_id)
         if self.grouped and turn_id:
             turn = self._ensure_turn(turn_id)
-            turn.add(widget, category, attention=attention)
+            turn.add(widget, category, attention=attention, historical=self._restoring)
             self._widget_turns[widget] = turn
         else:
             self.mount(widget)
@@ -197,9 +197,11 @@ class ChatLog(VerticalScroll):
     def _pause_tail(self) -> None:
         self.follow_tail = False
 
-    def _complete_activity(self, widget: Any) -> None:
+    def _complete_activity(self, widget: Any, *, attention: bool = False) -> None:
         if turn := self._widget_turns.get(widget):
             turn.complete(widget)
+            if attention:
+                turn.pin_completed(widget)
 
     def _remove_activity(self, widget: Any) -> None:
         if turn := self._widget_turns.pop(widget, None):
@@ -392,7 +394,10 @@ class ChatLog(VerticalScroll):
         self.finish_stream_phase()
         bubble = WorkflowTreeBubble.from_snapshot(snapshot)
         self._workflow_bubbles[bubble.workflow_id] = bubble
-        self._mount_activity(bubble, "Workflows", attention=True)
+        running = bubble.status in {"RUNNING", "WAITING"}
+        self._mount_activity(bubble, "Workflows", attention=running)
+        if not running:
+            self._complete_activity(bubble, attention=bubble.status in {"ERROR", "CANCELLED", "INTERRUPTED"})
         self._scroll_to_end()
         return bubble
 
@@ -508,12 +513,18 @@ class ChatLog(VerticalScroll):
         bubble = self._workflow_bubbles.get(workflow_id)
         if bubble is not None:
             bubble.complete(final_state, available=available)
+            if turn := self._widget_turns.get(bubble):
+                turn.rows[bubble].attention = False
+            self._complete_activity(bubble)
             self._scroll_to_end()
 
     def workflow_cancelled(self, workflow_id: str, error: str = "") -> None:
         bubble = self._workflow_bubbles.get(workflow_id)
         if bubble is not None:
             bubble.cancel(error)
+            if turn := self._widget_turns.get(bubble):
+                turn.rows[bubble].attention = False
+            self._complete_activity(bubble, attention=True)
 
     def workflow_task_view(
         self,
@@ -1516,7 +1527,8 @@ class ChatLog(VerticalScroll):
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
-            self._complete_activity(widget)
+            widget.duration_ms = event.get("duration_ms")
+            self._complete_activity(widget, attention=not bool(event.get("succeeded")))
         elif event_type == "rubric_grading_start":
             widget = self._ensure_grader_bubble(
                 key,
@@ -1529,7 +1541,8 @@ class ChatLog(VerticalScroll):
                 succeeded=bool(event.get("succeeded")),
                 duration_ms=event.get("duration_ms"),
             )
-            self._complete_activity(widget)
+            widget.duration_ms = event.get("duration_ms")
+            self._complete_activity(widget, attention=not bool(event.get("succeeded")))
         self._scroll_to_end()
 
     def tick_rubrics(self) -> None:
@@ -1549,10 +1562,10 @@ class ChatLog(VerticalScroll):
             grader = self._rubric_grader_widgets.get(key)
             if verifier is not None:
                 verifier.interrupt()
-                self._complete_activity(verifier)
+                self._complete_activity(verifier, attention=True)
             if grader is not None:
                 grader.interrupt()
-                self._complete_activity(grader)
+                self._complete_activity(grader, attention=True)
         self._rubric_activity.clear()
 
     def rubric_evaluation_finished(
@@ -1584,7 +1597,8 @@ class ChatLog(VerticalScroll):
             succeeded=str(evaluation.get("verifier_status") or "complete") != "failed",
             duration_ms=evaluation.get("verifier_duration_ms"),
         )
-        self._complete_activity(verifier)
+        verifier.duration_ms = evaluation.get("verifier_duration_ms")
+        self._complete_activity(verifier, attention=evaluation.get("verifier_status") == "failed")
         grader = None
         if (
             str(evaluation.get("verifier_status") or "complete") != "failed"
@@ -1605,7 +1619,8 @@ class ChatLog(VerticalScroll):
                 duration_ms=evaluation.get("grader_duration_ms"),
             )
             grader.set_result(body)
-            self._complete_activity(grader)
+            grader.duration_ms = evaluation.get("grader_duration_ms")
+            self._complete_activity(grader, attention=evaluation.get("grader_status") == "failed")
         if timestamp := timestamp_text(created_at):
             verifier.border_subtitle = escape(timestamp)
             if grader is not None:
@@ -2172,6 +2187,7 @@ class ChatLog(VerticalScroll):
         if timestamp := timestamp_text(created_at):
             widget.border_subtitle = escape(timestamp)
         widget.border_title = escape(self._subagent_title(label))
+        widget.duration_ms = self._subagent_blocks[label].get("duration_ms")
         widget.update(self._render_subagent(label))
         if self._subagent_blocks[label]["status"] != "RUNNING":
             self._complete_activity(widget)
@@ -2397,13 +2413,18 @@ class ChatLog(VerticalScroll):
         block = self._tool_blocks[key]
         output = Text()
         if block.get("result"):
-            output.append("-" * 12, style="dim")
+            grouped = block["widget"] in self._widget_turns
+            rendered = block["result"] if grouped else self.truncate_multiline(block["result"])
+            if not grouped:
+                output.append("-" * 12, style="dim")
             if block.get("is_error"):
-                output.append("\nerror:\n", style="bold red")
-                output.append(self.truncate_multiline(block["result"]), style="red")
+                if not grouped:
+                    output.append("\nerror:\n", style="bold red")
+                output.append(rendered, style="red")
             else:
-                output.append("\noutput:\n", style="bold cyan")
-                output.append(self.truncate_multiline(block["result"]), style="dim")
+                if not grouped:
+                    output.append("\noutput:\n", style="bold cyan")
+                output.append(rendered, style="dim")
         status = tool_lifecycle_status(
             draft=bool(block.get("draft")),
             started_at=block.get("started_at"),
@@ -2414,6 +2435,7 @@ class ChatLog(VerticalScroll):
             clock=time.monotonic,
         )
         widget: ToolBubble = block["widget"]
+        widget.duration_ms = block.get("duration_ms")
         widget.update_call(block["name"], block["args"], draft=bool(block.get("draft")))
         widget.update_details(output, status)
         origin_event_id = int(block.get("origin_event_id") or 0)

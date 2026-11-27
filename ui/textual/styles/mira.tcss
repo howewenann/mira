@@ -1991,15 +1991,23 @@ Button.settings-access-back:hover {
     padding: 0 1;
 }
 
-.turn-summary, .turn-counts {
-    height: auto;
-    color: #b8c1c7;
+.turn-summary {
+    height: 2;
+    padding: 0 1;
+    background: #17313a;
+    color: #e8edef;
+    text-style: none;
+    pointer: pointer;
 }
 
-.turn-summary { color: #e8edef; }
-.turn-active { height: auto; }
+.turn-summary:hover, .turn-summary:focus {
+    background: #1b3036;
+    text-style: none;
+}
 
-.completed-activity, .activity-row {
+.turn-summary:focus { outline: solid #5bb8b1; }
+
+.turn-active, .completed-activity, .activity-details {
     height: auto;
     padding: 0;
     margin: 0;
@@ -2007,47 +2015,75 @@ Button.settings-access-back:hover {
     background: transparent;
 }
 
-.completed-activity { margin: 1 0; }
+.completed-activity {
+    keyline: thin #51696c;
+    overflow: hidden hidden;
+    background-tint: transparent;
+}
 
-.completed-activity > CollapsibleTitle, .activity-row > CollapsibleTitle {
+.completed-activity:focus { background-tint: transparent; }
+
+.completed-activity > .activity-row {
     width: 1fr;
-    height: auto;
-    padding: 0;
+    height: 1;
+    min-height: 1;
+    padding: 0 1;
+    border: none;
+    margin: 1;
     color: #b8c1c7;
     background: transparent;
     text-style: none;
     text-wrap: nowrap;
     text-overflow: ellipsis;
+    pointer: pointer;
 }
 
-.completed-activity > CollapsibleTitle:focus, .activity-row > CollapsibleTitle:focus {
-    background: transparent;
+.completed-activity > .activity-row.-hovered,
+.completed-activity > .activity-row.-highlight,
+.completed-activity > .activity-row.selected,
+.completed-activity:focus > .activity-row.-highlight {
+    background: #17313a;
     text-style: none;
 }
 
-.completed-activity > CollapsibleTitle:hover,
-.completed-activity > CollapsibleTitle:focus:hover,
-.activity-row > CollapsibleTitle:hover,
-.activity-row > CollapsibleTitle:focus:hover {
-    background: #1b3036;
-    color: #eef7f8;
-    text-style: none;
+.activity-content { height: 1; width: 1fr; }
+.activity-glyph { width: 2; height: 1; text-style: none; }
+.activity-label { width: auto; height: 1; text-style: none; }
+.activity-preview {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+    color: #98a5ac;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+.activity-duration { width: 5; height: 1; color: #82909a; text-align: right; }
+
+.activity-detail-actions {
+    height: 1;
+    align-horizontal: right;
 }
 
-.completed-activity > Contents, .activity-row > Contents { padding: 0; }
-
-.activity-viewport {
-    height: auto;
-    max-height: 5;
+Button.activity-close {
+    width: auto;
+    min-width: 0;
+    height: 1;
     min-height: 1;
-    padding: 0;
-    scrollbar-gutter: stable;
-    scrollbar-color: #5bb8b1;
-    scrollbar-background: #122023;
+    padding: 0 1;
+    border: none;
+    background: transparent;
+    color: #98a5ac;
 }
 
-.active-activity > CollapsibleTitle { display: none; }
+Button.activity-close:hover, Button.activity-close:focus {
+    background: #17313a;
+    color: #e8edef;
+    text-style: none;
+}
+
 .assistant-turn .assistant { border: none; padding: 0; }
+.assistant-turn .assistant.turn-final-response { margin: 1 0 0 0; }
+.activity-details > .message { margin-bottom: 0; }
 
 .tool-args-editor {
     padding: 0 1;

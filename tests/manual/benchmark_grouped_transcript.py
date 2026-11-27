@@ -51,7 +51,9 @@ async def main():
                 return remove(owner, *args, **kwargs)
             async def settled():
                 await wait_until(lambda: all(turn._composed and not turn._moving and
-                    all(widget.is_mounted for widget in turn.rows) for turn in chat.query('.assistant-turn')), timeout=20)
+                    all((row.widget.parent is None if row.completed and not row.attention else row.widget.is_mounted)
+                        if hasattr(turn, 'selected') else row.widget.is_mounted
+                        for row in turn.rows.values()) for turn in chat.query('.assistant-turn')), timeout=20)
                 await pilot.pause()
             with patch.object(Widget, 'mount', counted_mount), patch.object(Widget, 'remove', counted_remove):
                 start = time.perf_counter()

@@ -1,0 +1,161 @@
+{
+  "textual": "8.2.8",
+  "terminal_cells": [
+    110,
+    40
+  ],
+  "workload": {
+    "saved_records": 250,
+    "saved_turns": 50,
+    "streamed_fragments": 200
+  },
+  "runs": {
+    "d3484c5": {
+      "samples": [
+        {
+          "records": 250,
+          "widgets": 900,
+          "restore_s": 2.1036,
+          "restore_operations": {
+            "mount": 900,
+            "remove": 0
+          },
+          "stream200_s": 0.7517,
+          "stream_added_mounts": 8,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 900,
+          "restore_s": 2.4193,
+          "restore_operations": {
+            "mount": 900,
+            "remove": 0
+          },
+          "stream200_s": 0.4731,
+          "stream_added_mounts": 8,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 900,
+          "restore_s": 2.1884,
+          "restore_operations": {
+            "mount": 900,
+            "remove": 0
+          },
+          "stream200_s": 0.8528,
+          "stream_added_mounts": 8,
+          "stream_removals": 0
+        }
+      ],
+      "median": {
+        "widgets": 900,
+        "restore_s": 2.1884,
+        "stream200_s": 0.7517,
+        "restore_mounts": 900,
+        "restore_removals": 0,
+        "stream_mounts": 8,
+        "stream_removals": 0
+      }
+    },
+    "f55cd08": {
+      "samples": [
+        {
+          "records": 250,
+          "widgets": 1900,
+          "restore_s": 5.5197,
+          "restore_operations": {
+            "mount": 1900,
+            "remove": 0
+          },
+          "stream200_s": 1.0078,
+          "stream_added_mounts": 19,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 1900,
+          "restore_s": 5.667,
+          "restore_operations": {
+            "mount": 1900,
+            "remove": 0
+          },
+          "stream200_s": 0.8143,
+          "stream_added_mounts": 19,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 1900,
+          "restore_s": 6.4849,
+          "restore_operations": {
+            "mount": 1900,
+            "remove": 0
+          },
+          "stream200_s": 0.7275,
+          "stream_added_mounts": 19,
+          "stream_removals": 0
+        }
+      ],
+      "median": {
+        "widgets": 1900,
+        "restore_s": 5.667,
+        "stream200_s": 0.8143,
+        "restore_mounts": 1900,
+        "restore_removals": 0,
+        "stream_mounts": 19,
+        "stream_removals": 0
+      }
+    },
+    "working_tree": {
+      "samples": [
+        {
+          "records": 250,
+          "widgets": 700,
+          "restore_s": 1.9125,
+          "restore_operations": {
+            "mount": 700,
+            "remove": 0
+          },
+          "stream200_s": 0.7009,
+          "stream_added_mounts": 13,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 700,
+          "restore_s": 2.2371,
+          "restore_operations": {
+            "mount": 700,
+            "remove": 0
+          },
+          "stream200_s": 0.3479,
+          "stream_added_mounts": 13,
+          "stream_removals": 0
+        },
+        {
+          "records": 250,
+          "widgets": 700,
+          "restore_s": 2.4537,
+          "restore_operations": {
+            "mount": 700,
+            "remove": 0
+          },
+          "stream200_s": 0.3752,
+          "stream_added_mounts": 13,
+          "stream_removals": 0
+        }
+      ],
+      "median": {
+        "widgets": 700,
+        "restore_s": 2.2371,
+        "stream200_s": 0.3752,
+        "restore_mounts": 700,
+        "restore_removals": 0,
+        "stream_mounts": 13,
+        "stream_removals": 0
+      }
+    }
+  }
+}

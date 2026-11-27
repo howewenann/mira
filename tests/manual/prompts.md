@@ -2239,7 +2239,7 @@ for some checks; its transcript should retain the existing flat presentation.
    stays visible without expanding history.
 2. Request parallel tools and two subagents. Expect all genuinely active rows
    visible together; counts increase only as logical activities complete. Open
-   completed history, independently expand rows and use their Inspector links.
+   completed history, select one detail below the list and use its Inspector link.
 3. Generate/revise/implement a Plan, then run a Goal with Rubric evaluation.
    Expect reviews and artifact controls to remain visible. Verifier/grader
    progress stays live; the final response remains outside history after grading.
@@ -2254,12 +2254,19 @@ for some checks; its transcript should retain the existing flat presentation.
 6. Run a registered Workflow, inspect its nodes and final state, and reopen its
    saved chat. Expect the existing tree and Inspector navigation to work within
    one identified outer container.
-7. Produce at least 20 completed activities. Expand history and scroll upward;
-   expand a row and leave it open while more work completes. Expect five compact
-   rows' worth of viewport height, all entries accessible by scrolling, stable
-   expansion/focus/position and no load-more control. Returning to the history
-   tail permits following new entries. Hover both disclosure glyphs while
-   collapsed and expanded; title geometry must remain stable.
+7. Produce 5, 20 and 50 completed activities. Expand history and scroll upward;
+   select a row and leave its detail open while more work completes. Expect
+   joined native keyline boxes (2N+1 terminal rows), all entries accessible with
+   the conversation scrollbar, stable selection/position and no nested scroller.
+   Use Up/Down and Enter, then mouse selection. Hover the summary and selected
+   row; glyph geometry must remain stable. Resize narrow and wide: long argument
+   previews stay on one line with an ellipsis and durations remain flush right.
 8. Copy a final and intermediate response, switch Markdown/plain text, inspect
    full tool arguments/output, and reopen an old chat lacking turn identities.
    Expect existing controls to work and legacy entries to retain saved order.
+9. Open a several-hundred-line thinking detail and a long read/execute result.
+   Both use the main conversation scrollbar and retain their final line. Select
+   another activity, select it again, use Close, and collapse the summary. Only
+   one detail is shown below the complete list; Arguments and Output begin
+   collapsed. The final response has exactly one blank row before it in Text
+   and Markdown modes, with history collapsed, expanded, or a detail selected.

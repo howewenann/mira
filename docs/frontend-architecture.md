@@ -374,18 +374,22 @@ presentation layer shared with terminal output, not an external frontend require
 The main ChatLog groups identified assistant activity by the public `turn_id`.
 User messages remain outside each [AssistantTurn](../ui/textual/widgets/assistant_turn.py).
 Existing reasoning, tool, subagent, Rubric and artifact widgets update in place;
-completed widgets become independently expandable rows in a collapsed history.
-Its native scroll viewport shows five compact rows and retains every activity.
-Expanded details scroll inside that viewport. New rows preserve expansion and
-the reader's position; tail following resumes only when already following.
+completed widgets become native ListItems in a collapsed ListView. Parent
+keylines join the one-line rows without individual border renderers. The list
+uses its natural height and the main conversation scrollbar. Rows mount on
+first expansion; only the selected historical detail mounts below the entire
+list. Selecting it again or using Close hides it. Existing widgets retain their
+captured content, display preferences and controls across lifecycle moves.
 
-The header counts completed logical widgets, excluding active work and the final
-answer. Parallel unfinished activities remain visible together. The latest
+The shaded two-line header toggles history and counts completed logical widgets,
+excluding active work and the final answer. Parallel unfinished activities remain
+visible together. The latest
 assistant message streams outside history as a candidate; later execution can
 make it intermediate. Model-message end never ends the outer container. At
 outer completion, the final candidate remains visible, including when Rubric
-evaluation followed its text. Artifacts with live controls, failures and blocking
-requests retain visible attention surfaces. Workflow trees retain their existing
+evaluation followed its text, with one blank terminal row before it. Artifacts
+with live controls, failures and blocking requests retain visible attention
+surfaces. Workflow trees retain their existing
 navigation and final-state presentation inside their outer interaction.
 
 [TextualFrontend](../ui/textual/adapter.py) supplies event identity while the
@@ -400,7 +404,7 @@ Worked-for duration. A cold recovery labels its new clock segment "since
 recovery". Live clocks remain local presentation state.
 
 The Inspector keeps its original flat transcript. Grouping, counters, expansion,
-scroll anchors and widget references are frontend state; they neither duplicate
+scroll position and widget references are frontend state; they neither duplicate
 Core execution history nor change the public API. Native Textual batching is
 used for lifecycle moves, not a second renderer or a virtualization framework.
 

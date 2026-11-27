@@ -410,6 +410,23 @@ async def wait_until(predicate: Any, *, timeout: float = 2.0) -> None:
         await asyncio.sleep(0.02)
 
 
+async def open_completed_workflow(app: MiraApp, pilot: Any) -> WorkflowTreeBubble:
+    """Use the native history selection before inspecting a completed tree."""
+    from ui.textual.widgets.assistant_turn import AssistantTurn
+    turn, row = next((turn, row) for turn in reversed(list(app.query(AssistantTurn)))
+                     for row in reversed(turn.completed_rows) if row.category == "Workflows")
+    if not turn.expanded:
+        turn.toggle_history()
+    await wait_until(lambda: row.parent is turn.history and row.is_attached)
+    turn.history.index = list(turn.history.children).index(row)
+    turn.history.focus(scroll_visible=False)
+    turn.history.action_select_cursor()
+    await wait_until(lambda: turn.selected is row and not turn._moving
+                     and row.widget.parent is turn.details and row.widget.is_attached, timeout=5)
+    await pilot.pause()
+    return row.widget
+
+
 async def start_prompt_resize(app: App[Any], pilot: Any) -> tuple[PromptBox, Any, int, int]:
     """Press MIRA's prompt resize handle and return its screen coordinates."""
     await pilot.pause()
@@ -670,6 +687,62 @@ def mcp_activity_snapshot(
 
 
 class TextualAppTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_read_calls_and_preceding_messages_survive_grouping_and_restore(self) -> None:
+        """Exercise the real MIRA graph/runner, including concurrent file reads."""
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.messages import AIMessage
+        from agent.factory import build_agent
+        from session.checkpoint import make_checkpointer
+        from tests.test_grouped_transcript import settle
+        from ui.textual.widgets.assistant_turn import AssistantTurn
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            text = '\n'.join(f'line {index}: file contents' for index in range(160)) + '\nREAD_END'
+            (workspace / 'note.txt').write_text(text, encoding='utf-8')
+            model = Model(responses=[
+                AIMessage(content='I will read the file now.', tool_calls=[
+                    {'name': 'read_file', 'args': {'file_path': '/note.txt', 'limit': 200}, 'id': f'read-{index}', 'type': 'tool_call'}
+                    for index in range(7)]),
+                AIMessage(content='All reads finished.'),
+            ])
+            checkpointer = make_checkpointer()
+            with patch('agent.factory.get_llm', return_value=model):
+                agent = build_agent({}, workspace, checkpointer)
+            app = make_app(workspace, agent=agent, plan_agent=agent, checkpointer=checkpointer)
+            async with app.run_test(size=(110, 40)) as pilot:
+                await pilot.pause()
+                await app._run_turn('Read the file seven times.')
+                await settle(app, pilot)
+                chat = app.query_one(ChatLog)
+                for restored in (False, True):
+                    if restored:
+                        records = list(app.core_session.snapshot().transcript)
+                        chat.clear_log()
+                        await pilot.pause()
+                        chat.restore_session({'events': records})
+                        await settle(app, pilot)
+                    turn = chat.query_one(AssistantTurn)
+                    self.assertEqual(turn.completed_counts['Tools'], 7)
+                    self.assertEqual(turn.completed_counts['Messages'], 1)
+                    self.assertEqual(turn.candidate.widget.text.strip(), 'All reads finished.')
+                    turn.toggle_history()
+                    message = next(row for row in turn.completed_rows if row.category == 'Messages')
+                    turn.select_activity(message)
+                    await settle(app, pilot)
+                    self.assertEqual(message.widget.text.strip(), 'I will read the file now.')
+                    for row in turn.completed_rows:
+                        if row.category == 'Tools':
+                            turn.select_activity(row)
+                            await settle(app, pilot)
+                            self.assertIn('READ_END', row.widget.output.content.plain)
+                            self.assertIn('/note.txt', row.widget.args_editor.text)
+                            self.assertIs(row.widget.parent, turn.details)
+
     async def test_inspection_query_failures_preserve_the_chat_and_report_unavailability(self) -> None:
         from ui.textual.widgets.subagent_panel import SubagentSelected
         from ui.textual.widgets.rubric_bubble import RubricInspectionSelected
@@ -723,6 +796,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._run_turn("hello")
                 await app._run_workflow_demo()
                 await pilot.pause()
+                await open_completed_workflow(app, pilot)
                 self.assertIn("public handle response", "\n".join(renderable_plain(child) for child in app.query_one(ChatLog).query(".assistant")))
                 self.assertEqual(len(app.query(WorkflowTreeBubble)), 1)
 
@@ -3079,6 +3153,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertFalse(chat.follow_tail)
             self.assertFalse(chat.is_vertical_scroll_end)
+            await pilot.wait_for_animation()
             paused_scroll_y = chat.scroll_y
 
             chat.show_waiting()
@@ -11547,6 +11622,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 panel = app.query_one(SubagentsPanel)
+                await open_completed_workflow(app, pilot)
                 bubbles = list(app.query(WorkflowTreeBubble))
                 self.assertEqual(len(bubbles), 1)
                 bubble = bubbles[0]
@@ -11584,6 +11660,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
+                await open_completed_workflow(app, pilot)
                 self.assertEqual(len(list(app.query(WorkflowTreeBubble))), 2)
                 self.assertFalse(panel._records)
 
@@ -11647,6 +11724,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(panel._records)
             self.assertGreater(len(chat.children), initial_chat_children)
 
+            await open_completed_workflow(app, pilot)
             bubble.post_message(
                 WorkflowAgentSelected(agent_task.agents[0].inspection_id)
             )
@@ -11707,6 +11785,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
 
+                await open_completed_workflow(app, pilot)
                 bubbles = list(app.query(WorkflowTreeBubble))
                 self.assertTrue(
                     bubbles,
@@ -11825,6 +11904,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await wait_until(lambda: app.turn_worker is None)
                 await pilot.pause()
+                await open_completed_workflow(app, pilot)
                 completed = list(app.query(WorkflowTreeBubble))
                 self.assertEqual(len(completed), 2)
                 self.assertIsNot(completed[0].final_state, completed[1].final_state)

@@ -250,8 +250,6 @@ class WorkflowTreeBubble(Vertical):
         )
         self.overall_status = Static(classes="workflow-overall-status")
         self.footer = Horizontal(
-            self.final_button,
-            self.overall_status,
             classes="workflow-footer",
         )
         self.footer.display = False
@@ -339,7 +337,10 @@ class WorkflowTreeBubble(Vertical):
 
     def compose(self) -> ComposeResult:
         yield self.workflow_tree
-        yield self.footer
+        # Compose retained controls explicitly so native remounts reattach them.
+        with self.footer:
+            yield self.final_button
+            yield self.overall_status
 
     def start_task(
         self,
