@@ -8,9 +8,8 @@ from rich.console import Group
 from rich.table import Table
 from rich.text import Text
 
-from agent.mcp.models import PromptSpec
-from agent.workflows import WorkflowSpec
-from config.runtime import RuntimeSnapshot
+from mira.api import CommandInfo
+from mira.api import RuntimeSnapshot
 
 
 def runtime_report(snapshot: RuntimeSnapshot) -> Group:
@@ -92,7 +91,7 @@ def resources_table(title: str, items: Sequence[Mapping[str, str]]) -> Table:
     return table
 
 
-def prompts_table(specs: Sequence[PromptSpec]) -> Table:
+def prompts_table(specs: Sequence[CommandInfo]) -> Table:
     """Build the local and MCP prompt registry with independently wrapping fields."""
     table = Table(title="Prompts", title_style="bold cyan")
     table.add_column("Prompt", style="cyan", no_wrap=True)
@@ -113,7 +112,7 @@ def prompts_table(specs: Sequence[PromptSpec]) -> Table:
     return table
 
 
-def workflows_table(specs: Sequence[WorkflowSpec]) -> Table:
+def workflows_table(specs: Sequence[CommandInfo]) -> Table:
     """Build the launchable workspace Workflow command list."""
     table = Table(title="Workflows", title_style="bold cyan")
     table.add_column("Command", style="cyan", no_wrap=True)

@@ -24,6 +24,8 @@ from ui.textual.widgets.session_history import SessionActionMenuScreen, SessionI
 from ui.textual.widgets.workspace import Workspace
 from ui.textual.widgets.workspace_controls import ActionTab, TabOverflowDropdown, ModelAliasPopup
 
+from tests.test_textual_app import mock_runtime_reconstruction
+
 
 class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
     def composer_border_colors(self, app, prompt, actions, grip):
@@ -99,7 +101,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             btw_actions = app.query_one("#actions-btw")
             btw_grip = app.query_one("#btw-resize-handle")
             app.local_file_uploads_enabled = True
-            app.project_backend = object()
+            app.application.project_backend = object()
             app._sync_interactivity()
             await pilot.pause()
             self.assertFalse(app.query_one("#add-file-button").disabled)
@@ -541,29 +543,29 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_and_failed_model_activation_use_production_rebuild(self):
         with tempfile.TemporaryDirectory() as directory:
             app = make_app(workspace=Path(directory))
-            registry = app.prebuilt["config"]["model_registry"]
+            registry = app.application.config["model_registry"]
             registry.profiles["next-alias"] = ModelProfile("next-alias", {"provider": "openai", "model": "private-provider-id"})
             async with app.run_test(size=(120, 32)) as pilot:
                 with (
                     patch("agent.llm.get_llm", return_value=object()),
                     patch("config.metadata.infer_model_metadata", AsyncMock(return_value=ModelMetadata(8192, "test"))),
-                    patch.object(app, "_build_agent_pair", side_effect=RuntimeError("activation failed")),
+                    patch("core.application.app.build_agent_pair", side_effect=RuntimeError("activation failed")),
                 ):
                     await app._activate_model_alias("next-alias")
                 self.assertEqual(app.effective_model_alias, "test")
                 with (
                     patch("agent.llm.get_llm", return_value=object()),
                     patch("config.metadata.infer_model_metadata", AsyncMock(return_value=ModelMetadata(8192, "test"))),
-                    patch.object(app, "_build_agent_pair", return_value=("next-agent", "next-plan")),
+                    patch("core.application.app.build_agent_pair", return_value=("next-agent", "next-plan")),
                 ):
                     await app._activate_model_alias("next-alias")
                 self.assertEqual(app.effective_model_alias, "next-alias")
                 await pilot.pause()
                 self.assertIn("main: next-alias", compositor_plain(app))
                 self.assertNotIn("private-provider-id", renderable_plain(app.query_one("#effective-model-main")))
-                await app._apply_settings(set_model_assignment(app.config, "main", None))
+                await app._apply_settings(set_model_assignment(app.application.config, "main", None))
                 await pilot.pause()
-                self.assertIsNone(app.agent)
+                self.assertIsNone(app.core_session.agent)
                 self.assertEqual(app.effective_model_alias, "")
                 self.assertIn("main: unset", compositor_plain(app))
 
@@ -765,7 +767,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
             await app._handle_plan_action("close", artifact["id"])
             decision = await asyncio.wait_for(review, 2)
             self.assertEqual(decision["action"], "close")
-            self.assertEqual(app.session["current_plan"]["id"], artifact["id"])
+            self.assertEqual(app.core_session.record["current_plan"]["id"], artifact["id"])
 
     async def test_queued_inspector_close_does_not_stop_a_new_inspection(self):
         app = make_app()

@@ -111,11 +111,10 @@ async def _run(
             session_id=session,
             config=config,
             launch_options=launch_options,
-            bootstrap=_bootstrap,
             tool_output_chars=config["tool_output_chars"],
         )
         if trace:
-            from tracing.stream import TraceStream
+            from ui.shared.trace import TraceStream
 
             tui.trace = TraceStream(get_diagnostics_logger(), output_chars=config["tool_output_chars"])
         await tui.run_async()

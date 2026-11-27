@@ -8,7 +8,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Collapsible, Static
 
-from core.diagnostics.issues import Issue, sort_issues
+from mira.api import Issue
 
 
 class IssuesScreen(ModalScreen[None]):
@@ -18,7 +18,7 @@ class IssuesScreen(ModalScreen[None]):
 
     def __init__(self, issues: list[Issue]) -> None:
         super().__init__()
-        self.issues = sort_issues(issues)
+        self.issues = sorted(issues, key=lambda issue: ("STARTUP", "MODEL", "MCP", "TOOL").index(issue.category))
 
     def compose(self) -> ComposeResult:
         with Vertical(id="issues-dialog"):

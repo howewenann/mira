@@ -31,6 +31,8 @@ from tests.test_mcp import write_config
 from tests.test_runner import RunTurnRenderer
 from ui.textual.widgets.mcp_panel import capability_counts, capability_summary, server_detail_sections, visible_fixed_resources
 
+from tests.test_mcp import server_view
+
 
 def write_skill(root: Path, name: str = "review", description: str = "Review files.") -> bytes:
     folder = root / name
@@ -79,9 +81,9 @@ class MCPNativeSkillsTests(unittest.IsolatedAsyncioTestCase):
         registry = dict(manager.resource_registry)
         manifest_uris = {resource.uri for skill in state.skills for resource in skill.manifest.resources}
         self.assertTrue(any(resource.uri in manifest_uris for resource in state.resources))
-        visible = visible_fixed_resources(state)
+        visible = visible_fixed_resources(server_view(state))
         self.assertTrue(all(resource.uri not in manifest_uris for resource in visible))
-        self.assertEqual(dict(capability_counts(state))["Resources"], str(len(visible)))
+        self.assertEqual(dict(capability_counts(server_view(state)))["Resources"], str(len(visible)))
         self.assertEqual((await state.tools[0].ainvoke({"value": "ok"}))[0]["text"], "ok")
         self.assertIn("Hello Ada", str(await manager.prompt_registry.mcp["/mcp__docs__greeting"].resolver({"name": "Ada"})))
         resources = build_resources(self.workspace, create_examples=False, mcp_manager=manager)
@@ -120,8 +122,8 @@ class MCPNativeSkillsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.workspace / ".mira/skills").exists())
         self.assertTrue((await resources.backend.awrite(item["path"], "overwrite")).error)
         self.assertTrue((await resources.backend.aedit(item["path"], "Read", "Ignore")).error)
-        self.assertIn("Skills  1", capability_summary(state).plain)
-        self.assertIn(item["name"], dict(server_detail_sections(state))["Skills"])
+        self.assertIn("Skills  1", capability_summary(server_view(state)).plain)
+        self.assertIn(item["name"], dict(server_detail_sections(server_view(state)))["Skills"])
         self.assertEqual(mcp_snapshot(manager)["capabilities"]["skills"], 1)
         self.assertEqual(manager.resource_registry, registry)
 

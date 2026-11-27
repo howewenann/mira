@@ -1145,7 +1145,7 @@ class PlanModeTests(unittest.IsolatedAsyncioTestCase):
         """The tools command should render one table for the active mode."""
         renderer = RecordingRenderer()
 
-        handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": False})
+        handled = await repl.handle_command("/tools", renderer, {}, "model", {"planning": False, "action_tools": [{"name": "read_file"}, {"name": "write_file"}]})
 
         self.assertTrue(handled)
         self.assertEqual(len(renderer.console.lines), 1)

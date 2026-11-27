@@ -55,7 +55,7 @@ from textual.widgets import Button, ContentSwitcher, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from core.execution.inspection.live import InspectionEvent, LiveInspectionStore
-from core.execution.streams.rubric import format_elapsed
+from ui.shared.rubric import format_elapsed
 from ui.shared.terminal.colors import (
     TOOL_CANCELLED_COLOR,
     TOOL_COMPLETED_COLOR,

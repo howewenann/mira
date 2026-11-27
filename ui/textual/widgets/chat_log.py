@@ -21,16 +21,14 @@ from textual.geometry import Size
 from textual.widgets import Button, ContentSwitcher, Input, Markdown, Static, TextArea
 
 from mira.api import rubric_inspection_id
-from core.execution.streams.output import normalize_response_delta
-from core.execution.streams.rubric import (
+from ui.shared.rubric import (
     elapsed_ms,
     format_elapsed,
     rubric_result_body_text,
     rubric_result_text,
 )
-from core.execution.streams.corrections import correction_text, correction_title
-from session.context import normalize_events
-from session.goals import GOAL_STATUSES
+from ui.shared.corrections import correction_text, correction_title
+GOAL_STATUSES = {"proposed", "active", "paused", "completed", "max_iterations_reached"}
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.shared.terminal.colors import (
@@ -64,12 +62,12 @@ class ChatLog(VerticalScroll):
             elif event.phase == "reasoning":
                 widget = self._reasoning_block
         elif isinstance(event, ToolEvent):
-            for key, block in self._tool_blocks.items():
-                if (event.tool_call_id and key == f"id:{event.tool_call_id}") or (
-                    event.origin_event_id and block.get("origin_event_id") == event.origin_event_id
-                ):
-                    widget = block["widget"]
-                    break
+            block = self._tool_blocks.get(f"id:{event.tool_call_id}") if event.tool_call_id else None
+            if block is None and event.origin_event_id:
+                block = next((item for item in self._tool_blocks.values()
+                              if item.get("origin_event_id") == event.origin_event_id), None)
+            if block is not None:
+                widget = block["widget"]
         if widget is not None:
             widget.frontend_event = event
 
@@ -466,7 +464,7 @@ class ChatLog(VerticalScroll):
         retained_id = str(retained.get("id") or "") if isinstance(retained, dict) else ""
         retained_goal = session.get("current_goal")
         retained_goal_id = str(retained_goal.get("id") or "") if isinstance(retained_goal, dict) else ""
-        for event in normalize_events(session.get("events")):
+        for event in session.get("events", ()):
             event_type = event["type"]
             created_at = str(event.get("created_at") or "")
             if event_type == "user":
@@ -601,7 +599,10 @@ class ChatLog(VerticalScroll):
 
     def text_delta(self, delta: str, *, created_at: str = "") -> None:
         """Append streamed assistant text to the current response block."""
-        delta = normalize_response_delta(self._assistant_text, delta)
+        if not self._assistant_text:
+            delta = re.sub(r"^\s*\n+\s*", "", delta)
+            if not delta.strip():
+                return
         if not delta:
             return
         self.hide_waiting()

@@ -20,6 +20,9 @@ from session.store import SessionStore
 from session.subagent_runs import normalize_runs, upsert_run
 from session.workflows import PersistentWorkflowHistory
 
+from core.interface import FrontendEmitter
+from ui.shared.adapter import RendererAdapter
+
 
 class SavingStore:
     def __init__(self, *, fail: bool = False) -> None:
@@ -173,18 +176,18 @@ class PersistentSubagentRunsTests(unittest.IsolatedAsyncioTestCase):
         renderer = InspectionRenderer(inspections)
         store = SavingStore()
         history = PersistentWorkflowHistory(
-            renderer,
+            RendererAdapter(renderer),
             record,
             store,
             command="/workflow__research topic=history",
         )
-        observer = PersistentSubagentRuns(history, record, store, inspections=inspections)
+        observer = PersistentSubagentRuns(FrontendEmitter(history), record, store, inspections=inspections)
         observer.workflow_started("wf-1", "research")
         observer.workflow_task_started(
             "task-1",
             "research",
             1,
-            {"topic": "history"},
+            input_state={"topic": "history"},
             workflow_id="wf-1",
         )
 

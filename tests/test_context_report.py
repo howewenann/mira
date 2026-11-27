@@ -19,11 +19,8 @@ from core.context.report import (
     ContextReportMCPServer,
     ContextReportObservation,
     build_context_report,
-    contributor_share,
-    current_context_values,
     estimate_conversation_tokens,
     estimate_text_tokens,
-    estimated_token_text,
     format_memory_prompt,
     format_skills_prompt,
     mcp_tool_metadata,
@@ -32,6 +29,8 @@ from core.context.report import (
 from core.context.observation import context_usage_scope
 from ui.textual.commands.help import command_help_entries
 from ui.textual.widgets.context_report import ContextReportRow, ContextReportScreen, ContextReportTools
+
+from ui.textual.widgets.context_report import current_context_values, estimated_token_text, contributor_share
 
 
 def schema_tool(

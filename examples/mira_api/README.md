@@ -36,3 +36,9 @@ request; `/continue-incomplete` asks before retrying uncertain work. Cancellatio
 waits for the turn-start notification, requests cancellation, and joins cleanup.
 The full example prints inspection snapshots on selection; a GUI can apply
 incremental inspection notifications to an already open view instead.
+
+The full frontend also shows detached session listings (`/sessions`), effective
+connection metadata (`/runtime`), context reports (`/context`), native compaction
+(`/compact`), and registered workflows (`/workflows`, then the listed command).
+Runtime changes use `application.apply_settings` or `application.reload`; see
+the API guide for preference editing and MCP management without native objects.

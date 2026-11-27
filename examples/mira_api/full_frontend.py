@@ -213,6 +213,22 @@ async def main() -> None:
         session = await application.open_session(session_id=arguments.session, resume=arguments.resume)
         frontend.session = session
 
+        # Restore detached display records without re-submitting graph messages.
+        # A graphical frontend would render these using its own widgets.
+        snapshot = session.snapshot()
+        for record in snapshot.transcript:
+            kind = record["type"]
+            if kind == "workflow":
+                print(f"[workflow] {record['command']} ({record['status']})")
+            elif kind == "tool_call":
+                print(f"[tool] {record['name']}: {record['args']!r}")
+            elif kind == "tool_result":
+                print(f"[tool result] {record['name']}: {record['output']}")
+            elif "text" in record:
+                print(f"[{kind}] {record['text']}")
+            else:
+                print(f"[{kind}] {record!r}")
+
         if arguments.prompt is not None:
             if arguments.cancel_after is None:
                 await session.prompt(arguments.prompt)
@@ -237,8 +253,9 @@ async def main() -> None:
             # Reuse the same durable MiraSession for each message. Responses
             # continue to arrive through FullFrontend.emit() and request().
             print("Connected to MIRA's in-process Python API.")
-            print("Type /quit, /inspections, /inspect ID, /resume-pending, or /continue-incomplete.")
-            print(f"Session: {session.snapshot().session_id}")
+            print("Type /quit, /sessions, /runtime, /context, /compact, /workflows, /inspections, or /inspect ID.")
+            print(f"Session: {session.id}")
+            print(f"Saved work: {session.snapshot(include_transcript=False).pending}")
             while True:
                 try:
                     prompt = await asyncio.to_thread(input, "\n> ")
@@ -247,7 +264,21 @@ async def main() -> None:
                 prompt = prompt.strip()
                 if prompt == "/quit":
                     break
-                if prompt == "/inspections":
+                if prompt == "/sessions":
+                    # A history UI sorts and wraps these detached summaries.
+                    print(json.dumps(application.list_sessions(), indent=2, default=str))
+                elif prompt == "/runtime":
+                    print(application.runtime())
+                elif prompt == "/context":
+                    print(await session.context_report())
+                elif prompt == "/compact":
+                    print(await session.compact())
+                elif prompt == "/workflows":
+                    for command in application.commands("workflow"):
+                        print(command.usage)
+                elif prompt.startswith("/workflow__"):
+                    await session.run_workflow(prompt)
+                elif prompt == "/inspections":
                     print(json.dumps(session.inspections(), indent=2, default=str))
                 elif prompt.startswith("/inspect "):
                     # Selection fetches one detached payload through the public API.

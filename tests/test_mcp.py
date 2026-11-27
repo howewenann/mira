@@ -1675,6 +1675,7 @@ class PanelManager:
                 transient=False,
                 tools=[],
                 tool_metadata=[],
+                skills=None, skill_error="", stderr_tail="", usable=False,
                 prompts=[],
                 resources=[],
                 error="",
@@ -1688,6 +1689,7 @@ class PanelManager:
                 transient=False,
                 tools=[],
                 tool_metadata=[],
+                skills=None, skill_error="", stderr_tail="", usable=False,
                 prompts=[],
                 resources=[],
                 error="",
@@ -1767,14 +1769,14 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
         )]
         state.skill_error = "Another skill failed discovery."
 
-        self.assertEqual([item.uri for item in visible_fixed_resources(state)], ordinary)
-        sections = dict(server_detail_sections(state))
+        self.assertEqual([item.uri for item in visible_fixed_resources(server_view(state))], ordinary)
+        sections = dict(server_detail_sections(server_view(state)))
         for uri in (entry, helper):
             self.assertNotIn(f"  {uri}    ", sections["Fixed resources"])
         for uri in ordinary:
             self.assertIn(uri, sections["Fixed resources"])
         self.assertIn("review", sections["Skills"])
-        self.assertEqual(dict(capability_counts(state)), {"Tools": "0", "Prompts": "0", "Resources": "3", "Skills": "1"})
+        self.assertEqual(dict(capability_counts(server_view(state))), {"Tools": "0", "Prompts": "0", "Resources": "3", "Skills": "1"})
         self.assertEqual(state.resources, original)
 
     def test_dynamic_skill_hides_only_its_known_entry(self) -> None:
@@ -1787,10 +1789,10 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
             manifest=SimpleNamespace(uri=entry, resources="dynamic"),
         )]
 
-        self.assertEqual([item.uri for item in visible_fixed_resources(state)], [supporting])
-        self.assertEqual(dict(capability_counts(state))["Resources"], "1")
-        self.assertIn(supporting, dict(server_detail_sections(state))["Fixed resources"])
-        self.assertNotIn(entry, dict(server_detail_sections(state))["Fixed resources"])
+        self.assertEqual([item.uri for item in visible_fixed_resources(server_view(state))], [supporting])
+        self.assertEqual(dict(capability_counts(server_view(state)))["Resources"], "1")
+        self.assertIn(supporting, dict(server_detail_sections(server_view(state)))["Fixed resources"])
+        self.assertNotIn(entry, dict(server_detail_sections(server_view(state)))["Fixed resources"])
 
     def test_failed_or_unavailable_skill_discovery_preserves_resources(self) -> None:
         state = PanelManager().servers["one"]
@@ -1800,19 +1802,19 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
                 state.skills = skills
                 state.skill_error = "Skills discovery failed."
                 state.resources = [resource]
-                self.assertEqual(visible_fixed_resources(state), [resource])
-                self.assertEqual(dict(capability_counts(state))["Resources"], "1")
-                self.assertIn(resource.uri, dict(server_detail_sections(state))["Fixed resources"])
+                self.assertEqual(visible_fixed_resources(server_view(state)), [resource])
+                self.assertEqual(dict(capability_counts(server_view(state)))["Resources"], "1")
+                self.assertIn(resource.uri, dict(server_detail_sections(server_view(state)))["Fixed resources"])
         for resources, count, content in ((None, "-", "  Not loaded"), ([], "0", "  No resources")):
             state.resources = resources
-            self.assertEqual(visible_fixed_resources(state), resources)
-            self.assertEqual(dict(capability_counts(state))["Resources"], count)
-            self.assertEqual(dict(server_detail_sections(state))["Fixed resources"], content)
+            self.assertEqual(visible_fixed_resources(server_view(state)), resources)
+            self.assertEqual(dict(capability_counts(server_view(state)))["Resources"], count)
+            self.assertEqual(dict(server_detail_sections(server_view(state)))["Fixed resources"], content)
 
     def test_recent_stderr_is_bounded_inside_expanded_detail_sections(self) -> None:
         state = PanelManager().servers["one"]
         state.stderr_tail = "old\n" + ("diagnostic\n" * 1200)
-        sections = dict(server_detail_sections(state))
+        sections = dict(server_detail_sections(server_view(state)))
 
         self.assertIn("Recent stderr", sections)
         self.assertTrue(sections["Recent stderr"].startswith("… older stderr omitted …"))
@@ -2241,3 +2243,8 @@ class MCPPanelTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def server_view(state):
+    from core.application.mcp import MiraMCP
+    return MiraMCP(SimpleNamespace(mcp_manager=SimpleNamespace(servers={state.name: state}))).servers[state.name]

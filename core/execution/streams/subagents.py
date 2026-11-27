@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Any
 
 from agent.rubric.graphs import INTERNAL_RUBRIC_GRAPHS
@@ -30,7 +29,6 @@ async def consume_subagents(
     inspection: SubagentInspectionCoordinator | None = None,
 ) -> None:
     """Consume subagent streams while the status animation is active."""
-    animation = None
     tasks: list[asyncio.Task[None]] = []
     cancelled = False
     visible_started = False
@@ -50,8 +48,6 @@ async def consume_subagents(
                     visible_started = True
                     if hasattr(renderer, "start_subagent_live"):
                         renderer.start_subagent_live()
-                    if not getattr(renderer, "manages_subagent_animation", False):
-                        animation = asyncio.create_task(animate_subagents(renderer))
                 task = asyncio.create_task(
                     consume_subagent(subagent, renderer, inspection)
                 )
@@ -73,10 +69,6 @@ async def consume_subagents(
             call_renderer(renderer, "subagents_cancelled")
         raise
     finally:
-        if animation is not None:
-            animation.cancel()
-            with suppress(asyncio.CancelledError):
-                await animation
         if visible_started and not cancelled and hasattr(renderer, "stop_subagent_live"):
             renderer.stop_subagent_live()
 
@@ -127,14 +119,6 @@ def call_renderer(renderer: Any, method: str) -> None:
     callback = getattr(renderer, method, None)
     if callable(callback):
         callback()
-
-
-async def animate_subagents(renderer: Any) -> None:
-    """Tick the subagent spinner until the parent task cancels it."""
-    while True:
-        if hasattr(renderer, "tick_subagents"):
-            renderer.tick_subagents()
-        await asyncio.sleep(0.12)
 
 
 async def consume_subagent(

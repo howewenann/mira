@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -17,7 +16,6 @@ from textual.events import Key, MouseDown, MouseMove, MouseUp, Resize
 from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
-from agent.middleware.file_references import file_reference_token
 from ui.textual.commands.help import command_help_entries, command_insertion
 from ui.textual.widgets.prompt_box import PromptBox
 from ui.textual.widgets.workspace_surfaces import ComposerActions
@@ -25,17 +23,7 @@ from ui.textual.widgets.workspace_surfaces import ComposerActions
 
 MAX_VISIBLE_COMPLETIONS = 5
 MIN_PROMPT_HEIGHT = 5
-FILE_DISCOVERY_CONCURRENCY = 32
 POPUP_BORDER_HEIGHT = 2
-EXCLUDED_FILE_COMPONENTS = {
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    "build",
-    "dist",
-}
 
 
 @dataclass(frozen=True)
@@ -121,7 +109,7 @@ class AutocompleteInput(Vertical):
     def __init__(
         self,
         *,
-        project_backend: Any = None,
+        file_provider: Callable[[], Any] | None = None,
         compact: bool = False,
         tool_provider: Callable[[], list[dict[str, str]]] | None = None,
         subagent_provider: Callable[[], list[dict[str, str]]] | None = None,
@@ -132,7 +120,7 @@ class AutocompleteInput(Vertical):
         super().__init__(id="autocomplete-input", **kwargs)
         self.add_class("workspace-composer")
         self.compact = compact
-        self.project_backend = project_backend
+        self.file_provider = file_provider
         self.tool_provider = tool_provider
         self.subagent_provider = subagent_provider
         self.skill_registry_provider = skill_registry_provider
@@ -219,10 +207,10 @@ class AutocompleteInput(Vertical):
             prompt.styles.height = safe_height
         self._sync_resize_handle_width()
 
-    def set_project_backend(self, backend: Any) -> None:
+    def set_file_provider(self, provider: Callable[[], Any]) -> None:
         """Switch discovery to a rebuilt project backend and clear old state."""
         self.dismiss()
-        self.project_backend = backend
+        self.file_provider = provider
 
     def set_mcp_manager(self, manager: Any) -> None:
         """Use the manager's canonical prompt and resource registries."""
@@ -354,7 +342,7 @@ class AutocompleteInput(Vertical):
         self._file_paths = None
         self._mcp_resources = []
         generation = self._generation
-        if self.project_backend is not None:
+        if self.file_provider is not None:
             self._file_worker = self.run_worker(
                 self._load_project_files(generation, fragment.start),
                 name=f"autocomplete-files-{generation}",
@@ -363,7 +351,7 @@ class AutocompleteInput(Vertical):
         else:
             self._file_paths = []
         if self.mcp_manager is not None:
-            self._mcp_resources = list(self.mcp_manager.resource_registry.values())
+            self._mcp_resources = list(self.mcp_manager.resources)
             self._resource_worker = self.run_worker(
                 self._load_mcp_resources(generation, fragment.start),
                 name=f"autocomplete-resources-{generation}",
@@ -382,7 +370,7 @@ class AutocompleteInput(Vertical):
 
     async def _load_project_files(self, generation: int, interaction_start: int) -> None:
         try:
-            paths = await discover_project_files(self.project_backend)
+            paths = await self.file_provider()
         except Exception:
             return
         if generation != self._generation or interaction_start != self._interaction_start:
@@ -408,7 +396,7 @@ class AutocompleteInput(Vertical):
         if generation != self._generation or interaction_start != self._interaction_start:
             return
         self._resource_worker = None
-        self._mcp_resources = list(self.mcp_manager.resource_registry.values())
+        self._mcp_resources = list(self.mcp_manager.resources)
         fragment = self._fragment
         if fragment is not None and fragment.kind == "file" and fragment.start == interaction_start:
             self._show_items(
@@ -439,7 +427,7 @@ class AutocompleteInput(Vertical):
             )
 
     def _prompt_registry(self) -> Any:
-        return self.mcp_manager.prompt_registry if self.mcp_manager is not None else None
+        return self.mcp_manager.commands() if self.mcp_manager is not None else ()
 
     def _skill_registry(self) -> Any:
         return self.skill_registry_provider() if self.skill_registry_provider is not None else None
@@ -540,7 +528,7 @@ def prompt_command_items(query: str, prompt_registry: Any = None) -> list[Comple
     if prompt_registry is None:
         return []
     folded = query.casefold()
-    specs = getattr(prompt_registry, "specs", {})
+    specs = prompt_registry
     return [
         CompletionItem(
             kind="prompt_command",
@@ -549,7 +537,7 @@ def prompt_command_items(query: str, prompt_registry: Any = None) -> list[Comple
             description=spec.description,
             metadata=spec,
         )
-        for spec in specs.values()
+        for spec in specs
         if folded in spec.usage.casefold()
     ]
 
@@ -562,13 +550,13 @@ def skill_command_items(query: str, skill_registry: Any = None) -> list[Completi
     return [
         CompletionItem(
             kind="skill_command",
-            display=command,
-            insertion=command,
-            description=str(skill.get("description") or ""),
+            display=skill.command,
+            insertion=skill.command,
+            description=skill.description,
             metadata=skill,
         )
-        for command, skill in skill_registry.commands.items()
-        if folded in command.casefold()
+        for skill in skill_registry
+        if folded in skill.command.casefold()
     ]
 
 
@@ -577,7 +565,7 @@ def workflow_command_items(query: str, workflow_registry: Any = None) -> list[Co
     if workflow_registry is None:
         return []
     folded = query.casefold()
-    specs = getattr(workflow_registry, "specs", {})
+    specs = workflow_registry
     return [
         CompletionItem(
             kind="workflow_command",
@@ -586,7 +574,7 @@ def workflow_command_items(query: str, workflow_registry: Any = None) -> list[Co
             description="Local workflow",
             metadata=spec,
         )
-        for spec in specs.values()
+        for spec in specs
         if folded in spec.usage.casefold()
     ]
 
@@ -678,43 +666,6 @@ def attachment_items(
     return items
 
 
-async def discover_project_files(backend: Any) -> list[str]:
-    """Enumerate project files through backend ls calls while pruning noisy trees."""
-    pending = deque(["/"])
-    visited: set[str] = set()
-    files: set[str] = set()
-    while pending:
-        directories: list[str] = []
-        while pending and len(directories) < FILE_DISCOVERY_CONCURRENCY:
-            directory = pending.popleft()
-            if directory in visited:
-                continue
-            visited.add(directory)
-            directories.append(directory)
-        if not directories:
-            continue
-
-        results = await asyncio.gather(*(backend.als(directory) for directory in directories))
-        for result in results:
-            for entry in getattr(result, "entries", None) or []:
-                if not isinstance(entry, dict):
-                    continue
-                path = str(entry.get("path") or "").replace("\\", "/")
-                relative = path.strip("/")
-                if not relative or _excluded_project_path(relative):
-                    continue
-                if entry.get("is_dir"):
-                    pending.append(f"/{relative}")
-                else:
-                    files.add(relative)
-    return sorted(files, key=lambda path: (path.casefold(), path))
-
-
-def _excluded_project_path(path: str) -> bool:
-    components = {component.casefold() for component in path.split("/")}
-    return bool(components & EXCLUDED_FILE_COMPONENTS)
-
-
 def completion_fragment(text: str, cursor: int) -> _CompletionFragment | None:
     """Locate the active command token or @ fragment at the cursor."""
     if text.startswith("/") and not any(character.isspace() for character in text):
@@ -772,10 +723,14 @@ __all__ = [
     "attachment_items",
     "command_items",
     "completion_fragment",
-    "discover_project_files",
     "file_items",
     "native_command_items",
     "prompt_command_items",
     "skill_command_items",
     "workflow_command_items",
 ]
+
+
+def file_reference_token(path: str) -> str:
+    """Quote whitespace when inserting a visible file mention."""
+    return f'@"{path}"' if any(character.isspace() for character in path) else f"@{path}"

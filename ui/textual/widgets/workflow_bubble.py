@@ -18,7 +18,7 @@ from textual.message import Message
 from textual.widgets import Button, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from core.execution.streams.rubric import elapsed_ms
+from ui.shared.rubric import elapsed_ms
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.textual.widgets.tool_bubble import tool_lifecycle_status
 

@@ -14,7 +14,7 @@ a `FrontendRequest` needs an answer before execution continues. A
 Read the [architecture walkthrough](frontend-architecture.md) for diagrams,
 identity examples, ownership, and the actual Textual integration. Continue below
 for a working frontend and precise contracts. The public entry points are
-`mira` and `mira.api`; importing `core`, `agent`, `session`, `ui`, or `protocols`
+`mira`, `mira.api`, and the pure preference editors in `mira.settings`; importing `core`, `agent`, `session`, `ui`, or `protocols`
 is not required or supported for custom frontend implementations.
 
 ## Build a minimal frontend
@@ -73,7 +73,7 @@ Async operations must be awaited. Use one prompt at a time per session.
 | `await session.prompt(text)` | Execute a complete outer interaction; returns turn result with `final_text` | Streams events and requests; raises provider/request failures or `CancelledError`; emits `ready` after cleanup. Use events and snapshot as display contracts. |
 | `await session.set_mode("act" or "plan")` | Select execution mode | Synchronizes native conversation context; refuses active operations or pending recovery. |
 | `await session.cancel()` | Request cancellation from another task | Does not wait for prompt cleanup; await the prompt task as well. |
-| `session.snapshot()` | Open/refresh authoritative display state | Detached full transcript; proportional copying cost. |
+| `session.snapshot(include_transcript=True)` | Open/refresh authoritative display state | Detached state; pass `False` for telemetry and command metadata without transcript copying. |
 | `session.inspection(id)` | Select a live or saved inspection by inspection ID or durable run ID | Detached `LiveInspection` or `None`; historical selection refreshes saved contents. |
 | `session.inspections(origin_event_id=None)` | Discover saved run summaries, optionally for a tool entry | Detached list of mappings excluding transcript `events`; no execution. |
 | `await session.resume_pending()` | Redisplay a saved request and resume its checkpoint | Same outer identity; returns result or `None` if no pending request. |
@@ -89,14 +89,75 @@ Async operations must be awaited. Use one prompt at a time per session.
 | `await app.shutdown()` | Release all sessions and shared resources | Always use in `finally`; safe after normal work ends. |
 
 `kind` for artifact methods is `"plan"` or `"goal"`. State transitions reject
-concurrent operations with `RuntimeError`. There is no general public operation
-to reconstruct runtime settings or launch a registered workflow in a session.
-The [migration inventory](frontend-architecture.md#migration-inventory) records
-remaining official-frontend exceptions.
+concurrent operations with `RuntimeError`. Core pauses interrupted artifacts;
+frontends do not repeat cleanup or save session records.
+
+### History, runtime and workspace operations
+
+| Operation | Contract |
+| --- | --- |
+| `app.list_sessions()` | Detached saved summaries, including pin/custom title and latest user prompt; no transcript, database, or live session objects. Sort and wrap these for your own history UI. |
+| `app.update_session(id, title=..., pinned=...)` | Change either metadata field without changing conversation recency; blank title restores the automatic title. |
+| `await session.clear()` | Clear this transcript, inspections and native conversation threads while retaining formal work. |
+| `await app.clear_history()` | Close sessions and remove saved conversations plus compaction archives; returns both counts. Open a session afterward. |
+| `app.prompt_history()`, `app.record_prompt(text)`, `app.clear_prompt_history()` | Read, append and clear workspace composer history. |
+| `await session.compact()` | Run native forced compaction for the selected mode; returns `compacted`, `reason` and archive/error metadata without adding a user turn. |
+| `await session.context_report()` | Detached context composition report; the frontend formats its rows. |
+| `app.configuration()`, `app.settings()`, `app.runtime()` | Detached editable preferences/profile names/issues, current disk preferences, and sanitized effective connection metadata respectively. No model credentials or native clients. |
+| `await app.apply_settings(preferences, reset_mcp=False)` | Save preferences and prepare replacement native agent pairs before installation. Returns `(ok, message)` and restores saved preferences if reconstruction fails. Tracing configuration changes require Reload Runtime. |
+| `await app.refresh_model()` | Refresh provider context metadata and rebuild only if the context window changed; normal prompts do this in Core. |
+| `await app.reload(restart_mcp=False)` | Re-read effective configuration/resources and rebuild open sessions. `True` also restarts MCP; default retains live connections. Returns effective runtime metadata. |
+| `app.tracing_preview(preferences)` | Credential-redacted tracing preview for an editor. |
+| `app.configure_git(bool)` | Apply the existing Git-protection choice; returns `(ok, message, preferences)`. The frontend owns confirmation. |
+| `await app.list_files()` | File names through the configured native project backend. |
+| `await session.upload_files(paths)` | Import selected local files; returns visible references and per-file failures. |
+| `await session.clear_uploads()`, `await app.clear_uploads()` | Remove imported files for this session or workspace respectively. |
+| `app.report_error(error, source=..., session_id=..., context=...)`, `app.clear_diagnostics()` | Existing error reporting and retention operations. `mira.api.report_error(..., workspace=...)` also works before application startup. |
+
+Runtime mutations require idle sessions. Startup failure can leave no application;
+`mira.settings.read_configuration(workspace)` reads detached editor data and
+`configure_workspace(workspace, preferences)` saves it for the next startup.
+Offline `configure_git` and `preview_tracing` retain those editor capabilities too.
+These offline operations never install changes into a running application.
+
+### Commands, workflows and MCP
+
+`app.commands(kind=None)` returns immutable `CommandInfo` descriptors for
+`prompt`, `skill`, and `workflow` commands. They contain usage, argument data,
+source and description, with no resolver, factory, graph, or credential.
+`await app.prepare_input(text)` resolves a prompt/skill invocation. Pass its
+`messages`, `display_text`, and optional `pinned_skills` to `session.prompt` as
+`prepared_messages`, `display_text`, and `pinned_skills`. Ordinary text returns
+`None`. MCP resource references come from `app.mcp.attachments_from_text(text)`
+and go to the prompt's `attachments` parameter.
+
+`app.workflow_invocation(text)` validates arguments and returns a command
+descriptor plus detached inputs, or `None` for ordinary text. Execute a registered
+command with `await session.run_workflow(text)`. Core constructs the native graph,
+records the command, captures workflow history/inspections, and handles cleanup.
+Use `session.cancel()` for the active workflow exactly as for an agent prompt.
+The hidden `/workflow-demo` and `/workflow-demo-phase2` diagnostics use this same
+operation; they retain their existing process-local history behavior.
+
+`app.mcp` is a supported client, not the internal MCP manager:
+
+- `servers` returns detached server snapshots; `resources` returns resource
+  descriptors. Tools are metadata, never executable tool instances.
+- `await discover_prompts(name=None)` and `await discover_resources(name=None)`
+  lazily discover capabilities, optionally for one server.
+- `await set_server_enabled(name, bool)`, `await set_server_always_allow(name, bool)`,
+  and `await restart_server(name)` retain native connection/approval semantics.
+- `settings()`, `commands()`, `resource_errors()`, `configured_count`,
+  `usable_count`, and `show_status` support status panels and autocomplete.
+
+MCP operations can issue the same blocking approval and elicitation requests as
+normal execution. A frontend must keep serving requests while an operation is
+awaited. It must not reproduce MCP persistence or agent reconstruction.
 
 ## Start MIRA and open a session
 
-`MiraApplication.start` resolves the workspace, loads configuration, starts
+`MiraApplication.start` accepts optional `LaunchOptions(llm_direct=True)` for
+the existing process-level Direct connection option. It resolves the workspace, loads configuration, starts
 MCP resources, and constructs MIRA's native agents without constructing a UI.
 
 ```python
@@ -183,8 +244,7 @@ receives an `ArtifactReviewRequest` when the Plan is ready for review.
 An explicit Goal uses the Goal preparation pipeline:
 
 ```python
-await session.begin_goal("Deliver the requested outcome")
-await session.prompt("Deliver the requested outcome")
+await session.create_goal("Deliver the requested outcome")
 ```
 
 Owned frontends also use these public session operations for retained formal
@@ -199,7 +259,10 @@ work:
 - `session.pause_active_artifacts()` makes interrupted formal work resumable.
 
 The first three operations above are async and must be awaited. Only one
-current Goal or Plan is authoritative at a time.
+current Goal or Plan is authoritative at a time. `await session.revise_artifact(kind,
+feedback)` stages and executes a revision in one operation. `await
+session.dismiss_artifact(kind)` hides historical controls while retaining current
+formal work; clearing is a different operation.
 
 ## Interrupted execution
 
@@ -211,8 +274,8 @@ there is no pending interaction. It does not submit another user message.
 work. External side effects may have happened before interruption and may
 repeat; obtain the user's decision before continuing. It returns `None` when
 there is no incomplete operation. Ordinary prompts are refused while recovery
-is pending. Recovery discovery still uses an internal descriptor; a supported
-snapshot projection is deferred to the ownership migration.
+is pending. `session.snapshot(include_transcript=False).pending` is `none`,
+`interaction`, or `incomplete`; no internal recovery descriptor crosses the API.
 
 ## Events
 
@@ -275,7 +338,7 @@ The event includes task/result text plus graph provenance such as `origin`,
 
 ### `RuntimeEvent`
 
-`kind` is one of `startup`, `waiting`, `message_group`, `session`, or `inspection`.
+`kind` is one of `startup`, `waiting`, `message_group`, `session`, `inspection`, or `configuration`.
 
 - `waiting`: state is `start` or `finish`; start detail may contain `label`,
   `immediate`, and `elapsed` presentation hints.
@@ -283,6 +346,7 @@ The event includes task/result text plus graph provenance such as `origin`,
 - `session`: known states are `opened`, `turn_started`, `ready`, `cancelling`,
   and `closed`.
 - `startup`: state is intentionally extensible human-readable progress text.
+- `configuration`: state `changed` tells consumers to refresh detached runtime/settings metadata.
 - `inspection`: state is `reset`, `append`, `delta`, or `status`; see
   [inspection retrieval](#inspection-retrieval-and-updates).
 
@@ -391,7 +455,7 @@ tool result and ends the display-only turn.
 
 ### `MCPApprovalRequest`
 
-`server` is the configured server state and `preview` is a safe launch/use
+`server` contains only the server name and transport and `preview` is a safe launch/use
 summary. Return exactly:
 
 - `"allow"`: approve for the current process/fingerprint.
@@ -430,9 +494,12 @@ snapshot = session.snapshot()
 - `turns`: completed/recorded turn count.
 - `current_goal`, `current_plan`: mutually exclusive retained artifact mapping
   or `None`.
-- `transcript`: tuple of detached persisted event mappings.
+- `transcript`: tuple of detached normalized persisted event mappings, empty when `include_transcript=False`.
+- `pending`: `none`, `interaction`, or `incomplete`.
+- `execution`: mode/authoring/execution flags, without graph thread IDs or recovery objects.
+- `history`: creation/update time, custom title and pin metadata.
 - `dashboard`: usage/duration/context aggregate mapping.
-- `model`: `name`, `context_limit_tokens`, and `context_limit_source`.
+- `model`: `name`, `alias`, `available`, `context_limit_tokens`, and `context_limit_source`.
 - `tools`: tuple of mappings such as `{"name": ..., "description": ...}` for
   the current mode/stage.
 - `resources`: mapping from resource category to tuples of metadata mappings.
@@ -445,7 +512,31 @@ nested tool arguments, attachments, artifact data, or MCP projections, cannot
 change authoritative session/runtime state. The snapshot dataclass itself is
 frozen. Copying the transcript costs time and memory proportional to its size;
 use incremental events for streaming and take snapshots at session/operation
-boundaries rather than on every token or animation tick.
+boundaries rather than on every token. Use `include_transcript=False` for lightweight status refreshes.
+
+### Restore a conversation without execution
+
+Render `snapshot.transcript` in its saved order. These are supported detached
+**display records**, not graph messages to submit back to Core. Preserve IDs and
+keep unknown historical fields; do not infer missing turn boundaries.
+
+| Record `type` | Display data |
+| --- | --- |
+| `user`, `assistant`, `reasoning`, `info`, `system_error`, `interrupted` | `text`; user records can include `mode` and `attachments`. |
+| `tool_call` | `name`, structured `args`, native `call_id`; its `id` is the origin for results/inspection navigation. |
+| `tool_result` | `name`, `output`, `call_id`, `is_error` and optional `duration_ms`; update the originating call. |
+| `correction` | Structured check/workflow/retry feedback, matching the correction information event. |
+| `plan`, `goal` | Nested artifact under the matching key plus historical `status`; snapshot current artifact determines whether controls remain available. |
+| `rubric` | `evaluation` and `max_iterations`, including criterion verdicts and verifier/grader lifecycle data. |
+| `subagent` | `name`, `task_input`, `output`, `origin`, `status` and timing. Use public inspection queries for its transcript. |
+| `workflow` | `command`, `workflow_id`, `workflow_name`, `status`, ordered `tasks`, timing and frozen final-state data. The command is embedded here; do not add a second user row. |
+| `compaction` | The saved compaction summary/archive metadata. |
+
+Records also carry `id`, `created_at` and available outer/native identity fields.
+Historical runs are read through `inspections`, rather than by scanning storage.
+Resource metadata retains tool `group` and subagent `kind`, `source_model` and
+`graph_id` so another frontend can reproduce configuration controls without
+inspecting native agents. The full example shows a simple history display.
 
 ## Inspection retrieval and updates
 

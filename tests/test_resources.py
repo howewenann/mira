@@ -15,7 +15,7 @@ from deepagents.backends import FilesystemBackend, LocalShellBackend
 
 from agent import factory
 from agent.tools.skill_validation import VALIDATE_SKILL_METADATA
-from agent.tools.groups import builtin_tool_groups
+from ui.shared.tool_groups import builtin_tool_groups
 from agent.middleware.context_overflow import ProviderContextOverflowMiddleware
 from agent.middleware import (
     ExecuteToolDescriptionRewriteMiddleware,

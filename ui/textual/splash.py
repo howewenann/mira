@@ -6,7 +6,7 @@ from pathlib import Path
 
 from rich.text import Text
 
-from config.branding import (
+from mira.branding import (
     MIRA_CYAN,
     MIRA_HINT,
     MIRA_LABEL,

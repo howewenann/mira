@@ -77,6 +77,25 @@ API_EXPORTS = {
     "ToolEvent",
     "UsageEvent",
     "WorkflowEvent",
+    "LaunchOptions",
+    "RuntimeSnapshot",
+    "CommandInfo",
+    "MCPServerSnapshot",
+    "ResourceInfo",
+    "MCPResource",
+    "PromptArgument",
+    "ContextReport",
+    "ContextReportRow",
+    "Issue",
+    "report_error",
+    "ConfigError",
+    "__version__",
+    "APPROVAL_CONSEQUENCE",
+    "ContextOverflowError",
+    "PostTurnCompactionResult",
+    "PreparedSkill",
+    "PreparedPrompt",
+    "MCPApprovalInfo",
 }
 
 
@@ -100,7 +119,7 @@ class PublicAPITests(unittest.TestCase):
         self.assertEqual(set(public_api.__all__), API_EXPORTS)
         self.assertFalse(hasattr(public_api, "FrontendEmitter"))
         self.assertFalse(hasattr(public_api, "NullFrontend"))
-        self.assertFalse(hasattr(public_api, "APPROVAL_CONSEQUENCE"))
+        self.assertTrue(public_api.APPROVAL_CONSEQUENCE)
 
     def test_frontend_facade_reexports_identical_interface_types(self) -> None:
         expected = {

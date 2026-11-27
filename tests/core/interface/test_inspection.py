@@ -100,7 +100,8 @@ class InspectionContractTests(unittest.IsolatedAsyncioTestCase):
 
         example = runpy.run_path(str(ROOT / "examples/mira_api/full_frontend.py"))
         session = SimpleNamespace(
-            snapshot=lambda: SimpleNamespace(session_id="saved"),
+            id="saved",
+            snapshot=lambda **kwargs: SimpleNamespace(session_id="saved", transcript=(), pending="none"),
             inspections=lambda: [{"id": "run-1", "status": "DONE"}],
             inspection=lambda key: LiveInspection(key, "child", events=[InspectionEvent("assistant", "captured answer")]),
             resume_pending=AsyncMock(), continue_incomplete=AsyncMock(),
@@ -122,7 +123,7 @@ class InspectionContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_example_cancellation_waits_for_turn_start_and_joins_cleanup(self):
         example = runpy.run_path(str(ROOT / "examples/mira_api/full_frontend.py"))
         application = SimpleNamespace(shutdown=AsyncMock())
-        session = SimpleNamespace()
+        session = SimpleNamespace(snapshot=lambda: SimpleNamespace(transcript=()))
         active = None
 
         async def start(**kwargs):

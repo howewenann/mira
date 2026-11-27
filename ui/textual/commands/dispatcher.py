@@ -12,10 +12,7 @@ from rich.text import Text
 
 from ui.textual.commands.help import COMMAND_HELP_SECTIONS
 
-from agent.planning.policy import plan_disabled_tools_text
-from core.application import available_tools, resources_for, select_mode
-from session.goals import current_goal
-from session.plans import current_plan
+from mira.settings import PLAN_DISABLED_TOOLS
 from ui.textual.runtime_report import resources_table, tools_table
 
 HELP_SECTION_STYLE = "bold #7aa2f7"
@@ -67,15 +64,15 @@ async def handle_command(
         return True
 
     if text == "/memories":
-        print_resources(renderer, "Memories", resources_for(mode, "memories"))
+        print_resources(renderer, "Memories", mode.get("resources", {}).get("memories", []))
         return True
 
     if text == "/skills":
-        print_resources(renderer, "Skills", resources_for(mode, "skills"))
+        print_resources(renderer, "Skills", mode.get("resources", {}).get("skills", []))
         return True
 
     if text == "/subagents":
-        print_resources(renderer, "Subagents", resources_for(mode, "subagents"))
+        print_resources(renderer, "Subagents", mode.get("resources", {}).get("subagents", []))
         return True
 
     if text == "/plan" or (text.startswith("/plan ") and not text[len("/plan"):].strip()):
@@ -83,10 +80,10 @@ async def handle_command(
         if core_session is not None:
             await core_session.set_mode("plan")
         else:
-            select_mode(session, mode, "plan")
+            mode["planning"] = True
         write_line(
             renderer,
-            f"Plan mode: {plan_disabled_tools_text()} disabled; use /act to leave",
+            f"Plan mode: {', '.join(PLAN_DISABLED_TOOLS)} disabled; use /act to leave",
             kind="status",
         )
         return True
@@ -156,7 +153,7 @@ async def handle_command(
         if core_session is not None:
             await core_session.set_mode("act")
         else:
-            select_mode(session, mode, "act")
+            mode["planning"] = False
         write_line(renderer, "action mode", kind="status")
         return True
 
@@ -222,8 +219,8 @@ def print_help(renderer: Any) -> None:
 
 def session_summary_text(session: dict[str, Any], mode: dict[str, Any]) -> str:
     """Return session details as one command output block."""
-    has_goal = current_goal(session) is not None
-    has_plan = current_plan(session) is not None or bool(mode.get("current_plan"))
+    has_goal = session.get("current_goal") is not None
+    has_plan = session.get("current_plan") is not None or bool(mode.get("current_plan"))
     return "\n".join(
         [
             f"session: {session['id']}",
@@ -311,7 +308,7 @@ def help_table() -> Table:
 def print_tools(renderer: Any, mode: dict[str, Any]) -> None:
     """Print tools available in the current mode as one command block."""
     planning = bool(mode.get("planning"))
-    write_renderable(renderer, tools_table(available_tools(mode, planning=planning), planning=planning))
+    write_renderable(renderer, tools_table(mode.get("planning_tools" if planning else "action_tools", []), planning=planning))
 
 
 def print_resources(renderer: Any, title: str, items: list[dict[str, str]]) -> None:

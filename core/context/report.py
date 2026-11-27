@@ -396,39 +396,6 @@ def extract_section(text: str, start_marker: str, end_marker: str) -> str | None
     return text[start : end + len(end_marker)]
 
 
-def contributor_share(tokens: int | None, estimated_total: int) -> float | None:
-    """Return a contributor's share of the overall estimated total."""
-    if tokens is None or estimated_total <= 0:
-        return None
-    return (tokens / estimated_total) * 100
-
-
-def current_context_values(report: ContextReport) -> tuple[str, str]:
-    """Return Used / Limit and Usage strings without using cumulative I/O."""
-    limit = compact_tokens(report.limit_tokens) if report.limit_tokens is not None else "?"
-    if report.current_tokens is None:
-        return f"pending / {limit}", "—"
-    usage = (
-        f"{(report.current_tokens / report.limit_tokens) * 100:.0f}%"
-        if report.limit_tokens
-        else "—"
-    )
-    return f"{compact_tokens(report.current_tokens)} / {limit}", usage
-
-
-def estimated_token_text(tokens: int | None) -> str:
-    """Format approximate values consistently for every contributor row."""
-    if tokens is None:
-        return "—"
-    return "0" if tokens == 0 else f"~{compact_tokens(tokens)}"
-
-
-def share_text(tokens: int | None, estimated_total: int) -> str:
-    """Format one overall contributor share."""
-    share = contributor_share(tokens, estimated_total)
-    return "—" if share is None else f"{share:.0f}%"
-
-
 def message_text(message: Any) -> str:
     """Flatten a LangChain-like system message to its text content."""
     if message is None:
@@ -464,17 +431,6 @@ def mcp_tool_metadata(tool: Any) -> Mapping[str, Any] | None:
         return None
     ownership = metadata.get("mira_mcp")
     return ownership if isinstance(ownership, Mapping) else None
-
-
-def compact_tokens(value: int | None) -> str:
-    """Format token values consistently with the status header."""
-    if value is None:
-        return "?"
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}m"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}k"
-    return str(value)
 
 
 def positive_int_or_none(value: Any) -> int | None:
@@ -514,16 +470,12 @@ __all__ = [
     "ContextReportRow",
     "build_agent_context_report",
     "build_context_report",
-    "contributor_share",
-    "current_context_values",
     "estimate_conversation_tokens",
     "estimate_text_tokens",
-    "estimated_token_text",
     "format_memory_prompt",
     "format_skills_prompt",
     "mcp_tool_metadata",
     "observe_context_inputs",
-    "share_text",
     "split_system_prompt",
     "tool_schema_rows",
 ]

@@ -7,14 +7,14 @@ from typing import Any
 from pyfiglet import Figlet
 from rich.text import Text
 
-from config.version import display_version
+from mira.api import __version__
 
 MIRA_CYAN = "#5bb8b1"
 MIRA_TITLE = "bold #eef7f8"
 MIRA_LABEL = "bold #d2a957"
 MIRA_VALUE = "#e8edef"
 MIRA_HINT = "#b8c1c7"
-VERSION = display_version()
+VERSION = f"Minimal Iterative Reasoning Agent v{__version__}"
 
 
 def blocky_wordmark() -> str:

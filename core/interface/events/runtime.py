@@ -7,7 +7,7 @@ from typing import Any, Literal, Mapping
 
 from core.interface.events.base import EventIdentity
 
-RuntimeKind = Literal["startup", "waiting", "message_group", "session", "inspection"]
+RuntimeKind = Literal["startup", "waiting", "message_group", "session", "inspection", "configuration"]
 MCPPhase = Literal["initializing", "initialized", "error"]
 
 

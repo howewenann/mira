@@ -45,14 +45,10 @@ flowchart TD
     E --> D
     S -->|inspection queries| I
     S -->|historical inspection queries| D
-    T -. current internal runtime / history / workflow paths .-> E
-    T -. current session management .-> D
 ```
 
-The solid public boundary is implemented for normal prompts, decisions,
-artifacts, snapshots, and inspection. Dashed paths are remaining exceptions,
-not capabilities a custom frontend must reproduce. The intended final boundary
-would remove those dashed dependencies. It has not yet been implemented.
+Every official Textual execution, persistence, resource and runtime operation
+uses this boundary. UI adapters only format observations and collect answers.
 ACP also owns protocol transport and request serialization; that is consumer work.
 
 ## One ordinary prompt
@@ -100,7 +96,7 @@ sequenceDiagram
     participant C as Core runner
     participant F as Frontend
     participant U as User
-    G-->>C: Tool action requires approval; checkpoint interrupt
+    G-->>C: Tool action requires approval and checkpoint interrupt
     C->>F: await request(ApprovalRequest)
     F->>U: Display action and arguments
     U-->>F: Allow, reject, or edit
@@ -127,7 +123,7 @@ sequenceDiagram
     G-->>C: Parent task/eval tool and child identity
     C-->>F: SubagentEvent(start / eval_start, metadata.inspection_id)
     G-->>C: Child reasoning, messages, tools
-    C->>C: Update session store; project existing runs[]
+    C->>C: Update session store and project existing runs[]
     C-->>F: RuntimeEvent(inspection, append / delta / reset / status)
     F->>S: inspection(inspection_id)
     S-->>F: Detached LiveInspection
@@ -214,11 +210,11 @@ sequenceDiagram
     S-->>F: RuntimeEvent(session, turn_started)
     F->>S: await cancel()
     S-->>F: RuntimeEvent(session, cancelling)
-    S->>S: Cancel native execution; finalize observed tools and inspections
+    S->>S: Cancel native execution and finalize observed tools and inspections
     S-->>F: RuntimeEvent(session, ready)
     S-->>F: Prompt task raises CancelledError
     F->>S: open_session(session_id, resume=True)
-    S-->>F: Session opened; no agent execution
+    S-->>F: Session opened without agent execution
     F->>S: snapshot() and inspection(selected_id)
     opt Saved approval exists
         F->>S: await resume_pending()
@@ -228,7 +224,7 @@ sequenceDiagram
     end
     opt Incomplete graph without saved approval
         F->>S: await continue_incomplete() after explicit user choice
-        S->>S: Continue graph; external side effects may repeat
+        S->>S: Continue graph and external side effects may repeat
     end
 ```
 
@@ -238,10 +234,8 @@ instruction to resume it. `resume_pending()` answers an existing checkpointed
 request; `continue_incomplete()` explicitly retries uncertain work. Neither
 adds a second user message. Their no-work case returns `None`.
 
-Recovery discovery is still an internal descriptor in official consumers; a
-public pending-state snapshot is deferred. Custom frontends can offer explicit
-resume and continue actions using the supported methods, but cannot infer that
-descriptor from `runtime_state="ready"`. Inspection queries work without
+Recovery discovery uses `snapshot(include_transcript=False).pending` without
+exposing native descriptors. Inspection queries work without
 resuming execution. Session close releases its live transcripts; saved runs
 remain available after reopening. Late notifications for another session must
 not update the currently displayed Inspector.
@@ -288,11 +282,11 @@ inventing precise turn or native-message relationships.
 | Event identities and persistence | Core recorders, semantic checkpoints, existing session storage |
 | Inspection capture and live state | Session-owned store; Core child/rubric/workflow observers |
 | Historical inspection access | Public session queries over existing durable runs |
-| Runtime configuration | Application and configuration modules; official Textual rebuild controls still use internals |
+| Runtime configuration | `MiraApplication`; one native reconstruction path updates open sessions |
 | Rendering and presentation state | Frontend: widgets, selection, expansion, tab placement |
 | Focus and scrolling | Frontend |
 | User interaction | Frontend collects choices; Core validates/routes decisions |
-| Registered workflow launch and history | Still internal execution and persistence wiring in Textual |
+| Registered workflow launch and history | `MiraSession.run_workflow`; native executor and existing durable workflow history |
 
 The live inspection store is an execution observation, not another persistence
 layer. Durable `runs[]` are its historical projection and retain terminal state
@@ -301,18 +295,18 @@ they are not a second transcript. Frontends never receive the mutable store.
 
 ## The actual Textual integration
 
-The official frontend is an incremental migration. These are implementation
+The official frontend uses the supported public API. These are implementation
 pointers, not prerequisites for writing another frontend:
 
 | Step | Current entry points |
 | --- | --- |
-| Startup / session opening | [CLI bootstrap](../cli/commands.py), `MiraApp._startup`, `_activate_core_session` in [app.py](../ui/textual/app.py) |
+| Startup / session opening | `MiraApplication.start`, `MiraApp._startup`, `_activate_core_session` in [app.py](../ui/textual/app.py) |
 | Prompt submission | `MiraApp._run_turn` → `core_session.prompt()` |
 | Typed events | [TextualFrontend.emit](../ui/textual/adapter.py) |
 | Existing callback projection | [RendererAdapter](../ui/shared/adapter.py) → application callbacks → [ChatLog](../ui/textual/widgets/chat_log.py) |
 | Blocking requests | `TextualFrontend.request` → `foreground_interrupt` → existing serialized editors / approval controls |
 | Inspector selection | App selection handlers → `core_session.inspection()` / `.inspections()` → [Inspector](../ui/textual/widgets/inspector.py) |
-| Restoration | `_activate_core_session`, `_render_current_session`; transcript restoration still uses internal record format |
+| Restoration | `_activate_core_session`, `_render_current_session`; detached snapshot transcript, without storage reads or native graph restoration |
 | Cancellation / cleanup | `action_interrupt_or_quit`, `_confirm_interrupt_or_quit`, session cancellation, application shutdown; Inspector close only ends presentation |
 
 | Event | Presentation |
@@ -326,22 +320,60 @@ pointers, not prerequisites for writing another frontend:
 | Session/waiting `RuntimeEvent` | Runtime status and waiting indicators |
 | Inspection `RuntimeEvent` | Direct incremental Inspector update; no callback/provenance double delivery |
 
-Other typed events still pass through the shared renderer adapter and then
-Textual retains their provenance on widgets. This transitional path is retained
-for terminal and workflow consumers. Inspection notifications consume the typed
-event directly in that same channel. External frontends implement only `emit`
-and `request`; reproducing Textual's callbacks is unnecessary.
+The shared renderer adapter is UI code: it projects events onto existing
+presentation callbacks used by the terminal and Textual. Textual applies message
+and tool provenance in that same projection, rather than forwarding every event
+to a second observer. Inspection/configuration notifications are consumed
+directly. Core calls only `emit` and `request`; it never discovers renderer
+methods, animation preferences, naming callbacks, widgets, or private stores.
 
 ## Migration inventory
 
-| State | Boundary |
+This is the capability coverage inventory for a complete custom frontend.
+Command names are Textual presentation choices; the operations are supported for
+all consumers.
+
+| Existing frontend capability | Public entry point |
 | --- | --- |
-| Supported | Application start/shutdown, session operations, typed events, requests, detached snapshots, formal artifact operations |
-| Completed in Phase 2A | Outer identity, durable event/origin references, error/recovery routing, explicit production Textual adapter |
-| Completed in Phase 2B | Session-owned capture, public inspection retrieval, typed incremental notifications, Inspector queries; removed hidden renderer traversal and UI transcript capture |
-| Remaining | Textual runtime reconstruction/settings, direct transcript restoration and session management, registered workflow launch/history orchestration; transcript clearing calls a private session inspection-cleanup hook until that broader lifecycle migrates |
-| Workflow exception | Textual still launches the internal `execute_workflow` and owns workflow history wiring. Core now constructs and closes inspection capture/projection with the session; Inspector retrieval is public. There is no public workflow session operation yet. |
-| Deferred | Runtime reconstruction migration, broader session-management API, workflow execution API, grouped-turn transcript redesign, public recovery descriptor |
+| Startup, new/select/resume/close chat, shutdown | `MiraApplication.start`, `open_session`, `MiraSession.close`, `shutdown` |
+| History list, rename, pin, delete, clear | `list_sessions`, `update_session`, `delete_session`, `session.clear`, `clear_history` |
+| Composer history | `prompt_history`, `record_prompt`, `clear_prompt_history` |
+| Stream one turn and cancel | `session.prompt`, `session.cancel`; typed message/tool/runtime events |
+| Discover and recover saved work | `snapshot(...).pending`, `resume_pending`, `continue_incomplete` |
+| Act/Plan mode and formal Plan generation | `set_mode`, `prompt`; artifact events and review requests |
+| Explicit Goal generation | `create_goal`; native criteria and review pipeline |
+| Show, implement, revise, close, clear Plan/Goal | Snapshot current artifact, `start_artifact` then `prompt`, `revise_artifact`, `dismiss_artifact`, `clear_artifact` |
+| Rubric settings, verification, grading and results | `mira.settings` editors + `apply_settings`; prompt/Goal execution and Rubric events |
+| Live/historical Inspector, parent-tool navigation | `inspection`, `inspections(origin_event_id=...)`, incremental inspection RuntimeEvents |
+| Workflow catalog, arguments, execution, cancellation, history | `commands("workflow")`, `workflow_invocation`, `run_workflow`, `cancel`, snapshot and inspection queries |
+| Reload agents / full runtime | `reload(restart_mcp=False/True)` |
+| Settings, model aliases, context limit and tracing | `configuration`, `settings`, `runtime`, `tracing_preview`, `apply_settings`; pure `mira.settings` editors |
+| Startup configuration recovery | `mira.settings.read_configuration`, `configure_workspace`, then `MiraApplication.start` |
+| MCP connect/disable/restart, policy, approvals | `app.mcp` operations; MCPApprovalRequest and MCPElicitationRequest |
+| MCP tool/resource/prompt/skill inventories | Detached MCP server snapshots, `resources`, discovery, `commands` and session resource metadata |
+| Local and MCP prompts / skill invocations | `commands`, `prepare_input`, `prompt` with prepared messages and pinned skills |
+| Workspace files, imported files and clearing uploads | `list_files`, `session.upload_files`, session/application `clear_uploads` |
+| Git-protection choice | `configure_git`; frontend owns confirmation |
+| Manual compaction and context report | `session.compact`, `session.context_report` |
+| Usage, context, duration, model/runtime status | Usage/Runtime events and `snapshot(include_transcript=False)` |
+| Error reports and clear diagnostics | `report_error`, `clear_diagnostics` |
+
+Textual keeps a detached display cache for its widgets. It cannot install that
+cache into Core or save it. Native agents, graphs, thread/recovery descriptors,
+checkpointers and persistence stores never enter its runtime state. Opening a
+session is the only native restoration path. File-picker, clipboard, local
+DirectoryTree/preview, docking, focus, dialogs, expansion and scrolling are UI
+presentation operations, not alternative agent execution paths.
+
+Grouped-turn transcript presentation remains deferred to Phase 3. Event
+identities, native provenance, durable origins and detached inspections retain
+the Phase 2A/2B contracts. Existing callbacks remain an internal UI presentation
+layer shared with terminal output, not an external frontend requirement.
+
+All six diagrams in this document were parsed with Mermaid 11.12.0. The five
+message-text semicolons that broke sequence parsing were replaced with words.
+This is actual Mermaid grammar validation; it does not claim a pinned GitHub
+renderer version or pixel-level SVG rendering verification.
 
 See [architecture decisions](../ARCHITECTURE_DECISIONS.md#headless-application-and-public-api)
 for rationale and the [API guide](frontend-api.md) for integration contracts.

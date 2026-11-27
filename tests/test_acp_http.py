@@ -23,7 +23,7 @@ from acp.exceptions import RequestError
 from acp.http import create_http_stream
 from rich.console import Console
 
-from config.branding import VERSION, blocky_wordmark
+from mira.branding import VERSION, blocky_wordmark
 from mira.api import (
     ApprovalRequest,
     ArtifactReviewRequest,

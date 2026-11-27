@@ -65,12 +65,12 @@ class WorkflowPersistenceTests(unittest.TestCase):
         renderer = Renderer()
         saving = store or SavingStore()
         observer = PersistentWorkflowHistory(
-            renderer,
+            RendererAdapter(renderer),
             record,
             saving,
             command=command,
         )
-        return FrontendEmitter(RendererAdapter(observer)), renderer, saving
+        return FrontendEmitter(observer), renderer, saving
 
     def test_projection_preserves_identity_order_steps_values_and_agents(self) -> None:
         record: dict[str, Any] = {"events": []}
@@ -153,11 +153,9 @@ class WorkflowPersistenceTests(unittest.TestCase):
             store = SessionStore(Path(directory))
             record = store.new("thread", Path("workspace"))
             observer = FrontendEmitter(
-                RendererAdapter(
-                    PersistentWorkflowHistory(
-                        Renderer(), record, store, command="/workflow__demo topic=values"
+                PersistentWorkflowHistory(
+                        RendererAdapter(Renderer()), record, store, command="/workflow__demo topic=values"
                     )
-                )
             )
             observer.workflow_started("wf-values", "demo")
             observer.workflow_task_started(
@@ -230,16 +228,14 @@ class WorkflowPersistenceTests(unittest.TestCase):
         current = [10.0]
         record: dict[str, Any] = {"events": []}
         observer = FrontendEmitter(
-            RendererAdapter(
-                PersistentWorkflowHistory(
-                    Renderer(),
+            PersistentWorkflowHistory(
+                    RendererAdapter(Renderer()),
                     record,
                     SavingStore(),
                     command="/workflow__demo value=1",
                     clock=lambda: current[0],
                     now=lambda: f"2026-01-01T00:00:{int(current[0]):02d}+00:00",
                 )
-            )
         )
         observer.workflow_started("wf-timing", "demo")
         current[0] = 12.0
@@ -392,11 +388,9 @@ class WorkflowPersistenceTests(unittest.TestCase):
             record = store.new("thread", Path("workspace"))
             record["updated_at"] = "2026-01-01T00:00:10+00:00"
             observer = FrontendEmitter(
-                RendererAdapter(
-                    PersistentWorkflowHistory(
-                        Renderer(), record, store, command="/workflow__demo value=1"
+                PersistentWorkflowHistory(
+                        RendererAdapter(Renderer()), record, store, command="/workflow__demo value=1"
                     )
-                )
             )
             observer.workflow_started("wf-running", "demo")
             observer.workflow_task_started(
@@ -423,13 +417,13 @@ class WorkflowPersistenceTests(unittest.TestCase):
             store = SessionStore(Path(directory))
             record = store.new("thread-external-save", Path("workspace"))
             history = PersistentWorkflowHistory(
-                Renderer(),
+                RendererAdapter(Renderer()),
                 record,
                 store,
                 command="/workflow__demo value=1",
                 clock=lambda: current[0],
             )
-            observer = FrontendEmitter(RendererAdapter(history))
+            observer = FrontendEmitter(history)
             observer.workflow_started("wf-external-save", "demo")
             current[0] = 11.0
             observer.workflow_task_started(
@@ -481,13 +475,13 @@ class WorkflowPersistenceTests(unittest.TestCase):
             inspections = LiveInspectionStore()
             renderer = Renderer(inspections)
             history = PersistentWorkflowHistory(
-                renderer,
+                RendererAdapter(renderer),
                 record,
                 store,
                 command="/workflow__agents topic=history",
                 clock=lambda: current[0],
             )
-            runs = PersistentSubagentRuns(history, record, store, inspections=inspections)
+            runs = PersistentSubagentRuns(FrontendEmitter(history), record, store, inspections=inspections)
             observer = FrontendEmitter(RendererAdapter(runs))
 
             observer.workflow_started("wf-agent-save", "agents")

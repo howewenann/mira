@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from core.application.files import discover_project_files
+
 import asyncio
 import unittest
 from types import SimpleNamespace
 from typing import Any
 
 from agent.mcp.models import MCPResource, PromptArgument, PromptSpec
-from agent.skills import SkillRegistry
+from mira.api import CommandInfo
 from ui.textual.commands.help import COMMAND_HELP_SECTIONS, command_help_entries
 from ui.textual.commands.dispatcher import COMMAND_HELP_SECTIONS as REPL_COMMAND_HELP_SECTIONS
 from ui.textual.widgets.autocomplete_input import (
@@ -17,7 +19,6 @@ from ui.textual.widgets.autocomplete_input import (
     attachment_items,
     command_items,
     completion_fragment,
-    discover_project_files,
     file_items,
     workflow_command_items,
 )
@@ -83,7 +84,7 @@ class AutocompleteModelTests(unittest.TestCase):
             source="local",
             resolver=resolve,
         )
-        registry = SimpleNamespace(specs={prompt.command: prompt})
+        registry = (CommandInfo(prompt.command, prompt.usage, prompt.description, arguments=prompt.arguments),)
 
         native = next(item for item in command_items("goal", registry) if item.display.startswith("/goal "))
         reusable = next(item for item in command_items("review", registry))
@@ -95,11 +96,9 @@ class AutocompleteModelTests(unittest.TestCase):
         self.assertEqual(reusable.insertion, "/prompt__review")
 
     def test_skill_commands_use_dynamic_registry_and_custom_tool_green(self) -> None:
-        registry = SkillRegistry(
-            [
-                {"name": "review", "description": "Review code."},
-                {"name": "skill-creator", "description": "Create skills."},
-            ]
+        registry = (
+            CommandInfo("/skill__review", "/skill__review", "Review code.", kind="skill"),
+            CommandInfo("/skill__skill-creator", "/skill__skill-creator", "Create skills.", kind="skill"),
         )
         review = next(item for item in command_items("review", None, registry))
         creator = next(item for item in command_items("creator", None, registry))
@@ -118,7 +117,7 @@ class AutocompleteModelTests(unittest.TestCase):
             command="/workflow__research",
             usage="/workflow__research topic=<str> [depth=<int>]",
         )
-        registry = SimpleNamespace(specs={"research": spec})
+        registry = (CommandInfo(spec.command, spec.usage, kind="workflow"),)
 
         item = workflow_command_items("research", registry)[0]
 

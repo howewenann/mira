@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
+from dataclasses import replace
+
+from core.interface.events import MessageEvent, WorkflowEvent
 from typing import Any, Callable
 
 from rich.pretty import pretty_repr
@@ -117,18 +120,21 @@ class PersistentWorkflowHistory:
 
     def __init__(
         self,
-        renderer: Any,
+        frontend: Any,
         record: dict[str, Any],
         store: Any,
         *,
         command: str,
+        record_user: bool = True,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], str] | None = None,
     ) -> None:
-        self.renderer = renderer
+        self.frontend = frontend
         self.record = record
         self.store = store
         self.command = command
+        self.record_user = record_user
+        self._event_index: int | None = None
         self._clock = clock
         self._now = now or _now_iso
         self._workflow_id = ""
@@ -138,152 +144,47 @@ class PersistentWorkflowHistory:
         self._agent_started: dict[str, float] = {}
         self._pending_agents: dict[str, list[dict[str, Any]]] = {}
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.renderer, name)
+    def emit(self, event: Any) -> None:
+        """Persist typed workflow observations before forwarding them once."""
+        if isinstance(event, WorkflowEvent):
+            self._observe(lambda: self._workflow_event(event))
+            if self._event is not None:
+                event = replace(event, event_id=self._event["id"], created_at=self._event["created_at"])
+                if event.phase == "run_start" and self.record_user:
+                    self.frontend.emit(MessageEvent(phase="user", text=self.command,
+                        session_id=event.session_id, turn_id=event.turn_id,
+                        event_id=event.event_id, created_at=event.created_at))
+        self.frontend.emit(event)
 
-    def workflow_started(self, workflow_id: str, workflow_name: str) -> Any:
-        self._observe(lambda: self._start(workflow_id, workflow_name))
-        return self.renderer.workflow_started(workflow_id, workflow_name)
+    async def request(self, request: Any) -> Any:
+        return await self.frontend.request(request)
 
-    def workflow_task_started(
-        self,
-        task_id: str,
-        name: str,
-        step: int,
-        input_state: Any,
-        *,
-        workflow_id: str = "",
-    ) -> Any:
-        self._observe(lambda: self._start_task(task_id, name, step, input_state))
-        return self.renderer.workflow_task_started(
-            task_id, name, step, input_state, workflow_id=workflow_id
-        )
-
-    def workflow_task_waiting(
-        self, task_id: str, name: str, step: int, *, workflow_id: str = ""
-    ) -> Any:
-        self._observe(lambda: self._set_task_status(task_id, "WAITING"))
-        return self.renderer.workflow_task_waiting(
-            task_id, name, step, workflow_id=workflow_id
-        )
-
-    def workflow_task_resumed(
-        self, task_id: str, name: str, step: int, *, workflow_id: str = ""
-    ) -> Any:
-        self._observe(lambda: self._set_task_status(task_id, "RUNNING"))
-        return self.renderer.workflow_task_resumed(
-            task_id, name, step, workflow_id=workflow_id
-        )
-
-    def workflow_task_finished(
-        self,
-        task_id: str,
-        name: str,
-        step: int,
-        *,
-        status: str = "DONE",
-        error: str = "",
-        result: Any = None,
-        result_available: bool = False,
-        workflow_id: str = "",
-    ) -> Any:
-        self._observe(
-            lambda: self._finish_task(
-                task_id, status, error, result, result_available
-            )
-        )
-        return self.renderer.workflow_task_finished(
-            task_id,
-            name,
-            step,
-            status=status,
-            error=error,
-            result=result,
-            result_available=result_available,
-            workflow_id=workflow_id,
-        )
-
-    def workflow_agent_started(
-        self,
-        task_id: str,
-        name: str,
-        inspection_id: str,
-        *,
-        task_input: str = "",
-        resumed: bool = False,
-        workflow_id: str = "",
-    ) -> Any:
-        self._observe(
-            lambda: self._start_agent(task_id, name, inspection_id, task_input)
-        )
-        return self.renderer.workflow_agent_started(
-            task_id,
-            name,
-            inspection_id,
-            task_input=task_input,
-            resumed=resumed,
-            workflow_id=workflow_id,
-        )
-
-    def workflow_agent_waiting(
-        self,
-        task_id: str,
-        name: str,
-        inspection_id: str,
-        *,
-        workflow_id: str = "",
-    ) -> Any:
-        self._observe(lambda: self._set_agent_status(inspection_id, "WAITING"))
-        return self.renderer.workflow_agent_waiting(
-            task_id, name, inspection_id, workflow_id=workflow_id
-        )
-
-    def workflow_agent_finished(
-        self,
-        task_id: str,
-        name: str,
-        inspection_id: str,
-        *,
-        status: str = "DONE",
-        result: str = "",
-        error: str = "",
-        workflow_id: str = "",
-    ) -> Any:
-        self._observe(
-            lambda: self._finish_agent(inspection_id, status, result, error)
-        )
-        return self.renderer.workflow_agent_finished(
-            task_id,
-            name,
-            inspection_id,
-            status=status,
-            result=result,
-            error=error,
-            workflow_id=workflow_id,
-        )
-
-    def workflow_finished(
-        self,
-        workflow_id: str,
-        *,
-        final_state: Any = None,
-        final_state_available: bool = False,
-    ) -> Any:
-        self._observe(lambda: self._finish(final_state, final_state_available))
-        return self.renderer.workflow_finished(
-            workflow_id,
-            final_state=final_state,
-            final_state_available=final_state_available,
-        )
-
-    def workflow_cancelled(self, workflow_id: str, *, error: str = "") -> Any:
-        self._observe(lambda: self._cancel(error))
-        return self.renderer.workflow_cancelled(workflow_id, error=error)
+    def _workflow_event(self, event: WorkflowEvent) -> None:
+        if event.phase == "run_start":
+            self._start(event.workflow_id, event.workflow_name)
+            self._event["turn_id"] = event.turn_id
+        elif event.phase == "task_start":
+            self._start_task(event.task_id, event.name, event.step, event.input_state)
+        elif event.phase in {"task_waiting", "task_resume"}:
+            self._set_task_status(event.task_id, "WAITING" if event.phase == "task_waiting" else "RUNNING")
+        elif event.phase == "task_finish":
+            self._finish_task(event.task_id, event.status, event.error, event.result, event.result_available)
+        elif event.phase in {"agent_start", "agent_resume"}:
+            self._start_agent(event.task_id, event.name, event.inspection_id, event.task_input)
+        elif event.phase == "agent_waiting":
+            self._set_agent_status(event.inspection_id, "WAITING")
+        elif event.phase == "agent_finish":
+            self._finish_agent(event.inspection_id, event.status, event.result, event.error)
+        elif event.phase == "run_finish":
+            self._finish(event.final_state, event.final_state_available)
+        elif event.phase == "run_cancel":
+            self._cancel(event.error)
 
     def close(self) -> None:
         """Release the retained live event after the observer is detached."""
         self._workflow_id = ""
         self._event = None
+        self._event_index = None
 
     def _observe(self, update: Callable[[], None]) -> None:
         try:
@@ -326,6 +227,7 @@ class PersistentWorkflowHistory:
             "final_state_available": False,
             "final_state": None,
         }
+        self._event_index = len(events)
         events.append(self._event)
 
     def _start_task(
@@ -523,16 +425,17 @@ class PersistentWorkflowHistory:
         """Resolve the canonical event after any observer may have saved."""
         if not self._workflow_id:
             return
-        self._event = next(
-            (
-                event
-                for event in self.record.get("events", [])
-                if isinstance(event, dict)
-                and event.get("type") == "workflow"
-                and str(event.get("workflow_id") or "") == self._workflow_id
-            ),
-            None,
-        )
+        events = self.record.get("events", [])
+        if self._event_index is not None and self._event_index < len(events):
+            candidate = events[self._event_index]
+            if candidate.get("workflow_id") == self._workflow_id:
+                self._event = candidate
+                return
+        self._event = None
+        for index, event in enumerate(events):
+            if isinstance(event, dict) and event.get("type") == "workflow" and event.get("workflow_id") == self._workflow_id:
+                self._event, self._event_index = event, index
+                break
 
 
 def _normalize_task(value: Any) -> dict[str, Any] | None:

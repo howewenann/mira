@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import unittest
 
-from tracing.stream import TraceStream
+from ui.shared.trace import TraceStream
 
 
 class ListHandler(logging.Handler):

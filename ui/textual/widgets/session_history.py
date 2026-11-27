@@ -27,9 +27,9 @@ class SessionActionButton(Button):
 class SessionHistory(ListView):
     """Selectable list of saved sessions."""
 
-    def refresh_sessions(self, store: Any, *, current_id: str = "") -> None:
+    def refresh_sessions(self, records: list[dict[str, Any]], *, current_id: str = "") -> None:
         """Reload session rows from the backing store."""
-        records = session_records(store)
+        records = session_records(records)
         items: list[SessionItem] = []
         active_index = 0
 
@@ -216,18 +216,9 @@ class SessionActionMenuScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
-def session_records(store: Any) -> list[dict[str, Any]]:
+def session_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return sessions sorted by most recently updated."""
-    session_paths = getattr(store, "session_paths", None)
-    if not callable(session_paths):
-        return []
-
-    records = []
-    for path in session_paths():
-        try:
-            records.append(store.read(path))
-        except Exception:
-            continue
+    records = list(records)
     records.sort(
         key=lambda record: (
             record.get("pinned") is True,
@@ -266,6 +257,8 @@ def session_display_title(record: dict[str, Any]) -> str:
 
 def latest_user_prompt(record: dict[str, Any]) -> str:
     """Return the newest visible user prompt from a session record."""
+    if "latest_user_prompt" in record:
+        return compact_line(record["latest_user_prompt"])
     events = record.get("events")
     if not isinstance(events, list):
         return ""

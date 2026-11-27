@@ -25,7 +25,7 @@ from ui.shared.interrupts import (
     plan_request,
 )
 from session.goals import goal_artifact_text
-from core.execution.streams.rubric import format_elapsed
+from ui.shared.rubric import format_elapsed
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.shared.terminal.transcript import DEFAULT_TOOL_OUTPUT_CHARS, TerminalTranscript
 

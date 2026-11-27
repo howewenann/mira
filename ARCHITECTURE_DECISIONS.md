@@ -135,9 +135,13 @@ offers prompt, cancellation, mode, snapshot, and close operations. The Core
 Interface under [core/interface/](core/interface/) implements ordered event emission plus
 blocking interaction requests. The thin `mira` and `mira.api` facades expose
 those exact classes and types as the one supported MIRA API. Textual and
-one-shot terminal output use that surface for normal turns. Textual still owns
-internal runtime rebuild, Workflow launch, and history operations;
-the API boundary migration is incomplete.
+one-shot terminal output use that surface for normal turns. Textual uses supported application/session operations for runtime reconstruction,
+settings, history, recovery, workflows, uploads, diagnostics and compaction too.
+Preferences are detached data edited through `mira.settings`; Core applies them
+and prepares native pairs before installation. One reconstruction path serves
+startup, reload, preference changes and completed always-allow policy changes.
+Provider context metadata refresh also belongs to Core and rebuilds only when
+the context window changes.
 
 Outer interactions use opaque IDs distinct from completed-turn counts and
 native model-message IDs. The ID is saved in the session's semantic checkpoint
@@ -168,13 +172,16 @@ without event contents. Incremental updates use the existing `RuntimeEvent`
 channel with kind `inspection`; Textual consumes these directly once. There
 is no public mutable store, extra persistence layer, or snapshot-wide copy of
 inspections. Closing a session releases live contents; recovery restores saved
-inspection identities. Core Workflow execution now constructs and closes inspection observers using
-the owning session. Textual still launches that internal executor and wires
-Workflow history until Workflow launch itself migrates. Transcript clearing
-still calls a private session cleanup hook pending broader session migration.
+inspection identities. Core Workflow execution constructs and closes inspection capture and typed
+workflow-history projection with the session. Its history observer forwards
+observations once, keeps the existing durable workflow event shape and resolves
+the canonical event by index after storage normalization. Transcript clearing
+uses the public session operation and clears native threads and inspections
+together. Runtime recovery state is projected as `pending` without exposing
+graphs or native resume descriptors.
 
 The [frontend walkthrough](docs/frontend-architecture.md) explains current
-ownership and remaining exceptions; the [API guide](docs/frontend-api.md)
+ownership and capability coverage; the [API guide](docs/frontend-api.md)
 teaches a complete minimal integration before the detailed contracts.
 
 
@@ -456,7 +463,7 @@ LangGraph used to handle, or when a workaround becomes part of the normal path.
 ### Runtime policies and built-in tools
 
 General Settings and Access share the hierarchy in
-[agent/tools/groups.py](agent/tools/groups.py): Core Tools keeps Read-only before
+[ui/shared/tool_groups.py](ui/shared/tool_groups.py): Core Tools keeps Read-only before
 Actions using existing policy definitions (`grep` and `eval` remain Core).
 MIRA Tools groups only explicitly configurable bundled features. A bundled tool
 module declares `TOOL_GROUP = "Feature name"`; discovery carries this metadata
@@ -1541,7 +1548,7 @@ normal non-trace TUI runs do not create live trace logs solely for successful
 activity.
 
 **Where to check:** [core/diagnostics/error_report.py](core/diagnostics/error_report.py), [core/diagnostics/logging.py](core/diagnostics/logging.py),
-[tracing/stream.py](tracing/stream.py), [ui/shared/terminal/transcript.py](ui/shared/terminal/transcript.py), [cli/commands.py](cli/commands.py),
+[ui/shared/trace.py](ui/shared/trace.py), [ui/shared/terminal/transcript.py](ui/shared/terminal/transcript.py), [cli/commands.py](cli/commands.py),
 [ui/textual/app.py](ui/textual/app.py).
 
 **Update this when:** Error artifact layout, reporting boundaries, diagnostic

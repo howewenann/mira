@@ -44,6 +44,8 @@ from tests.test_runner import (
 )
 from tests.support.turns import run_user_turn
 
+from core.interface import FrontendEmitter
+
 
 class Snapshot:
     def __init__(self, values: dict[str, Any]) -> None:
@@ -272,7 +274,7 @@ class SessionContextTests(unittest.IsolatedAsyncioTestCase):
             workspace = Path(directory)
             store = SessionStore(workspace / ".mira" / "_sessions")
             record = store.new(session_id="thread-1", workspace=workspace)
-            observer = PersistentWorkflowHistory(Mock(), record, store, command="/workflow__demo")
+            observer = FrontendEmitter(PersistentWorkflowHistory(Mock(), record, store, command="/workflow__demo"))
             observer.workflow_started("workflow-demo:1", "demo")
             self.assertFalse(record.get("resume_context_pending"))
             observer.workflow_finished(

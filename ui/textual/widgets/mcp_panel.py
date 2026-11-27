@@ -15,7 +15,7 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Collapsible, Static
 
-from agent.mcp.models import MCPResource
+from mira.api import MCPResource
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 
 
@@ -212,13 +212,11 @@ class MCPPanelScreen(ModalScreen[None]):
 
 def visible_fixed_resources(state: Any) -> list[MCPResource] | None:
     """Hide only exact URIs owned by successfully discovered skills in this panel."""
-    if not state.resources:
-        return state.resources
+    if state.resources is None:
+        return None
     skill_uris: set[str] = set()
     for skill in getattr(state, "skills", None) or ():
-        skill_uris.add(skill.manifest.uri)
-        if isinstance(skill.manifest.resources, list):
-            skill_uris.update(resource.uri for resource in skill.manifest.resources)
+        skill_uris.update(skill.uris)
     return [resource for resource in state.resources if resource.uri not in skill_uris]
 
 

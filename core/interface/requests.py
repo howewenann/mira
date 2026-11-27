@@ -92,7 +92,7 @@ class ArtifactDisplayRequest:
 class MCPApprovalRequest:
     """Ask whether one configured MCP server may be connected.
 
-    ``server`` is the configured server state and ``preview`` is the safe
+    ``server`` is detached server identity (name and transport) and ``preview`` is the safe
     human-readable launch/use summary. Return exactly ``"allow"`` for this
     process, ``"always_allow"`` to persist approval for the current server
     fingerprint, or ``"deny"``. Any other value is interpreted as denial.

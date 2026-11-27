@@ -17,7 +17,7 @@ from textual.events import Click
 from textual.message import Message
 from textual.widgets import Button, Collapsible, Static, TextArea
 
-from core.execution.streams.rubric import elapsed_ms, format_elapsed
+from ui.shared.rubric import elapsed_ms, format_elapsed
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 from ui.shared.terminal.colors import (
     TOOL_CANCELLED_COLOR,

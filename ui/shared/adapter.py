@@ -34,16 +34,6 @@ class RendererAdapter:
     def __init__(self, renderer: Any) -> None:
         self.renderer = renderer
 
-    @property
-    def manages_subagent_animation(self) -> bool:
-        return bool(getattr(self.renderer, "manages_subagent_animation", False))
-
-    def subagent_label(self, subagent: Any) -> str:
-        callback = getattr(self.renderer, "subagent_label", None)
-        if callable(callback):
-            return str(callback(subagent))
-        return str(getattr(subagent, "name", "subagent") or "subagent")
-
     def emit(self, event: FrontendEvent) -> None:
         """Project one semantic event onto the unchanged renderer surface."""
         if isinstance(event, MessageEvent):
@@ -275,7 +265,7 @@ class RendererAdapter:
                 event.task_id,
                 event.name,
                 event.step,
-                event.input_state,
+                input_state=event.input_state,
                 workflow_id=event.workflow_id,
                 frontend_event=event,
             )

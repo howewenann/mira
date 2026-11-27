@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Button, Static
 
-from core.execution.streams.rubric import elapsed_ms, format_elapsed
+from ui.shared.rubric import elapsed_ms, format_elapsed
 from ui.shared.terminal.colors import (
     RUBRIC_BODY_COLOR,
     TOOL_CANCELLED_COLOR,

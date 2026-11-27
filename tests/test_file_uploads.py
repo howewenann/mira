@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from deepagents.backends import FilesystemBackend
 
 from agent.middleware.file_references import local_file_references
-from ui.textual.file_uploads import clear_local_uploads, ingest_local_files, safe_upload_scope
-from ui.textual.widgets.autocomplete_input import discover_project_files
+from core.application.uploads import clear_local_uploads, ingest_local_files, safe_upload_scope
+from core.application.files import discover_project_files
 
 
 class RecordingUploadBackend:

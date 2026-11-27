@@ -51,10 +51,6 @@ class FrontendEmitter:
         self.turn_id = turn_id
         self._context_notice_rendered = False
 
-    @property
-    def manages_subagent_animation(self) -> bool:
-        return bool(getattr(self.frontend, "manages_subagent_animation", False))
-
     def _identity(self, **kwargs: Any) -> dict[str, Any]:
         return {
             "session_id": str(kwargs.pop("session_id", self.session_id) or ""),
@@ -440,12 +436,10 @@ class FrontendEmitter:
         )
 
     def subagent_label(self, subagent: Any) -> str:
-        labeler = getattr(self.frontend, "subagent_label", None)
-        if callable(labeler):
-            return str(labeler(subagent))
+        from coolname import generate_slug
+
         name = str(getattr(subagent, "name", "subagent") or "subagent")
-        native_id = getattr(subagent, "id", None)
-        return f"{name} [{native_id or id(subagent)}]"
+        return f"{name} [{generate_slug(2)}]"
 
     def subagent_started(self, name: str, task_input: str = "", **kwargs: Any) -> None:
         self._subagent("start", name, task_input=task_input, **kwargs)
@@ -584,6 +578,12 @@ class FrontendEmitter:
         self.frontend.emit(UsageEvent(usage=dict(usage or {}), **self._identity()))
 
     def compaction_started(self) -> None:
+        from agent.middleware.context_overflow import pop_context_overflow_notice
+
+        notice = pop_context_overflow_notice()
+        if notice:
+            self.system_message(notice, kind="info")
+            self.mark_context_notice_rendered()
         self.frontend.emit(CompactionEvent(phase="start", **self._identity()))
 
     def compaction_finished(self) -> None:

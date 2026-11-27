@@ -6,8 +6,8 @@ import json
 import re
 from typing import Any, Callable
 
-from core.execution.streams.rubric import rubric_result_text
-from core.execution.streams.corrections import correction_text, correction_title
+from ui.shared.rubric import rubric_result_text
+from ui.shared.corrections import correction_text, correction_title
 from ui.shared.terminal.names import generate_slug
 from ui.shared.terminal.spinners import SPINNER_FRAMES
 

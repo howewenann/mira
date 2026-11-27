@@ -14,9 +14,9 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.widgets import Button, ContentSwitcher, Input, Select, Static
 
-from agent.planning.policy import PLAN_DISABLED_TOOLS
-from agent.tools.groups import builtin_tool_groups
-from config.settings import (
+from mira.settings import PLAN_DISABLED_TOOLS
+from ui.shared.tool_groups import builtin_tool_groups
+from mira.settings import (
     DYNAMIC_SUBAGENTS,
     DYNAMIC_SUBAGENT_RESPONSE_SCHEMA,
     EXECUTE_TOOL,
@@ -83,8 +83,6 @@ from config.settings import (
     tracing_enabled,
     tracing_settings,
 )
-from config.tracing import TracingRegistry
-from tracing.bootstrap import tracing_yaml_fragment
 
 ToggleKind = Literal[
     "git", "system", "response_schema", "todos", "rubric", "enabled", "always_allow", "plan_access", "ptc",
@@ -153,8 +151,9 @@ class SettingsPanel(Vertical):
         reload_runtime: ReloadCallback | None = None,
         close_panel: CloseCallback | None = None,
         mcp_manager: Any = None,
-        model_registry: Any = None,
-        tracing_registry: TracingRegistry | None = None,
+        model_aliases: tuple[str, ...] = (),
+        tracing_profiles: tuple[str, ...] = (),
+        tracing_preview: Callable[[dict[str, Any]], str] | None = None,
         subagent_metadata: list[dict[str, str]] | None = None,
         initial_tab: str = "general",
         **kwargs: Any,
@@ -168,8 +167,9 @@ class SettingsPanel(Vertical):
         self.reload_runtime = reload_runtime
         self.close_panel = close_panel
         self.mcp_manager = mcp_manager
-        self.model_registry = model_registry
-        self.tracing_registry = tracing_registry or TracingRegistry()
+        self.model_aliases = model_aliases
+        self.tracing_profiles = tracing_profiles
+        self.tracing_preview = tracing_preview
         self.subagent_metadata = list(subagent_metadata or [])
         self.initial_tab = initial_tab if initial_tab in SETTINGS_TAB_PAGES else "general"
         self._model_controls_ready = False
@@ -603,7 +603,7 @@ class SettingsPanel(Vertical):
         current = str(tracing_settings(self.settings)["profile"])
         if not selected or selected == current:
             return
-        if selected not in self.tracing_registry.profiles:
+        if selected not in self.tracing_profiles:
             self._set_status(f"tracing profile '{selected}' is unavailable")
             self._restore_select_value(event.select, current)
             return
@@ -878,7 +878,7 @@ class SettingsPanel(Vertical):
                 profile = tracing_settings(self.settings)["profile"]
                 select = profiles[0]
                 with select.prevent(Select.Changed):
-                    select.allow_blank = profile not in self.tracing_registry.profiles
+                    select.allow_blank = profile not in self.tracing_profiles
                     select.value = profile if not select.allow_blank else Select.NULL
                 self._restore_select_value(self.query_one("#settings-middleware-spans", Select), tracing_settings(self.settings)["middleware_spans"])
                 self._refresh_tracing_preview()
@@ -952,9 +952,7 @@ class SettingsPanel(Vertical):
             if self.mcp_manager is None or not await self.mcp_manager.set_server_enabled(cell.server, value):
                 self._set_status("could not update MCP server")
                 return
-            from config.settings import load_settings
-
-            self.settings = load_settings(self.mcp_manager.workspace)
+            self.settings = self.mcp_manager.settings()
             self._set_status("MCP server updated; agents rebuilt; no reload required")
             self._refresh_buttons()
             self._refresh_access_counts()
@@ -963,9 +961,7 @@ class SettingsPanel(Vertical):
             if self.mcp_manager is None or not await self.mcp_manager.set_server_always_allow(cell.server, value):
                 self._set_status("could not update MCP server approval")
                 return
-            from config.settings import load_settings
-
-            self.settings = load_settings(self.mcp_manager.workspace)
+            self.settings = self.mcp_manager.settings()
             self._set_status("MCP approval updated; no reload required")
             self._refresh_buttons()
             return
@@ -1172,9 +1168,9 @@ class SettingsPanel(Vertical):
                     button.disabled = False
         self._set_status(success_message if reloaded else "runtime reload failed")
 
-    def refresh_tracing_registry(self, registry: TracingRegistry) -> None:
+    def refresh_tracing_profiles(self, profiles: tuple[str, ...]) -> None:
         """Refresh tracing choices after the shared runtime reload."""
-        self.tracing_registry = registry
+        self.tracing_profiles = profiles
         selects = list(self.query("#settings-tracing-profile"))
         if not selects:
             return
@@ -1184,7 +1180,7 @@ class SettingsPanel(Vertical):
             self._refresh_tracing_preview()
             return
         selected = str(tracing_settings(self.settings)["profile"])
-        value = selected if selected in self.tracing_registry.profiles else options[0][1]
+        value = selected if selected in self.tracing_profiles else options[0][1]
         with select.prevent(Select.Changed):
             select.set_options(options)
             select.value = value
@@ -1263,7 +1259,7 @@ class SettingsPanel(Vertical):
         values = tracing_settings(self.settings)
         profile = str(values["profile"])
         options = self._tracing_profile_options()
-        available = profile in self.tracing_registry.profiles
+        available = profile in self.tracing_profiles
         return [
             Button(
                 "< Back",
@@ -1313,24 +1309,12 @@ class SettingsPanel(Vertical):
             previews[0].update(self._tracing_preview_text())
 
     def _tracing_preview_text(self) -> str:
-        values = tracing_settings(self.settings)
-        selected = str(values["profile"])
-        profile = self.tracing_registry.profile(selected)
-        if profile is None:
-            return f"Preview unavailable: tracing profile '{selected}' was not found"
-        return tracing_yaml_fragment(
-            enabled=bool(values["enabled"]),
-            profile=selected,
-            middleware_spans=str(values["middleware_spans"]),
-            endpoint=profile.endpoint,
-            headers=profile.headers,
-            span_attributes=profile.span_attributes,
-        )
+        return self.tracing_preview(self.settings) if self.tracing_preview else "Preview unavailable"
 
     def _tracing_profile_options(self) -> list[tuple[str, str]]:
         return [
             (self._tracing_profile_label(name), name)
-            for name in self.tracing_registry.profiles
+            for name in self.tracing_profiles
         ]
 
     @staticmethod
@@ -1461,7 +1445,7 @@ class SettingsPanel(Vertical):
             self.close_panel()
 
     def _profile_names(self) -> list[str]:
-        return list(getattr(self.model_registry, "profiles", {}))
+        return list(self.model_aliases)
 
     def _role_options(self, role: str) -> list[tuple[str, str]]:
         assigned = model_assignment(self.settings, role)

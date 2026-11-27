@@ -2202,3 +2202,27 @@ existing Inspector styling and workspace layout.
    Use `--cancel-after 1` with a one-shot prompt to check cancellation cleanup.
    `/resume-pending` redisplays a saved request; `/continue-incomplete` asks before
    retrying uncertain work. Unsupported requests in the minimal example abort.
+
+
+## Complete public API ownership
+
+Use a disposable workspace with your usual model and MCP configuration.
+
+1. Rename and pin a chat, open another chat, return, and clear the first chat.
+   Expected: unchanged history ordering and controls; cleared tools/inspections
+   do not reappear, and retained Plan/Goal work is still available.
+2. Change a model alias, a tool policy and tracing preferences. Run `/reload`
+   and `/reload-runtime`. Expected: the same Settings controls and focus;
+   ordinary reload keeps MCP connections, full reload reconnects once, and
+   tracing preview remains redacted.
+3. Invoke a prompt, a skill and a registered Workflow. Cancel a Workflow while
+   a node is waiting, then reopen its saved history. Expected: one command row,
+   terminal node states and working Inspector/final-state navigation.
+4. Upload two files, including one with a space in its name. Use autocomplete,
+   `/context-report`, `/compact`, and current/all upload clearing. Expected:
+   unchanged quoting, file references, report layout and compaction messages.
+5. Interrupt an approval, restart MIRA, and choose recovery explicitly.
+   Expected: the snapshot reports pending work; opening alone executes nothing;
+   continuation retains existing interaction/tool/inspection identities.
+
+The grouped-turn transcript layout remains a separate Phase 3 change.

@@ -35,6 +35,8 @@ from textual.color import Color
 from textual.geometry import Region
 from textual.widgets import Button, Collapsible, ContentSwitcher, Select, Static
 
+from tests.test_textual_app import mock_runtime_reconstruction
+
 
 def rendered_lines(widget: object) -> list[str]:
     """Return the exact terminal-cell lines rendered by a mounted widget."""
@@ -232,8 +234,8 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
                 self.assertEqual(manager.servers["docs"].status, "Disabled")
-                self.assertIsNone(app.agent)
-                self.assertIsNone(app.plan_agent)
+                self.assertIsNone(app.core_session.agent)
+                self.assertIsNone(app.core_session.plan_agent)
                 self.assertEqual(app.agent_unavailable_message, "Main model is not configured. Run /models.")
                 self.assertTrue(app.ready)
 
@@ -342,7 +344,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             settings=settings,
             tool_metadata=[],
             apply_change=lambda _settings: None,
-            model_registry=registry,
+            model_aliases=tuple(registry.profiles),
         )
 
         self.assertEqual(panel._role_options("main"), [("claude", "claude"), ("gpt", "gpt")])
@@ -492,7 +494,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             ):
                 async with app.run_test(size=(110, 42)) as pilot:
                     await pilot.pause()
-                    app._rebuild_agents = AsyncMock()  # type: ignore[method-assign]
+                    runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock())
                     app._apply_settings = AsyncMock(  # type: ignore[method-assign]
                         wraps=app._apply_settings
                     )
@@ -515,7 +517,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app._apply_settings.await_count, 1)
                     self.assertEqual(main.value, target)
                     self.assertEqual(model_assignment(panel.settings, "main"), target)
-                    self.assertEqual(model_assignment(app.config, "main"), target)
+                    self.assertEqual(model_assignment(app.application.config, "main"), target)
                     self.assertEqual(model_assignment(load_settings(workspace), "main"), target)
                     self.assertEqual(
                         str(app.query_one("#model-settings-button", Button).label),
@@ -565,7 +567,7 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(110, 36)) as pilot:
                     await pilot.pause()
                     app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
-                    app._rebuild_agents = AsyncMock()  # type: ignore[method-assign]
+                    runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock())
 
                     updates = [
                         lambda current: set_model_assignment(current, "main", "new"),
@@ -576,19 +578,19 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
                         lambda current: set_context_limit_tokens(current, 4096),
                     ]
                     for update in updates:
-                        ok, message = await app._apply_settings(update(app.config["settings"]))
+                        ok, message = await app._apply_settings(update(app.application.config["settings"]))
                         self.assertTrue(ok)
                         self.assertEqual(message, "settings saved; agents rebuilt; no reload required")
 
                     footer = str(app.query_one("#model-settings-button", Button).label)
 
             app._reload_runtime.assert_not_awaited()
-            app._rebuild_agents.assert_awaited()
-            self.assertEqual(app._rebuild_agents.await_count, 6)
+            runtime_rebuild.assert_awaited()
+            self.assertEqual(runtime_rebuild.await_count, 6)
             manager.reload.assert_not_awaited()
             self.assertEqual(infer.await_count, 2)
             self.assertEqual(
-                app._rebuild_agents.await_args_list[1].kwargs["metadata"],
+                runtime_rebuild.await_args_list[1].kwargs["metadata"],
                 ModelMetadata(8192, "settings.models.context_limit_tokens"),
             )
             self.assertEqual(app.model_name, "[new] openai:new-model")
@@ -607,19 +609,17 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test() as pilot:
                 await pilot.pause()
-                with patch.object(
-                    app,
-                    "_build_agent_pair",
-                    return_value=("rebuilt-agent", "rebuilt-plan-agent"),
-                ) as build_pair:
-                    await app._rebuild_agents()
+                with patch("core.application.app.build_agent_pair", return_value=("rebuilt-agent", "rebuilt-plan-agent")) as build_pair:
+                    from config.settings import set_tool_enabled
+                    await app.application.apply_settings(set_tool_enabled(app.application.configuration()["settings"], "read_file", False))
+
 
             self.assertEqual(
                 build_pair.call_args.kwargs["metadata"],
                 ModelMetadata(4096, "provider.profile.max_input_tokens"),
             )
-            self.assertEqual(app.agent, "rebuilt-agent")
-            self.assertEqual(app.plan_agent, "rebuilt-plan-agent")
+            self.assertEqual(app.core_session.agent, "rebuilt-agent")
+            self.assertEqual(app.core_session.plan_agent, "rebuilt-plan-agent")
 
     async def test_models_change_without_main_keeps_expected_model_issue(self) -> None:
         """Subagent settings should rebuild locally even while Main is unset."""
@@ -642,15 +642,15 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test() as pilot:
                 await pilot.pause()
                 app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
-                updated = set_subagent_enabled(app.config["settings"], "project-guide", True)
+                updated = set_subagent_enabled(app.application.config["settings"], "project-guide", True)
                 ok, message = await app._apply_settings(updated)
 
             self.assertTrue(ok)
             self.assertEqual(message, "settings saved; agents rebuilt; no reload required")
             app._reload_runtime.assert_not_awaited()
             manager.reload.assert_not_awaited()
-            self.assertIsNone(app.agent)
-            self.assertIsNone(app.plan_agent)
+            self.assertIsNone(app.core_session.agent)
+            self.assertIsNone(app.core_session.plan_agent)
             self.assertTrue(any(issue.summary == "Main model is not configured" for issue in app.issues))
 
     async def test_rejected_model_selection_restores_visible_value(self) -> None:
@@ -704,21 +704,21 @@ class ModelManagementUITests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test() as pilot:
                 await pilot.pause()
-                old_agent = app.agent
-                old_plan_agent = app.plan_agent
+                old_agent = app.core_session.agent
+                old_plan_agent = app.core_session.plan_agent
                 app._reload_runtime = AsyncMock()  # type: ignore[method-assign]
-                app._rebuild_agents = AsyncMock(  # type: ignore[method-assign]
+                runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock(  # type: ignore[method-assign]
                     side_effect=ConfigError("rubric model is unavailable")
-                )
-                updated = set_model_assignment(app.config["settings"], "rubric", "test")
+                ))
+                updated = set_model_assignment(app.application.config["settings"], "rubric", "test")
                 ok, message = await app._apply_settings(updated)
 
             self.assertFalse(ok)
             self.assertEqual(message, "settings not saved: rubric model is unavailable")
             self.assertIsNone(model_assignment(load_settings(workspace), "rubric"))
-            self.assertIsNone(model_assignment(app.config, "rubric"))
-            self.assertIs(app.agent, old_agent)
-            self.assertIs(app.plan_agent, old_plan_agent)
+            self.assertIsNone(model_assignment(app.application.config, "rubric"))
+            self.assertIs(app.core_session.agent, old_agent)
+            self.assertIs(app.core_session.plan_agent, old_plan_agent)
             app._reload_runtime.assert_not_awaited()
             manager.reload.assert_not_awaited()
 

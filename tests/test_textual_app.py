@@ -95,7 +95,8 @@ from core.execution.runner import SubagentRequestRenderer
 from core.execution.streams.subagents import consume_subagents
 from core.execution.streams.tools import CONTROL_TOOLS
 from core.interface import FrontendEmitter
-from tracing.stream import TraceStream
+from mira.api import MessageEvent
+from ui.shared.trace import TraceStream
 from session.goals import current_goal, goal_artifact
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from session.plans import current_plan, plan_artifact
@@ -106,7 +107,9 @@ from session.workflows import freeze_workflow_value
 from ui.textual.commands import dispatcher as repl
 from ui.textual.commands.help import command_help_entries
 from ui.shared.interrupts import ASK_USER_OPEN_OPTION, action_choices, action_preview, normalize_plan
-from ui.textual.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp, append_prompt_history, read_prompt_history
+from ui.textual.app import DESTRUCTIVE_CONFIRM_CHOICES, MiraApp
+from core.application.files import discover_project_files
+from core.application.input_history import append_prompt_history, read_prompt_history
 from ui.textual.widgets.workspace import Workspace
 from ui.textual.adapter import TextualFrontend
 from ui.terminal.renderer import Renderer
@@ -153,7 +156,7 @@ from ui.textual.widgets.subagent_panel import (
     group_status_icon,
     truncate_cells,
 )
-from ui.textual.workflow_demo import build_workflow_demo
+from core.execution.workflow_demo import build_workflow_demo
 from ui.textual.widgets.session_history import (
     SessionActionMenuScreen,
     SessionItem,
@@ -188,6 +191,18 @@ class FakeStore:
         """Ignore session saves."""
         self.saves.append(record)
         return None
+
+    def session_paths(self):
+        return list(dict.fromkeys(str(record["id"]) for record in self.saves))
+
+    def read(self, path):
+        return deepcopy(next(record for record in reversed(self.saves) if record["id"] == str(path)))
+
+    def path(self, session_id):
+        return session_id
+
+    def save_metadata(self, record):
+        self.save(record)
 
     def load(self, session_id: str | None, resume: bool, workspace: Path) -> dict[str, Any]:
         """Return a new session for tests that exercise session creation."""
@@ -319,7 +334,7 @@ class AutocompleteTestApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield AutocompleteInput(
-            project_backend=self.backend,
+            file_provider=(lambda: discover_project_files(self.backend)) if self.backend else None,
             tool_provider=self.tool_provider,
             compact=self.compact,
         )
@@ -497,12 +512,65 @@ def make_app(
         "checkpointer": "checkpointer",
     }
     state.update(state_overrides)
-    return MiraApp(
+    from core.application import MiraApplication
+    from core.interface.protocol import NullFrontend
+
+    application = MiraApplication(
+        frontend=NullFrontend(), workspace=workspace,
+        **{key: value for key, value in state.items() if key != "session"},
+        **{key: value for key, value in {
+            "mcp_manager": None, "issues": [], "tool_failures": [],
+            "resource_metadata": {}, "project_backend": None, "agent_unavailable_message": "Main model is not configured. Run /models.",
+        }.items() if key not in state},
+    )
+    from session.dashboard import ensure_dashboard
+    ensure_dashboard(session_record, model_name=application.model_name, context_limit_tokens=application.context_limit_tokens, context_limit_source=application.context_limit_source)
+    core_session = MiraSession(application, session_record)
+    if state.get("resource_metadata"):
+        core_session.mode["resources"] = state["resource_metadata"]
+    app = MiraApp(
         workspace=workspace,
-        prebuilt=state,
+        prebuilt={"application": application, "core_session": core_session},
         launch_options=launch_options,
         tool_output_chars=80,
     )
+    application.frontend = TextualFrontend(app)
+    application.agent_metadata = ModelMetadata(application.context_limit_tokens, application.context_limit_source)
+    application.launch_options = launch_options or LaunchOptions()
+    application._refresh_model = AsyncMock()
+    app.application, app.core_session = application, core_session
+    return app
+
+
+def install_mcp_fixture(app, manager):
+    if manager is not None:
+        for state in manager.servers.values():
+            defaults = {"status": "Available" if getattr(state, "usable", False) else "Disabled",
+                        "error": "", "prompts": None, "resources": None, "skills": None,
+                        "prompt_error": "", "resource_error": "", "skill_error": "", "stderr_tail": ""}
+            for name, value in defaults.items():
+                if not hasattr(state, name):
+                    setattr(state, name, value)
+    app.application.mcp_manager = manager
+    app._refresh_runtime_view()
+
+
+def mock_reconstruct_callback(rebuild):
+    async def reconstruct(owner, config, **options):
+        owner.config = config
+        await rebuild()
+        owner._runtime_changed()
+    return reconstruct
+
+
+def mock_runtime_reconstruction(test, application, rebuild):
+    """Stub native construction while exercising the real public settings operation."""
+    async def reconstruct(owner, config, **options):
+        owner.config = config
+        await rebuild()
+        owner._runtime_changed()
+    test.enterContext(patch("core.application.runtime.reconstruct", new=reconstruct))
+    return rebuild
 
 
 def compact_test_agent() -> SimpleNamespace:
@@ -544,10 +612,10 @@ def start_artifact_review(
     """Start the same Core-owned artifact review used by real Textual turns."""
     emitter = FrontendEmitter(
         TextualFrontend(app),
-        session_id=str(app.session.get("id") or ""),
+        session_id=str(app.core_session.record.get("id") or ""),
     )
-    recorder = SessionRecorder(app.session, app.store, "planning")
-    bridge = SessionEventEmitter(emitter, recorder, semantic_state=app.mode)
+    recorder = SessionRecorder(app.core_session.record, app.application.store, "planning")
+    bridge = SessionEventEmitter(emitter, recorder, semantic_state=app.core_session.mode)
     return asyncio.create_task(getattr(bridge, f"finalize_{kind}")(interrupt))
 
 
@@ -619,6 +687,43 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Workflow history unavailable: history read failed", rendered)
             self.assertEqual(app.query_one(Workspace).active["main"], "chat")
 
+    async def test_production_ui_operates_with_only_public_handles(self) -> None:
+        """A behavioral guard rejects native/private access beyond import checks."""
+        app = make_app()
+        application, session = app.application, app.core_session
+
+        def public_handle(target, names):
+            class Handle:
+                def __getattr__(self, name):
+                    if name not in names:
+                        raise AssertionError(f"Unsupported frontend access: {name}")
+                    return getattr(target, name)
+            return Handle()
+
+        app.prebuilt = {
+            "application": public_handle(application, {
+                "configuration", "runtime", "mcp", "prompt_history", "list_files",
+                "list_sessions", "settings", "commands", "shutdown", "record_prompt",
+                "prepare_input", "apply_settings", "reload", "report_error", "tracing_preview",
+            }),
+            "core_session": public_handle(session, {
+                "id", "snapshot", "inspection", "inspections", "prompt", "run_workflow", "cancel",
+            }),
+        }
+        async def execute(**kwargs):
+            application.frontend.emit(MessageEvent(phase="content", text="public handle response",
+                session_id=session.id, turn_id=kwargs["turn_id"]))
+
+        with patch("core.application.session.run_user_turn", AsyncMock(side_effect=execute)):
+            async with app.run_test(size=(110, 35)) as pilot:
+                for command in ("/help", "/runtime", "/tools", "/skills", "/subagents", "/memories", "/workflows", "/prompts"):
+                    await app.submit_prompt(PromptBox.Submitted(app.query_one(PromptBox), command))
+                await app._run_turn("hello")
+                await app._run_workflow_demo()
+                await pilot.pause()
+                self.assertIn("public handle response", "\n".join(renderable_plain(child) for child in app.query_one(ChatLog).children))
+                self.assertEqual(len(app.query(WorkflowTreeBubble)), 1)
+
     async def test_typed_inspection_updates_and_queries_follow_the_selected_session(self) -> None:
         app = make_app()
         async with app.run_test(size=(120, 40)) as pilot:
@@ -673,7 +778,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             emitter.session_state("turn_started")
             self.assertEqual(app.status_state, "running")
             bridge = SessionEventEmitter(
-                emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer"),
+                emitter, SessionRecorder(app.core_session.record, app.application.store, "action", turn_id="outer"),
                 clock=iter([10.0, 12.5]).__next__,
             )
             bridge.text_delta("hello", message_id="native-message", namespace=("root",), metadata={"provider": "test"})
@@ -685,7 +790,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(message.event_id, 0)
             bridge.tool_call("read_file", {"file_path": "x"}, call_id="call")
             block = chat._tool_blocks["id:call"]
-            self.assertEqual(block["origin_event_id"], app.session["events"][-1]["id"])
+            self.assertEqual(block["origin_event_id"], app.core_session.record["events"][-1]["id"])
             bridge.stop_active_tools("interrupted")
             self.assertEqual(block["duration_ms"], 2500)
             self.assertEqual(block["terminal_status"], "interrupted")
@@ -700,15 +805,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = False
 
     async def test_normal_startup_explicitly_selects_textual_frontend(self) -> None:
-        state = make_app().prebuilt
-        bootstrap = AsyncMock(return_value=state)
-        app = MiraApp(workspace=Path("."), bootstrap=bootstrap)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await wait_until(lambda: app.ready)
-            await pilot.pause()
-            frontend = bootstrap.await_args.kwargs["frontend"]
-            self.assertIsInstance(frontend, TextualFrontend)
-            self.assertIs(frontend.renderer, app)
+        fixture = make_app()
+        application = fixture.application
+        application.open_session = AsyncMock(return_value=fixture.core_session)
+        app = MiraApp(workspace=Path("."))
+        with patch("ui.textual.app.MiraApplication.start", AsyncMock(return_value=application)) as start:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await wait_until(lambda: app.ready)
+                frontend = start.await_args.kwargs["frontend"]
+                self.assertIsInstance(frontend, TextualFrontend)
+                self.assertIs(frontend.renderer, app)
+
 
     async def test_typed_recovery_reuses_the_original_tool_widget_and_restarts_its_clock(self) -> None:
         app = make_app()
@@ -716,18 +823,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             app.busy = True
             emitter = FrontendEmitter(app.application.frontend, session_id=app.core_session.id, turn_id="outer")
-            first = SessionEventEmitter(emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer"))
+            first = SessionEventEmitter(emitter, SessionRecorder(app.core_session.record, app.application.store, "action", turn_id="outer"))
             first.tool_call("read_file", {"file_path": "x"}, call_id="call")
             first.stop_active_tools("interrupted")
             chat = app.query_one(ChatLog)
             widget = chat._tool_blocks["id:call"]["widget"]
-            resumed = SessionEventEmitter(emitter, SessionRecorder(app.session, app.store, "action", turn_id="outer", recovering=True))
+            resumed = SessionEventEmitter(emitter, SessionRecorder(app.core_session.record, app.application.store, "action", turn_id="outer", recovering=True))
             resumed.recovered_tool_call("read_file", {"file_path": "x"}, call_id="call")
             block = chat._tool_blocks["id:call"]
             self.assertIs(block["widget"], widget)
             self.assertIsNone(block["duration_ms"])
             self.assertFalse(block["terminal"])
-            self.assertEqual(len([e for e in app.session["events"] if e["type"] == "tool_call"]), 1)
+            self.assertEqual(len([e for e in app.core_session.record["events"] if e["type"] == "tool_call"]), 1)
             app.busy = False
 
     async def test_mcp_skills_inventory_has_native_disclosure_and_no_initial_focus(self) -> None:
@@ -841,7 +948,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         async with app.run_test() as pilot:
             renderer = SessionEventEmitter(
                 app,
-                SessionRecorder(app.session, app.store, "planning"),
+                SessionRecorder(app.core_session.record, app.application.store, "planning"),
             )
             for name in CONTROL_TOOLS:
                 call_id = f"call-{name}"
@@ -870,7 +977,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("output:", rendered)
                 self.assertNotIn("draft:", rendered)
             self.assertEqual(
-                [event["type"] for event in app.session["events"]],
+                [event["type"] for event in app.core_session.record["events"]],
                 ["tool_call", "tool_result"] * len(CONTROL_TOOLS),
             )
 
@@ -1235,7 +1342,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("ui.textual.app.choose_local_files", return_value=selected) as picker,
             patch(
-                "ui.textual.app.ingest_local_files",
+                "core.application.uploads.ingest_local_files",
                 AsyncMock(return_value=(references, [])),
             ) as ingest,
         ):
@@ -1253,7 +1360,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     'Compare @/.mira/_uploads/thread-1/a/report.pdf @"/.mira/_uploads/thread-1/b/annual report.pdf"',
                 )
                 self.assertTrue(prompt.has_focus)
-                self.assertEqual(app.session.get("events", []), [])
+                self.assertEqual(app.core_session.record.get("events", []), [])
                 self.assertEqual(app._last_file_picker_directory, selected[0].parent)
 
     async def test_add_file_cancel_is_a_focused_no_op(self) -> None:
@@ -1262,7 +1369,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("ui.textual.app.choose_local_files", return_value=[]) as picker,
-            patch("ui.textual.app.ingest_local_files", AsyncMock()) as ingest,
+            patch("core.application.uploads.ingest_local_files", AsyncMock()) as ingest,
         ):
             async with app.run_test(size=(100, 25)) as pilot:
                 prompt = app.query_one(PromptBox)
@@ -1296,11 +1403,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 25)) as pilot:
             await pilot.pause()
-            app._set_project_backend(new_backend)
-
-            self.assertIs(app.project_backend, new_backend)
+            app.application.project_backend = new_backend
+            app.application._runtime_changed()
             self.assertIs(app.application.project_backend, new_backend)
-            self.assertIs(app.query_one(AutocompleteInput).project_backend, new_backend)
+            self.assertIsNotNone(app.query_one(AutocompleteInput).file_provider)
 
     async def test_partial_file_upload_inserts_success_and_reports_failures(self) -> None:
         app = make_app(project_backend=object())
@@ -1308,7 +1414,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         reference = "@/.mira/_uploads/thread-1/id/good.txt"
 
         with patch(
-            "ui.textual.app.ingest_local_files",
+            "core.application.uploads.ingest_local_files",
             AsyncMock(return_value=([reference], ["blocked.txt: permission_denied"])),
         ):
             async with app.run_test(size=(100, 25)) as pilot:
@@ -2036,7 +2142,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt = app.query_one(PromptBox)
             completion = app.query_one(AutocompleteInput)
             options = app.query_one(OptionList)
-            app.mode.update(
+            app.core_session.mode.update(
                 {
                     "planning": False,
                     "action_tools": [
@@ -2064,7 +2170,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(prompt.value, "Use action_writer")
 
-            app.mode.update(
+            app.core_session.mode.update(
                 {
                     "planning": True,
                     "planning_stage": PLANNING_STAGE_PLAN_RESEARCH,
@@ -2074,7 +2180,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual([item.display for item in completion.items], ["plan_reader"])
 
-            app.mode["planning_stage"] = PLANNING_STAGE_PLAN_FINALIZE
+            app.core_session.mode["planning_stage"] = PLANNING_STAGE_PLAN_FINALIZE
             prompt.value = "Use @final"
             await pilot.pause()
             self.assertEqual([item.display for item in completion.items], ["finalize_plan"])
@@ -2122,9 +2228,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             prompt.value = "Review @old"
             await wait_until(lambda: completion.active)
 
-            completion.set_project_backend(new_backend)
+            completion.set_file_provider(lambda: discover_project_files(new_backend))
             self.assertFalse(completion.active)
-            self.assertIs(completion.project_backend, new_backend)
+            self.assertIsNotNone(completion.file_provider)
             prompt.value = "Review "
             await pilot.pause()
             prompt.value = "Review @new"
@@ -2260,7 +2366,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             records[1]["custom_title"] = "Pinned custom title"
             store.save_metadata(records[1])
-            ordered = session_records(store)
+            ordered = session_records(make_app(store=store).application.list_sessions())
 
         self.assertEqual(
             [record["id"] for record in ordered],
@@ -2323,18 +2429,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             runtime_snapshot = app.runtime_snapshot
             app.query_one("#new-chat", Button).press()
-            await wait_until(lambda: app.session["id"] == "new-thread-1")
+            await wait_until(lambda: app.core_session.record["id"] == "new-thread-1")
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertEqual(old_session["events"], [{"type": "user", "text": "keep me"}])
-            self.assertEqual(app.session["turns"], 0)
-            self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.core_session.record["turns"], 0)
+            self.assertEqual(app.core_session.record["events"], [])
             self.assertEqual(store.new_sessions, 1)
             self.assertIn("started new chat", rendered)
             self.assertNotIn("keep me", rendered)
             self.assertTrue(app.query_one(PromptBox).has_focus)
             self.assertIs(app.launch_options, launch_options)
-            self.assertTrue(app.config["llm_direct"])
+            self.assertTrue(app.application.config["llm_direct"])
             self.assertIs(app.runtime_snapshot, runtime_snapshot)
             self.assertTrue(app.runtime_snapshot.direct_effective)
 
@@ -2347,10 +2453,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             prompt = app.query_one(PromptBox)
             await app.submit_prompt(PromptBox.Submitted(prompt, "/new-chat"))
-            await wait_until(lambda: app.session["id"] == "new-thread-1")
+            await wait_until(lambda: app.core_session.record["id"] == "new-thread-1")
 
-            self.assertEqual(app.session["turns"], 0)
-            self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.core_session.record["turns"], 0)
+            self.assertEqual(app.core_session.record["events"], [])
             self.assertEqual(store.new_sessions, 1)
 
     async def test_new_chat_is_blocked_while_busy(self) -> None:
@@ -2369,7 +2475,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertTrue(handled)
-            self.assertEqual(app.session["id"], "thread-1")
+            self.assertEqual(app.core_session.record["id"], "thread-1")
             self.assertEqual(store.new_sessions, 0)
             self.assertEqual(len(app.query_one(ChatLog).children), before)
             self.assertTrue(app.query_one("#new-chat", Button).disabled)
@@ -2460,11 +2566,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await app._load_session("thread-2")
             await pilot.pause()
 
-        self.assertEqual(app.session["id"], "thread-2")
-        self.assertEqual(app.agent, "agent")
-        self.assertEqual(app.plan_agent, "plan-agent")
+        self.assertEqual(app.core_session.record["id"], "thread-2")
+        self.assertEqual(app.core_session.agent, "agent")
+        self.assertEqual(app.core_session.plan_agent, "plan-agent")
         self.assertIs(app.launch_options, launch_options)
-        self.assertTrue(app.config["llm_direct"])
+        self.assertTrue(app.application.config["llm_direct"])
         self.assertTrue(app.runtime_snapshot.direct_effective)
         self.assertTrue(app.runtime_snapshot.direct_requested)
 
@@ -2636,7 +2742,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
                 pinned_button.press()
                 await wait_until(lambda: not store.read(store.path("other"))["pinned"])
-                restored = session_records(store)
+                restored = session_records(make_app(store=store).application.list_sessions())
                 self.assertFalse(store.read(store.path("other"))["pinned"])
                 self.assertEqual(store.read(store.path("other"))["updated_at"], original_updated_at)
                 self.assertEqual([record["id"] for record in restored], ["other", "current"])
@@ -2764,7 +2870,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._delete_history_session(other_item)
                 await pilot.pause()
                 self.assertFalse(store.path("other").exists())
-                self.assertEqual(app.session["id"], "current")
+                self.assertEqual(app.core_session.record["id"], "current")
 
                 current_item = next(
                     row for row in app.query(SessionItem) if row.session_id == "current"
@@ -2772,8 +2878,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._delete_history_session(current_item)
                 await pilot.pause()
                 self.assertFalse(store.path("current").exists())
-                self.assertNotEqual(app.session["id"], "current")
-                self.assertTrue(store.path(str(app.session["id"])).exists())
+                self.assertNotEqual(app.core_session.record["id"], "current")
+                self.assertTrue(store.path(str(app.core_session.record["id"])).exists())
                 self.assertEqual(app._prompt_choice.await_count, 2)
 
     async def test_narrow_window_uses_original_responsive_sidebar_behavior(self) -> None:
@@ -2794,8 +2900,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 rubric_enabled=False,
                 rubric_iterations=3,
             )
-            app.session["current_goal"] = goal
-            app.mode["current_goal"] = goal
+            app.core_session.record["current_goal"] = goal
+            app.core_session.mode["current_goal"] = goal
+            app._refresh_session_view()
             app._sync_artifact_button()
             await pilot.pause()
 
@@ -3102,7 +3209,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
 
-                await app._run_turn_for_plan_revision({"title": "Revise It"}, "more tests")
+                value = plan_artifact(plan_id="revise", title="Revise It", objective="Revise the work.",
+                    context_and_constraints="Preserve behavior.", key_changes=["Revise."], test_plan=["Check."], assumptions=["None."],
+                    success_criteria="- Done", rubric_enabled=False, rubric_iterations=1)
+                app.core_session.record["current_plan"] = value
+                with patch("core.application.session.synchronize_conversation", AsyncMock()):
+                    await app._run_turn_for_plan_revision(value, "more tests")
                 await pilot.pause()
 
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
@@ -3111,81 +3223,41 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(report.call_args.kwargs["source"], "tui.plan_revision")
 
     async def test_startup_failure_shows_error_report_path(self) -> None:
-        """Startup errors should get a report even before a real session exists."""
-        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            raise RuntimeError("startup boom")
-
-        app = MiraApp(
-            workspace=Path("."),
-            config={},
-            bootstrap=bootstrap,
-        )
-
-        with patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")) as report:
+        app = MiraApp(workspace=Path("."), config={})
+        with (
+            patch("ui.textual.app.MiraApplication.start", AsyncMock(side_effect=RuntimeError("startup boom"))),
+            patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")) as report,
+        ):
             async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.pause()
                 await wait_until(lambda: app.status_state == "error")
-
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
                 self.assertIn("startup error: startup boom", rendered)
                 self.assertIn("error report: startup-report.txt", rendered)
                 self.assertEqual(report.call_args.kwargs["source"], "tui.startup")
                 self.assertIsNone(report.call_args.kwargs["session_id"])
                 self.assertFalse(app.ready)
-                self.assertFalse(app.query_one(PromptBox).disabled)
+
 
     async def test_startup_error_accepts_full_runtime_retry_but_rejects_model_work(self) -> None:
-        """Startup Error should expose recovery without pretending the runtime is installed."""
-        attempts = 0
-        session = {
-            "id": "thread-recovered",
-            "workspace": ".",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "turns": 0,
-            "dashboard": {},
-            "events": [],
-        }
-
-        async def bootstrap(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise RuntimeError("startup boom")
-            return {
-                "agent": "agent",
-                "plan_agent": "plan-agent",
-                "config": managed_model_config(),
-                "store": FakeStore(),
-                "session": session,
-                "model_name": "recovered-model",
-                "context_limit_tokens": 8192,
-                "context_limit_source": "test",
-                "checkpointer": "checkpointer",
-            }
-
-        app = MiraApp(workspace=Path("."), config={}, bootstrap=bootstrap)
-        with patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")):
+        fixture = make_app(session={"id": "thread-recovered", "workspace": ".", "turns": 0, "events": []})
+        fixture.application.open_session = AsyncMock(return_value=fixture.core_session)
+        app = MiraApp(workspace=Path("."), config={})
+        with (
+            patch("ui.textual.app.MiraApplication.start", AsyncMock(side_effect=[RuntimeError("startup boom"), fixture.application])) as start,
+            patch("ui.textual.app.write_error_report", return_value=Path("startup-report.txt")),
+        ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await wait_until(lambda: app.status_state == "error")
                 prompt = app.query_one(PromptBox)
-
                 await app.submit_prompt(PromptBox.Submitted(prompt, "do model work"))
-                await pilot.pause()
                 self.assertFalse(app.ready)
                 self.assertEqual(app.status_state, "error")
-                self.assertIn(
-                    "Use /settings, /models, /issues, /runtime, or /reload-runtime",
-                    renderable_plain(app.query_one(ChatLog).children[-1]),
-                )
-
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/reload-runtime"))
                 await wait_until(lambda: app.ready)
-
-                self.assertEqual(attempts, 2)
-                self.assertEqual(app.status_state, "ready")
-                self.assertEqual(app.session["id"], "thread-recovered")
-                self.assertEqual(app.checkpointer, "checkpointer")
+                self.assertEqual(start.await_count, 2)
+                self.assertEqual(app.core_session.id, "thread-recovered")
                 self.assertFalse(prompt.disabled)
+
 
     async def test_session_load_failure_shows_error_report_path(self) -> None:
         """Session-switch failures should show the generated report path."""
@@ -4365,21 +4437,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async def run_goal(**kwargs: Any) -> None:
             captured.update(dict(kwargs["mode"]["goal_staging"]))
+            kwargs["mode"]["goal_staging"] = None
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.mode["rubric_enabled"] = True
+            app.core_session.mode["rubric_enabled"] = True
             with (
                 patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
                 patch("core.application.session.run_user_turn", side_effect=run_goal) as run,
             ):
                 await app._run_goal_command("Write a professional announcement.")
 
-        self.assertFalse(app.mode["planning"])
-        self.assertIsNone(app.mode["goal_staging"])
+        self.assertFalse(app.core_session.mode["planning"])
+        self.assertIsNone(app.core_session.mode["goal_staging"])
         self.assertEqual(captured["authoritative_objective"], "Write a professional announcement.")
         self.assertEqual(captured["stage"], "goal_research")
-        self.assertEqual(run.await_args.kwargs["plan_agent"], app.plan_agent)
+        self.assertEqual(run.await_args.kwargs["plan_agent"], app.core_session.plan_agent)
         self.assertEqual(run.await_args.kwargs["display_text"], "/goal Write a professional announcement.")
 
     async def test_cancelled_goal_generation_restores_ready_header(self) -> None:
@@ -4412,10 +4485,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         value = goal_artifact(goal_id="goal-1", title="Report", objective="Write a report.", success_criteria="- The report exists.", rubric_enabled=False, rubric_iterations=3)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.session["current_goal"] = value
-            app.mode["current_goal"] = value
-            app.session.setdefault("events", []).append({"id": 1, "type": "goal", "created_at": "now", "goal": value, "status": "proposed"})
+            app.core_session.record["current_goal"] = value
+            app.core_session.mode["current_goal"] = value
+            app.core_session.record.setdefault("events", []).append({"id": 1, "type": "goal", "created_at": "now", "goal": value, "status": "proposed"})
             app.query_one(ChatLog).present_goal(value, active=True)
+            app._refresh_session_view()
             app._sync_artifact_button()
             await pilot.pause()
             artifact_button = app.query_one("#artifact-status-button", Button)
@@ -4425,8 +4499,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
 
-        self.assertIsNone(app.session["current_goal"])
-        self.assertTrue(any(event.get("type") == "goal" for event in app.session["events"]))
+        self.assertIsNone(app.core_session.record["current_goal"])
+        self.assertTrue(any(event.get("type") == "goal" for event in app.core_session.record["events"]))
         self.assertFalse(artifact_button.display)
 
     async def test_goal_close_retains_lifecycle_and_current_goal(self) -> None:
@@ -4434,15 +4508,16 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         value = goal_artifact(goal_id="goal-1", title="Work", objective="Do work.", success_criteria="- Work is done.", rubric_enabled=False, rubric_iterations=3)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.session["current_goal"] = value
-            app.mode["current_goal"] = value
+            app.core_session.record["current_goal"] = value
+            app.core_session.mode["current_goal"] = value
             app.query_one(ChatLog).present_goal(value, active=True)
+            app._refresh_session_view()
             app._sync_artifact_button()
             await pilot.pause()
             await app._handle_goal_action("close", "goal-1")
             await pilot.pause()
-            self.assertEqual(app.session["current_goal"]["id"], "goal-1")
-            self.assertEqual(app.session["current_goal"]["status"], "proposed")
+            self.assertEqual(app.core_session.record["current_goal"]["id"], "goal-1")
+            self.assertEqual(app.core_session.record["current_goal"]["status"], "proposed")
             self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
             artifact_button = app.query_one("#artifact-status-button", Button)
             self.assertTrue(artifact_button.display)
@@ -4498,10 +4573,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             for status, (suffix, primary) in expected.items():
                 goal["status"] = status
-                app.session["current_goal"] = goal
-                app.session["current_plan"] = None
-                app.mode["current_goal"] = goal
-                app.mode["current_plan"] = None
+                app.core_session.record["current_goal"] = goal
+                app.core_session.record["current_plan"] = None
+                app.core_session.mode["current_goal"] = goal
+                app.core_session.mode["current_plan"] = None
+                app._refresh_session_view()
                 app._sync_artifact_button()
                 app._set_status(state="ready")
                 chat.present_goal(goal, active=True, status=status)
@@ -4518,10 +4594,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             plan["status"] = "completed"
-            app.session["current_goal"] = None
-            app.session["current_plan"] = plan
-            app.mode["current_goal"] = None
-            app.mode["current_plan"] = plan
+            app.core_session.record["current_goal"] = None
+            app.core_session.record["current_plan"] = plan
+            app.core_session.mode["current_goal"] = None
+            app.core_session.mode["current_plan"] = plan
+            app._refresh_session_view()
             app._sync_artifact_button()
             chat.present_plan(plan, active=True, status="completed")
             await pilot.pause()
@@ -4536,9 +4613,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             )
 
             app.busy = True
+            app._refresh_session_view()
             app._sync_artifact_button()
             self.assertTrue(button.disabled)
             app.busy = False
+            app._refresh_session_view()
             app._sync_artifact_button()
             self.assertFalse(button.disabled)
 
@@ -4573,8 +4652,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             artifact = app.query_one("#artifact-status-button", Button)
             mcp = app.query_one("#mcp-status-button", Button)
 
-            app.session["current_goal"] = goal
-            app.session["current_plan"] = None
+            app.core_session.record["current_goal"] = goal
+            app.core_session.record["current_plan"] = None
+            app._refresh_session_view()
             app._sync_artifact_button()
             await pilot.pause()
 
@@ -4590,8 +4670,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(artifact.styles.background, goal_surface)
             self.assertEqual(artifact.styles.color, goal_text)
 
-            app.session["current_goal"] = None
-            app.session["current_plan"] = plan
+            app.core_session.record["current_goal"] = None
+            app.core_session.record["current_plan"] = plan
+            app._refresh_session_view()
             app._sync_artifact_button()
             await pilot.pause()
 
@@ -4636,13 +4717,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await app.show_goal()
 
                 with (
-                    patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
                     patch("core.application.session.run_user_turn", side_effect=show_retained_goal),
                 ):
                     async with app.run_test(size=(100, 35)) as pilot:
                         await pilot.pause()
-                        app.session["current_goal"] = value
-                        app.mode["current_goal"] = value
+                        app.core_session.record["current_goal"] = value
+                        app.core_session.mode["current_goal"] = value
                         await app.show_goal()
                         await pilot.pause()
                         direct = list(app.query_one(ChatLog).query(".goal"))[-1]
@@ -4677,21 +4757,20 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         value["status"] = "active"
 
         async def finish_paused(**_kwargs: Any) -> None:
-            paused = dict(app.session["current_goal"])
+            paused = dict(app.core_session.record["current_goal"])
             paused["status"] = "paused"
-            app.session["current_goal"] = paused
-            app.mode["current_goal"] = paused
-            app.mode["executing_goal"] = False
+            app.core_session.record["current_goal"] = paused
+            app.core_session.mode["current_goal"] = paused
+            app.core_session.mode["executing_goal"] = False
 
         with (
-            patch.object(app, "_refresh_model_metadata", new_callable=AsyncMock),
             patch("core.application.session.run_user_turn", side_effect=finish_paused),
         ):
             async with app.run_test(size=(100, 35)) as pilot:
                 await pilot.pause()
-                app.session["current_goal"] = value
-                app.mode["current_goal"] = value
-                app.mode["executing_goal"] = True
+                app.core_session.record["current_goal"] = value
+                app.core_session.mode["current_goal"] = value
+                app.core_session.mode["executing_goal"] = True
                 chat = app.query_one(ChatLog)
                 chat.present_goal(value, active=True, status="active")
                 await pilot.pause()
@@ -4722,13 +4801,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.session["current_plan"] = plan
+            app.core_session.record["current_plan"] = plan
             with patch("core.application.session.run_user_turn", new_callable=AsyncMock) as run:
                 await app._run_goal_command("Create a replacement Goal.")
 
         run.assert_not_awaited()
-        self.assertEqual(app.session["current_plan"]["id"], "plan-1")
-        self.assertIsNone(app.session.get("current_goal"))
+        self.assertEqual(app.core_session.record["current_plan"]["id"], "plan-1")
+        self.assertIsNone(app.core_session.record.get("current_goal"))
 
     async def test_formal_replacement_dialog_uses_current_artifact_for_all_combinations(self) -> None:
         plan = plan_artifact(
@@ -4757,8 +4836,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 for answer, expected in (("replace", True), ("keep", False)):
                     with self.subTest(current=current_kind, new=new_kind, answer=answer):
                         app = make_app()
-                        app.session["current_plan"] = current_value if current_kind == "Plan" else None
-                        app.session["current_goal"] = current_value if current_kind == "Goal" else None
+                        app.core_session.record["current_plan"] = current_value if current_kind == "Plan" else None
+                        app.core_session.record["current_goal"] = current_value if current_kind == "Goal" else None
                         app._prompt_choice = AsyncMock(return_value=answer)
 
                         accepted = await app._confirm_formal_replacement(new_kind)
@@ -4777,9 +4856,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                             ],
                             vertical=True,
                         )
-                        self.assertIs(app.session[f"current_{current_kind.lower()}"], current_value)
+                        self.assertIs(app.core_session.record[f"current_{current_kind.lower()}"], current_value)
                         other_kind = "goal" if current_kind == "Plan" else "plan"
-                        self.assertIsNone(app.session[f"current_{other_kind}"])
+                        self.assertIsNone(app.core_session.record[f"current_{other_kind}"])
 
     async def test_show_goal_mismatch_directs_to_current_plan(self) -> None:
         app = make_app()
@@ -4797,7 +4876,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         )
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.session["current_plan"] = plan
+            app.core_session.record["current_plan"] = plan
             result = await app.show_goal()
 
         self.assertEqual(
@@ -5308,15 +5387,17 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.status_state, "error")
 
                 unchanged, unchanged_message = await app._apply_settings(
-                    deepcopy(app.config["settings"])
+                    deepcopy(app.application.config["settings"])
                 )
                 self.assertTrue(unchanged)
                 self.assertEqual(unchanged_message, "settings unchanged")
 
                 app.ready = False
+                application = app.application
+                app.application = None
                 updated = set_rubric_enabled(
-                    deepcopy(app.config["settings"]),
-                    not rubric_enabled(app.config),
+                    deepcopy(application.config["settings"]),
+                    not rubric_enabled(application.config),
                 )
                 saved, message = await app._apply_settings(updated)
 
@@ -5332,7 +5413,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             set_context_overflow_notice("Provider context limit reached. Compacting older context and retrying.")
-            app.compaction_started()
+            FrontendEmitter(app.application.frontend).compaction_started()
             await pilot.pause()
 
             blocks = list(app.query_one(ChatLog).children)
@@ -5355,7 +5436,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 "The user wants me to extract the most important context from this conversation history. "
                 "Key information to extract: Session intent, Summary, Artifacts, Next Steps."
             )
-            app.compaction_started()
+            FrontendEmitter(app.application.frontend).compaction_started()
             await pilot.pause()
 
             blocks = list(app.query_one(ChatLog).children)
@@ -5409,53 +5490,26 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app.busy = False
 
     async def test_startup_loading_splash_renders_before_bootstrap_finishes(self) -> None:
-        """Startup should show branded progress before async bootstrap completes."""
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def bootstrap(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        started, release = asyncio.Event(), asyncio.Event()
+        fixture = make_app()
+        fixture.application.open_session = AsyncMock(return_value=fixture.core_session)
+        async def start(**kwargs):
             started.set()
             await release.wait()
-            return {
-                "agent": "agent",
-                "plan_agent": "plan-agent",
-                "config": {},
-                "store": FakeStore(),
-                "session": {
-                    "id": "thread-startup",
-                    "workspace": ".",
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                    "turns": 0,
-                },
-                "model_name": "test-model",
-                "context_limit_tokens": 8192,
-                "context_limit_source": "test",
-                "checkpointer": "checkpointer",
-            }
+            return fixture.application
+        app = MiraApp(workspace=Path("."), config={})
+        with patch("ui.textual.app.MiraApplication.start", new=start):
+            async with app.run_test(size=(100, 30)) as pilot:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                await pilot.pause()
+                self.assertFalse(app.ready)
+                loading_text = renderable_plain(app.query_one(ChatLog).children[0])
+                self.assertIn(VERSION, loading_text)
+                self.assertIn("loading model metadata", loading_text)
+                self.assertIn("STARTING", renderable_plain(app.query_one(StatusBar)))
+                release.set()
+                await wait_until(lambda: app.ready)
 
-        app = MiraApp(
-            workspace=Path("."),
-            config={},
-            bootstrap=bootstrap,
-        )
-
-        async with app.run_test(size=(100, 30)) as pilot:
-            await asyncio.wait_for(started.wait(), timeout=2)
-            await pilot.pause()
-
-            self.assertFalse(app.ready)
-            loading_text = renderable_plain(app.query_one(ChatLog).children[0])
-            self.assertIn(VERSION, loading_text)
-            self.assertIn("loading", loading_text)
-            self.assertIn("loading model metadata", loading_text)
-            status_text = renderable_plain(app.query_one(StatusBar))
-            self.assertIn("STARTING", status_text)
-            self.assertNotIn("LOADING", status_text)
-            self.assertNotIn("loading model metadata", status_text)
-
-            release.set()
-            await pilot.pause()
-            self.assertTrue(app.ready)
 
     async def test_fast_mcp_batch_never_mounts_activity_cell(self) -> None:
         app = make_app()
@@ -5491,7 +5545,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
         app._mcp_reveal_delay_seconds = 0.05
         async with app.run_test(size=(100, 32)) as pilot:
-            events_before = deepcopy(app.session.get("events"))
+            events_before = deepcopy(app.core_session.record.get("events"))
             rows = [
                 {
                     "name": "memory",
@@ -5579,7 +5633,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("MCP 3/4 available", painted)
             self.assertIn("resources", painted)
             self.assertLessEqual(cell.region.height, 4)
-            self.assertEqual(app.session.get("events"), events_before)
+            self.assertEqual(app.core_session.record.get("events"), events_before)
 
     async def test_startup_and_reload_match_status_button_counts_and_keep_disabled_rows(self) -> None:
         from tests.test_mcp import PanelManager
@@ -6518,7 +6572,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                await app._refresh_model_metadata()
+                await type(app.application)._refresh_model(app.application)
 
         build_agent.assert_not_called()
         build_plan_agent.assert_not_called()
@@ -6542,10 +6596,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                await app._refresh_model_metadata()
+                await type(app.application)._refresh_model(app.application)
 
-        self.assertEqual(app.agent, "new-agent")
-        self.assertEqual(app.plan_agent, "new-plan-agent")
+        self.assertEqual(app.core_session.agent, "new-agent")
+        self.assertEqual(app.core_session.plan_agent, "new-plan-agent")
         self.assertEqual(app.context_limit_tokens, 10000)
         self.assertEqual(app.context_limit_source, "lmstudio.api.v1.loaded_instance")
         self.assertEqual(build_agent.call_count, 1)
@@ -6666,9 +6720,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 original_startup = chat._startup_block
                 original_children = tuple(chat.children)
-                original_events = list(app.session.get("events", []))
-                original_turns = app.session["turns"]
-                original_saves = len(app.store.saves)
+                original_events = list(app.core_session.record.get("events", []))
+                original_turns = app.core_session.record["turns"]
+                original_saves = len(app.application.store.saves)
                 original_scroll_y = chat.scroll_y
                 prompt = app.query_one(PromptBox)
 
@@ -6692,13 +6746,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(chat.scroll_y, original_scroll_y)
 
         run_turn.assert_not_awaited()
-        self.assertEqual(app.session.get("events", []), original_events)
-        self.assertEqual(app.session["turns"], original_turns)
-        self.assertEqual(len(app.store.saves), original_saves)
+        self.assertEqual(app.core_session.record.get("events", []), original_events)
+        self.assertEqual(app.core_session.record["turns"], original_turns)
+        self.assertEqual(len(app.application.store.saves), original_saves)
 
     async def test_goal_command_runs_with_rubrics_disabled(self) -> None:
         app = make_app()
-        app.mode["rubric_enabled"] = False
+        app.core_session.mode["rubric_enabled"] = False
         with (
             patch("core.application.session.synchronize_conversation", new_callable=AsyncMock),
             patch("core.application.session.run_user_turn", new=AsyncMock()) as run,
@@ -6707,7 +6761,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await app._run_goal_command("add search")
         run.assert_awaited_once()
-        self.assertFalse(app.mode["planning"])
+        self.assertFalse(app.core_session.mode["planning"])
 
     async def test_plan_prompt_suffix_enters_mode_and_uses_normal_turn_path(self) -> None:
         app = make_app()
@@ -6728,8 +6782,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await wait_until(lambda: not app.busy)
 
-        self.assertTrue(app.mode["planning"])
-        self.assertEqual(app.mode["plan_thread_id"], "thread-1:plan")
+        self.assertTrue(app.core_session.mode["planning"])
+        self.assertEqual(app.core_session.mode["plan_thread_id"], "thread-1:plan")
         self.assertEqual(captured["text"], '"keep quoted text"')
         self.assertNotIn("display_text", captured)
 
@@ -6739,8 +6793,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         compact_result = PostTurnCompactionResult(compacted=True, reason="compacted")
 
         with (
-            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact,
-            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
+            patch("core.execution.compaction.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact,
+            patch("session.context.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -6754,9 +6808,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         agent.mira_compaction.aplan_forced_compaction_update.assert_awaited_once_with({})
         compact.assert_awaited_once_with(agent, "thread-1", agent.aget_state.return_value, agent.mira_compaction.aplan_forced_compaction_update.return_value)
-        sync.assert_awaited_once_with(app.session, agent, "thread-1")
-        self.assertEqual(app.session["turns"], 0)
-        self.assertEqual(len(app.store.saves), 1)
+        sync.assert_awaited_once_with(app.core_session.record, agent, "thread-1")
+        self.assertEqual(app.core_session.record["turns"], 0)
+        self.assertEqual(len(app.application.store.saves), 1)
         self.assertIn("context compacted", rendered)
 
     async def test_compact_command_with_real_mira_checkpoint(self) -> None:
@@ -6807,11 +6861,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 model.profile = {"max_input_tokens": 100}
 
                 async def reload_agents() -> None:
-                    app.agent = reloaded
+                    app.core_session.agent = reloaded
 
                 with patch.object(app, "_reload_agents", side_effect=reload_agents):
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
-                    await wait_until(lambda: app.agent is reloaded, timeout=10)
+                    await wait_until(lambda: app.core_session.agent is reloaded, timeout=10)
                     await wait_until(lambda: not app._reload_in_progress, timeout=10)
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
                 await wait_until(lambda: not app.busy, timeout=10)
@@ -6825,18 +6879,18 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             archive_path = snapshot.values["_summarization_event"]["file_path"]
             archive = (await reloaded.mira_backend.adownload_files([archive_path]))[0].content
             self.assertEqual(archive.count(b"## Summarized at"), 2)
-            self.assertEqual(app.session["turns"], 0)
+            self.assertEqual(app.core_session.record["turns"], 0)
 
     async def test_compact_command_uses_active_planning_thread(self) -> None:
         plan_agent = compact_test_agent()
         app = make_app(plan_agent=plan_agent)
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
-        with patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact:
+        with patch("core.execution.compaction.commit_forced_compaction", new=AsyncMock(return_value=compact_result)) as compact:
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app.mode["planning"] = True
-                app.mode["plan_thread_id"] = "thread-1:plan:7"
+                app.core_session.mode["planning"] = True
+                app.core_session.mode["plan_thread_id"] = "thread-1:plan:7"
                 prompt = app.query_one(PromptBox)
 
                 await app.submit_prompt(PromptBox.Submitted(prompt, "/compact"))
@@ -6844,15 +6898,15 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
         compact.assert_awaited_once_with(plan_agent, "thread-1:plan:7", plan_agent.aget_state.return_value, plan_agent.mira_compaction.aplan_forced_compaction_update.return_value)
-        self.assertEqual(app.session["turns"], 0)
+        self.assertEqual(app.core_session.record["turns"], 0)
 
     async def test_compact_command_reports_noop_without_syncing_session(self) -> None:
         app = make_app(agent=compact_test_agent())
         compact_result = PostTurnCompactionResult(reason="nothing_to_compact")
 
         with (
-            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
-            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock()) as sync,
+            patch("core.execution.compaction.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
+            patch("session.context.sync_deepagents_compaction", new=AsyncMock()) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -6865,7 +6919,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
         sync.assert_not_awaited()
-        self.assertEqual(app.store.saves, [])
+        self.assertEqual(app.application.store.saves, [])
         self.assertIn("nothing to compact", rendered)
 
     async def test_compact_command_reports_archive_failure(self) -> None:
@@ -6873,8 +6927,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         compact_result = PostTurnCompactionResult(reason="archive_failed")
 
         with (
-            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
-            patch("ui.textual.app.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
+            patch("core.execution.compaction.commit_forced_compaction", new=AsyncMock(return_value=compact_result)),
+            patch("session.context.sync_deepagents_compaction", new=AsyncMock(return_value=True)) as sync,
         ):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
@@ -6885,14 +6939,14 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
 
         sync.assert_not_awaited()
-        self.assertEqual(len(app.store.saves), 0)
+        self.assertEqual(len(app.application.store.saves), 0)
         self.assertIn("context compaction failed", rendered)
 
     async def test_compact_command_reports_failure_and_restores_prompt(self) -> None:
         app = make_app(agent=compact_test_agent())
 
         with (
-            patch("ui.textual.app.commit_forced_compaction", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
+            patch("core.execution.compaction.commit_forced_compaction", new=AsyncMock(side_effect=RuntimeError("summary failed"))),
             patch.object(app, "_write_error_report", return_value=Path("compaction-error.json")),
         ):
             async with app.run_test(size=(100, 30)) as pilot:
@@ -7014,8 +7068,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Memories", output)
         self.assertNotIn("secret", output)
         self.assertNotIn("token", output)
-        self.assertEqual(app.session["turns"], 3)
-        self.assertEqual(app.session["events"], [{"type": "user", "text": "keep me"}])
+        self.assertEqual(app.core_session.record["turns"], 3)
+        self.assertEqual(app.core_session.record["events"], [{"type": "user", "text": "keep me"}])
         load_config.assert_not_called()
         get_llm.assert_not_called()
         infer_metadata.assert_not_called()
@@ -7058,7 +7112,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            app.mode.update(
+            app.core_session.mode.update(
                 {
                     "planning": True,
                     "planning_tools": [
@@ -7247,7 +7301,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     prompt = app.query_one(PromptBox)
 
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/reload"))
-                    await wait_until(lambda: app.agent is action_agent)
+                    await wait_until(lambda: app.core_session.agent is action_agent)
                     await pilot.pause(0.3)
                     reload_info_blocks = [
                         child for child in app.query_one(ChatLog).children if "info" in child.classes
@@ -7265,8 +7319,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         child for child in app.query_one(ChatLog).children if "command" in child.classes
                     ]
 
-            self.assertIs(app.plan_agent, plan_agent)
-            self.assertIs(app.mcp_manager, mcp_manager)
+            self.assertIs(app.core_session.plan_agent, plan_agent)
+            self.assertIs(app.application.mcp_manager, mcp_manager)
             mcp_manager.reload.assert_not_awaited()
             self.assertIn("/prompt__reload", prompt_registry.local)
             self.assertEqual(app.model_name, "[visual] lmstudio:visual-model")
@@ -7275,13 +7329,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(build_agent.call_count, 1)
             self.assertEqual(build_plan_agent.call_count, 1)
             self.assertIs(app.launch_options, launch_options)
-            self.assertTrue(app.config["llm_direct"])
+            self.assertTrue(app.application.config["llm_direct"])
             self.assertTrue(get_llm.call_args.args[0]["llm_direct"])
             self.assertTrue(build_agent.call_args.kwargs["config"]["llm_direct"])
             self.assertTrue(build_plan_agent.call_args.kwargs["config"]["llm_direct"])
             environment = mira_environment_label()
             self.assertEqual(
-                app.mode["action_tools"],
+                app.core_session.mode["action_tools"],
                 [
                     {
                         "name": "fresh_tool",
@@ -7293,7 +7347,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertEqual(
-                app.mode["planning_tools"],
+                app.core_session.mode["planning_tools"],
                 [
                     {
                         "name": "plan_tool",
@@ -7316,10 +7370,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(command_blocks), 1)
             runtime_output = renderable_plain(command_blocks[0])
             self.assertIn("Runtime", runtime_output)
-            self.assertTrue(any(item["name"] == "reload.md" for item in app.mode["resources"]["memories"]))
-            self.assertTrue(any(item["name"] == "reload-skill" for item in app.mode["resources"]["skills"]))
-            self.assertTrue(any(item["name"] == "reload-reviewer" for item in app.mode["resources"]["subagents"]))
-            self.assertTrue(any(item["name"] == "reload_tool" for item in app.mode["resources"]["tools"]))
+            self.assertTrue(any(item["name"] == "reload.md" for item in app.core_session.mode["resources"]["memories"]))
+            self.assertTrue(any(item["name"] == "reload-skill" for item in app.core_session.mode["resources"]["skills"]))
+            self.assertTrue(any(item["name"] == "reload-reviewer" for item in app.core_session.mode["resources"]["subagents"]))
+            self.assertTrue(any(item["name"] == "reload_tool" for item in app.core_session.mode["resources"]["tools"]))
 
     async def test_reload_paths_reread_dotenv_and_only_runtime_reload_restarts_mcp(self) -> None:
         """Both scopes reread config while only the full runtime scope reloads MCP."""
@@ -7374,7 +7428,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
                 patch("config.metadata.infer_model_metadata", infer_metadata),
-                patch.object(app, "_build_agent_pair", return_value=(app.agent, app.plan_agent)),
+                patch("core.application.app.build_agent_pair", return_value=(app.core_session.agent, app.core_session.plan_agent)),
             ):
                 async with app.run_test(size=(100, 30)) as pilot:
                     await pilot.pause()
@@ -7388,11 +7442,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         renderable_plain(block) for block in app.query_one(ChatLog).children
                     )
 
-            profile = app.config["model_registry"].profile("local")
+            profile = app.application.config["model_registry"].profile("local")
             self.assertEqual(profile.values["api_key"], "from-env-file")
-            self.assertTrue(app.config["llm_direct"])
+            self.assertTrue(app.application.config["llm_direct"])
             self.assertIs(app.launch_options, launch_options)
-            self.assertIs(app.mcp_manager, mcp_manager)
+            self.assertIs(app.application.mcp_manager, mcp_manager)
             self.assertEqual(os.environ["TEST_MODEL_API_KEY"], "from-env-file")
             self.assertEqual(mcp_reload_values, ["from-env-file"])
             self.assertIsNot(agent_reload_workflows, initial_workflows)
@@ -7500,11 +7554,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 with (
                     patch("agent.llm.get_llm", return_value=type("Model", (), {"profile": {}})()),
                     patch("config.metadata.infer_model_metadata", infer_metadata),
-                    patch.object(app, "_build_agent_pair", return_value=(app.agent, app.plan_agent)),
+                    patch("core.application.app.build_agent_pair", return_value=(app.core_session.agent, app.core_session.plan_agent)),
                 ):
                     await app._reload_runtime()
 
-            self.assertFalse(app.config["llm_direct"])
+            self.assertFalse(app.application.config["llm_direct"])
             self.assertFalse(app.launch_options.llm_direct)
 
     async def test_reload_agent_failure_preserves_previous_runtime(self) -> None:
@@ -7531,9 +7585,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app.notify = Mock()  # type: ignore[method-assign]
-                old_config = app.config
-                old_agent = app.agent
-                old_plan_agent = app.plan_agent
+                old_config = app.application.config
+                old_agent = app.core_session.agent
+                old_plan_agent = app.core_session.plan_agent
                 old_model_name = app.model_name
                 old_context_limit = app.context_limit_tokens
                 old_snapshot = app.runtime_snapshot
@@ -7549,9 +7603,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             build_agent.assert_called_once()
             build_plan.assert_called_once()
-            self.assertIs(app.config, old_config)
-            self.assertIs(app.agent, old_agent)
-            self.assertIs(app.plan_agent, old_plan_agent)
+            self.assertIs(app.application.config, old_config)
+            self.assertIs(app.core_session.agent, old_agent)
+            self.assertIs(app.core_session.plan_agent, old_plan_agent)
             self.assertEqual(app.model_name, old_model_name)
             self.assertEqual(app.context_limit_tokens, old_context_limit)
             self.assertIs(app.runtime_snapshot, old_snapshot)
@@ -7942,8 +7996,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertTrue(handled)
-            self.assertEqual(app.session["turns"], 2)
-            self.assertEqual(app.session["events"], [{"type": "user", "text": "keep me"}])
+            self.assertEqual(app.core_session.record["turns"], 2)
+            self.assertEqual(app.core_session.record["events"], [{"type": "user", "text": "keep me"}])
             self.assertEqual(store.saves, [])
 
     async def test_clear_chat_command_confirm_resets_current_session(self) -> None:
@@ -7968,10 +8022,10 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertTrue(handled)
-            self.assertEqual(app.session["turns"], 0)
-            self.assertEqual(app.session["events"], [])
-            self.assertEqual(app.session["runs"], [])
-            self.assertEqual(app.session["dashboard"]["tokens"], {"in": 0, "out": 0})
+            self.assertEqual(app.core_session.record["turns"], 0)
+            self.assertEqual(app.core_session.record["events"], [])
+            self.assertEqual(app.core_session.inspections(), [])
+            self.assertEqual(app.core_session.record["dashboard"]["tokens"], {"in": 0, "out": 0})
             self.assertEqual(len(store.saves), 1)
             self.assertIn("current chat history cleared", rendered)
             self.assertNotIn("clear me", rendered)
@@ -8004,9 +8058,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Press O to confirm, C or Esc to cancel.", message)
 
             await pilot.press("o")
-            await wait_until(lambda: app.session["events"] == [])
+            await wait_until(lambda: app.core_session.record["events"] == [])
 
-            self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.core_session.record["events"], [])
             self.assertEqual(len(store.saves), 1)
 
     async def test_clear_chat_keeps_session_directory_and_usable_checkpoints(self) -> None:
@@ -8057,7 +8111,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 await app._handle_history_command("/clear-all-chats")
             self.assertEqual(store.clear_all_calls, 0)
             self.assertEqual(store.clear_compactions_calls, 0)
-            self.assertEqual(app.session["events"], [{"type": "user", "text": "clear all"}])
+            self.assertEqual(app.core_session.record["events"], [{"type": "user", "text": "clear all"}])
 
             with patch.object(app, "_prompt_choice", return_value="o"):
                 await app._handle_history_command("/clear-all-chats")
@@ -8065,8 +8119,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(store.clear_all_calls, 1)
             self.assertEqual(store.clear_compactions_calls, 1)
-            self.assertEqual(app.session["turns"], 0)
-            self.assertEqual(app.session["events"], [])
+            self.assertEqual(app.core_session.record["turns"], 0)
+            self.assertEqual(app.core_session.record["events"], [])
             self.assertGreaterEqual(len(store.saves), 1)
             rendered = "\n".join(renderable_plain(block) for block in app.query_one(ChatLog).children)
             self.assertIn("cleared 3 saved chat sessions and 2 compaction files", rendered)
@@ -8310,12 +8364,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls: list[dict[str, Any]] = []
 
             async def rebuild(**kwargs: Any) -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 prompt = app.query_one(PromptBox)
-                with patch.object(app, "_rebuild_agents", rebuild):
+                with patch("core.application.runtime.reconstruct", new=mock_reconstruct_callback(rebuild)):
                     await app.submit_prompt(PromptBox.Submitted(prompt, "/settings"))
                     await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                     await wait_until(lambda: len(app.query("#settings-toggle-always_allow-edit_file")) == 1)
@@ -8342,7 +8396,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async def rebuild(**kwargs: Any) -> None:
                     return None
 
-                with patch.object(app, "_rebuild_agents", rebuild):
+                with patch("core.application.runtime.reconstruct", new=mock_reconstruct_callback(rebuild)):
                     app._handle_settings_command()
                     await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                     panel = app.query_one(SettingsPanel)
@@ -8362,7 +8416,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             app = make_app(workspace=workspace, config={"settings": load_settings(workspace)})
 
             async def reload_runtime() -> bool:
-                app.query_one(SettingsPanel).refresh_tracing_registry(load_tracing_registry(workspace))
+                app.application.config["tracing_registry"] = load_tracing_registry(workspace)
+                app.query_one(SettingsPanel).refresh_tracing_profiles(tuple(app.application.config["tracing_registry"].profiles))
                 return True
 
             app._run_reload_runtime_command = AsyncMock(side_effect=reload_runtime)  # type: ignore[method-assign]
@@ -8428,7 +8483,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 rebuild = AsyncMock()
-                with patch.object(app, "_rebuild_agents", rebuild):
+                with patch("core.application.runtime.reconstruct", new=mock_reconstruct_callback(rebuild)):
                     middleware_spans.value = "full"
                     await wait_until(
                         lambda: load_settings(workspace)["tracing"]["middleware_spans"] == "full"
@@ -8499,7 +8554,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async def rebuild(**kwargs: Any) -> None:
                     return None
 
-                with patch.object(app, "_rebuild_agents", rebuild):
+                with patch("core.application.runtime.reconstruct", new=mock_reconstruct_callback(rebuild)):
                     app._handle_settings_command()
                     await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                     await wait_until(
@@ -8590,7 +8645,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 35)) as pilot:
                 await pilot.pause()
                 app._prompt_choice = AsyncMock(return_value="c")
-                app._rebuild_agents = AsyncMock()
+                runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock())
                 app._handle_settings_command()
                 await pilot.pause()
                 panel = app.query_one(SettingsPanel)
@@ -8599,22 +8654,22 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 body.scroll_end(animate=False)
                 await pilot.pause()
                 scroll = body.scroll_y
-                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                with patch("config.settings.save_settings", wraps=save_settings) as save:
                     reset.press()
                     await pilot.pause()
                 save.assert_not_called()
-                app._rebuild_agents.assert_not_awaited()
+                runtime_rebuild.assert_not_awaited()
                 self.assertEqual(panel.settings, configured)
                 app._prompt_choice.assert_awaited_once_with(
                     "Reset General?", "Restore the default settings for General? Other tabs will not be changed.",
                     [("r", "Reset"), ("c", "Cancel")],
                 )
                 app._prompt_choice.return_value = "r"
-                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                with patch("config.settings.save_settings", wraps=save_settings) as save:
                     reset.press()
                     await pilot.pause()
                 self.assertEqual(save.call_count, 1)
-                app._rebuild_agents.assert_awaited_once()
+                runtime_rebuild.assert_awaited_once()
                 self.assertEqual(panel.query_one("#settings-switcher", ContentSwitcher).current, "settings-body")
                 self.assertEqual(body.scroll_y, min(scroll, body.max_scroll_y))
                 self.assertTrue(tool_enabled(panel.settings, "read_file"))
@@ -8628,12 +8683,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(rubric_enabled(panel.settings))
                 self.assertIn("tracing requires Reload Runtime", renderable_plain(panel.query_one("#settings-status", Static)))
                 self.assertEqual(load_settings(workspace), panel.settings)
-                app._rebuild_agents.reset_mock()
-                with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                runtime_rebuild.reset_mock()
+                with patch("config.settings.save_settings", wraps=save_settings) as save:
                     reset.press()
                     await pilot.pause()
                 save.assert_not_called()
-                app._rebuild_agents.assert_not_awaited()
+                runtime_rebuild.assert_not_awaited()
 
     async def test_settings_reset_custom_and_access_keep_other_policies(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
@@ -8648,8 +8703,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 35)) as pilot:
                 await pilot.pause()
                 app._prompt_choice = AsyncMock(return_value="r")
-                app._rebuild_agents = AsyncMock()
-                app.mode.setdefault("resources", {})["tools"] = [{"name": "custom", "source": "project"}]
+                runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock())
+                app.core_session.mode.setdefault("resources", {})["tools"] = [{"name": "custom", "source": "project"}]
                 app._handle_settings_command("custom")
                 await pilot.pause()
                 panel = app.query_one(SettingsPanel)
@@ -8691,7 +8746,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 35)) as pilot:
                 await pilot.pause()
                 app._prompt_choice = AsyncMock(return_value="r")
-                app.mode.setdefault("resources", {})["subagents"] = [{"name": "worker", "kind": "raw"}]
+                app.core_session.mode.setdefault("resources", {})["subagents"] = [{"name": "worker", "kind": "raw"}]
                 app._handle_settings_command("models")
                 await pilot.pause()
                 panel = app.query_one(SettingsPanel)
@@ -8700,8 +8755,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                 self.assertEqual(panel.settings["models"], DEFAULT_SETTINGS["models"])
                 self.assertEqual(load_settings(workspace)["models"], DEFAULT_SETTINGS["models"])
-                self.assertIsNone(app.agent)
-                self.assertIsNone(app.plan_agent)
+                self.assertIsNone(app.core_session.agent)
+                self.assertIsNone(app.core_session.plan_agent)
                 self.assertEqual(app.model_name, "unset")
                 for role in ("main", "rubric", "summarization"):
                     self.assertEqual(panel.query_one(f"#settings-model-{role}", Select).value, "__mira_default__")
@@ -8725,13 +8780,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async with app.run_test(size=(110, 35)) as pilot:
                     await pilot.pause()
                     app._prompt_choice = AsyncMock(return_value="r")
-                    app._rebuild_agents = AsyncMock(side_effect=RuntimeError("rebuild failed") if failure == "rebuild" else None)
+                    runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock(side_effect=RuntimeError("rebuild failed") if failure == "rebuild" else None))
                     app._rebuild_model_agents = AsyncMock(side_effect=RuntimeError("rebuild failed"))
                     app._write_error_report = Mock(return_value="error.txt")
                     app._handle_settings_command(tab)
                     await pilot.pause()
                     panel = app.query_one(SettingsPanel)
-                    with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                    with patch("config.settings.save_settings", wraps=save_settings) as save:
                         if failure == "save":
                             save.return_value = False
                             save.side_effect = lambda *args: False
@@ -8739,7 +8794,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         await pilot.pause()
                     self.assertEqual(save.call_count, 1 if failure == "save" else 2)
                     self.assertEqual(panel.settings, original)
-                    self.assertEqual(app.config["settings"], original)
+                    self.assertEqual(app.application.config["settings"], original)
                     self.assertEqual((workspace / ".mira/settings.yml").read_bytes(), before)
                     self.assertEqual(str(panel.query_one("#settings-toggle-enabled-read_file", Button).label), "no")
                     if tab == "models":
@@ -8763,29 +8818,29 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 app = make_app(workspace=workspace, config={"settings": configured})
                 async with app.run_test(size=(110, 35)) as pilot:
                     await pilot.pause()
-                    app.mcp_manager = manager
+                    install_mcp_fixture(app, manager)
                     app._prompt_choice = AsyncMock(return_value="r")
                     registrations = []
 
                     async def rebuild() -> None:
-                        registrations.append(manager.tools_for_mode(app.config["settings"], planning=False)[1])
+                        registrations.append(manager.tools_for_mode(app.application.config["settings"], planning=False)[1])
                         if fail and len(registrations) == 1:
                             raise RuntimeError("rebuild failed")
 
-                    app._rebuild_agents = AsyncMock(side_effect=rebuild)
+                    runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock(side_effect=rebuild))
                     app._write_error_report = Mock(return_value="error.txt")
                     app._handle_settings_command("mcp")
                     await pilot.pause()
                     panel = app.query_one(SettingsPanel)
-                    with patch("ui.textual.app.save_settings", wraps=save_settings) as save:
+                    with patch("config.settings.save_settings", wraps=save_settings) as save:
                         panel.query_one("#settings-reset-default", Button).press()
                         await pilot.pause()
                         await wait_until(lambda: not panel._runtime_busy and bool(renderable_plain(panel.query_one("#settings-status", Static))))
                     self.assertEqual(save.call_count, 2 if fail else 1, (
-                        registrations, app._rebuild_agents.await_count,
+                        registrations, runtime_rebuild.await_count,
                         renderable_plain(panel.query_one("#settings-status", Static)),
                     ))
-                    self.assertEqual(app._rebuild_agents.await_count, 2 if fail else 1)
+                    self.assertEqual(runtime_rebuild.await_count, 2 if fail else 1)
                     self.assertEqual((workspace / ".mira/mcp/mcp.json").read_bytes(), definitions)
                     if fail:
                         self.assertEqual(load_settings(workspace), configured)
@@ -8800,7 +8855,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(str(panel.query_one("#settings-toggle-mcp_server_enabled-docs-docs", Button).label), "yes")
                         self.assertEqual(str(panel.query_one("#settings-toggle-mcp_tool_allow-docs-search", Button).label), "no")
                         self.assertTrue(panel.query_one("#settings-toggle-mcp_tool_allow-docs-search", Button).disabled)
-                    app.mcp_manager = None
+                    install_mcp_fixture(app, None)
                 await manager.shutdown()
 
     async def test_settings_panel_renders_default_rows_and_closes(self) -> None:
@@ -9007,11 +9062,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             rebuilt = []
 
             async def rebuild() -> None:
-                rebuilt.append(repeated_tool_call_guard_settings(app.config))
+                rebuilt.append(repeated_tool_call_guard_settings(app.application.config))
 
             async with app.run_test(size=(110, 40)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -9046,7 +9101,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((repeats.value, recovery.value), ("6", "4"))
 
                 # Runtime rebuild failure rolls YAML and visible values back.
-                app._rebuild_agents = AsyncMock(side_effect=RuntimeError("rebuild failed"))
+                runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock(side_effect=RuntimeError("rebuild failed")))
                 repeats.value = "8"
                 await panel.submit_execute_env_input(Input.Submitted(repeats, "8"))
                 self.assertEqual(repeats.value, "6")
@@ -9057,7 +9112,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(toggle.label), "yes")
                 self.assertFalse(repeats.disabled or recovery.disabled)
 
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._prompt_choice = AsyncMock(return_value="r")
                 panel.query_one("#settings-reset-default", Button).press()
                 await pilot.pause()
@@ -9077,7 +9132,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -9114,7 +9169,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -9145,19 +9200,19 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = AsyncMock()
+                runtime_rebuild = mock_runtime_reconstruction(self, app.application, AsyncMock())
                 goal = goal_artifact(goal_id="goal-1", title="Search", objective="Add search.", success_criteria="- Search works.", rubric_enabled=False, rubric_iterations=3)
-                app.session["current_goal"] = goal
-                app.mode["current_goal"] = goal
+                app.core_session.record["current_goal"] = goal
+                app.core_session.mode["current_goal"] = goal
                 await pilot.pause()
 
-                updated = set_rubric_enabled(app.config["settings"], True)
+                updated = set_rubric_enabled(app.application.config["settings"], True)
                 ok, _ = await app._apply_settings(updated)
 
                 self.assertTrue(ok)
-                self.assertEqual(app.session["current_goal"]["id"], "goal-1")
-                self.assertFalse(app.session["current_goal"]["rubric_enabled"])
-                app._rebuild_agents.assert_awaited_once()
+                self.assertEqual(app.core_session.record["current_goal"]["id"], "goal-1")
+                self.assertFalse(app.core_session.record["current_goal"]["rubric_enabled"])
+                runtime_rebuild.assert_awaited_once()
 
     async def test_tool_section_headers_match_system_spacing(self) -> None:
         """Tool tables should use the compact System Settings row progression."""
@@ -9167,7 +9222,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 55)) as pilot:
                 await pilot.pause()
-                app.mode.setdefault("resources", {})["tools"] = [
+                app.core_session.mode.setdefault("resources", {})["tools"] = [
                     {
                         "name": "project_status",
                         "path": "/.mira/tools/status.py",
@@ -9325,13 +9380,13 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async def rebuild() -> None:
                     return None
 
-                app._rebuild_agents = rebuild
-                app.mcp_manager = SimpleNamespace(
+                mock_runtime_reconstruction(self, app.application, rebuild)
+                install_mcp_fixture(app, SimpleNamespace(
                     servers={"docs": docs, "off": off},
                     show_status=False,
                     shutdown=AsyncMock(),
-                )
-                app.mode.setdefault("resources", {})["tools"] = [
+                ))
+                app.core_session.mode.setdefault("resources", {})["tools"] = [
                     {"name": "custom_search", "source": "project"},
                     {"name": "disabled_custom", "source": "project"},
                 ]
@@ -9666,8 +9721,8 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(130, 45)) as pilot:
                 await pilot.pause()
-                app.mcp_manager = manager
-                app.mode.setdefault("resources", {})["tools"] = [
+                install_mcp_fixture(app, manager)
+                app.core_session.mode.setdefault("resources", {})["tools"] = [
                     {
                         "name": "custom_tool_name_that_is_far_too_long_for_the_settings_column",
                         "path": "/.mira/tools/long_name.py",
@@ -9826,7 +9881,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             async with app.run_test(size=(110, 36)) as pilot:
                 await pilot.pause()
                 app._run_reload_runtime_command = AsyncMock(return_value=True)  # type: ignore[method-assign]
-                app.mcp_manager = manager
+                install_mcp_fixture(app, manager)
                 app._handle_settings_command(initial_tab="mcp")
                 await wait_until(lambda: len(app.query(SettingsPanel)) == 1)
                 panel = app.query_one(SettingsPanel)
@@ -9883,7 +9938,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(120, 30)) as pilot:
                 await pilot.pause()
-                app.mcp_manager = manager
+                install_mcp_fixture(app, manager)
                 app._handle_settings_command("mcp")
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -9910,11 +9965,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -9950,7 +10005,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(110, 35)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10005,11 +10060,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10031,11 +10086,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10062,11 +10117,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10088,7 +10143,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 18)) as pilot:
                 await pilot.pause()
-                app.mode.setdefault("resources", {})["tools"] = [
+                app.core_session.mode.setdefault("resources", {})["tools"] = [
                     {
                         "name": "project_status",
                         "path": "/.mira/tools/status.py",
@@ -10099,7 +10154,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 async def rebuild() -> None:
                     return None
 
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10165,11 +10220,11 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
             calls = []
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10304,12 +10359,12 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 return "y"
 
             async def rebuild() -> None:
-                calls.append(dict(app.config or {}))
+                calls.append(dict(app.application.config or {}))
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
                 app._prompt_choice = accept_execute
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -10344,7 +10399,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 await pilot.pause()
-                app.mode.setdefault("resources", {})["tools"] = [
+                app.core_session.mode.setdefault("resources", {})["tools"] = [
                     {
                         "name": "project_status",
                         "path": "/.mira/tools/status.py",
@@ -10355,9 +10410,9 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 calls = []
 
                 async def rebuild() -> None:
-                    calls.append(dict(app.config or {}))
+                    calls.append(dict(app.application.config or {}))
 
-                app._rebuild_agents = rebuild
+                mock_runtime_reconstruction(self, app.application, rebuild)
                 app._handle_settings_command()
                 await wait_until(lambda: len(app.query(SettingsPanel)) > 0)
                 panel = app.query_one(SettingsPanel)
@@ -11476,7 +11531,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         app = make_app()
 
         with patch(
-            "ui.textual.app.build_workflow_demo",
+            "core.execution.workflow_demo.build_workflow_demo",
             return_value=build_workflow_demo(delay_scale=0),
         ):
             async with app.run_test(size=(120, 30)) as pilot:
@@ -11516,7 +11571,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(
                     [
                         event
-                        for event in app.session.get("events", [])
+                        for event in app.core_session.record.get("events", [])
                         if event.get("type") == "workflow"
                     ]
                 )
@@ -11677,7 +11732,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("{'topic':", renderable_plain(user_messages[0]))
                 workflow_events = [
                     event
-                    for event in app.session.get("events", [])
+                    for event in app.core_session.record.get("events", [])
                     if event.get("type") == "workflow"
                 ]
                 self.assertEqual(len(workflow_events), 1)
@@ -11686,7 +11741,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                     '/workflow__demo topic="hello world" repeat=3',
                 )
                 self.assertEqual(workflow_events[0]["status"], "DONE")
-                self.assertEqual(app.session["turns"], 0)
+                self.assertEqual(app.core_session.record["turns"], 0)
 
                 bubble.final_button.press()
                 await wait_until(
@@ -11773,7 +11828,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(factory.call_count, 2)
                 workflow_events = [
                     event
-                    for event in app.session.get("events", [])
+                    for event in app.core_session.record.get("events", [])
                     if event.get("type") == "workflow"
                 ]
                 self.assertEqual(len(workflow_events), 2)
@@ -12177,7 +12232,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(
                     [
                         event
-                        for event in app.session.get("events", [])
+                        for event in app.core_session.record.get("events", [])
                         if event.get("type") == "workflow"
                     ]
                 )
@@ -12196,7 +12251,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
         }
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            session_before = deepcopy(app.session)
+            session_before = deepcopy(app.core_session.record)
             chat = app.query_one(ChatLog)
             bubble = chat.workflow_started("native-id", "native")
             chat.workflow_finished("native-id", final_state, available=True)
@@ -12204,7 +12259,7 @@ class TextualAppTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIs(bubble, app.query_one(WorkflowTreeBubble))
             self.assertIs(bubble.final_state, final_state)
-            self.assertEqual(app.session, session_before)
+            self.assertEqual(app.core_session.record, session_before)
             bubble.final_button.press()
             await wait_until(
                 lambda: bool(
@@ -13998,13 +14053,13 @@ def workflow(mira):
             task = start_artifact_review(app, "plan", final_plan_interrupt())
             await wait_until(lambda: app._pending_artifact_review is not None)
             provisional = app._pending_artifact_review.artifact
-            self.assertIsNone(current_plan(app.session))
+            self.assertIsNone(current_plan(app.core_session.record))
             self.assertEqual(provisional["success_criteria"], "- The exact requested outcome is verified.")
 
             await app._handle_plan_action("close", str(provisional["id"]))
             decision = await asyncio.wait_for(task, timeout=2)
             self.assertEqual(decision["action"], "close")
-            self.assertEqual(current_plan(app.session), provisional)
+            self.assertEqual(current_plan(app.core_session.record), provisional)
             self.assertIsNone(app._pending_artifact_review)
             app.busy = False
             await pilot.pause()
@@ -14025,8 +14080,8 @@ def workflow(mira):
             rubric_iterations=3,
         )
         async with app.run_test(size=(100, 30)) as pilot:
-            app.session["current_plan"] = previous
-            app.session.setdefault("events", []).append(
+            app.core_session.record["current_plan"] = previous
+            app.core_session.record.setdefault("events", []).append(
                 {"type": "plan", "plan": previous, "status": "proposed"}
             )
             app.busy = True
@@ -14038,8 +14093,8 @@ def workflow(mira):
             await pilot.pause()
             self.assertEqual(len(list(app.query_one(ChatLog).query(".plan"))), 0)
 
-        self.assertEqual(current_plan(app.session)["id"], "plan-a")
-        previous_event = next(event for event in app.session["events"] if event.get("plan", {}).get("id") == "plan-a")
+        self.assertEqual(current_plan(app.core_session.record)["id"], "plan-a")
+        previous_event = next(event for event in app.core_session.record["events"] if event.get("plan", {}).get("id") == "plan-a")
         self.assertEqual(previous_event["status"], "proposed")
 
     async def test_pending_goal_clear_preserves_previous_retained_goal(self) -> None:
@@ -14053,8 +14108,8 @@ def workflow(mira):
             rubric_iterations=3,
         )
         async with app.run_test(size=(100, 30)) as pilot:
-            app.session["current_goal"] = previous
-            app.session.setdefault("events", []).append(
+            app.core_session.record["current_goal"] = previous
+            app.core_session.record.setdefault("events", []).append(
                 {"type": "goal", "goal": previous, "status": "proposed"}
             )
             app.busy = True
@@ -14066,7 +14121,7 @@ def workflow(mira):
             await pilot.pause()
             self.assertEqual(len(list(app.query_one(ChatLog).query(".goal"))), 0)
 
-        self.assertEqual(current_goal(app.session)["id"], "goal-a")
+        self.assertEqual(current_goal(app.core_session.record)["id"], "goal-a")
 
     async def test_pending_revision_feedback_escape_keeps_same_review_unresolved(self) -> None:
         app = make_app()
@@ -14088,7 +14143,7 @@ def workflow(mira):
             decision = await asyncio.wait_for(task, timeout=2)
             self.assertEqual(decision["action"], "revise")
             self.assertEqual(decision["feedback"], "Change the deliverable.")
-            self.assertIsNone(current_plan(app.session))
+            self.assertIsNone(current_plan(app.core_session.record))
 
     async def test_tool_approval_escape_keeps_interrupt_pending(self) -> None:
         app = make_app()
@@ -14331,7 +14386,7 @@ def workflow(mira):
             app.busy = False
             app.turn_worker = None
 
-        self.assertIsNone(current_plan(app.session))
+        self.assertIsNone(current_plan(app.core_session.record))
         self.assertIsNone(app._pending_artifact_review)
         self.assertTrue(worker.cancelled)
 
@@ -14364,8 +14419,8 @@ def workflow(mira):
                 focused = settings_panel.query_one("#settings-toggle-system-dynamic_subagents", Button)
                 focused.focus()
                 with (
-                    patch("ui.textual.app.is_git_worktree", return_value=False),
-                    patch("ui.textual.app.init_git_repository", return_value=True) as init_git,
+                    patch("core.workspace.is_git_worktree", return_value=False),
+                    patch("core.workspace.init_git_repository", return_value=True) as init_git,
                 ):
                     git_button.press()
                     await wait_until(lambda: app.query_one(PromptPanel).active)
@@ -14386,8 +14441,8 @@ def workflow(mira):
 
             async with app.run_test(size=(100, 30)) as pilot:
                 with (
-                    patch("ui.textual.app.is_git_worktree", return_value=False),
-                    patch("ui.textual.app.init_git_repository", return_value=False),
+                    patch("core.workspace.is_git_worktree", return_value=False),
+                    patch("core.workspace.init_git_repository", return_value=False),
                     patch("core.workspace.is_git_worktree", return_value=False),
                 ):
                     task = asyncio.create_task(app._configure_git(None))

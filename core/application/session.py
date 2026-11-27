@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from contextlib import suppress
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -15,7 +16,7 @@ from core.execution.inspection.persistence import inspection_from_run
 from core.execution.turns import plan_thread_id, run_user_turn
 from core.interface import FrontendEmitter, SessionSnapshot
 from core.interface.events import RuntimeEvent
-from session.dashboard import normalize_dashboard, update_duration
+from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
 from session.goals import clear_current_goal, current_goal, pause_current_goal, start_goal_attempt
 from session.plans import clear_current_plan, current_plan, pause_current_plan, start_plan_attempt
 from session.subagent_runs import clear_runs
@@ -56,6 +57,9 @@ class MiraSession:
             (application.config or {}).get("settings"),
             record,
         )
+        metadata = getattr(application, "resource_metadata", None)
+        if isinstance(metadata, dict) and metadata:
+            self.mode["resources"] = deepcopy(metadata)
         self.runtime_state = "ready"
         self._active_task: asyncio.Task[Any] | None = None
         self._transitioning = False
@@ -180,8 +184,8 @@ class MiraSession:
         """Execute one complete ACT/PLAN/Goal workflow through the MIRA API."""
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
-        if self._transitioning:
-            raise RuntimeError("MIRA session is changing modes; retry after the transition")
+        if self._transitioning or self.application._runtime_transition:
+            raise RuntimeError("MIRA session or runtime is changing; retry after the transition")
         if self._active_task is not None and not self._active_task.done():
             raise RuntimeError("MIRA session already has an active turn")
         if self.recovery is not None:
@@ -217,6 +221,7 @@ class MiraSession:
         kwargs.pop("continue_incomplete", None)
         turn_error: BaseException | None = None
         try:
+            await self.application._refresh_model(self)
             # Save before invoking the graph so cold recovery keeps this interaction.
             await self.persist_graph_state()
             emitter.session_state("turn_started")
@@ -239,10 +244,20 @@ class MiraSession:
                 **kwargs,
             )
         except (Exception, asyncio.CancelledError) as exc:
+            from langchain_core.exceptions import ContextOverflowError
+            from agent.middleware.context_overflow import context_notice_rendered, mark_context_notice_rendered, pop_context_overflow_notice
+
+            if isinstance(exc, ContextOverflowError) and not context_notice_rendered(exc):
+                emitter.system_message(pop_context_overflow_notice(exc), kind="info")
+                mark_context_notice_rendered(exc)
             turn_error = exc
             with suppress(Exception):
                 await self.restore_graph_state()
             self.pause_active_artifacts()
+            if self.recovery is None:
+                self.mode.update(goal_staging=None, goal_revision=None, plan_revision=None)
+                if self.mode.get("planning"):
+                    self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
             await self.persist_graph_state()
             raise
         else:
@@ -323,7 +338,7 @@ class MiraSession:
     def _begin_transition(self) -> None:
         if self.runtime_state == "closed":
             raise RuntimeError("MIRA session is closed")
-        if self._transitioning or (self._active_task is not None and not self._active_task.done()):
+        if self._transitioning or self.application._runtime_transition or (self._active_task is not None and not self._active_task.done()):
             raise RuntimeError("MIRA session already has an active operation")
         if self.recovery is not None:
             raise RuntimeError("Answer the pending checkpoint request before changing modes")
@@ -404,7 +419,7 @@ class MiraSession:
         """Start one explicit retained Goal/Plan execution attempt."""
         self._begin_transition()
         try:
-            return await self._start_artifact(kind)
+            return deepcopy(await self._start_artifact(kind))
         finally:
             self._transitioning = False
 
@@ -437,7 +452,7 @@ class MiraSession:
         """Clear only the authoritative current artifact, retaining history."""
         self._begin_transition()
         try:
-            return await self._clear_artifact(kind)
+            return deepcopy(await self._clear_artifact(kind))
         finally:
             self._transitioning = False
 
@@ -462,11 +477,12 @@ class MiraSession:
             self.mode["executing_plan"] = False
         self.application.store.save(self.record)
 
-    def snapshot(self) -> SessionSnapshot:
+    def snapshot(self, *, include_transcript: bool = True) -> SessionSnapshot:
         """Return the consumer projection of current authoritative state."""
-        from core.application.app import available_tools, mcp_snapshot, normalize_resource_items
+        from core.application.app import available_tools, mcp_snapshot
 
         resources = self.mode.get("resources") if isinstance(self.mode.get("resources"), dict) else {}
+        update_duration(self.record)
         mcp_state = mcp_snapshot(getattr(self.application, "mcp_manager", None))
         snapshot = SessionSnapshot(
             session_id=self.id,
@@ -477,16 +493,22 @@ class MiraSession:
             turns=int(self.record.get("turns") or 0),
             current_goal=current_goal(self.record),
             current_plan=current_plan(self.record),
-            transcript=tuple(event for event in self.record.get("events", ()) if isinstance(event, dict)),
+            transcript=tuple(event for event in self.record.get("events", ()) if isinstance(event, dict)) if include_transcript else (),
             dashboard=dict(normalize_dashboard(self.record.get("dashboard"))),
             model={
+                "available": self.agent is not None and self.plan_agent is not None,
+                "alias": self.application.effective_model_alias,
                 "name": self.application.model_name,
                 "context_limit_tokens": self.application.context_limit_tokens,
                 "context_limit_source": self.application.context_limit_source,
             },
             tools=tuple(available_tools(self.mode, planning=bool(self.mode.get("planning")))),
             resources={
-                key: tuple(dict(item) for item in normalize_resource_items(value))
+                key: tuple({field: str(item[field]) for field in (
+                    "name", "path", "source", "replaces", "description", "group", "kind",
+                    "source_model", "graph_id", "server", "uri", "original_name",
+                ) if field in item}
+                    for item in (value if isinstance(value, (list, tuple)) else ()) if isinstance(item, dict) and item.get("name"))
                 for key, value in resources.items()
             },
             rubric={
@@ -494,6 +516,17 @@ class MiraSession:
                 "max_iterations": int(self.mode.get("rubric_max_iterations") or 3),
             },
             mcp=mcp_state,
+            pending=("incomplete" if self.recovery.get("incomplete") else "interaction") if self.recovery else "none",
+            execution={
+                "planning": bool(self.mode.get("planning")),
+                "executing_plan": bool(self.mode.get("executing_plan")),
+                "executing_goal": bool(self.mode.get("executing_goal")),
+                "planning_stage": self.mode.get("planning_stage"),
+                "goal_staging": bool(self.mode.get("goal_staging")),
+                "goal_revision": bool(self.mode.get("goal_revision")),
+                "plan_revision": bool(self.mode.get("plan_revision")),
+            },
+            history={key: self.record.get(key) for key in ("created_at", "updated_at", "custom_title", "pinned")},
         )
         return deepcopy(snapshot)
 
@@ -513,6 +546,216 @@ class MiraSession:
         self.runtime_state = "closed"
         self._inspections.clear()
         FrontendEmitter(self.application.frontend, session_id=self.id).session_state("closed")
+
+    async def clear(self) -> None:
+        """Clear this conversation's transcript, inspections and native threads."""
+        self._begin_transition()
+        try:
+            if self.checkpointer is not None:
+                for thread_id in (
+                    self.id, f"{self.id}:plan",
+                    *(f"{self.id}:plan:{index}" for index in range(1, int(self.mode.get("plan_runs") or 0) + 1)),
+                ):
+                    await self.checkpointer.adelete_thread(thread_id)
+            self.record.update(title="Untitled session", turns=0, events=[], dashboard=normalize_dashboard(None))
+            ensure_dashboard(self.record, model_name=self.application.model_name,
+                             context_limit_tokens=self.application.context_limit_tokens,
+                             context_limit_source=self.application.context_limit_source)
+            self._clear_inspections()
+            self.application.store.save(self.record)
+            await self.persist_graph_state()
+        finally:
+            self._transitioning = False
+
+    async def dismiss_artifact(self, kind: str) -> None:
+        """Retain formal work while marking its historical controls closed."""
+        from core.application.artifacts import update_artifact_event_status
+
+        self._begin_transition()
+        try:
+            artifact = current_plan(self.record) if kind == "plan" else current_goal(self.record)
+            if artifact is not None:
+                update_artifact_event_status(self.record, kind, artifact["id"], "closed")
+                self.application.store.save(self.record)
+        finally:
+            self._transitioning = False
+
+    async def revise_artifact(self, kind: str, feedback: str) -> Any:
+        """Revise the retained artifact through its native preparation pipeline."""
+        from core.execution.turns import goal_revision_text, plan_revision_text
+
+        artifact = current_plan(self.record) if kind == "plan" else current_goal(self.record)
+        if artifact is None:
+            return None
+        await self.begin_artifact_revision(kind, artifact, feedback)
+        instruction = plan_revision_text(artifact, feedback) if kind == "plan" else goal_revision_text(artifact, feedback)
+        return await self.prompt(instruction, display_text=f"Revise {kind.title()}: {feedback}")
+
+    async def create_goal(self, objective: str) -> Any:
+        """Prepare and review an explicit Goal through the existing native flow."""
+        await self.begin_goal(objective)
+        return await self.prompt(objective, display_text=f"/goal {objective}")
+
+    async def compact(self) -> Any:
+        """Compact the selected native conversation without submitting a prompt."""
+        from agent.middleware.compaction import PostTurnCompactionResult
+        from core.execution.compaction import commit_forced_compaction
+        from session.context import sync_deepagents_compaction
+
+        self._begin_transition()
+        agent = self.plan_agent if self.mode["planning"] else self.agent
+        thread_id = str(self.mode.get("plan_thread_id") or plan_thread_id(self.record)) if self.mode["planning"] else self.id
+        synchronize = False
+        try:
+            middleware = getattr(agent, "mira_compaction", None)
+            if middleware is None:
+                return PostTurnCompactionResult(reason="unavailable")
+            snapshot = await agent.aget_state({"configurable": {"thread_id": thread_id}})
+            if snapshot.next or snapshot.tasks:
+                return PostTurnCompactionResult(reason="pending_work")
+            plan = await middleware.aplan_forced_compaction_update(snapshot.values)
+            result = await commit_forced_compaction(agent, thread_id, snapshot, plan)
+            synchronize = result.compacted
+            return result
+        except Exception:
+            synchronize = True
+            raise
+        finally:
+            try:
+                if synchronize and agent is not None:
+                    with suppress(Exception):
+                        if await sync_deepagents_compaction(self.record, agent, thread_id):
+                            self.application.store.save(self.record)
+            finally:
+                self._transitioning = False
+
+    async def context_report(self) -> Any:
+        """Return the existing detached context accounting report for this session."""
+        from core.context.report import (
+            ContextReportMCPServer, ContextReportObservation,
+            build_agent_context_report, mcp_tool_metadata,
+        )
+        from core.application.app import available_tools
+
+        context = dict(normalize_dashboard(self.record.get("dashboard")).get("context") or {})
+        observation = self.mode.get("context_report_observation")
+        if not isinstance(observation, ContextReportObservation):
+            observation = None
+        planning = bool(self.mode.get("context_report_planning", self.mode.get("planning")))
+        agent = self.mode.get("context_report_agent")
+        if agent is None:
+            agent = self.plan_agent if planning else self.agent
+        thread_id = str(self.mode.get("context_report_thread_id") or (
+            self.mode.get("plan_thread_id") if planning else self.id
+        ) or "")
+        manager = self.application.mcp_manager
+        selected: dict[str, list[Any]] = {}
+        if manager is not None:
+            tools, _ = manager.tools_for_mode(self.application.config.get("settings"), planning=planning)
+            for tool in tools:
+                ownership = mcp_tool_metadata(tool)
+                if ownership is not None:
+                    selected.setdefault(str(ownership.get("server") or "unknown"), []).append(tool)
+        servers = tuple(ContextReportMCPServer(
+            name=str(state.name), status=str(state.status), error=str(state.error or ""),
+            tools=tuple(selected.get(str(state.name), ())),
+        ) for state in (manager.servers.values() if manager is not None else ()))
+        return await build_agent_context_report(
+            agent=agent, thread_id=thread_id, observation=observation,
+            current_tokens=context.get("used_tokens"), limit_tokens=context.get("limit_tokens"),
+            tool_metadata=tuple(dict(item) for item in available_tools(self.mode, planning=planning)),
+            mcp_servers=servers,
+        )
+
+    async def run_workflow(self, invocation: str, *, inputs: dict[str, Any] | None = None, record_user: bool = True) -> Any:
+        """Validate and execute an existing registered workflow command."""
+        from agent.workflows.discovery import validate_runtime_graph, validate_workflow_input
+        from core.execution.workflows import execute_workflow
+        from session.workflows import PersistentWorkflowHistory
+
+        self._begin_transition()
+        try:
+            demo = invocation in {"/workflow-demo", "/workflow-demo-phase2"}
+            if invocation == "/workflow-demo":
+                from core.execution.workflow_demo import build_workflow_demo
+
+                graph = build_workflow_demo()
+                inputs = inputs if inputs is not None else {"events": []}
+                workflow_name = "workflow-demo"
+            elif invocation == "/workflow-demo-phase2":
+                from core.execution.workflow_demo_phase2 import build_workflow_demo_phase2
+
+                child = self.application.workflows.agent(name="workflow-demo-agent", tools=[],
+                    system_prompt="Reply in one short sentence confirming that the Workflow demo agent ran.")
+                graph = build_workflow_demo_phase2(child)
+                inputs = inputs if inputs is not None else {"messages": [{"role": "user", "content": "Confirm that the Workflow Phase 2 demo is running."}]}
+                workflow_name = "workflow-demo-phase2"
+            else:
+                if inputs is None:
+                    resolved = self.application.workflow_registry.resolve(invocation)
+                    if resolved is None:
+                        raise ValueError("Expected a registered workflow invocation")
+                    spec, parsed = resolved
+                else:
+                    command = invocation.split(maxsplit=1)[0]
+                    spec = self.application.workflow_registry.commands.get(command)
+                    if spec is None:
+                        raise ValueError(f"unknown workflow command: {command}")
+                    parsed = inputs
+                graph = spec.factory(self.application.workflows)
+                model = validate_runtime_graph(spec, graph)
+                inputs = inputs if inputs is not None else parsed
+                validate_workflow_input(model, inputs, spec.usage)
+                workflow_name = spec.name
+        except BaseException:
+            self._transitioning = False
+            raise
+        self._transitioning = False
+        self._active_task = asyncio.current_task()
+        self.runtime_state = "running"
+        self.mode["turn_id"] = uuid4().hex
+        emitter = FrontendEmitter(self.application.frontend, session_id=self.id, turn_id=self.mode["turn_id"])
+        history = None
+        try:
+            if not demo:
+                history = PersistentWorkflowHistory(self.application.frontend, self.record,
+                    self.application.store, command=invocation, record_user=record_user)
+                emitter = FrontendEmitter(history, session_id=self.id, turn_id=self.mode["turn_id"])
+            emitter.session_state("turn_started")
+            return await execute_workflow(
+                graph, inputs, emitter=emitter, session=self,
+                workflow_id=f"workflow-{workflow_name}:{uuid4()}", workflow_name=workflow_name,
+                config={"configurable": {"thread_id": f"workflow:{workflow_name}:{uuid4()}"}},
+                context=None if demo else self.application.workflows.context, action_agent=self.agent,
+                inspection_title="workflow-demo-agent" if invocation == "/workflow-demo-phase2" else "",
+                persist_always_allow=self.application.persist_tool_always_allow,
+            )
+        finally:
+            if history is not None:
+                history.close()
+            self._active_task = None
+            self.runtime_state = "ready"
+            emitter.session_state("ready")
+
+    async def upload_files(self, paths: list[Path]) -> tuple[list[str], list[str]]:
+        """Import selected local files through the active project backend."""
+        from core.application.uploads import ingest_local_files
+
+        self._begin_transition()
+        try:
+            return await ingest_local_files(paths, self.application.project_backend, self.id)
+        finally:
+            self._transitioning = False
+
+    async def clear_uploads(self) -> bool:
+        """Remove this conversation's imported files through the project backend."""
+        from core.application.uploads import clear_local_uploads
+
+        self._begin_transition()
+        try:
+            return await clear_local_uploads(self.application.project_backend, self.id)
+        finally:
+            self._transitioning = False
 
 
 __all__ = ["MiraSession"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
@@ -37,6 +37,9 @@ class SessionSnapshot:
     resources: Mapping[str, tuple[Mapping[str, Any], ...]]
     rubric: Mapping[str, Any]
     mcp: Mapping[str, Any]
+    pending: str = "none"
+    execution: Mapping[str, Any] = field(default_factory=dict)
+    history: Mapping[str, Any] = field(default_factory=dict)
 
 
 __all__ = ["SessionSnapshot"]

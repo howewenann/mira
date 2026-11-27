@@ -1,7 +1,6 @@
 """The configurable built-in hierarchy shared by Settings and Access."""
 
-from agent.tools.skill_validation import VALIDATE_SKILL_METADATA, VALIDATE_SKILL_TOOL
-from config.settings import CORE_READ_ONLY_TOOLS, INBUILT_DANGEROUS_TOOLS
+from mira.settings import CORE_READ_ONLY_TOOLS, INBUILT_DANGEROUS_TOOLS
 
 
 def builtin_tool_groups(
@@ -13,7 +12,7 @@ def builtin_tool_groups(
         item["name"]: item for item in metadata
         if item.get("group") and item.get("name") and item.get("source") in {"default", "project"}
     }
-    mira[VALIDATE_SKILL_TOOL] = VALIDATE_SKILL_METADATA
+    mira["validate_skill"] = {"name": "validate_skill", "group": "Skill Validation"}
     features: dict[str, set[str]] = {}
     for name, item in mira.items():
         if name not in core_names:

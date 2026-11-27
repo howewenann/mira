@@ -6,13 +6,10 @@ import asyncio
 import json
 import sys
 from collections.abc import Awaitable, Callable
-from contextlib import nullcontext, suppress
-from datetime import datetime
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from langchain_core.exceptions import ContextOverflowError
 from rich.pretty import pretty_repr
 from textual import on
 from textual.actions import SkipAction
@@ -24,57 +21,19 @@ from textual.events import Key
 from textual.reactive import reactive
 from textual.widgets import Button, ContentSwitcher, DirectoryTree, ListView, Static
 
-from agent.middleware.compaction import PostTurnCompactionResult
-from agent.middleware.context_overflow import context_notice_rendered, pop_context_overflow_notice
-from agent.skills import PreparedSkill, SkillRegistry, prepare_skill
-from agent.planning.policy import (
-    PLANNING_STAGE_GOAL_FINALIZE,
-    PLANNING_STAGE_GOAL_RESEARCH,
-    PLANNING_STAGE_PLAN_FINALIZE,
-    PLANNING_STAGE_PLAN_RESEARCH,
-)
-from config.runtime import LaunchOptions, RuntimeSnapshot, build_runtime_snapshot
-from config.settings import (
+from mira.api import LaunchOptions, RuntimeSnapshot
+from mira.settings import (
     EXECUTE_TOOL,
-    git_protection_preference,
-    load_settings,
-    middleware_span_mode,
-    rubric_enabled,
-    rubric_max_iterations,
-    save_settings,
-    set_git_protection,
     tool_enabled,
+    read_configuration,
+    configure_workspace,
+    configure_git,
+    preview_tracing,
 )
-from core.diagnostics.logging import get_diagnostics_logger
-from core.context.report import (
-    ContextReportMCPServer,
-    ContextReportObservation,
-    build_agent_context_report,
-    mcp_tool_metadata,
-)
-from core.diagnostics.error_report import clear_error_reports, write_error_report
-from core.workspace import GIT_NOT_CONFIGURED_SUMMARY, git_protection_issue, init_git_repository, is_git_worktree
-from core.application import available_tools, initial_mode, refresh_agent_specs, resources_for
-from core.execution.compaction import commit_forced_compaction
-from core.execution.turns import goal_revision_text, plan_command_prompt, plan_revision_text
-from core.execution.workflows import execute_workflow
-from core.interface import FrontendEmitter
+from mira.api import report_error as write_error_report
 from mira import MiraApplication, MiraSession
-from mira.api import FrontendEvent, MessageEvent, RuntimeEvent, ToolEvent
-from tracing.stream import TraceStream
-from session.dashboard import ensure_dashboard, normalize_dashboard, update_duration
-from session.context import sync_deepagents_compaction
-from session.goals import (
-    RESUMABLE_GOAL_STATUSES,
-    current_goal,
-)
-from session.plans import (
-    RESUMABLE_PLAN_STATUSES,
-    current_plan,
-    plan_artifact_text,
-)
-from session.recorder import update_goal_event_status, update_plan_event_status
-from session.workflows import PersistentWorkflowHistory
+from mira.api import ContextOverflowError, MessageEvent, RuntimeEvent, ToolEvent
+from ui.shared.trace import TraceStream
 from ui.shared.interrupts import (
     ASK_USER_OPEN_OPTION,
     action_choices,
@@ -126,15 +85,11 @@ from ui.textual.platform.windows.clipboard import set_windows_clipboard
 from ui.textual.platform.windows.file_picker import choose_local_files
 from ui.textual.platform.windows.input import driver_class_for_platform
 from ui.textual.platform.windows.scrollbars import configure_scrollbars_for_platform
-from ui.textual.file_uploads import clear_local_uploads, ingest_local_files
-from ui.textual.workflow_demo import build_workflow_demo
-from ui.textual.workflow_demo_phase2 import build_workflow_demo_phase2
 
 from ui.textual.widgets.workspace import Workspace
 from ui.textual.widgets.workspace_controls import DragDivider, ModelAliasPopup
 from ui.textual.widgets.workspace_surfaces import ChatSurface, ComposerActions
 
-Bootstrap = Callable[..., Awaitable[dict[str, Any]]]
 DESTRUCTIVE_HISTORY_COMMANDS = {
     "/clear-chat",
     "/clear-all-chats",
@@ -201,7 +156,6 @@ class MiraApp(App[None]):
         session_id: str | None = None,
         config: dict[str, Any] | None = None,
         launch_options: LaunchOptions | None = None,
-        bootstrap: Bootstrap | None = None,
         prebuilt: dict[str, Any] | None = None,
         tool_output_chars: int = DEFAULT_TOOL_OUTPUT_CHARS,
     ) -> None:
@@ -212,7 +166,6 @@ class MiraApp(App[None]):
         self.session_id = session_id
         self.config = config
         self.launch_options = launch_options or LaunchOptions()
-        self.bootstrap = bootstrap
         self.prebuilt = prebuilt
         self.tool_output_chars = int(tool_output_chars)
         self.history_path = self.workspace / ".mira" / "history.txt"
@@ -221,10 +174,6 @@ class MiraApp(App[None]):
         self._last_file_picker_directory = self.workspace
         self._file_ingestion_active = False
 
-        self.agent: Any = None
-        self.plan_agent: Any = None
-        self.project_backend: Any = None
-        self.store: Any = None
         self.application: MiraApplication | None = None
         self.core_session: MiraSession | None = None
         self.session: dict[str, Any] = {"id": "", "workspace": str(self.workspace), "turns": 0}
@@ -232,7 +181,6 @@ class MiraApp(App[None]):
         self.context_limit_tokens: int | None = None
         self.context_limit_source = "unknown"
         self.runtime_snapshot: RuntimeSnapshot | None = None
-        self.checkpointer: Any = None
         self.mode: dict[str, Any] = {"planning": False}
         self.ready = False
         self.busy = False
@@ -320,7 +268,7 @@ class MiraApp(App[None]):
         if self.prebuilt is not None:
             self._install_state(self.prebuilt)
             self._notify_startup_issues()
-            if self.core_session is not None and self.core_session.recovery is not None:
+            if self.core_session is not None and self.core_session.snapshot(include_transcript=False).pending != "none":
                 self.run_worker(self._recover_open_session(), name="recover-session")
             return
         self.query_one(ChatLog).startup_loading(workspace=str(self.workspace), state="starting...")
@@ -331,30 +279,23 @@ class MiraApp(App[None]):
         self.run_worker(self._startup(), name="startup", exclusive=True)
 
     async def _startup(self) -> None:
-        """Build agents inside the TUI without blocking on workspace Git state."""
+        application = None
         try:
-            if self.bootstrap is None:
-                raise RuntimeError("MIRA bootstrap function was not provided")
-
             self.startup_progress("loading model metadata...")
-            state = await self.bootstrap(
-                self.workspace,
-                self.session_id,
-                self.resume,
-                self.config,
-                self,
-                frontend=TextualFrontend(self),
-            )
-            self._install_state(state)
+            application = await MiraApplication.start(workspace=self.workspace, frontend=TextualFrontend(self), config=self.config, launch_options=self.launch_options)
+            core_session = await application.open_session(self.session_id, resume=self.resume)
+            self._install_state({"application": application, "core_session": core_session})
             self._notify_startup_issues()
             await self._recover_open_session()
         except Exception as exc:
+            if application is not None and self.application is not application:
+                with suppress(Exception):
+                    await application.shutdown()
             error_path = self._write_error_report(exc, source="tui.startup")
             self.system_message(f"startup error: {exc}\nerror report: {error_path}", kind="error")
             self.busy = False
             self._set_status(state="error")
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
+            self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
 
     async def _retry_startup(self) -> None:
@@ -366,93 +307,34 @@ class MiraApp(App[None]):
         self._set_status(state="running")
         await self._startup()
 
-    def _install_state(self, state: dict[str, Any]) -> None:
-        """Install bootstrapped agents and session state into the app."""
-        self.agent = state["agent"]
-        self.plan_agent = state["plan_agent"]
-        self.project_backend = (
-            getattr(self.agent, "mira_project_backend", None) or state.get("project_backend")
-        )
-        self.config = state["config"]
-        self._record_effective_model()
-        self.store = state["store"]
-        self.session = state["session"]
-        self.application = state.get("application")
-        self.core_session = state.get("core_session")
-        self.model_name = str(state.get("model_name") or "")
-        self.context_limit_tokens = state.get("context_limit_tokens")
-        self.context_limit_source = str(state.get("context_limit_source") or "unknown")
-        self.checkpointer = state.get("checkpointer")
-        self.mcp_manager = state.get("mcp_manager") or self.mcp_manager
-        if self.mcp_manager is not None:
-            self.mcp_manager.set_change_handler(self._mcp_registry_changed)
-            set_activity_handler = getattr(self.mcp_manager, "set_activity_handler", None)
-            if callable(set_activity_handler) and self.application is None:
-                set_activity_handler(self.mcp_activity)
-        self.tool_failures = list(state.get("tool_failures") or getattr(self.agent, "mira_tool_failures", []))
-        self.issues = list(state.get("issues") or [])
-        self.agent_unavailable_message = str(
-            state.get("agent_unavailable_message") or "Main model is not configured. Run /models."
-        )
-        if not self.issues and self.tool_failures:
-            from agent.tools.failures import tool_failure_issues
+    def _refresh_runtime_view(self) -> None:
+        self.config = self.application.configuration()
+        self.runtime_snapshot = self.application.runtime()
+        self.mcp_manager = self.application.mcp
+        self.issues = list(self.config["issues"])
+        self.tool_failures = list(self.config["tool_failures"])
+        self.agent_unavailable_message = self.config["agent_unavailable_message"]
+        self._refresh_session_view()
 
-            self.issues = tool_failure_issues(self.tool_failures)
-        self.runtime_snapshot = build_runtime_snapshot(
-            self.config or {},
-            self.launch_options,
-            model_name=self.model_name,
-        )
-        if self.application is None:
-            self.application = MiraApplication(
-                frontend=TextualFrontend(self),
-                workspace=self.workspace,
-                agent=self.agent,
-                plan_agent=self.plan_agent,
-                config=self.config,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-                store=self.store,
-                checkpointer=self.checkpointer,
-                mcp_manager=self.mcp_manager,
-                tool_failures=self.tool_failures,
-                issues=self.issues,
-                resource_metadata=state.get("resource_metadata") or {},
-                project_backend=self.project_backend,
-                agent_unavailable_message=self.agent_unavailable_message,
-            )
-            self.issues = list(self.application.issues)
-        if self.core_session is None:
-            self.core_session = MiraSession(self.application, self.session)
-        self.mode = self.core_session.mode
-        if state.get("resource_metadata"):
-            self.mode["resources"] = state["resource_metadata"]
+    def _install_state(self, state: dict[str, Any]) -> None:
+        self.application = state["application"]
+        self.core_session = state["core_session"]
+        self._refresh_runtime_view()
+        self._refresh_session_view(full=True)
         self.ready = True
         self.busy = False
         self._main_stream_active = False
         prompt = self.query_one(PromptBox)
         prompt.disabled = False
-        prompt.set_history(read_prompt_history(self.history_path))
+        prompt.set_history(self.application.prompt_history())
         autocomplete = self.query_one(AutocompleteInput)
-        autocomplete.set_project_backend(self.project_backend)
-        autocomplete.set_mcp_manager(self.mcp_manager)
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-
+        autocomplete.set_mcp_manager(self.application.mcp)
+        autocomplete.set_file_provider(self.application.list_files)
         chat = self.query_one(ChatLog)
         self._restore_chat_viewport()
         self.query_one(SubagentsPanel).reset()
         chat.clear_log(preserve_startup_activity=True)
-        chat.startup(
-            model_name=self.model_name,
-            session_id=self.session["id"],
-            workspace=str(self.session["workspace"]),
-        )
+        chat.startup(model_name=self.model_name, session_id=self.session["id"], workspace=self.session["workspace"])
         chat.restore_session(self.session)
         self._refresh_sessions()
         self._set_status(state="ready")
@@ -481,13 +363,13 @@ class MiraApp(App[None]):
             session_id=str(self.session.get("id") or "") or None,
             context=report_context,
         )
-        get_diagnostics_logger().exception("%s failed; error report: %s", source, error_path)
         return error_path
 
     @on(PromptBox.Submitted)
     async def submit_prompt(self, event: PromptBox.Submitted) -> None:
         """Handle submitted prompt text."""
         text = event.value.strip()
+        self._refresh_session_view()
         prompt = self.query_one(PromptBox)
         prompt.value = ""
         if not text:
@@ -552,7 +434,7 @@ class MiraApp(App[None]):
 
         if text.startswith("/workflow__"):
             try:
-                resolved = self._workflow_registry().resolve(text)
+                resolved = self.application.workflow_invocation(text)
             except ValueError as error:
                 self.system_message(str(error), kind="warning")
                 self.action_focus_prompt()
@@ -623,32 +505,19 @@ class MiraApp(App[None]):
             return
 
         prepared = None
-        if text.startswith("/skill__"):
-            if not self._model_agents_available():
-                return
+        if text.startswith(("/skill__", "/mcp__", "/prompt__")):
             try:
-                prepared = prepare_skill(text, self._skill_registry())
-            except (AttributeError, ValueError) as error:
-                self.system_message(str(error), kind="warning")
-                self.action_focus_prompt()
-                return
-        if self.mcp_manager is not None:
-            if text.startswith("/mcp__"):
-                await self.mcp_manager.discover_prompts()
-            try:
-                prompt_prepared = await self.mcp_manager.prompt_registry.resolve(text)
-                prepared = prepared or prompt_prepared
+                prepared = await self.application.prepare_input(text)
             except ValueError as error:
                 self.system_message(str(error), kind="warning")
                 self.action_focus_prompt()
                 return
 
-        plan_prompt = plan_command_prompt(text)
+        plan_prompt = text[len("/plan"):].strip() if text == "/plan" or text.startswith("/plan ") else None
         if text == "/continue":
             if (
                 self.core_session is None
-                or self.core_session.recovery is None
-                or not self.core_session.recovery["incomplete"]
+                or self.core_session.snapshot(include_transcript=False).pending != "incomplete"
             ):
                 self.system_message("no interrupted operation to continue", kind="muted")
             else:
@@ -745,7 +614,7 @@ class MiraApp(App[None]):
                 text,
                 prepared_messages=prepared.messages if prepared is not None else None,
                 display_text=prepared.display_text if prepared is not None else None,
-                pinned_skills=prepared.pinned_skills if isinstance(prepared, PreparedSkill) else None,
+                pinned_skills=getattr(prepared, "pinned_skills", None),
                 attachments=attachments,
             ),
             name="turn",
@@ -753,148 +622,57 @@ class MiraApp(App[None]):
         )
 
     async def _run_incomplete_continuation(self) -> None:
-        """Run an explicitly retried checkpoint through the normal turn UI."""
+        await self._run_operation(self.core_session.continue_incomplete())
+
+    async def _run_operation(self, operation: Awaitable[Any], *, source: str = "tui.turn", error_label: str = "error") -> None:
+        previous_goal = self.session.get("current_goal") or {}
+        previous_goal_state = (previous_goal.get("id"), previous_goal.get("status"))
         try:
-            await self.core_session.continue_incomplete()
-            self._refresh_sessions()
+            await operation
             self._set_status(state="ready")
         except asyncio.CancelledError:
             self.finish_turn(cancelled=True)
+            self.system_message("Goal generation cancelled" if source == "tui.goal" else "turn cancelled", kind="warning")
+            self._set_status(state="ready")
             raise
+        except ContextOverflowError:
+            self.finish_turn(cancelled=True, tool_status="interrupted")
+            self._set_status(state="ready")
         except Exception as exc:
             self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(exc, source="tui.continue")
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
+            error_path = self._write_error_report(exc, source=source)
+            self.system_message(f"{error_label}: {exc}\nerror report: {error_path}", kind="error")
             self._set_status(state="error")
         finally:
-            self.finish_turn()
+            self._refresh_session_view()
+            self._refresh_sessions()
+            goal = self.session.get("current_goal") or {}
+            if (goal.get("id"), goal.get("status")) != previous_goal_state:
+                self._resolve_goal_attempt_status()
             self.turn_worker = None
             self.busy = False
+            self.finish_turn()
+            self.waiting_finished()
             self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
 
-    async def _run_turn(
-        self,
-        text: str,
-        *,
-        prepared_messages: list[Any] | None = None,
-        display_text: str | None = None,
-        pinned_skills: list[str] | None = None,
-        attachments: list[dict[str, str]] | None = None,
-    ) -> None:
-        """Run one agent turn and restore prompt focus when done."""
-        try:
-            await self._refresh_model_metadata()
-            turn_kwargs: dict[str, Any] = {}
-            if display_text is not None:
-                turn_kwargs["display_text"] = display_text
-            if prepared_messages is not None:
-                turn_kwargs["prepared_messages"] = prepared_messages
-            if pinned_skills is not None:
-                turn_kwargs["pinned_skills"] = pinned_skills
-            if attachments:
-                turn_kwargs["attachments"] = attachments
-            await self.core_session.prompt(
-                text=text,
-                **turn_kwargs,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            if self.mode.get("executing_goal"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_goal"] = current_goal(self.session)
-                self.store.save(self.session)
-                self.mode["executing_goal"] = False
-                self._resolve_goal_attempt_status()
-            if self.mode.get("executing_plan"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_plan"] = current_plan(self.session)
-                self.store.save(self.session)
-                self.mode["executing_plan"] = False
-            self.mode["plan_revision"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True)
-            self.system_message("turn cancelled", kind="warning")
-            self._set_status(state="ready")
-            raise
-        except ContextOverflowError as exc:
-            if self.mode.get("executing_goal"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_goal"] = current_goal(self.session)
-                self.store.save(self.session)
-                self.mode["executing_goal"] = False
-                self._resolve_goal_attempt_status()
-            if self.mode.get("executing_plan"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_plan"] = current_plan(self.session)
-                self.store.save(self.session)
-                self.mode["executing_plan"] = False
-            self.mode["plan_revision"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            if not context_notice_rendered(exc):
-                self.system_message(pop_context_overflow_notice(exc), kind="info")
-            self._set_status(state="ready")
-        except Exception as exc:
-            if self.mode.get("executing_goal"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_goal"] = current_goal(self.session)
-                self.store.save(self.session)
-                self.mode["executing_goal"] = False
-                self._resolve_goal_attempt_status()
-            if self.mode.get("executing_plan"):
-                self.core_session.pause_active_artifacts()
-                self.mode["current_plan"] = current_plan(self.session)
-                self.store.save(self.session)
-                self.mode["executing_plan"] = False
-            self.mode["plan_revision"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(exc, source="tui.turn")
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            self.mode["goal_staging"] = None
-            self.mode["goal_revision"] = None
-            self.turn_worker = None
-            self.busy = False
-            self.finish_turn()
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
+    async def _run_turn(self, text: str, *, prepared_messages: list[Any] | None = None,
+                        display_text: str | None = None, pinned_skills: list[str] | None = None,
+                        attachments: list[dict[str, str]] | None = None) -> None:
+        options = {key: value for key, value in {
+            "prepared_messages": prepared_messages, "display_text": display_text,
+            "pinned_skills": pinned_skills, "attachments": attachments,
+        }.items() if value is not None}
+        await self._run_operation(self.core_session.prompt(text, **options))
 
     async def _run_compact_command(self) -> None:
         """Compact the current action or planning conversation."""
-        if self.mode["planning"]:
-            active_agent = self.plan_agent
-            thread_id = self.mode["plan_thread_id"]
-        else:
-            active_agent = self.agent
-            thread_id = self.session["id"]
-
         self.compaction_started()
         try:
-            middleware = getattr(active_agent, "mira_compaction", None)
-            if middleware is None:
-                result = PostTurnCompactionResult(reason="unavailable")
-            else:
-                config = {"configurable": {"thread_id": thread_id}}
-                snapshot = await active_agent.aget_state(config)
-                if snapshot.next or snapshot.tasks:
-                    result = PostTurnCompactionResult(reason="pending_work")
-                else:
-                    # The command uses the same middleware as compact_conversation
-                    # without adding another agent turn.
-                    plan = await middleware.aplan_forced_compaction_update(snapshot.values)
-                    result = await commit_forced_compaction(active_agent, thread_id, snapshot, plan)
+            result = await self.core_session.compact()
             if result.compacted:
-                if await sync_deepagents_compaction(self.session, active_agent, thread_id):
-                    self.store.save(self.session)
-                    self._refresh_sessions()
+                self._refresh_session_view()
+                self._refresh_sessions()
                 self.compaction_finished("context compacted", resume_waiting=False)
             elif result.reason in {"no_messages", "nothing_to_compact"}:
                 self.compaction_finished("nothing to compact", success=False, resume_waiting=False)
@@ -912,14 +690,6 @@ class MiraApp(App[None]):
             self._set_status(state="ready")
             raise
         except Exception as exc:
-            # A checkpoint write may commit before reporting an error. Keep
-            # session replay aligned with the state that actually persisted.
-            try:
-                if await sync_deepagents_compaction(self.session, active_agent, thread_id):
-                    self.store.save(self.session)
-                    self._refresh_sessions()
-            except Exception as sync_error:
-                get_diagnostics_logger().warning("Could not sync failed compaction: %s", sync_error)
             self.compaction_finished("context compaction failed", success=False, resume_waiting=False)
             error_path = self._write_error_report(exc, source="tui.compact")
             self.system_message(f"compaction error: {exc}\nerror report: {error_path}", kind="error")
@@ -932,171 +702,19 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
 
     async def _run_workflow_demo(self) -> None:
-        """Run the hidden deterministic graph through the real Workflow UI path."""
-        emitter = FrontendEmitter(
-            self.application.frontend,
-            session_id=str(self.session.get("id") or ""),
-        )
-        try:
-            graph = build_workflow_demo()
-            payload = {"events": []}
-            self._show_workflow_input(payload)
-            await execute_workflow(
-                graph,
-                payload,
-                emitter=emitter,
-                session=self.core_session,
-                workflow_id="workflow-demo",
-                workflow_name="workflow-demo",
-            )
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self._set_status(state="ready")
-            raise
-        except Exception as exc:
-            error_path = self._write_error_report(exc, source="tui.workflow-demo")
-            self.system_message(
-                f"workflow demo error: {exc}\nerror report: {error_path}",
-                kind="error",
-            )
-            self._set_status(state="error")
-        finally:
-            self.turn_worker = None
-            self.busy = False
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
+        payload = {"events": []}
+        self._show_workflow_input(payload)
+        await self._run_operation(self.core_session.run_workflow("/workflow-demo", inputs=payload, record_user=False), source="tui.workflow-demo")
+
 
     async def _run_workflow_demo_phase2(self) -> None:
-        """Run the hidden native agent/HITL demo through existing UI paths."""
-        emitter = FrontendEmitter(
-            self.application.frontend,
-            session_id=str(self.session.get("id") or ""),
-        )
-        try:
-            agent = self.application.workflows.agent(
-                name="workflow-demo-agent",
-                tools=[],
-                system_prompt=(
-                    "Reply in one short sentence confirming that the Workflow demo agent ran."
-                ),
-            )
-            graph = build_workflow_demo_phase2(agent)
-            payload: Any = {
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "Confirm that the Workflow Phase 2 demo is running.",
-                    }
-                ]
-            }
-            config = {
-                "configurable": {
-                    "thread_id": f"workflow-demo-phase2:{uuid4()}",
-                }
-            }
+        payload = {"messages": [{"role": "user", "content": "Confirm that the Workflow Phase 2 demo is running."}]}
+        self._show_workflow_input(payload)
+        await self._run_operation(self.core_session.run_workflow("/workflow-demo-phase2", inputs=payload, record_user=False), source="tui.workflow-demo-phase2")
 
-            self._show_workflow_input(payload)
-            await execute_workflow(
-                graph,
-                payload,
-                emitter=emitter,
-                session=self.core_session,
-                workflow_id="workflow-demo-phase2",
-                workflow_name="workflow-demo-phase2",
-                config=config,
-                inspection_title="workflow-demo-agent",
-                action_agent=self.agent,
-                persist_always_allow=self.application.persist_tool_always_allow,
-            )
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self._set_status(state="ready")
-            raise
-        except Exception as exc:
-            error_path = self._write_error_report(
-                exc,
-                source="tui.workflow-demo-phase2",
-            )
-            self.system_message(
-                f"workflow Phase 2 demo error: {exc}\nerror report: {error_path}",
-                kind="error",
-            )
-            self._set_status(state="error")
-        finally:
-            self.turn_worker = None
-            self.busy = False
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
 
-    async def _run_registered_workflow(
-        self,
-        spec: Any,
-        inputs: dict[str, Any],
-        command_text: str,
-    ) -> None:
-        """Construct and run one discovered Workflow through the shared path."""
-        from agent.workflows.discovery import (
-            validate_runtime_graph,
-            validate_workflow_input,
-        )
-
-        workflow_history: PersistentWorkflowHistory | None = None
-        try:
-            graph = spec.factory(self.application.workflows)
-            input_model = validate_runtime_graph(spec, graph)
-            validate_workflow_input(input_model, inputs, spec.usage)
-            workflow_id = f"workflow-{spec.name}:{uuid4()}"
-            self.query_one(ChatLog).user_message(command_text)
-            workflow_history = PersistentWorkflowHistory(
-                self,
-                self.session,
-                self.store,
-                command=command_text,
-            )
-            emitter = FrontendEmitter(
-                TextualFrontend(workflow_history),
-                session_id=str(self.session.get("id") or ""),
-            )
-            await execute_workflow(
-                graph,
-                inputs,
-                emitter=emitter,
-                session=self.core_session,
-                workflow_id=workflow_id,
-                workflow_name=spec.name,
-                config={
-                    "configurable": {
-                        "thread_id": f"workflow:{spec.name}:{uuid4()}",
-                    }
-                },
-                context=self.application.workflows.context,
-                action_agent=self.agent,
-                persist_always_allow=self.application.persist_tool_always_allow,
-            )
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self._set_status(state="ready")
-            raise
-        except Exception as exc:
-            error_path = self._write_error_report(
-                exc,
-                source=f"tui.workflow.{spec.name}",
-            )
-            self.system_message(
-                f"workflow {spec.name} error: {exc}\nerror report: {error_path}",
-                kind="error",
-            )
-            self._set_status(state="error")
-        finally:
-            if workflow_history is not None:
-                workflow_history.close()
-            self.turn_worker = None
-            self.busy = False
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
+    async def _run_registered_workflow(self, spec: Any, inputs: dict[str, Any], command_text: str) -> None:
+        await self._run_operation(self.core_session.run_workflow(command_text), source=f"tui.workflow.{spec.name}", error_label=f"workflow {spec.name} error")
 
     def _show_workflow_input(self, payload: Any) -> None:
         """Render one process-local Workflow payload as a normal user message."""
@@ -1247,14 +865,12 @@ class MiraApp(App[None]):
 
     @on(SessionItem.RenameSubmitted)
     def rename_history_session(self, event: SessionItem.RenameSubmitted) -> None:
-        """Persist an inline custom title without changing conversation recency."""
         event.stop()
         if self.busy:
             self._notify_busy_action("renaming a chat")
             return
-        record = self._history_session_record(event.item)
-        record["custom_title"] = " ".join(event.value.split())
-        self._save_history_metadata(record)
+        self.application.update_session(event.item.session_id, title=event.value)
+        self._refresh_session_view()
         self._refresh_sessions()
 
     async def _run_history_session_menu(self, item: SessionItem) -> None:
@@ -1277,29 +893,10 @@ class MiraApp(App[None]):
         self.call_after_refresh(self.action_focus_prompt)
 
     def _set_history_pin(self, item: SessionItem, pinned: bool) -> None:
-        """Persist pin state and refresh grouped chronological ordering."""
-        record = self._history_session_record(item)
-        record["pinned"] = bool(pinned)
-        self._save_history_metadata(record)
+        self.application.update_session(item.session_id, pinned=pinned)
+        self._refresh_session_view()
         self._refresh_sessions()
 
-    def _history_session_record(self, item: SessionItem) -> dict[str, Any]:
-        """Return the live record when an action targets the open session."""
-        if item.session_id == str(self.session.get("id") or ""):
-            return self.session
-        return item.record
-
-    def _save_history_metadata(self, record: dict[str, Any]) -> None:
-        """Use metadata-only persistence so pin and rename preserve updated_at."""
-        if self.store is None:
-            return
-        save_metadata = getattr(self.store, "save_metadata", None)
-        if callable(save_metadata):
-            save_metadata(record)
-            return
-        updated_at = record.get("updated_at")
-        self.store.save(record)
-        record["updated_at"] = updated_at
 
     async def _delete_history_session(self, item: SessionItem) -> None:
         """Confirm and delete only the selected session."""
@@ -1309,7 +906,7 @@ class MiraApp(App[None]):
             f'Delete saved chat "{title}"?\n\n{DESTRUCTIVE_CONFIRM_HINT}',
             DESTRUCTIVE_CONFIRM_CHOICES,
         )
-        if answer != "o" or self.store is None:
+        if answer != "o":
             return
         if self.application is None or not await self.application.delete_session(item.session_id):
             self.notify("The saved chat no longer exists.", title="History")
@@ -1337,7 +934,7 @@ class MiraApp(App[None]):
         if self.busy:
             self._notify_busy_action("starting a new chat")
             return True
-        if self.store is None:
+        if self.application is None:
             self.system_message("new chat needs the normal session store", kind="warning")
             return True
 
@@ -1346,43 +943,44 @@ class MiraApp(App[None]):
         self.system_message("started new chat", kind="info")
         return True
 
+    def _refresh_session_view(self, *, full: bool = False) -> None:
+        if self.core_session is None:
+            return
+        snapshot = self.core_session.snapshot(include_transcript=full)
+        previous_events = self.session.get("events", [])
+        self.session = {
+            **snapshot.history, "id": snapshot.session_id, "workspace": snapshot.workspace,
+            "title": snapshot.title, "turns": snapshot.turns, "dashboard": dict(snapshot.dashboard),
+            "current_goal": snapshot.current_goal, "current_plan": snapshot.current_plan,
+            "events": list(snapshot.transcript) if full else previous_events,
+        }
+        self.mode = {
+            **snapshot.execution, "planning": snapshot.mode == "planning",
+            "resources": dict(snapshot.resources), "current_goal": snapshot.current_goal,
+            "current_plan": snapshot.current_plan, "action_tools": list(snapshot.tools),
+            "planning_tools": list(snapshot.tools), "rubric_enabled": snapshot.rubric["enabled"],
+            "rubric_max_iterations": snapshot.rubric["max_iterations"],
+        }
+        self.model_name = str(snapshot.model["name"])
+        self.context_limit_tokens = snapshot.model["context_limit_tokens"]
+        self.context_limit_source = str(snapshot.model["context_limit_source"])
+        self.effective_model_alias = str(snapshot.model["alias"])
+        self.models_available = bool(snapshot.model["available"])
+
     def _activate_core_session(self, core_session: MiraSession) -> None:
-        """Install one headless session projection into the existing UI shell."""
         self.core_session = core_session
-        self.agent = core_session.agent
-        self.plan_agent = core_session.plan_agent
-        self.checkpointer = core_session.checkpointer
-        self.session = core_session.record
-        self.mode = self.core_session.mode
+        self._refresh_session_view(full=True)
         self.query_one(SubagentsPanel).reset()
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
         self._render_current_session()
 
     async def _recover_open_session(self) -> None:
-        """Surface saved approvals automatically; leave uncertain work stopped."""
-        recovery = self.core_session.recovery if self.core_session is not None else None
-        if recovery is None:
+        pending = self.core_session.snapshot(include_transcript=False).pending
+        if pending == "none":
             return
-        if recovery["incomplete"]:
-            self.system_message(
-                "The previous operation stopped before its result was checkpointed. "
-                "External side effects may already have occurred. Review them before continuing.",
-                kind="warning",
-            )
+        if pending == "incomplete":
+            self.system_message("The previous operation stopped before its result was checkpointed. External side effects may already have occurred. Review them before continuing.", kind="warning")
             return
-        self.busy = True
-        self.query_one(PromptBox).disabled = True
-        try:
-            await self.core_session.resume_pending()
-        finally:
-            self.busy = False
-            self.query_one(PromptBox).disabled = False
-            self.action_focus_prompt()
+        await self._run_operation(self.core_session.resume_pending())
 
     async def _run_prompts_command(self) -> None:
         """List the exact shared prompt registry after lazy MCP discovery."""
@@ -1391,35 +989,31 @@ class MiraApp(App[None]):
             self.action_focus_prompt()
             return
         await self.mcp_manager.discover_prompts()
-        specs = sorted(self.mcp_manager.prompt_registry.specs.values(), key=lambda item: item.command.casefold())
+        specs = self.application.commands("prompt")
         self.command_output(prompts_table(specs))
         self.action_focus_prompt()
 
     def _run_workflows_command(self) -> None:
         """List the exact process-local launchable Workflow registry."""
-        specs = sorted(
-            self._workflow_registry().specs.values(),
-            key=lambda item: item.command.casefold(),
-        )
+        specs = self.application.commands("workflow")
         self.command_output(workflows_table(specs))
 
-    def _skill_registry(self) -> SkillRegistry:
-        """Build exact commands from the active resource projection."""
-        return SkillRegistry(resources_for(self.mode, "skills"))
+    def _skill_registry(self) -> tuple[Any, ...]:
+        return self.application.commands("skill") if self.application is not None else ()
 
-    def _workflow_registry(self) -> Any:
-        """Return the application's current process-local Workflow registry."""
-        from agent.workflows import WorkflowRegistry
 
-        return getattr(self.application, "workflow_registry", None) or WorkflowRegistry({})
+    def _workflow_registry(self) -> tuple[Any, ...]:
+        return self.application.commands("workflow") if self.application is not None else ()
+
 
     async def _handle_plan_action(self, action: str, plan_id: str) -> None:
         """Resolve the active structured plan."""
+        self._refresh_session_view()
         pending = self._pending_artifact_review
         if pending is not None and pending.matches("plan", plan_id):
             await self._handle_pending_artifact_action(pending, action)
             return
-        plan = current_plan(self.session)
+        plan = self.session.get("current_plan")
         if plan is None or str(plan.get("id") or "") != plan_id:
             self.system_message("that plan is no longer active", kind="warning")
             return
@@ -1429,8 +1023,7 @@ class MiraApp(App[None]):
 
         if action == "close":
             self.query_one(ChatLog).dismiss_plan(plan_id)
-            update_plan_event_status(self.session, plan_id, "closed")
-            self.store.save(self.session)
+            await self.core_session.dismiss_artifact("plan")
             self.system_message(f"closed plan \"{plan_title(plan)}\"", kind="muted")
             self.action_focus_prompt()
             return
@@ -1450,7 +1043,6 @@ class MiraApp(App[None]):
                 self.system_message(f"kept plan \"{plan_title(plan)}\" active", kind="muted")
                 self.action_focus_prompt()
                 return
-            await self.core_session.begin_artifact_revision("plan", plan, feedback)
             self.system_message(f"revising plan \"{plan_title(plan)}\"", kind="status")
             self.busy = True
             self._main_stream_active = False
@@ -1480,53 +1072,23 @@ class MiraApp(App[None]):
             )
 
     async def _run_goal_command(self, objective: str) -> None:
-        """Run one explicit Goal request through the read-only Goal agent."""
-        try:
-            if not await self._confirm_formal_replacement("Goal"):
-                self.system_message("kept the current formal work", kind="muted")
-                return
-            await self._refresh_model_metadata()
-            await self.core_session.begin_goal(objective)
-            await self.core_session.prompt(
-                text=objective,
-                display_text=f"/goal {objective}",
-                record_user=True,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self.system_message("Goal generation cancelled", kind="warning")
-            raise
-        except Exception as exc:
-            error_path = self._write_error_report(exc, source="tui.goal")
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
-                self.mode["goal_staging"] = None
-                self.mode["goal_revision"] = None
-            await self.core_session.persist_graph_state()
-            self._sync_active_agent_pair()
-            self.waiting_finished()
-            self._waiting_label = "working..."
-            self.turn_worker = None
+        if not await self._confirm_formal_replacement("Goal"):
+            self.system_message("kept the current formal work", kind="muted")
             self.busy = False
-            if self.status_state != "error":
-                self._set_status(state="ready")
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
+            self.turn_worker = None
+            self.query_one(PromptBox).disabled = False
             self.action_focus_prompt()
+            return
+        await self._run_operation(self.core_session.create_goal(objective), source="tui.goal")
 
     async def _handle_goal_action(self, action: str, goal_id: str) -> None:
         """Resolve an action from the current Goal bubble."""
+        self._refresh_session_view()
         pending = self._pending_artifact_review
         if pending is not None and pending.matches("goal", goal_id):
             await self._handle_pending_artifact_action(pending, action)
             return
-        value = current_goal(self.session)
+        value = self.session.get("current_goal")
         if value is None or str(value.get("id") or "") != goal_id:
             self.system_message("that Goal is no longer current", kind="warning")
             return
@@ -1536,8 +1098,7 @@ class MiraApp(App[None]):
 
         if action == "close":
             self.query_one(ChatLog).dismiss_goal(goal_id)
-            update_goal_event_status(self.session, goal_id, "closed")
-            self.store.save(self.session)
+            await self.core_session.dismiss_artifact("goal")
             self.system_message(f'closed Goal "{goal_title(value)}"', kind="muted")
             self.action_focus_prompt()
             return
@@ -1644,7 +1205,7 @@ class MiraApp(App[None]):
         self.query_one(Workspace).activate("chat")
         self.waiting_finished()
         self.mode["planning_stage"] = (
-            PLANNING_STAGE_PLAN_FINALIZE if kind == "plan" else PLANNING_STAGE_GOAL_FINALIZE
+            "plan_finalize" if kind == "plan" else "goal_finalize"
         )
         artifact_id = str(artifact.get("id") or "")
         created_at = ""
@@ -1688,6 +1249,7 @@ class MiraApp(App[None]):
 
     def artifact_state_changed(self, event: Any) -> None:
         """Project one authoritative Core artifact transition into chat widgets."""
+        self._refresh_session_view()
         artifact = dict(event.artifact or {})
         artifact_id = str(event.artifact_id or artifact.get("id") or "")
         decision = dict(event.decision or {})
@@ -1720,175 +1282,22 @@ class MiraApp(App[None]):
         self._sync_artifact_button()
 
     async def _run_turn_for_goal(self, value: dict[str, Any]) -> None:
-        """Run the normal action agent for one explicit Goal attempt."""
-        try:
-            await self._refresh_model_metadata()
-            await self.core_session.prompt(
-                text="Work toward the retained Goal.",
-                display_text=f"Implement Goal: {goal_title(value)}",
-                record_user=False,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._resolve_goal_attempt_status()
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self.core_session.pause_active_artifacts()
-            self.mode["current_goal"] = current_goal(self.session)
-            self.mode["executing_goal"] = False
-            self.store.save(self.session)
-            self._resolve_goal_attempt_status()
-            self.finish_turn(cancelled=True)
-            self.system_message("turn cancelled", kind="warning")
-            raise
-        except Exception as exc:
-            self.core_session.pause_active_artifacts()
-            self.mode["current_goal"] = current_goal(self.session)
-            self.mode["executing_goal"] = False
-            self.store.save(self.session)
-            self._resolve_goal_attempt_status()
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(exc, source="tui.goal_turn", context={"goal": goal_title(value)})
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            self.turn_worker = None
-            self.busy = False
-            self.finish_turn()
-            if self.status_state != "error":
-                self._set_status(state="ready")
-            self.query_one(PromptBox).disabled = False
-            self.action_focus_prompt()
+        await self._run_operation(self.core_session.prompt("Work toward the retained Goal.",
+            display_text=f"Implement Goal: {goal_title(value)}", record_user=False), source="tui.goal_turn")
 
     async def _run_goal_revision(self, value: dict[str, Any], feedback: str) -> None:
-        """Run feedback through the same read-only Goal pipeline."""
-        try:
-            await self._refresh_model_metadata()
-            await self.core_session.begin_artifact_revision("goal", value, feedback)
-            await self.core_session.prompt(
-                text=goal_revision_text(value, feedback),
-                display_text=f"Revise Goal: {feedback}",
-                record_user=True,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self.finish_turn(cancelled=True)
-            self.system_message("revision cancelled", kind="warning")
-            raise
-        except Exception as exc:
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(exc, source="tui.goal_revision")
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
-                self.mode["goal_staging"] = None
-                self.mode["goal_revision"] = None
-            await self.core_session.persist_graph_state()
-            self.turn_worker = None
-            self.busy = False
-            self.finish_turn()
-            if self.status_state != "error":
-                self._set_status(state="ready")
-            self.query_one(PromptBox).disabled = False
-            self.action_focus_prompt()
+        await self._run_operation(self.core_session.revise_artifact("goal", feedback), source="tui.goal_revision")
 
     async def _run_turn_for_plan(self, plan: dict[str, Any]) -> None:
-        """Run action mode from an approved structured plan."""
-        try:
-            await self._refresh_model_metadata()
-            await self.core_session.prompt(
-                text="Implement the approved plan.",
-                display_text=f"Implement plan: {plan_title(plan)}",
-                record_user=False,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self.core_session.pause_active_artifacts()
-            self.mode["current_plan"] = current_plan(self.session)
-            self.mode["executing_plan"] = False
-            self.store.save(self.session)
-            self.finish_turn(cancelled=True)
-            self.system_message("turn cancelled", kind="warning")
-            self._set_status(state="ready")
-            raise
-        except Exception as exc:
-            self.core_session.pause_active_artifacts()
-            self.mode["current_plan"] = current_plan(self.session)
-            self.mode["executing_plan"] = False
-            self.store.save(self.session)
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(
-                exc,
-                source="tui.plan_turn",
-                context={"plan": plan_title(plan)},
-            )
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            self.turn_worker = None
-            self.busy = False
-            self.finish_turn()
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
+        await self._run_operation(self.core_session.prompt("Implement the approved plan.",
+            display_text=f"Implement plan: {plan_title(plan)}", record_user=False), source="tui.plan_turn")
 
     async def _run_turn_for_plan_revision(self, plan: dict[str, Any], feedback: str) -> None:
-        """Run planning mode with the current plan and revision feedback."""
-        try:
-            await self._refresh_model_metadata()
-            await self.core_session.prompt(
-                text=plan_revision_text(plan, feedback),
-                display_text=f"Revise plan: {feedback}",
-                record_user=True,
-                model_name=self.model_name,
-                context_limit_tokens=self.context_limit_tokens,
-                context_limit_source=self.context_limit_source,
-            )
-            self._refresh_sessions()
-            self._set_status(state="ready")
-        except asyncio.CancelledError:
-            self.mode["plan_revision"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True)
-            self.system_message("turn cancelled", kind="warning")
-            self._set_status(state="ready")
-            raise
-        except Exception as exc:
-            self.mode["plan_revision"] = None
-            self.mode["planning_stage"] = PLANNING_STAGE_PLAN_RESEARCH
-            self.finish_turn(cancelled=True, tool_status="interrupted")
-            error_path = self._write_error_report(
-                exc,
-                source="tui.plan_revision",
-                context={"plan": plan_title(plan)},
-            )
-            self.system_message(f"error: {exc}\nerror report: {error_path}", kind="error")
-            self._set_status(state="error")
-        finally:
-            if not (self.core_session.recovery and self.core_session.recovery["interrupts"]):
-                self.mode["plan_revision"] = None
-            await self.core_session.persist_graph_state()
-            self.turn_worker = None
-            self.busy = False
-            self.finish_turn()
-            prompt = self.query_one(PromptBox)
-            prompt.disabled = False
-            self.action_focus_prompt()
+        await self._run_operation(self.core_session.revise_artifact("plan", feedback), source="tui.plan_revision")
 
     def _resolve_goal_attempt_status(self) -> None:
         """Reflect a finished Goal attempt in its execution bubble."""
-        value = current_goal(self.session)
+        value = self.session.get("current_goal")
         if value is None or value.get("status") in {"proposed", "active"}:
             return
         self.query_one(ChatLog).resolve_goal(
@@ -1975,7 +1384,7 @@ class MiraApp(App[None]):
         try:
             set_windows_clipboard(text)
         except OSError as error:
-            get_diagnostics_logger().warning("Windows clipboard copy failed: %s", error)
+            self.notify(f"Windows clipboard copy failed: {error}", severity="warning")
 
     def action_focus_prompt(self) -> None:
         """Focus the prompt input."""
@@ -1990,13 +1399,13 @@ class MiraApp(App[None]):
 
     def _active_autocomplete_tools(self) -> list[dict[str, str]]:
         """Return the same live tool projection shown by /tools."""
-        return available_tools(self.mode, planning=bool(self.mode.get("planning")))
+        return list(self.core_session.snapshot(include_transcript=False).tools) if self.core_session else []
 
     def _active_autocomplete_subagents(self) -> list[dict[str, str]]:
         """Return enabled effective subagents for the shared @ surface."""
         resources = self.mode.get("resources") or {}
         items = resources.get("subagents") or []
-        from config.settings import subagent_enabled
+        from mira.settings import subagent_enabled
 
         return [
             item
@@ -2005,9 +1414,8 @@ class MiraApp(App[None]):
         ]
 
     def _model_agents_available(self) -> bool:
-        """Stop at a model-backed boundary without treating configuration as a crash."""
-        active = self.plan_agent if self.mode.get("planning") else self.agent
-        if active is not None:
+        self._refresh_session_view()
+        if self.models_available:
             return True
         self.system_message(self.agent_unavailable_message, kind="warning")
         self._set_ready_unless_error()
@@ -2045,9 +1453,10 @@ class MiraApp(App[None]):
 
     async def show_plan(self, interrupt: Any = None) -> str:  # noqa: ARG002
         """Render the exact current Plan without invoking or paraphrasing through a model."""
-        value = current_plan(self.session)
+        self._refresh_session_view()
+        value = self.session.get("current_plan")
         if value is None:
-            if current_goal(self.session) is not None:
+            if self.session.get("current_goal") is not None:
                 message = "There is no current Plan. The current formal work is a Goal.\nUse /goal-show to display it."
                 self.system_message(message, kind="info")
                 return message
@@ -2061,7 +1470,7 @@ class MiraApp(App[None]):
         """Clear current_plan without deleting historical transcript events."""
         value = await self.core_session.clear_artifact("plan")
         if value is None:
-            if current_goal(self.session) is not None:
+            if self.session.get("current_goal") is not None:
                 self.system_message("There is no current Plan. Use /goal-clear to clear the current Goal.", kind="info")
                 return
             self.system_message("no current Plan", kind="muted")
@@ -2073,7 +1482,7 @@ class MiraApp(App[None]):
         """Resume any incomplete current Plan immediately in Act mode."""
         if not self._model_agents_available():
             return
-        value = current_plan(self.session)
+        value = self.session.get("current_plan")
         if value is None:
             self.system_message("no current Plan", kind="muted")
             return
@@ -2083,7 +1492,7 @@ class MiraApp(App[None]):
                 kind="info",
             )
             return
-        if value["status"] not in RESUMABLE_PLAN_STATUSES:
+        if value["status"] not in {"proposed", "active", "paused", "max_iterations_reached"}:
             self.system_message("the current Plan is not resumable", kind="warning")
             return
         started = await self.core_session.start_artifact("plan")
@@ -2102,9 +1511,10 @@ class MiraApp(App[None]):
 
     async def show_goal(self, interrupt: Any = None) -> str:  # noqa: ARG002
         """Render the exact current Goal without a model call."""
-        value = current_goal(self.session)
+        self._refresh_session_view()
+        value = self.session.get("current_goal")
         if value is None:
-            if current_plan(self.session) is not None:
+            if self.session.get("current_plan") is not None:
                 message = "There is no current Goal. The current formal work is a Plan.\nUse /plan-show to display it."
                 self.system_message(message, kind="info")
                 return message
@@ -2118,7 +1528,7 @@ class MiraApp(App[None]):
         """Clear current_goal without deleting historical transcript events."""
         value = await self.core_session.clear_artifact("goal")
         if value is None:
-            if current_plan(self.session) is not None:
+            if self.session.get("current_plan") is not None:
                 self.system_message("There is no current Goal. Use /plan-clear to clear the current Plan.", kind="info")
                 return
             self.system_message("no current Goal", kind="muted")
@@ -2130,9 +1540,9 @@ class MiraApp(App[None]):
         """Resume any incomplete current Goal immediately in Act mode."""
         if not self._model_agents_available():
             return
-        value = current_goal(self.session)
+        value = self.session.get("current_goal")
         if value is None:
-            if current_plan(self.session) is not None:
+            if self.session.get("current_plan") is not None:
                 self.system_message("There is no current Goal. Use /plan-resume to resume the current Plan.", kind="info")
                 return
             self.system_message("no current Goal", kind="muted")
@@ -2143,7 +1553,7 @@ class MiraApp(App[None]):
                 kind="info",
             )
             return
-        if value["status"] not in RESUMABLE_GOAL_STATUSES:
+        if value["status"] not in {"proposed", "active", "paused", "max_iterations_reached"}:
             self.system_message("the current Goal is not resumable", kind="warning")
             return
         started = await self.core_session.start_artifact("goal")
@@ -2162,8 +1572,9 @@ class MiraApp(App[None]):
 
     async def _confirm_formal_replacement(self, new_kind: str) -> bool:
         """Confirm replacement of one incomplete current Plan or Goal."""
-        plan = current_plan(self.session)
-        goal = current_goal(self.session)
+        self._refresh_session_view()
+        plan = self.session.get("current_plan")
+        goal = self.session.get("current_goal")
         current_kind = "Plan" if plan is not None else "Goal" if goal is not None else ""
         current = plan or goal
         if current is None or current.get("status") == "completed":
@@ -2188,9 +1599,6 @@ class MiraApp(App[None]):
         self.trace.compaction_started()
         self._main_stream_active = False
         self.waiting_finished()
-        notice = pop_context_overflow_notice()
-        if notice:
-            self.query_one(ChatLog).system_message(notice, kind="info")
         self.query_one(ChatLog).compaction_started()
         self._set_status(state="running")
 
@@ -2277,10 +1685,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear uploads cancelled", kind="muted")
                 return True
-            await clear_local_uploads(
-                self.project_backend,
-                str(self.session.get("id") or ""),
-            )
+            await self.core_session.clear_uploads()
             self.system_message("current chat uploads cleared", kind="info")
             return True
 
@@ -2294,7 +1699,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear all uploads cancelled", kind="muted")
                 return True
-            await clear_local_uploads(self.project_backend)
+            await self.application.clear_uploads()
             self.system_message("all uploads cleared", kind="info")
             return True
 
@@ -2309,7 +1714,7 @@ class MiraApp(App[None]):
             if answer != "o":
                 self.system_message("clear error reports cancelled", kind="muted")
                 return True
-            reports = clear_error_reports(self.workspace)
+            reports = self.application.clear_diagnostics()
             suffix = "" if reports == 1 else "s"
             self.system_message(f"cleared {reports} error report file{suffix}", kind="info")
             return True
@@ -2377,7 +1782,7 @@ class MiraApp(App[None]):
                 self._set_status(state="ready")
             return reloaded
         except Exception as exc:
-            from config.llm import ConfigError
+            from mira.api import ConfigError
 
             if isinstance(exc, ConfigError):
                 self.system_message(str(exc), kind="warning")
@@ -2417,119 +1822,10 @@ class MiraApp(App[None]):
         return await self._reload_runtime_state(reload_mcp=True)
 
     async def _reload_runtime_state(self, *, reload_mcp: bool) -> RuntimeSnapshot:
-        """Build and install refreshed runtime state for the requested scope."""
-        from agent.llm import active_model_issues, get_llm, get_model_name, model_unavailable_message
-        from agent.resources import build_resources
-        from agent.workflows import MiraWorkflowAPI, discover_workflows
-        from agent.subagents.discovery import subagent_model_issues
-        from config.metadata import ModelMetadata, infer_model_metadata
-        from config.runtime import load_effective_config
-
-        config = load_effective_config(
-            self.workspace,
-            self.launch_options,
-            override_dotenv=True,
-        )
-        if self.mcp_manager is not None:
-            if reload_mcp:
-                await self.mcp_manager.reload()
-            else:
-                self.mcp_manager.prompt_registry.reload_local()
-        resources = build_resources(
-            self.workspace,
-            settings=config.get("settings"),
-            config=None,
-            mcp_manager=self.mcp_manager,
-        )
-        if resources.subagent_discovery.complete and config.get("settings_valid", True):
-            from config.settings import prune_subagent_settings, save_settings
-
-            current_settings = config.get("settings") or {}
-            pruned = prune_subagent_settings(
-                current_settings,
-                {item.name for item in resources.subagent_discovery.items},
-            )
-            if pruned != current_settings and save_settings(self.workspace, pruned):
-                config["settings"] = pruned
-        assignment_issues = [
-            *active_model_issues(config),
-            *subagent_model_issues(resources.subagent_discovery, config),
-        ]
-        issues = [
-            *(config.get("issues") or []),
-            *(self.mcp_manager.issues if self.mcp_manager is not None else []),
-            *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
-            *resources.issues,
-            *assignment_issues,
-        ]
-        metadata = ModelMetadata(
-            context_tokens=int((config.get("settings") or {}).get("models", {}).get("context_limit_tokens", 32768)),
-            context_source="settings.models.context_limit_tokens",
-        )
-        agent = None
-        plan_agent = None
-        if config.get("settings_valid", True) and not assignment_issues:
-            inspect_model = get_llm(config, metadata=ModelMetadata())
-            metadata = await infer_model_metadata(config, model=inspect_model)
-            from agent.resources import configure_subagents
-
-            action_resources = configure_subagents(resources, config)
-            agent, plan_agent = self._build_agent_pair(
-                config=config,
-                metadata=metadata,
-                action_resources=action_resources,
-            )
-        from core.diagnostics.issues import unique_issues
-
-        workflow_registry = discover_workflows(
-            self.workspace,
-            MiraWorkflowAPI(lambda: agent),
-        )
-
-        issues = unique_issues(
-            [
-                *issues,
-                *getattr(agent, "mira_resource_issues", []),
-                *workflow_registry.issues,
-            ]
-        )
-        model_name = get_model_name(config)
-        mode_updates = self._agent_mode_updates(agent, plan_agent, config)
-        mode_updates["resources"] = resources.metadata
-        snapshot = build_runtime_snapshot(
-            config,
-            self.launch_options,
-            model_name=model_name,
-        )
-
-        self.config = config
+        snapshot = await self.application.reload(restart_mcp=reload_mcp)
+        self._refresh_runtime_view()
         if self._settings_panel is not None and self._settings_panel.is_mounted:
-            self._settings_panel.refresh_tracing_registry(config["tracing_registry"])
-        self.model_name = model_name
-        self.context_limit_tokens = metadata.context_tokens
-        self.context_limit_source = metadata.context_source
-        self.agent = agent
-        self.plan_agent = plan_agent
-        self._record_effective_model()
-        self.agent_unavailable_message = model_unavailable_message(config) if agent is None else ""
-        self._set_project_backend(
-            getattr(agent, "mira_project_backend", None) or resources.project_backend
-        )
-        self.tool_failures = resources.tool_failures
-        self.issues = issues
-        self.mode.update(mode_updates)
-        self._sync_core_application()
-        self.application.workflow_registry = workflow_registry
-        self.application.issues = issues
-        self.runtime_snapshot = snapshot
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-        if self.store is not None:
-            self.store.save(self.session)
+            self._settings_panel.refresh_tracing_profiles(self.config["tracing_profiles"])
         self._refresh_startup_splash()
         self._set_status(state=self.status_state)
         self._sync_issues()
@@ -2547,68 +1843,9 @@ class MiraApp(App[None]):
         self.command_output(runtime_report(snapshot))
 
     async def open_context_report(self) -> None:
-        """Build and present the shared Context Report modal."""
         if self.busy or isinstance(self.screen, ContextReportScreen):
             return
-        dashboard = normalize_dashboard(self.session.get("dashboard"))
-        context = dict(dashboard.get("context") or {})
-        observation = self.mode.get("context_report_observation")
-        if not isinstance(observation, ContextReportObservation):
-            observation = None
-
-        planning = bool(self.mode.get("context_report_planning", self.mode.get("planning")))
-        active_agent = self.mode.get("context_report_agent")
-        if active_agent is None:
-            active_agent = self.plan_agent if planning else self.agent
-        thread_id = str(
-            self.mode.get("context_report_thread_id")
-            or (self.mode.get("plan_thread_id") if planning else self.session.get("id"))
-            or ""
-        )
-        tool_metadata = tuple(
-            dict(item)
-            for item in available_tools(self.mode, planning=planning)
-            if isinstance(item, dict)
-        )
-        selected_mcp_tools: dict[str, list[Any]] = {}
-        if self.mcp_manager is not None:
-            selected_tools, _ = self.mcp_manager.tools_for_mode(
-                (self.config or {}).get("settings"),
-                planning=planning,
-            )
-            for tool in selected_tools:
-                ownership = mcp_tool_metadata(tool)
-                if ownership is None:
-                    continue
-                selected_mcp_tools.setdefault(
-                    str(ownership.get("server") or "unknown"),
-                    [],
-                ).append(tool)
-        mcp_servers = tuple(
-            ContextReportMCPServer(
-                name=str(state.name),
-                status=str(state.status),
-                error=str(state.error or ""),
-                tools=tuple(selected_mcp_tools.get(str(state.name), ())),
-            )
-            for state in (
-                self.mcp_manager.servers.values()
-                if self.mcp_manager is not None
-                else ()
-            )
-        )
-
-        # These values are copied before the checkpoint read so one report
-        # cannot mix telemetry or registry changes from another turn.
-        report = await build_agent_context_report(
-            agent=active_agent,
-            thread_id=thread_id,
-            observation=observation,
-            current_tokens=context.get("used_tokens"),
-            limit_tokens=context.get("limit_tokens"),
-            tool_metadata=tool_metadata,
-            mcp_servers=mcp_servers,
-        )
+        report = await self.core_session.context_report()
         if not self.busy:
             self.push_screen(ContextReportScreen(report))
 
@@ -2624,18 +1861,16 @@ class MiraApp(App[None]):
 
     def _handle_settings_command(self, initial_tab: str = "general") -> Any:
         """Mount the interactive settings panel."""
-        from config.tracing import TracingRegistry, load_tracing_registry
-
+        self._refresh_session_view()
         if self.busy:
             self._notify_busy_action("changing settings")
             return True
 
-        settings = load_settings(self.workspace)
+        if self.application is None:
+            self.config = read_configuration(self.workspace)
+        settings = self.application.settings() if self.application else self.config["settings"]
         if self._settings_panel is not None and self._settings_panel.is_mounted:
             self._settings_panel.remove()
-        tracing_registry = (self.config or {}).get("tracing_registry")
-        if not isinstance(tracing_registry, TracingRegistry):
-            tracing_registry = load_tracing_registry(self.workspace)
         panel = SettingsPanel(
             settings,
             tool_metadata=self._settings_tool_metadata(),
@@ -2645,9 +1880,10 @@ class MiraApp(App[None]):
             reload_runtime=self._run_reload_runtime_command,
             close_panel=self._close_settings_panel,
             mcp_manager=self.mcp_manager,
-            model_registry=(self.config or {}).get("model_registry"),
-            tracing_registry=tracing_registry,
-            subagent_metadata=((self.mode.get("resources") or {}).get("subagents") or []),
+            model_aliases=(self.config or {}).get("model_aliases", ()),
+            tracing_profiles=self.config.get("tracing_profiles", ()),
+            tracing_preview=self.application.tracing_preview if self.application else lambda preferences: preview_tracing(self.workspace, preferences),
+            subagent_metadata=list((self.mode.get("resources") or {}).get("subagents") or ()),
             initial_tab=initial_tab,
         )
         self._settings_panel = panel
@@ -2670,67 +1906,20 @@ class MiraApp(App[None]):
         return ok, message
 
     async def _apply_settings(self, settings: dict[str, Any], *, reset_mcp: bool = False) -> tuple[bool, str]:
-        """Persist settings and apply any needed runtime changes."""
-        old_settings = (self.config or {}).get("settings") or load_settings(self.workspace)
-        changed = old_settings != settings
-        if not changed and not reset_mcp:
-            return True, "settings unchanged"
-        if await self._execute_enable_cancelled(old_settings, settings):
+        if await self._execute_enable_cancelled(self.config.get("settings") or {}, settings):
             return False, "execute remains disabled"
-        if changed and not save_settings(self.workspace, settings):
-            return False, "could not save .mira/settings.yml"
-
-        old_config = self.config
-        self.config = dict(old_config or {})
-        self.config["settings"] = settings
-        old_tracing = old_settings.get("tracing") or {}
-        new_tracing = settings.get("tracing") or {}
-        tracing_reload = (
-            old_tracing.get("enabled") != new_tracing.get("enabled")
-            or old_tracing.get("profile") != new_tracing.get("profile")
-        )
-        middleware_spans_changed = middleware_span_mode(old_settings) != middleware_span_mode(settings)
-
-        try:
-            policy_reset = self.mcp_manager.reset_policy() if reset_mcp and self.mcp_manager is not None else nullcontext(False)
-            async with policy_reset as mcp_changed:
-                if not changed and not mcp_changed:
-                    return True, "settings unchanged"
-                if not self.ready:
-                    return True, "settings saved; MIRA is not ready; Reload Runtime required"
-                if tracing_reload and all(old_settings.get(key) == value for key, value in settings.items() if key != "tracing"):
-                    return True, "tracing settings saved; Reload Runtime required"
-                if old_settings.get("models") != settings.get("models"):
-                    await self._rebuild_model_agents(old_settings)
-                else:
-                    await self._rebuild_agents()
-        except Exception as error:
-            from config.llm import ConfigError
-
-            restored = save_settings(self.workspace, old_settings)
-            self.config = old_config
-            if isinstance(error, ConfigError):
-                message = f"settings not saved: {error}"
-            else:
-                error_path = self._write_error_report(error, source="tui.settings")
-                message = f"settings not saved; agent rebuild failed: {error}; error report: {error_path}"
-            if not restored:
-                message += "; could not restore .mira/settings.yml"
-            if reset_mcp and self.mcp_manager is not None:
-                # Rollback reopened clients; old agent tools still reference closed clients.
-                try:
-                    await self._rebuild_agents()
-                except Exception:
-                    message += "; could not restore MCP agent registration; Reload Runtime required"
-            return False, message
-        self._set_status(state="ready")
-        if tracing_reload:
-            return True, "settings saved; agents rebuilt; tracing requires Reload Runtime"
-        if old_settings.get("models") != settings.get("models") and settings["models"].get("main") is None:
-            return True, "settings saved; agents rebuilt; Main is unset; select a model with /models"
-        if middleware_spans_changed:
-            return True, "middleware span setting saved; agents rebuilt; no reload required"
-        return True, "settings saved; agents rebuilt; no reload required"
+        if self.application is None:
+            result = configure_workspace(self.workspace, settings)
+            if result[0]:
+                self.config = read_configuration(self.workspace)
+            return (result[0], "settings saved; MIRA is not ready; Reload Runtime required") if result[0] else result
+        result = await self.application.apply_settings(settings, reset_mcp=reset_mcp)
+        self._refresh_runtime_view()
+        self._refresh_startup_splash()
+        self._sync_issues()
+        if result[0] and result[1] != "settings unchanged":
+            self._set_status(state="ready")
+        return result
 
     async def _execute_enable_cancelled(self, old_settings: dict[str, Any], new_settings: dict[str, Any]) -> bool:
         """Confirm before switching the agent to LocalShellBackend."""
@@ -2761,8 +1950,7 @@ class MiraApp(App[None]):
         preference: bool | None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Resolve and persist Git protection without blocking MIRA."""
-        settings = (self.config or {}).get("settings") or load_settings(self.workspace)
-        current = git_protection_preference(settings)
+        settings = (self.config or {}).get("settings") or (self.application.settings() if self.application else read_configuration(self.workspace)["settings"])
         if preference is None:
             answer = await self.foreground_interrupt(
                 lambda: self._prompt_choice(
@@ -2775,49 +1963,18 @@ class MiraApp(App[None]):
                 return False, "Git configuration cancelled", settings
             preference = answer == "y"
 
-        if preference and not is_git_worktree(self.workspace):
-            if not init_git_repository(self.workspace):
-                self._refresh_git_issue(None)
-                return False, "Git could not initialize; protection remains unconfigured", settings
-
-        updated = set_git_protection(settings, preference)
-        if not save_settings(self.workspace, updated):
-            return False, "could not save .mira/settings.yml", settings
-        if self.config is not None:
-            self.config["settings"] = updated
-        self._refresh_git_issue(preference)
-        if preference:
-            message = "Git protection enabled; repository ready"
-        else:
-            message = "Git protection declined; no reload required"
-        return True, message, updated
-
-    def _refresh_git_issue(self, preference: bool | None) -> None:
-        """Replace only the workspace Git diagnostic in current runtime state."""
-        issue = git_protection_issue(self.workspace, preference)
-        self.issues = [
-            item
-            for item in self.issues
-            if getattr(item, "summary", "") != GIT_NOT_CONFIGURED_SUMMARY
-        ]
-        if issue is not None:
-            self.issues.append(issue)
-        if self.config is not None:
-            config_issues = [
-                item
-                for item in self.config.get("issues", [])
-                if getattr(item, "summary", "") != GIT_NOT_CONFIGURED_SUMMARY
-            ]
-            if issue is not None:
-                config_issues.append(issue)
-            self.config["issues"] = config_issues
+        if self.application is None:
+            return configure_git(self.workspace, preference)
+        result = self.application.configure_git(preference)
+        self._refresh_runtime_view()
         self._sync_issues()
+        return result
 
     def _settings_tool_metadata(self) -> list[dict[str, str]]:
         """Return loaded tool metadata for the settings panel."""
         resources = self.mode.get("resources") if isinstance(self.mode, dict) else None
         tools = resources.get("tools") if isinstance(resources, dict) else None
-        return tools if isinstance(tools, list) else []
+        return list(tools or ())
 
     def _close_settings_panel(self) -> None:
         """Forget the closed settings panel and return focus to the prompt."""
@@ -2825,57 +1982,21 @@ class MiraApp(App[None]):
         self.action_focus_prompt()
 
     async def _clear_current_chat(self) -> None:
-        """Reset the active persisted transcript while keeping the same session id."""
-        if self.core_session is not None and self.core_session.checkpointer is not None:
-            for thread_id in (
-                self.core_session.id,
-                f"{self.core_session.id}:plan",
-                *(f"{self.core_session.id}:plan:{run_id}" for run_id in range(1, int(self.mode.get("plan_runs") or 0) + 1)),
-            ):
-                await self.core_session.checkpointer.adelete_thread(thread_id)
-        self.session["title"] = "Untitled session"
-        self.session["turns"] = 0
-        self.session["events"] = []
-        self.core_session._clear_inspections()
-        self.session["dashboard"] = normalize_dashboard(None)
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-        if self.store is not None:
-            self.store.save(self.session)
-        if self.core_session is not None:
-            await self.core_session.persist_graph_state()
+        await self.core_session.clear()
+        self._refresh_session_view(full=True)
         self._render_current_session()
 
     async def _clear_all_chats(self) -> tuple[int, int]:
-        """Delete saved session files and keep the active session usable."""
-        sessions = 0
-        compactions = 0
-        active_id = str(self.session.get("id") or "")
-        if self.store is not None:
-            if self.application is not None:
-                sessions = await self.application.clear_sessions()
-            else:
-                sessions = int(self.store.clear_all())
-            clear_compactions = getattr(self.store, "clear_compactions", None)
-            if callable(clear_compactions):
-                compactions = int(clear_compactions())
-        if self.application is not None:
-            self._activate_core_session(await self.application.open_session(active_id))
-        return sessions, compactions
+        active_id = self.core_session.id
+        counts = await self.application.clear_history()
+        self._activate_core_session(await self.application.open_session(active_id))
+        return counts
+
 
     def _clear_prompt_history(self) -> None:
-        """Clear prompt history on disk and in memory."""
-        try:
-            if self.history_path.exists():
-                self.history_path.write_text("", encoding="utf-8")
-            else:
-                self.history_path.parent.mkdir(parents=True, exist_ok=True)
-        finally:
-            self.query_one(PromptBox).set_history([])
+        self.application.clear_prompt_history()
+        self.query_one(PromptBox).set_history([])
+
 
     def _render_current_session(self) -> None:
         """Rebuild visible chat output from the active session."""
@@ -3019,12 +2140,6 @@ class MiraApp(App[None]):
         detail = event.detail
         self.query_one(Inspector).update_inspection(detail["inspection_id"], detail["update"])
 
-    def frontend_event_received(self, event: FrontendEvent) -> None:
-        """Retain native provenance on the existing transcript widgets."""
-        if self.is_mounted:
-            # Session close is emitted after Textual has removed its children.
-            with suppress(NoMatches):
-                self.query_one(ChatLog).retain_frontend_event(event)
 
     def session_state_changed(self, event: RuntimeEvent) -> None:
         """Project Core session notifications without clearing sticky UI errors."""
@@ -3716,13 +2831,7 @@ class MiraApp(App[None]):
             self._subagent_live_active = False
 
     def _sync_active_agent_pair(self) -> None:
-        """Use a policy-refreshed pair installed for the active session."""
-        if self.core_session is None:
-            return
-        self.agent = self.core_session.agent
-        self.plan_agent = self.core_session.plan_agent
-        if self.core_session.checkpointer is not None:
-            self.checkpointer = self.core_session.checkpointer
+        self._refresh_session_view()
 
     def usage_updated(self) -> None:
         """Refresh the status bar after token usage is committed."""
@@ -4108,12 +3217,7 @@ class MiraApp(App[None]):
         self.status_state = state
         if not self.is_mounted:
             return
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
+        self._refresh_session_view()
         self.query_one(StatusBar).set_state(
             mode=self._mode_label(),
             model_name=self.model_name or "loading",
@@ -4128,7 +3232,7 @@ class MiraApp(App[None]):
             dashboard=self.session.get("dashboard"),
             turns=int(self.session.get("turns") or 0),
         )
-        from config.settings import MAIN_MODEL, model_assignment
+        from mira.settings import MAIN_MODEL, model_assignment
         self.query_one("#actions-main", ComposerActions).set_alias(model_assignment(self.config, MAIN_MODEL))
         self._sync_artifact_button()
         self._sync_mcp_button()
@@ -4154,7 +3258,7 @@ class MiraApp(App[None]):
                 locked
                 or not self.local_file_uploads_enabled
                 or not self.ready
-                or self.project_backend is None
+                or self.core_session is None
                 or self._file_ingestion_active
             )
         except NoMatches:
@@ -4232,13 +3336,12 @@ class MiraApp(App[None]):
     @on(Button.Pressed, "#model-trigger-main")
     def press_model_selector(self, event: Button.Pressed) -> None:
         """Choose an alias using the same Settings application/rebuild path."""
-        from agent.llm import model_registry
-        from config.settings import MAIN_MODEL, model_assignment
+        from mira.settings import MAIN_MODEL, model_assignment
 
         event.stop()
         if self.busy or self._reload_in_progress or not self.ready:
             return
-        aliases = tuple(model_registry(self.config or {}).profiles)
+        aliases = tuple((self.config or {}).get("model_aliases", ()))
         if not aliases:
             self.notify("No model aliases are available. Configure profiles with /models.")
             return
@@ -4254,7 +3357,7 @@ class MiraApp(App[None]):
             self.run_worker(self._activate_model_alias(alias), name="select-main-model")
 
     async def _activate_model_alias(self, alias: str) -> None:
-        from config.settings import MAIN_MODEL, set_model_assignment
+        from mira.settings import MAIN_MODEL, set_model_assignment
         if self.busy or self._reload_in_progress or not self.ready:
             return
         self._reload_in_progress = True
@@ -4263,7 +3366,7 @@ class MiraApp(App[None]):
         disabled = prompt.disabled
         prompt.disabled = True
         try:
-            settings = (self.config or {}).get("settings") or load_settings(self.workspace)
+            settings = (self.config or {}).get("settings") or (self.application.settings() if self.application else read_configuration(self.workspace)["settings"])
             ok, message = await self._apply_settings(set_model_assignment(settings, MAIN_MODEL, alias))
             if not ok:
                 self.notify(message, severity="error")
@@ -4281,15 +3384,13 @@ class MiraApp(App[None]):
         self._set_status(state=self.status_state)
 
     def _record_effective_model(self) -> None:
-        """Capture an alias only at a successfully installed runtime boundary."""
-        from config.settings import MAIN_MODEL, model_assignment
-        self.effective_model_alias = (model_assignment(self.config, MAIN_MODEL) or "") if self.agent is not None else ""
+        self._refresh_session_view()
 
     @on(Button.Pressed, "#add-file-button")
     def press_add_file(self, event: Button.Pressed) -> None:
         """Open the native multi-file picker without blocking Textual."""
         event.stop()
-        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.project_backend is None:
+        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.core_session is None:
             return
         self._file_ingestion_active = True
         self._sync_interactivity()
@@ -4303,7 +3404,7 @@ class MiraApp(App[None]):
     def ingest_pasted_local_files(self, event: PromptBox.LocalFilesPasted) -> None:
         """Route Explorer clipboard files through the shared ingestion path."""
         event.stop()
-        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.project_backend is None:
+        if self.busy or self._reload_in_progress or not self.local_file_uploads_enabled or self._file_ingestion_active or not self.ready or self.core_session is None:
             return
         self._file_ingestion_active = True
         self._sync_interactivity()
@@ -4340,11 +3441,7 @@ class MiraApp(App[None]):
 
     async def _ingest_local_file_paths(self, paths: list[Path]) -> None:
         """Upload local files through the current project backend and insert refs."""
-        references, failures = await ingest_local_files(
-            paths,
-            self.project_backend,
-            str(self.session.get("id") or ""),
-        )
+        references, failures = await self.core_session.upload_files(paths)
         if references:
             self.query_one(PromptBox).insert_file_references(references)
         if failures:
@@ -4374,9 +3471,9 @@ class MiraApp(App[None]):
         event.stop()
         if self.busy:
             return
-        if current_plan(self.session) is not None:
+        if self.session.get("current_plan") is not None:
             await self.show_plan()
-        elif current_goal(self.session) is not None:
+        elif self.session.get("current_goal") is not None:
             await self.show_goal()
         self.action_focus_prompt()
 
@@ -4386,8 +3483,8 @@ class MiraApp(App[None]):
             button = self.query_one("#artifact-status-button", Button)
         except NoMatches:
             return
-        plan = current_plan(self.session)
-        goal = current_goal(self.session)
+        plan = self.session.get("current_plan")
+        goal = self.session.get("current_goal")
         artifact = plan or goal
         if artifact is None:
             button.disabled = True
@@ -4477,7 +3574,7 @@ class MiraApp(App[None]):
             controls = (
                 (
                     self.query_one("#artifact-status-button", Button),
-                    current_plan(self.session) is not None or current_goal(self.session) is not None,
+                    self.session.get("current_plan") is not None or self.session.get("current_goal") is not None,
                 ),
                 (
                     self.query_one("#mcp-status-button", Button),
@@ -4534,214 +3631,6 @@ class MiraApp(App[None]):
             prompt.disabled = False
             self.action_focus_prompt()
 
-    async def _rebuild_model_agents(self, old_settings: dict[str, Any]) -> None:
-        """Apply Models settings without reloading configuration or MCP servers."""
-        if self.config is None or self.checkpointer is None:
-            return
-
-        from agent.llm import get_llm, get_model_name, resolve_model_profile
-        from config.llm import ConfigError
-        from config.metadata import ModelMetadata, infer_model_metadata
-        from config.settings import MAIN_MODEL, context_limit_tokens, model_assignment
-
-        metadata = self._current_model_metadata()
-        main_changed = model_assignment(old_settings, MAIN_MODEL) != model_assignment(
-            self.config,
-            MAIN_MODEL,
-        )
-        context_changed = context_limit_tokens(old_settings) != context_limit_tokens(self.config)
-        if main_changed or context_changed:
-            try:
-                resolve_model_profile(self.config)
-            except ConfigError:
-                metadata = ModelMetadata(
-                    context_limit_tokens(self.config),
-                    "settings.models.context_limit_tokens",
-                )
-            else:
-                inspect_model = get_llm(self.config, metadata=ModelMetadata())
-                metadata = await infer_model_metadata(self.config, model=inspect_model)
-
-        await self._rebuild_agents(metadata=metadata)
-
-        self.model_name = get_model_name(self.config)
-        self.context_limit_tokens = metadata.context_tokens
-        self.context_limit_source = metadata.context_source
-        self.runtime_snapshot = build_runtime_snapshot(
-            self.config,
-            self.launch_options,
-            model_name=self.model_name,
-        )
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-        if self.store is not None:
-            self.store.save(self.session)
-        self._refresh_startup_splash()
-        self._set_status(state=self.status_state)
-
-    def _current_model_metadata(self) -> Any:
-        """Return the metadata currently bound to the active agent pair."""
-        from config.metadata import ModelMetadata
-        from config.settings import context_limit_tokens
-
-        configured_limit = context_limit_tokens(self.config)
-        return ModelMetadata(
-            context_tokens=self.context_limit_tokens or configured_limit,
-            context_source=(
-                self.context_limit_source
-                if self.context_limit_tokens
-                else "settings.models.context_limit_tokens"
-            ),
-        )
-
-    async def _refresh_model_metadata(self) -> None:
-        """Refresh model metadata and rebuild agents when context changes."""
-        if self.config is None or self.checkpointer is None:
-            return
-        from agent.llm import resolve_model_profile
-        from config.llm import ConfigError
-
-        try:
-            resolve_model_profile(self.config)
-        except ConfigError:
-            return
-
-        from agent.llm import get_llm
-        from config.metadata import ModelMetadata, infer_model_metadata
-
-        inspect_model = get_llm(self.config, metadata=ModelMetadata())
-        metadata = await infer_model_metadata(self.config, model=inspect_model)
-        if not metadata.context_tokens or metadata.context_tokens == self.context_limit_tokens:
-            return
-
-        await self._rebuild_agents(metadata=metadata)
-        self.context_limit_tokens = metadata.context_tokens
-        self.context_limit_source = metadata.context_source
-        ensure_dashboard(
-            self.session,
-            model_name=self.model_name,
-            context_limit_tokens=self.context_limit_tokens,
-            context_limit_source=self.context_limit_source,
-        )
-        self.store.save(self.session)
-        self._set_status(state=self.status_state)
-
-    async def _rebuild_agents(self, metadata: Any | None = None) -> None:
-        """Rebuild action and planning agents after settings or metadata changes."""
-        if self.config is None or self.checkpointer is None:
-            return
-
-        metadata = metadata or self._current_model_metadata()
-
-        from agent.llm import active_model_issues, model_unavailable_message
-        from agent.resources import build_resources, configure_subagents
-        from agent.subagents.discovery import subagent_model_issues
-
-        resources = build_resources(
-            self.workspace,
-            settings=self.config.get("settings"),
-            config=None,
-            mcp_manager=self.mcp_manager,
-        )
-        assignment_issues = [
-            *active_model_issues(self.config),
-            *subagent_model_issues(resources.subagent_discovery, self.config),
-        ]
-        agent = None
-        plan_agent = None
-        if self.config.get("settings_valid", True) and not assignment_issues:
-            action_resources = configure_subagents(resources, self.config)
-            agent, plan_agent = self._build_agent_pair(
-                config=self.config,
-                metadata=metadata,
-                action_resources=action_resources,
-            )
-        from core.diagnostics.issues import unique_issues
-
-        mode_updates = self._agent_mode_updates(agent, plan_agent, self.config)
-        mode_updates["resources"] = resources.metadata
-        self.agent = agent
-        self.plan_agent = plan_agent
-        self._record_effective_model()
-        self.agent_unavailable_message = model_unavailable_message(self.config) if agent is None else ""
-        self.tool_failures = resources.tool_failures
-        self.issues = unique_issues(
-            [
-                *(self.config.get("issues") or []),
-                *(self.mcp_manager.issues if self.mcp_manager is not None else []),
-                *(self.mcp_manager.prompt_registry.issues if self.mcp_manager is not None else []),
-                *resources.issues,
-                *assignment_issues,
-                *getattr(agent, "mira_resource_issues", []),
-            ]
-        )
-        self.mode.update(mode_updates)
-        self._sync_core_application()
-        self._set_project_backend(resources.project_backend)
-        self._sync_issues()
-
-    def _build_agent_pair(
-        self,
-        *,
-        config: dict[str, Any],
-        metadata: Any | None,
-        action_resources: Any | None = None,
-        checkpointer: Any | None = None,
-    ) -> tuple[Any, Any]:
-        """Build both agents without replacing the active pair."""
-        from agent.factory import build_agent, build_plan_agent
-        from agent.resources import build_resources
-
-        action_resources = action_resources or build_resources(
-            self.workspace,
-            settings=config.get("settings"),
-            config=config,
-            mcp_manager=self.mcp_manager,
-        )
-        self._last_action_resources = action_resources
-        plan_resources = build_resources(
-            self.workspace,
-            create_examples=False,
-            settings=config.get("settings"),
-            enable_execute=False,
-            config=config,
-            subagent_discovery=action_resources.subagent_discovery,
-            mcp_manager=self.mcp_manager,
-        )
-
-        agent = build_agent(
-            config=config,
-            workspace=self.workspace,
-            checkpointer=checkpointer or self.checkpointer,
-            metadata=metadata,
-            mcp_manager=self.mcp_manager,
-            resources=action_resources,
-        )
-        plan_agent = build_plan_agent(
-            config=config,
-            workspace=self.workspace,
-            checkpointer=checkpointer or self.checkpointer,
-            metadata=metadata,
-            mcp_manager=self.mcp_manager,
-            resources=plan_resources,
-        )
-        return agent, plan_agent
-
-    async def _mcp_registry_changed(self) -> None:
-        """Install one rebuilt Act/Plan pair after a manager registry transition."""
-        if self.config is not None:
-            self.config["settings"] = load_settings(self.workspace)
-        await self._rebuild_agents()
-        if self.is_mounted:
-            autocomplete = self.query_one(AutocompleteInput)
-            autocomplete.set_mcp_manager(self.mcp_manager)
-            self._set_status(state=self.status_state)
-            if isinstance(self.screen, MCPPanelScreen):
-                await self.screen.refresh_from_manager()
 
     async def approve_mcp_server(self, state: Any, preview: str) -> str:
         """Use MIRA's existing modal choice interaction for server trust."""
@@ -4759,91 +3648,21 @@ class MiraApp(App[None]):
         return {"a": "allow", "l": "always_allow"}.get(answer, "deny")
 
     async def on_unmount(self) -> None:
-        """Close every process-owned runtime when the Textual app exits."""
-        for task in list(self._mcp_activity_tasks.values()):
+        for task in self._mcp_activity_tasks.values():
             task.cancel()
-        self._mcp_activity_tasks = {}
-        try:
-            if self.application is not None:
-                await self.application.shutdown(persist_sessions=False)
-            elif self.mcp_manager is not None:
-                await self.mcp_manager.shutdown()
-        finally:
-            from tracing.bootstrap import shutdown_tracing
-
-            shutdown_tracing()
-
-    def _sync_core_application(self) -> None:
-        """Keep rebuilt native resources installed in the headless facade."""
-        if self.application is None:
-            return
-        self.application.agent = self.agent
-        self.application.plan_agent = self.plan_agent
-        self.application.checkpointer = self.checkpointer
-        if self.core_session is not None:
-            self.core_session.agent = self.agent
-            self.core_session.plan_agent = self.plan_agent
-        action_resources = getattr(self, "_last_action_resources", None)
-        if action_resources is not None:
-            self.application.action_resources = action_resources
-            for session in self.application._sessions.values():
-                if session is self.core_session or session.runtime_state == "closed" or session.checkpointer is None:
-                    continue
-                session.agent, session.plan_agent = self._build_agent_pair(
-                    config=self.config,
-                    metadata=self._current_model_metadata(),
-                    action_resources=action_resources,
-                    checkpointer=session.checkpointer,
-                )
-        self.application.config = self.config
-        self.application.model_name = self.model_name
-        self.application.context_limit_tokens = self.context_limit_tokens
-        self.application.context_limit_source = self.context_limit_source
-        self.application.mcp_manager = self.mcp_manager
-        self.application.project_backend = self.project_backend
-        self.application.agent_unavailable_message = self.agent_unavailable_message
-
-    def _set_project_backend(self, backend: Any) -> None:
-        """Install one resolved project backend for uploads and autocomplete."""
-        self.project_backend = backend
+        self._mcp_activity_tasks.clear()
         if self.application is not None:
-            self.application.project_backend = backend
-        if self.is_mounted:
-            self.query_one(AutocompleteInput).set_project_backend(backend)
+            await self.application.shutdown(persist_sessions=False)
 
-    def _agent_mode_updates(
-        self,
-        agent: Any,
-        plan_agent: Any,
-        config: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Prepare mode projections before installing a rebuilt agent pair."""
-        candidate = dict(self.mode)
-        refresh_agent_specs(candidate, agent, plan_agent)
-        candidate["rubric_enabled"] = rubric_enabled(config.get("settings"))
-        candidate["rubric_max_iterations"] = rubric_max_iterations(config.get("settings"))
-        return {
-            key: candidate[key]
-            for key in (
-                "action_tools",
-                "planning_tools",
-                "resources",
-                "rubric_enabled",
-                "rubric_max_iterations",
-            )
-        }
 
     def _refresh_sessions(self) -> None:
-        """Reload the session list if the store is available."""
-        if self.store is None or not self.is_mounted:
-            return
-        self.query_one(SessionHistory).refresh_sessions(self.store, current_id=str(self.session.get("id") or ""))
+        if self.application is not None and self.is_mounted:
+            self.query_one(SessionHistory).refresh_sessions(self.application.list_sessions(), current_id=str(self.session.get("id") or ""))
 
     def _tick_status(self) -> None:
         """Refresh the clock and dashboard line."""
         if not self.ready or not self.is_mounted:
             return
-        update_duration(self.session)
         try:
             self._set_status(state=self.status_state)
         except NoMatches:
@@ -4937,48 +3756,12 @@ class MiraApp(App[None]):
     def _record_prompt_history(self, text: str) -> None:
         """Remember submitted prompt text and persist it for normal app runs."""
         self.query_one(PromptBox).remember(text)
-        if not self.persist_prompt_history:
+        if not self.persist_prompt_history or self.application is None:
             return
         try:
-            append_prompt_history(self.history_path, text)
+            self.application.record_prompt(text)
         except OSError as exc:
             self.system_message(f"could not update prompt history: {exc}", kind="warning")
-
-
-def read_prompt_history(path: Path) -> list[str]:
-    """Read MIRA prompt history entries from a prompt-toolkit-style file."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-
-    entries: list[str] = []
-    current: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            if current:
-                entries.append("\n".join(current).strip())
-                current = []
-            continue
-        if stripped.startswith("+"):
-            current.append(stripped[1:])
-    if current:
-        entries.append("\n".join(current).strip())
-    return entries
-
-
-def append_prompt_history(path: Path, text: str) -> None:
-    """Append one submitted prompt to the workspace history file."""
-    entry = text.strip()
-    if not entry:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().isoformat(sep=" ", timespec="microseconds")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(f"\n# {timestamp}\n")
-        for line in entry.splitlines():
-            handle.write(f"+{line}\n")
 
 
 def plan_title(plan: dict[str, Any]) -> str:
